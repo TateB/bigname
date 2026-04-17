@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://bigname:bigname@127.0.0.1:5432/bigname}}"
+
+docker compose up -d
+cargo run -p bigname-worker -- migrate
+
+cleanup() {
+  local pids
+
+  pids="$(jobs -p)"
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+cargo run -p bigname-api -- serve &
+cargo run -p bigname-indexer -- run &
+cargo run -p bigname-worker -- run &
+
+wait

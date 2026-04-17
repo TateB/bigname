@@ -1,0 +1,16 @@
+[package]
+name = "bigname-adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bigname-storage = { workspace = true }
+serde_json = "1.0.145"
+sha3 = "0.10.8"
+sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

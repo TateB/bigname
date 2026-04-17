@@ -1,0 +1,4 @@
+[alias]
+api = "run -p bigname-api --"
+indexer = "run -p bigname-indexer --"
+worker = "run -p bigname-worker --"

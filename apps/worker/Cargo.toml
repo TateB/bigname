@@ -1,0 +1,17 @@
+[package]
+name = "bigname-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+bigname-domain.workspace = true
+bigname-execution.workspace = true
+bigname-storage.workspace = true

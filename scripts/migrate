@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://bigname:bigname@127.0.0.1:5432/bigname}}"
+
+cargo run -p bigname-worker -- migrate
