@@ -40,14 +40,16 @@ Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
 
 Typed subagents (anything defined in `.codex/agents/*.toml`) take a scoped prompt, not a fork of the parent thread. Compose each call with only what the subagent needs: the slice envelope or the relevant fields, owned paths, the exact deliverable, success signal. Do not try to inherit full conversation context — that dispatch mode is rejected and wastes a round-trip on retry.
 
+Pass task-relevant facts only. Do not leak orchestration metadata ("user invoked `$phased-continuation`", the current skill name, what mode you are in). The subagent does not need to know why you are dispatching it — only what to produce. Mentioning a skill in the prompt can make the subagent re-invoke it and load irrelevant instructions, bloating its context.
+
 ## Waiting on subagents
 
-Subagents take minutes, not seconds. Slow is not stuck.
+Subagents take minutes, not seconds. Slow is not stuck. Once work is dispatched, waiting is the job.
 
+- While any subagent is live, do not start local implementation, read code "in preparation", draft docs, or spawn agents to fill time. Planned parallel fan-out is expected; ad-hoc spawning because you feel idle is the failure mode. Patience is the default, not the fallback.
 - Do not cancel or restart a live subagent because it feels slow. Cancellation requires concrete evidence of being stuck: silence for several minutes AND no sign of work in the latest output. Reading files, running searches, and writing code are work, not silence.
 - Do not spawn duplicates of in-flight work. Before spawning, read `.agents/state/slices.jsonl`.
 - If a live subagent seems off-track, ask it for a status update. Do not kill and restart.
-- If there is nothing else to steer, wait. Spawning more agents because you feel idle is the failure mode.
 
 ## Playbook routing
 
