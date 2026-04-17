@@ -26,12 +26,14 @@ const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
 const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
 const EVENT_KIND_REGISTRATION_RELEASED: &str = "RegistrationReleased";
 const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
+const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
 const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
 const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 
 const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256,uint256)";
 const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
+const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 
@@ -148,11 +150,19 @@ struct RegistryOwnerObservation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolverObservation {
+    namehash: String,
+    resolver: String,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AuthorityObservation {
     RegistrationGranted(NameRegistrationObservation),
     RegistrationRenewed(NameRenewalObservation),
     TokenTransferred(TokenTransferObservation),
     RegistryOwnerChanged(RegistryOwnerObservation),
+    ResolverChanged(ResolverObservation),
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +251,7 @@ struct NameHistory {
     first_name_ref: Option<ObservationRef>,
     current_registration: Option<RegistrationLease>,
     current_registry_owner: Option<String>,
+    current_resolver: Option<String>,
     open_binding: Option<OpenBinding>,
     bindings: Vec<BindingSegment>,
     events: Vec<NormalizedEvent>,
@@ -297,6 +308,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
     }
 
     let mut histories = BTreeMap::<String, NameHistory>::new();
+    let mut namehash_to_labelhash = HashMap::<String, String>::new();
     let mut matched_log_count = 0usize;
     for raw_log in &raw_logs {
         let Some(observation) = build_authority_observation(raw_log)? else {
@@ -304,7 +316,15 @@ pub async fn sync_ens_v1_unwrapped_authority(
         };
         matched_log_count += 1;
 
-        let labelhash = observation_labelhash(&observation);
+        let labelhash = match &observation {
+            AuthorityObservation::ResolverChanged(event) => {
+                let Some(labelhash) = namehash_to_labelhash.get(&event.namehash).cloned() else {
+                    continue;
+                };
+                labelhash
+            }
+            _ => observation_labelhash(&observation),
+        };
         let history = histories
             .entry(labelhash.clone())
             .or_insert_with(|| NameHistory {
@@ -313,6 +333,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
                 first_name_ref: None,
                 current_registration: None,
                 current_registry_owner: None,
+                current_resolver: None,
                 open_binding: None,
                 bindings: Vec::new(),
                 events: Vec::new(),
@@ -322,6 +343,9 @@ pub async fn sync_ens_v1_unwrapped_authority(
             });
 
         apply_observation(history, observation, &block_index).await?;
+        if let Some(name) = history.name.as_ref() {
+            namehash_to_labelhash.insert(name.namehash.clone(), labelhash);
+        }
     }
 
     let head_block = block_index
@@ -1032,6 +1056,38 @@ async fn apply_observation(
                 ),
             ));
         }
+        AuthorityObservation::ResolverChanged(event) => {
+            let before_resolver = history.current_resolver.clone();
+            history.current_resolver = Some(event.resolver.clone());
+
+            let Some(name) = history.name.as_ref() else {
+                return Ok(());
+            };
+            let authority = active_anchor_for_history(history, &event.reference.chain_id);
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(name.logical_name_id.clone()),
+                authority.as_ref().map(|value| value.resource_id),
+                EVENT_KIND_RESOLVER_CHANGED,
+                json!({
+                    "resolver": before_resolver,
+                }),
+                json!({
+                    "resolver": event.resolver,
+                    "namehash": event.namehash,
+                }),
+                format!(
+                    "resolver:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
         AuthorityObservation::RegistryOwnerChanged(event) => {
             let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
             let before_owner = history.current_registry_owner.clone();
@@ -1403,6 +1459,9 @@ fn observation_labelhash(observation: &AuthorityObservation) -> String {
         AuthorityObservation::RegistrationRenewed(value) => value.labelhash.clone(),
         AuthorityObservation::TokenTransferred(value) => value.labelhash.clone(),
         AuthorityObservation::RegistryOwnerChanged(value) => value.labelhash.clone(),
+        AuthorityObservation::ResolverChanged(_) => {
+            unreachable!("resolver observations must be resolved by namehash before use")
+        }
     }
 }
 
@@ -1544,6 +1603,23 @@ fn build_authority_observation(
                         .context("NewOwner log is missing indexed labelhash")?,
                 )?,
                 owner: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRY_L1
+        && topic0.eq_ignore_ascii_case(&new_resolver_topic0())
+    {
+        return Ok(Some(AuthorityObservation::ResolverChanged(
+            ResolverObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("NewResolver log is missing indexed node")?,
+                )?,
+                resolver: decode_owner_address(&raw_log.data)?,
                 reference: raw_log.reference(),
             },
         )));
@@ -2014,6 +2090,10 @@ fn new_owner_topic0() -> String {
     keccak256_hex(NEW_OWNER_SIGNATURE.as_bytes())
 }
 
+fn new_resolver_topic0() -> String {
+    keccak256_hex(NEW_RESOLVER_SIGNATURE.as_bytes())
+}
+
 fn hex_string(bytes: &[u8]) -> String {
     let mut output = String::from("0x");
     for byte in bytes {
@@ -2313,6 +2393,10 @@ mod tests {
         output
     }
 
+    fn encode_registry_new_resolver_log_data(resolver: &str) -> Vec<u8> {
+        abi_word_address(resolver).to_vec()
+    }
+
     #[tokio::test]
     async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempotently()
     -> Result<()> {
@@ -2457,6 +2541,245 @@ mod tests {
                 (EVENT_KIND_REGISTRATION_GRANTED.to_owned(), 1_usize),
                 (EVENT_KIND_SURFACE_BOUND.to_owned(), 1_usize),
             ])
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let registrar_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            registrar_manifest_id,
+            "contract",
+            "registrar",
+            registrar_contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            registrar_manifest_id,
+        )
+        .await?;
+
+        let registry_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registry_l1/v1.toml",
+        )
+        .await?;
+        let registry_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            registry_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            registry_manifest_id,
+            "contract",
+            "registry",
+            registry_contract_instance_id,
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            registry_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+            registry_manifest_id,
+        )
+        .await?;
+
+        let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let transaction_hash = "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_timestamp = 1_700_000_042;
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                block_hash,
+                Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                42,
+                block_timestamp,
+            )],
+        )
+        .await?;
+        let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        name_registered_topic0(),
+                        keccak256_hex(b"alice"),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                    ],
+                    data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let first = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(first.scanned_log_count, 2);
+        assert_eq!(first.matched_log_count, 2);
+        assert_eq!(first.total_name_surface_count, 1);
+        assert_eq!(first.total_resource_count, 1);
+        assert_eq!(first.total_surface_binding_count, 1);
+        assert_eq!(first.total_normalized_event_count, 5);
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+            Some(&1_usize)
+        );
+
+        let expected_identity = format!(
+            "{}:{}:resolver:{}:{}:{}",
+            DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            EVENT_KIND_RESOLVER_CHANGED,
+            block_hash,
+            transaction_hash,
+            1
+        );
+        let resolver_event_resource_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM normalized_events WHERE event_kind = 'ResolverChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let authority_resource_id =
+            sqlx::query_scalar::<_, Uuid>("SELECT resource_id FROM resources LIMIT 1")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(resolver_event_resource_id, authority_resource_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT event_identity FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            expected_identity
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "ens:alice.eth".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT source_family FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT before_state->>'resolver' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            None
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'resolver' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "0x00000000000000000000000000000000000000cc".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'namehash' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            alice.namehash.clone()
+        );
+
+        let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(second.scanned_log_count, 2);
+        assert_eq!(second.matched_log_count, 2);
+        assert_eq!(second.total_normalized_event_count, 5);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+                .fetch_one(database.pool())
+                .await?,
+            5
         );
 
         database.cleanup().await

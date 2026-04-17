@@ -1235,6 +1235,10 @@ fn registrar_name_registered_topic0() -> String {
     keccak256_hex(b"NameRegistered(string,bytes32,address,uint256,uint256)")
 }
 
+fn registry_new_resolver_topic0() -> String {
+    keccak256_hex(b"NewResolver(bytes32,address)")
+}
+
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
     let mut labels = Vec::<Vec<u8>>::new();
     let mut cursor = 0usize;
@@ -1359,6 +1363,42 @@ fn rpc_registrar_name_registered_log_payload(
             hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
         ],
         "data": encode_registrar_name_registered_log_data(label, expiry_unix)
+    })
+}
+
+fn encode_registry_new_resolver_log_data(resolver: &str) -> String {
+    hex_string(&abi_word_address(resolver))
+}
+
+fn rpc_registry_new_resolver_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    resolver: &str,
+    log_index: u64,
+) -> Value {
+    let dns_name = {
+        let mut output = Vec::new();
+        output.push(u8::try_from(label.len()).expect("resolver label length must fit in u8"));
+        output.extend_from_slice(label.as_bytes());
+        output.push(3);
+        output.extend_from_slice(b"eth");
+        output.push(0);
+        output
+    };
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            registry_new_resolver_topic0(),
+            namehash_for_dns_name(&dns_name)
+        ],
+        "data": encode_registry_new_resolver_log_data(resolver)
     })
 }
 
@@ -2365,7 +2405,9 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
 async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     let registrar_contract_instance_id = Uuid::from_u128(33);
+    let registry_contract_instance_id = Uuid::from_u128(34);
     let registrar_address = "0x00000000000000000000000000000000000000ab";
+    let registry_address = "0x00000000000000000000000000000000000000ac";
 
     sqlx::query(
         r#"
@@ -2398,11 +2440,51 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
     .execute(database.pool())
     .await
     .context("failed to insert manifest_versions for unwrapped authority reconciliation test")?;
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                2,
+                1,
+                'ens',
+                'ens_v1_registry_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_registry_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context(
+        "failed to insert registry manifest_versions for unwrapped authority reconciliation test",
+    )?;
     insert_contract_instance(
         database.pool(),
         registrar_contract_instance_id,
         "ethereum-mainnet",
         "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
     )
     .await?;
     insert_active_contract_instance_address(
@@ -2411,6 +2493,14 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         "ethereum-mainnet",
         registrar_address,
         Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        registry_address,
+        Some(2),
     )
     .await?;
     insert_manifest_contract_instance(
@@ -2424,6 +2514,13 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         None,
     )
     .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        2,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
@@ -2433,12 +2530,21 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         52,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        logs: vec![rpc_registrar_name_registered_log_payload(
-            &canonical_head,
-            registrar_address,
-            "alice",
-            canonical_head.block_timestamp_unix_secs + 31_536_000,
-        )],
+        logs: vec![
+            rpc_registrar_name_registered_log_payload(
+                &canonical_head,
+                registrar_address,
+                "alice",
+                canonical_head.block_timestamp_unix_secs + 31_536_000,
+            ),
+            rpc_registry_new_resolver_log_payload(
+                &canonical_head,
+                registry_address,
+                "alice",
+                "0x00000000000000000000000000000000000000cc",
+                1,
+            ),
+        ],
         block: canonical_head.clone(),
     }])
     .await?;
@@ -2528,6 +2634,57 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         .fetch_one(database.pool())
         .await?,
         1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    let resolver_event_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id FROM normalized_events WHERE event_kind = 'ResolverChanged'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        resolver_event_resource_id,
+        sqlx::query_scalar::<_, Uuid>("SELECT resource_id FROM resources LIMIT 1")
+            .fetch_one(database.pool())
+            .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens:alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_registry_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'resolver' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000cc".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical".to_owned()
     );
 
     server.abort();
@@ -3758,6 +3915,55 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         }],
     )
     .await?;
+    sqlx::query(
+        r#"
+            INSERT INTO normalized_events (
+                event_identity,
+                namespace,
+                logical_name_id,
+                resource_id,
+                event_kind,
+                source_family,
+                manifest_version,
+                source_manifest_id,
+                chain_id,
+                block_number,
+                block_hash,
+                transaction_hash,
+                log_index,
+                raw_fact_ref,
+                derivation_kind,
+                canonicality_state,
+                before_state,
+                after_state
+            )
+            VALUES (
+                'ens_v1_unwrapped_authority:ResolverChanged:resolver:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:1',
+                'ens',
+                'ens:reorg.eth',
+                $1,
+                'ResolverChanged',
+                'ens_v1_registry_l1',
+                1,
+                1,
+                'ethereum-mainnet',
+                42,
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                $2,
+                1,
+                '{"kind":"raw_log"}'::jsonb,
+                'ens_v1_unwrapped_authority',
+                'canonical'::canonicality_state,
+                '{"resolver":"0x00000000000000000000000000000000000000aa"}'::jsonb,
+                '{"resolver":"0x00000000000000000000000000000000000000bb"}'::jsonb
+            )
+            "#,
+    )
+    .bind(resource_id)
+    .bind(transaction_hash_for_block(&losing_block))
+    .execute(database.pool())
+    .await
+    .context("failed to insert ResolverChanged event for reorg reconciliation test")?;
     tasks[0].checkpoint = advance_chain_checkpoints(
         database.pool(),
         &ChainCheckpointUpdate {
@@ -3890,6 +4096,14 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
             .await?,
             "orphaned".to_owned()
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM token_lineages WHERE token_lineage_id = $1"
