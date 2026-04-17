@@ -156,6 +156,23 @@ These routes define the baseline `v1` surface. Later additions must be additive 
 
 ## 5. Route-Level Semantics
 
+### `GET /v1/namespaces/{namespace}`
+
+Returns manifest-backed metadata for one public namespace.
+
+`declared_state` includes:
+
+- `active_manifest_count`
+- `active_source_families`
+- `chains`
+- `normalizer_versions`
+
+Rules:
+
+- return `200` with empty lists and `active_manifest_count=0` when the namespace is public but has no active manifests yet
+- return `404 not_found` when the namespace is not a supported public namespace
+- use `GET /v1/manifests/{namespace}` for per-manifest capability flags and manifest-version detail
+
 ### `GET /v1/names/{namespace}/{name}`
 
 Returns:

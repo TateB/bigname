@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -50,6 +53,40 @@ struct HealthResponse {
     service: &'static str,
     phase: &'static str,
     status: &'static str,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct NamespaceMetadataResponse {
+    data: NamespaceMetadataData,
+    declared_state: NamespaceMetadataDeclaredState,
+    verified_state: Option<()>,
+    provenance: NamespaceMetadataProvenance,
+    coverage: CoverageResponse,
+    chain_positions: BTreeMap<String, ChainPositionResponse>,
+    consistency: String,
+    last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct NamespaceMetadataData {
+    namespace: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct NamespaceMetadataDeclaredState {
+    active_manifest_count: usize,
+    active_source_families: Vec<String>,
+    chains: Vec<String>,
+    normalizer_versions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct NamespaceMetadataProvenance {
+    normalized_event_ids: Vec<String>,
+    raw_fact_refs: Vec<String>,
+    manifest_versions: Vec<ManifestVersionRef>,
+    execution_trace_id: Option<String>,
+    derivation_kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -133,6 +170,17 @@ impl From<ActiveManifestVersion> for NamespaceManifestEntry {
 
 impl From<&NamespaceManifestEntry> for ManifestVersionRef {
     fn from(value: &NamespaceManifestEntry) -> Self {
+        Self {
+            manifest_version: value.manifest_version,
+            source_family: value.source_family.clone(),
+            chain: value.chain.clone(),
+            deployment_epoch: value.deployment_epoch.clone(),
+        }
+    }
+}
+
+impl From<&ActiveManifestVersion> for ManifestVersionRef {
+    fn from(value: &ActiveManifestVersion) -> Self {
         Self {
             manifest_version: value.manifest_version,
             source_family: value.source_family.clone(),
@@ -226,6 +274,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/manifests/{namespace}", get(namespace_manifests))
         .with_state(state)
 }
@@ -238,17 +287,34 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn namespace_metadata(
+    Path(namespace): Path<String>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<NamespaceMetadataResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let snapshot = load_namespace_manifest_snapshot(&state.pool, &namespace)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                error = ?load_error,
+                "failed to load namespace metadata"
+            );
+            ApiError::internal_error(format!(
+                "failed to load namespace metadata for namespace {namespace}"
+            ))
+        })?;
+
+    Ok(Json(build_namespace_metadata_response(namespace, snapshot)))
+}
+
 async fn namespace_manifests(
     Path(namespace): Path<String>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NamespaceManifestsResponse>> {
-    if !PUBLIC_NAMESPACES.contains(&namespace.as_str()) {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("namespace {namespace} is not supported"),
-        });
-    }
+    ensure_public_namespace(&namespace)?;
 
     let snapshot = load_namespace_manifest_snapshot(&state.pool, &namespace)
         .await
@@ -267,6 +333,60 @@ async fn namespace_manifests(
     Ok(Json(build_namespace_manifests_response(
         namespace, snapshot,
     )))
+}
+
+fn build_namespace_metadata_response(
+    namespace: String,
+    snapshot: NamespaceManifestSnapshot,
+) -> NamespaceMetadataResponse {
+    let manifest_versions = snapshot
+        .manifests
+        .iter()
+        .map(ManifestVersionRef::from)
+        .collect::<Vec<_>>();
+
+    NamespaceMetadataResponse {
+        data: NamespaceMetadataData { namespace },
+        declared_state: NamespaceMetadataDeclaredState {
+            active_manifest_count: snapshot.manifests.len(),
+            active_source_families: collect_unique(
+                snapshot
+                    .manifests
+                    .iter()
+                    .map(|manifest| manifest.source_family.clone()),
+            ),
+            chains: collect_unique(
+                snapshot
+                    .manifests
+                    .iter()
+                    .map(|manifest| manifest.chain.clone()),
+            ),
+            normalizer_versions: collect_unique(
+                snapshot
+                    .manifests
+                    .iter()
+                    .map(|manifest| manifest.normalizer_version.clone()),
+            ),
+        },
+        verified_state: None,
+        provenance: NamespaceMetadataProvenance {
+            normalized_event_ids: Vec::new(),
+            raw_fact_refs: Vec::new(),
+            manifest_versions,
+            execution_trace_id: None,
+            derivation_kind: "declared".to_owned(),
+        },
+        coverage: CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["source_manifests".to_owned()],
+            enumeration_basis: "active manifests for the requested namespace".to_owned(),
+            unsupported_reason: None,
+        },
+        chain_positions: BTreeMap::new(),
+        consistency: "head".to_owned(),
+        last_updated: snapshot.last_updated,
+    }
 }
 
 fn build_namespace_manifests_response(
@@ -302,6 +422,22 @@ fn build_namespace_manifests_response(
         consistency: "head".to_owned(),
         last_updated: snapshot.last_updated,
     }
+}
+
+fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
+    if PUBLIC_NAMESPACES.contains(&namespace) {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("namespace {namespace} is not supported"),
+        })
+    }
+}
+
+fn collect_unique(values: impl Iterator<Item = String>) -> Vec<String> {
+    values.collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 async fn shutdown_signal(service: &'static str) {
@@ -762,6 +898,242 @@ mod tests {
                 deployment_epoch: "ens_v2_base".to_owned(),
             }
         );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
+        let database = TestDatabase::new(true).await?;
+
+        let ens_l1 = database
+            .insert_manifest(
+                "ens",
+                "ens_v2_registry_l1",
+                "ethereum-mainnet",
+                "ens_v2",
+                1,
+                "active",
+                "uts46-v1",
+            )
+            .await?;
+        database
+            .insert_capability_flag(ens_l1, "declared_children", "supported", None)
+            .await?;
+
+        let ens_l2 = database
+            .insert_manifest(
+                "ens",
+                "ens_v2_registry_l2",
+                "base-mainnet",
+                "ens_v2_base",
+                2,
+                "active",
+                "uts46-v2",
+            )
+            .await?;
+        database
+            .insert_capability_flag(ens_l2, "declared_children", "shadow", Some("shadowed"))
+            .await?;
+
+        let ens_shadow = database
+            .insert_manifest(
+                "ens",
+                "ens_shadow_registry",
+                "ethereum-mainnet",
+                "ens_shadow",
+                3,
+                "shadow",
+                "uts46-v1",
+            )
+            .await?;
+        database
+            .insert_capability_flag(ens_shadow, "verified_resolution", "shadow", None)
+            .await?;
+
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/namespaces/ens")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("namespace metadata request failed")?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: NamespaceMetadataResponse = read_json(response).await?;
+        assert_eq!(payload.data.namespace, "ens");
+        assert_eq!(payload.declared_state.active_manifest_count, 2);
+        assert_eq!(
+            payload.declared_state.active_source_families,
+            vec![
+                "ens_v2_registry_l1".to_owned(),
+                "ens_v2_registry_l2".to_owned()
+            ]
+        );
+        assert_eq!(
+            payload.declared_state.chains,
+            vec!["base-mainnet".to_owned(), "ethereum-mainnet".to_owned()]
+        );
+        assert_eq!(
+            payload.declared_state.normalizer_versions,
+            vec!["uts46-v1".to_owned(), "uts46-v2".to_owned()]
+        );
+        assert_eq!(payload.coverage.status, "full");
+        assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+        assert_eq!(
+            payload.coverage.source_classes_considered,
+            vec!["source_manifests".to_owned()]
+        );
+        assert_eq!(
+            payload.coverage.enumeration_basis,
+            "active manifests for the requested namespace"
+        );
+        assert_eq!(payload.coverage.unsupported_reason, None);
+        assert_eq!(payload.provenance.derivation_kind, "declared");
+        assert_eq!(payload.provenance.execution_trace_id, None);
+        assert!(payload.provenance.normalized_event_ids.is_empty());
+        assert!(payload.provenance.raw_fact_refs.is_empty());
+        assert_eq!(payload.provenance.manifest_versions.len(), 2);
+        assert_eq!(
+            payload.provenance.manifest_versions[0],
+            ManifestVersionRef {
+                manifest_version: 1,
+                source_family: "ens_v2_registry_l1".to_owned(),
+                chain: "ethereum-mainnet".to_owned(),
+                deployment_epoch: "ens_v2".to_owned(),
+            }
+        );
+        assert_eq!(
+            payload.provenance.manifest_versions[1],
+            ManifestVersionRef {
+                manifest_version: 2,
+                source_family: "ens_v2_registry_l2".to_owned(),
+                chain: "base-mainnet".to_owned(),
+                deployment_epoch: "ens_v2_base".to_owned(),
+            }
+        );
+        assert_eq!(payload.consistency, "head");
+        assert!(payload.last_updated.ends_with('Z'));
+        assert!(payload.verified_state.is_none());
+        assert!(payload.chain_positions.is_empty());
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_namespace_metadata_returns_empty_summary_when_namespace_has_no_active_manifests()
+    -> Result<()> {
+        let database = TestDatabase::new(true).await?;
+
+        let ens_shadow = database
+            .insert_manifest(
+                "ens",
+                "ens_shadow_registry",
+                "ethereum-mainnet",
+                "ens_shadow",
+                1,
+                "shadow",
+                "uts46-v1",
+            )
+            .await?;
+        database
+            .insert_capability_flag(ens_shadow, "declared_children", "supported", None)
+            .await?;
+
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/namespaces/ens")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("namespace metadata request failed")?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: NamespaceMetadataResponse = read_json(response).await?;
+        assert_eq!(payload.data.namespace, "ens");
+        assert_eq!(payload.declared_state.active_manifest_count, 0);
+        assert!(payload.declared_state.active_source_families.is_empty());
+        assert!(payload.declared_state.chains.is_empty());
+        assert!(payload.declared_state.normalizer_versions.is_empty());
+        assert!(payload.provenance.manifest_versions.is_empty());
+        assert_eq!(payload.coverage.status, "full");
+        assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+        assert_eq!(
+            payload.coverage.source_classes_considered,
+            vec!["source_manifests".to_owned()]
+        );
+        assert_eq!(
+            payload.coverage.enumeration_basis,
+            "active manifests for the requested namespace"
+        );
+        assert_eq!(payload.coverage.unsupported_reason, None);
+        assert_eq!(payload.provenance.derivation_kind, "declared");
+        assert_eq!(payload.consistency, "head");
+        assert!(payload.last_updated.ends_with('Z'));
+        assert!(payload.verified_state.is_none());
+        assert!(payload.chain_positions.is_empty());
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_namespace_metadata_returns_internal_error_envelope_on_load_failure() -> Result<()>
+    {
+        let database = TestDatabase::new(false).await?;
+
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/namespaces/ens")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("namespace metadata request failed")?;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "internal_error");
+        assert_eq!(
+            payload.error.message,
+            "failed to load namespace metadata for namespace ens"
+        );
+        assert!(payload.error.details.is_empty());
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_namespace_metadata_returns_not_found_for_unknown_namespace() -> Result<()> {
+        let database = TestDatabase::new(true).await?;
+
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/namespaces/unknown")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("namespace metadata request failed")?;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "not_found");
+        assert_eq!(payload.error.message, "namespace unknown is not supported");
+        assert!(payload.error.details.is_empty());
 
         database.cleanup().await?;
         Ok(())
