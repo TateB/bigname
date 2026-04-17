@@ -1,15 +1,19 @@
 mod provider;
 
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::{
     BlockDerivedNormalizedEventSyncSummary, ManifestNormalizedEventSyncSummary,
 };
 use bigname_manifests::{
-    DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus,
-    ManifestSyncSummary, WatchedChainPlan, WatchedContractSummary, load_watched_chain_plan,
-    load_watched_contract_summary,
+    DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
+    ManifestSyncStatus, ManifestSyncSummary, WatchedChainPlan, WatchedContractSummary,
+    load_watched_chain_plan, load_watched_contract_summary,
 };
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, ChainLineageBlock,
@@ -80,32 +84,19 @@ async fn main() -> Result<()> {
 }
 
 async fn run(args: RunArgs) -> Result<()> {
-    let manifest_repository = bigname_manifests::load_repository(&args.manifests_root)
-        .with_context(|| {
-            format!(
-                "failed to load repository manifests from {}",
-                args.manifests_root.display()
-            )
-        })?;
-    let manifest_summary = manifest_repository.summary();
-    log_manifest_summary(manifest_summary);
-    ensure_manifest_root_ready(manifest_summary)?;
+    let manifest_repository = load_manifest_repository(&args.manifests_root)?;
+    let manifest_summary = manifest_repository.summary().clone();
+    log_manifest_summary(&manifest_summary);
+    ensure_manifest_root_ready(&manifest_summary)?;
 
     let pool = bigname_storage::connect(&args.database).await?;
-    let sync_summary = bigname_manifests::sync_repository(&pool, &manifest_repository).await?;
-    log_manifest_sync_summary(&sync_summary);
-    let admission_state = bigname_manifests::load_discovery_admission_state(&pool).await?;
-    log_discovery_admission_state(&admission_state);
-    verify_stored_manifest_state(&sync_summary, &admission_state)?;
-    let manifest_normalized_event_summary =
-        bigname_adapters::sync_manifest_normalized_events(&pool).await?;
-    log_manifest_normalized_event_summary(&manifest_normalized_event_summary);
-    let watched_contract_summary = load_watched_contract_summary(&pool).await?;
-    log_watched_contract_summary(&watched_contract_summary);
-    let watched_chain_plan = load_watched_chain_plan(&pool).await?;
-    log_watched_chain_plan("startup", &watched_chain_plan);
-    let watched_chain_plan_state = watched_chain_plan_state(&watched_chain_plan);
-    let intake_chain_tasks = sync_intake_chain_tasks(&pool, &watched_chain_plan).await?;
+    let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
+    log_manifest_runtime_state(&manifest_runtime_state);
+    log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
+    let watched_chain_plan_state =
+        watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
+    let intake_chain_tasks =
+        sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
     let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
@@ -115,44 +106,44 @@ async fn run(args: RunArgs) -> Result<()> {
         service = "indexer",
         phase = bigname_domain::bootstrap_phase(),
         manifest_loader_status = bigname_manifests::bootstrap_status(),
-        manifests_root = %manifest_summary.root.display(),
-        manifests_status = manifest_summary.status.as_str(),
-        manifest_namespace_count = manifest_summary.namespace_count,
-        manifest_source_family_count = manifest_summary.source_family_count,
-        manifest_count = manifest_summary.manifest_count,
-        manifest_sync_status = sync_summary.status.as_str(),
-        synced_manifest_count = sync_summary.synced_manifest_count,
-        synced_active_manifest_count = sync_summary.active_manifest_count,
-        synced_root_count = sync_summary.root_count,
-        synced_contract_count = sync_summary.contract_count,
-        synced_capability_count = sync_summary.capability_count,
-        synced_discovery_rule_count = sync_summary.discovery_rule_count,
-        removed_manifest_count = sync_summary.removed_manifest_count,
-        cleared_discovery_edge_count = sync_summary.cleared_discovery_edge_count,
-        stored_active_manifest_count = admission_state.active_manifest_count,
-        stored_active_root_count = admission_state.active_root_count,
-        stored_active_contract_count = admission_state.active_contract_count,
-        stored_active_rule_count = admission_state.active_rule_count,
-        normalized_event_sync_total_count = manifest_normalized_event_summary.total_synced_count,
-        normalized_event_inserted_total_count = manifest_normalized_event_summary.total_inserted_count,
-        normalized_event_kind_count = manifest_normalized_event_summary.by_kind.len(),
+        manifests_root = %manifest_runtime_state.manifest_summary.root.display(),
+        manifests_status = manifest_runtime_state.manifest_summary.status.as_str(),
+        manifest_namespace_count = manifest_runtime_state.manifest_summary.namespace_count,
+        manifest_source_family_count = manifest_runtime_state.manifest_summary.source_family_count,
+        manifest_count = manifest_runtime_state.manifest_summary.manifest_count,
+        manifest_sync_status = manifest_runtime_state.sync_summary.status.as_str(),
+        synced_manifest_count = manifest_runtime_state.sync_summary.synced_manifest_count,
+        synced_active_manifest_count = manifest_runtime_state.sync_summary.active_manifest_count,
+        synced_root_count = manifest_runtime_state.sync_summary.root_count,
+        synced_contract_count = manifest_runtime_state.sync_summary.contract_count,
+        synced_capability_count = manifest_runtime_state.sync_summary.capability_count,
+        synced_discovery_rule_count = manifest_runtime_state.sync_summary.discovery_rule_count,
+        removed_manifest_count = manifest_runtime_state.sync_summary.removed_manifest_count,
+        cleared_discovery_edge_count = manifest_runtime_state.sync_summary.cleared_discovery_edge_count,
+        stored_active_manifest_count = manifest_runtime_state.discovery_admission.active_manifest_count,
+        stored_active_root_count = manifest_runtime_state.discovery_admission.active_root_count,
+        stored_active_contract_count = manifest_runtime_state.discovery_admission.active_contract_count,
+        stored_active_rule_count = manifest_runtime_state.discovery_admission.active_rule_count,
+        normalized_event_sync_total_count = manifest_runtime_state.manifest_normalized_event_summary.total_synced_count,
+        normalized_event_inserted_total_count = manifest_runtime_state.manifest_normalized_event_summary.total_inserted_count,
+        normalized_event_kind_count = manifest_runtime_state.manifest_normalized_event_summary.by_kind.len(),
         source_manifest_updated_event_count = manifest_normalized_event_kind_count(
-            &manifest_normalized_event_summary,
+            &manifest_runtime_state.manifest_normalized_event_summary,
             "SourceManifestUpdated"
         ),
         capability_changed_event_count = manifest_normalized_event_kind_count(
-            &manifest_normalized_event_summary,
+            &manifest_runtime_state.manifest_normalized_event_summary,
             "CapabilityChanged"
         ),
         proxy_implementation_changed_event_count = manifest_normalized_event_kind_count(
-            &manifest_normalized_event_summary,
+            &manifest_runtime_state.manifest_normalized_event_summary,
             "ProxyImplementationChanged"
         ),
-        watched_entry_count_total = watched_contract_summary.source_entry_count,
-        watched_manifest_root_entry_count = watched_contract_summary.manifest_root_count,
-        watched_manifest_contract_entry_count = watched_contract_summary.manifest_contract_count,
-        watched_discovery_edge_entry_count = watched_contract_summary.discovery_edge_count,
-        watched_chain_count = watched_contract_summary.chains.len(),
+        watched_entry_count_total = manifest_runtime_state.watched_contract_summary.source_entry_count,
+        watched_manifest_root_entry_count = manifest_runtime_state.watched_contract_summary.manifest_root_count,
+        watched_manifest_contract_entry_count = manifest_runtime_state.watched_contract_summary.manifest_contract_count,
+        watched_discovery_edge_entry_count = manifest_runtime_state.watched_contract_summary.discovery_edge_count,
+        watched_chain_count = manifest_runtime_state.watched_contract_summary.chains.len(),
         watched_runtime_chain_count = watched_chain_plan_state.chain_count,
         watched_runtime_address_count = watched_chain_plan_state.address_count,
         watched_runtime_entry_count = watched_chain_plan_state.entry_count,
@@ -172,12 +163,79 @@ async fn run(args: RunArgs) -> Result<()> {
 
     run_poll_loop(
         &pool,
-        watched_chain_plan,
+        args.manifests_root,
+        manifest_runtime_state,
         intake_chain_tasks,
         &provider_registry,
         args.poll_interval_secs,
     )
     .await
+}
+
+fn load_manifest_repository(manifests_root: &Path) -> Result<ManifestRepository> {
+    bigname_manifests::load_repository(manifests_root).with_context(|| {
+        format!(
+            "failed to load repository manifests from {}",
+            manifests_root.display()
+        )
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveryAdmissionSnapshot {
+    active_manifest_count: usize,
+    active_root_count: usize,
+    active_contract_count: usize,
+    active_rule_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestRuntimeState {
+    manifest_summary: ManifestLoadSummary,
+    sync_summary: ManifestSyncSummary,
+    discovery_admission: DiscoveryAdmissionSnapshot,
+    manifest_normalized_event_summary: ManifestNormalizedEventSyncSummary,
+    watched_contract_summary: WatchedContractSummary,
+    watched_chain_plan: Vec<WatchedChainPlan>,
+}
+
+async fn build_manifest_runtime_state(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+) -> Result<ManifestRuntimeState> {
+    let manifest_summary = manifest_repository.summary().clone();
+    let sync_summary = bigname_manifests::sync_repository(pool, manifest_repository).await?;
+    let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
+    verify_stored_manifest_state(&sync_summary, &admission_state)?;
+    let manifest_normalized_event_summary =
+        bigname_adapters::sync_manifest_normalized_events(pool).await?;
+    let watched_contract_summary = load_watched_contract_summary(pool).await?;
+    let watched_chain_plan = load_watched_chain_plan(pool).await?;
+
+    Ok(ManifestRuntimeState {
+        manifest_summary,
+        sync_summary,
+        discovery_admission: discovery_admission_snapshot(&admission_state),
+        manifest_normalized_event_summary,
+        watched_contract_summary,
+        watched_chain_plan,
+    })
+}
+
+fn discovery_admission_snapshot(state: &DiscoveryAdmissionState) -> DiscoveryAdmissionSnapshot {
+    DiscoveryAdmissionSnapshot {
+        active_manifest_count: state.active_manifest_count,
+        active_root_count: state.active_root_count,
+        active_contract_count: state.active_contract_count,
+        active_rule_count: state.active_rule_count,
+    }
+}
+
+fn log_manifest_runtime_state(state: &ManifestRuntimeState) {
+    log_manifest_sync_summary(&state.sync_summary);
+    log_discovery_admission_state(&state.discovery_admission);
+    log_manifest_normalized_event_summary(&state.manifest_normalized_event_summary);
+    log_watched_contract_summary(&state.watched_contract_summary);
 }
 
 fn log_manifest_summary(summary: &ManifestLoadSummary) {
@@ -275,7 +333,7 @@ fn verify_stored_manifest_state(
     Ok(())
 }
 
-fn log_discovery_admission_state(state: &DiscoveryAdmissionState) {
+fn log_discovery_admission_state(state: &DiscoveryAdmissionSnapshot) {
     info!(
         service = "indexer",
         stored_active_manifest_count = state.active_manifest_count,
@@ -1642,7 +1700,8 @@ async fn refresh_intake_chain_tasks(
 
 async fn run_poll_loop(
     pool: &sqlx::PgPool,
-    mut watched_chain_plan: Vec<WatchedChainPlan>,
+    manifests_root: PathBuf,
+    mut manifest_runtime_state: ManifestRuntimeState,
     mut intake_chain_tasks: Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
     poll_interval_secs: u64,
@@ -1657,109 +1716,227 @@ async fn run_poll_loop(
                 return Ok(());
             }
             _ = interval.tick() => {
-                match refresh_watched_chain_plan(pool, &watched_chain_plan).await {
-                    Ok(Some(next_plan)) => {
-                        match sync_intake_chain_tasks(pool, &next_plan).await {
-                            Ok(next_tasks) => {
-                                let previous_watch_state = watched_chain_plan_state(&watched_chain_plan);
-                                let next_watch_state = watched_chain_plan_state(&next_plan);
-                                let previous_intake_state = intake_runtime_state(&intake_chain_tasks);
-                                let next_intake_state = intake_runtime_state(&next_tasks);
+                match load_manifest_repository(&manifests_root) {
+                    Ok(manifest_repository) => {
+                        let manifest_summary = manifest_repository.summary().clone();
+                        if manifest_summary != manifest_runtime_state.manifest_summary {
+                            log_manifest_summary(&manifest_summary);
+                        }
 
-                                info!(
-                                    service = "indexer",
-                                    refresh_reason = "timer",
-                                    watched_plan_changed = true,
-                                    plan_source = "stored_manifest_state",
-                                    previous_watched_chain_count = previous_watch_state.chain_count,
-                                    previous_watched_address_count = previous_watch_state.address_count,
-                                    previous_watched_entry_count_total = previous_watch_state.entry_count,
-                                    watched_chain_count = next_watch_state.chain_count,
-                                    watched_address_count = next_watch_state.address_count,
-                                    watched_entry_count_total = next_watch_state.entry_count,
-                                    previous_intake_chain_count = previous_intake_state.chain_count,
-                                    previous_intake_address_count = previous_intake_state.address_count,
-                                    previous_intake_entry_count_total = previous_intake_state.entry_count,
-                                    intake_chain_count = next_intake_state.chain_count,
-                                    intake_address_count = next_intake_state.address_count,
-                                    intake_entry_count_total = next_intake_state.entry_count,
-                                    intake_cold_start_chain_count = next_intake_state.cold_start_chain_count,
-                                    intake_resumable_chain_count = next_intake_state.resumable_chain_count,
-                                    "runtime watched chain plan changed after poll"
-                                );
-                                log_watched_chain_plan("refresh", &next_plan);
-                                log_intake_chain_tasks("refresh", &next_tasks);
-                                log_provider_registry("refresh", &next_tasks, provider_registry);
-                                watched_chain_plan = next_plan;
-                                intake_chain_tasks = next_tasks;
-                            }
-                            Err(error) => {
-                                let current_watch_state = watched_chain_plan_state(&watched_chain_plan);
-                                let current_intake_state = intake_runtime_state(&intake_chain_tasks);
-                                warn!(
-                                    service = "indexer",
-                                    refresh_reason = "timer",
-                                    plan_source = "stored_manifest_state",
-                                    error = ?error,
-                                    watched_chain_count = current_watch_state.chain_count,
-                                    watched_address_count = current_watch_state.address_count,
-                                    watched_entry_count_total = current_watch_state.entry_count,
-                                    intake_chain_count = current_intake_state.chain_count,
-                                    intake_address_count = current_intake_state.address_count,
-                                    intake_entry_count_total = current_intake_state.entry_count,
-                                    "failed to sync intake chain tasks for a changed watch plan; keeping last successful runtime state"
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => match refresh_intake_chain_tasks(pool, &intake_chain_tasks, &watched_chain_plan).await {
-                        Ok(Some(next_tasks)) => {
-                            let previous_state = intake_runtime_state(&intake_chain_tasks);
-                            let next_state = intake_runtime_state(&next_tasks);
-                            info!(
-                                service = "indexer",
-                                refresh_reason = "timer",
-                                watched_plan_changed = false,
-                                checkpoint_state_changed = true,
-                                plan_source = "stored_manifest_state",
-                                previous_intake_chain_count = previous_state.chain_count,
-                                previous_intake_address_count = previous_state.address_count,
-                                previous_intake_entry_count_total = previous_state.entry_count,
-                                previous_intake_cold_start_chain_count = previous_state.cold_start_chain_count,
-                                previous_intake_resumable_chain_count = previous_state.resumable_chain_count,
-                                intake_chain_count = next_state.chain_count,
-                                intake_address_count = next_state.address_count,
-                                intake_entry_count_total = next_state.entry_count,
-                                intake_cold_start_chain_count = next_state.cold_start_chain_count,
-                                intake_resumable_chain_count = next_state.resumable_chain_count,
-                                intake_safe_checkpoint_chain_count = next_state.safe_checkpoint_chain_count,
-                                intake_finalized_checkpoint_chain_count = next_state.finalized_checkpoint_chain_count,
-                                "persisted checkpoint state changed for active intake chains"
-                            );
-                            log_intake_chain_tasks("checkpoint-refresh", &next_tasks);
-                            intake_chain_tasks = next_tasks;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let current_watch_state = watched_chain_plan_state(&watched_chain_plan);
+                        if let Err(error) = ensure_manifest_root_ready(&manifest_summary) {
+                            let current_watch_state =
+                                watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
                             let current_intake_state = intake_runtime_state(&intake_chain_tasks);
                             warn!(
                                 service = "indexer",
                                 refresh_reason = "timer",
-                                plan_source = "stored_manifest_state",
+                                plan_source = "repository_manifest_reload",
                                 error = ?error,
+                                manifests_root = %manifest_summary.root.display(),
+                                manifests_status = manifest_summary.status.as_str(),
                                 watched_chain_count = current_watch_state.chain_count,
                                 watched_address_count = current_watch_state.address_count,
                                 watched_entry_count_total = current_watch_state.entry_count,
                                 intake_chain_count = current_intake_state.chain_count,
                                 intake_address_count = current_intake_state.address_count,
                                 intake_entry_count_total = current_intake_state.entry_count,
-                                "failed to refresh runtime intake chain tasks; keeping last successful state"
+                                "failed to reload repository manifests; keeping last successful runtime state"
                             );
+                        } else {
+                            match build_manifest_runtime_state(pool, &manifest_repository).await {
+                                Ok(next_manifest_runtime_state) => {
+                                    let manifest_state_changed =
+                                        next_manifest_runtime_state != manifest_runtime_state;
+                                    let watched_plan_changed = next_manifest_runtime_state
+                                        .watched_chain_plan
+                                        != manifest_runtime_state.watched_chain_plan;
+
+                                    if manifest_state_changed {
+                                        let previous_watch_state = watched_chain_plan_state(
+                                            &manifest_runtime_state.watched_chain_plan,
+                                        );
+                                        let next_watch_state = watched_chain_plan_state(
+                                            &next_manifest_runtime_state.watched_chain_plan,
+                                        );
+                                        info!(
+                                            service = "indexer",
+                                            refresh_reason = "timer",
+                                            plan_source = "repository_manifest_reload",
+                                            manifest_state_changed = true,
+                                            watched_plan_changed,
+                                            previous_manifest_count = manifest_runtime_state.manifest_summary.manifest_count,
+                                            manifest_count = next_manifest_runtime_state.manifest_summary.manifest_count,
+                                            previous_active_manifest_count = manifest_runtime_state.discovery_admission.active_manifest_count,
+                                            stored_active_manifest_count = next_manifest_runtime_state.discovery_admission.active_manifest_count,
+                                            previous_watched_chain_count = previous_watch_state.chain_count,
+                                            previous_watched_address_count = previous_watch_state.address_count,
+                                            previous_watched_entry_count_total = previous_watch_state.entry_count,
+                                            watched_chain_count = next_watch_state.chain_count,
+                                            watched_address_count = next_watch_state.address_count,
+                                            watched_entry_count_total = next_watch_state.entry_count,
+                                            "repository manifest refresh changed stored runtime state"
+                                        );
+                                        log_manifest_runtime_state(&next_manifest_runtime_state);
+                                    }
+
+                                    if watched_plan_changed {
+                                        match sync_intake_chain_tasks(
+                                            pool,
+                                            &next_manifest_runtime_state.watched_chain_plan,
+                                        )
+                                        .await
+                                        {
+                                            Ok(next_tasks) => {
+                                                let previous_watch_state = watched_chain_plan_state(
+                                                    &manifest_runtime_state.watched_chain_plan,
+                                                );
+                                                let next_watch_state = watched_chain_plan_state(
+                                                    &next_manifest_runtime_state.watched_chain_plan,
+                                                );
+                                                let previous_intake_state =
+                                                    intake_runtime_state(&intake_chain_tasks);
+                                                let next_intake_state =
+                                                    intake_runtime_state(&next_tasks);
+
+                                                info!(
+                                                    service = "indexer",
+                                                    refresh_reason = "timer",
+                                                    watched_plan_changed = true,
+                                                    plan_source = "repository_manifest_reload",
+                                                    previous_watched_chain_count = previous_watch_state.chain_count,
+                                                    previous_watched_address_count = previous_watch_state.address_count,
+                                                    previous_watched_entry_count_total = previous_watch_state.entry_count,
+                                                    watched_chain_count = next_watch_state.chain_count,
+                                                    watched_address_count = next_watch_state.address_count,
+                                                    watched_entry_count_total = next_watch_state.entry_count,
+                                                    previous_intake_chain_count = previous_intake_state.chain_count,
+                                                    previous_intake_address_count = previous_intake_state.address_count,
+                                                    previous_intake_entry_count_total = previous_intake_state.entry_count,
+                                                    intake_chain_count = next_intake_state.chain_count,
+                                                    intake_address_count = next_intake_state.address_count,
+                                                    intake_entry_count_total = next_intake_state.entry_count,
+                                                    intake_cold_start_chain_count = next_intake_state.cold_start_chain_count,
+                                                    intake_resumable_chain_count = next_intake_state.resumable_chain_count,
+                                                    "runtime watched chain plan changed after repository manifest refresh"
+                                                );
+                                                log_watched_chain_plan(
+                                                    "refresh",
+                                                    &next_manifest_runtime_state.watched_chain_plan,
+                                                );
+                                                log_intake_chain_tasks("refresh", &next_tasks);
+                                                log_provider_registry(
+                                                    "refresh",
+                                                    &next_tasks,
+                                                    provider_registry,
+                                                );
+                                                manifest_runtime_state = next_manifest_runtime_state;
+                                                intake_chain_tasks = next_tasks;
+                                            }
+                                            Err(error) => {
+                                                let current_watch_state = watched_chain_plan_state(
+                                                    &manifest_runtime_state.watched_chain_plan,
+                                                );
+                                                let current_intake_state =
+                                                    intake_runtime_state(&intake_chain_tasks);
+                                                warn!(
+                                                    service = "indexer",
+                                                    refresh_reason = "timer",
+                                                    plan_source = "repository_manifest_reload",
+                                                    error = ?error,
+                                                    watched_chain_count = current_watch_state.chain_count,
+                                                    watched_address_count = current_watch_state.address_count,
+                                                    watched_entry_count_total = current_watch_state.entry_count,
+                                                    intake_chain_count = current_intake_state.chain_count,
+                                                    intake_address_count = current_intake_state.address_count,
+                                                    intake_entry_count_total = current_intake_state.entry_count,
+                                                    "failed to sync intake chain tasks for a changed watch plan after repository manifest refresh; keeping last successful runtime state"
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        manifest_runtime_state = next_manifest_runtime_state;
+                                    }
+                                }
+                                Err(error) => {
+                                    let current_watch_state = watched_chain_plan_state(
+                                        &manifest_runtime_state.watched_chain_plan,
+                                    );
+                                    let current_intake_state = intake_runtime_state(&intake_chain_tasks);
+                                    warn!(
+                                        service = "indexer",
+                                        refresh_reason = "timer",
+                                        plan_source = "repository_manifest_reload",
+                                        error = ?error,
+                                        watched_chain_count = current_watch_state.chain_count,
+                                        watched_address_count = current_watch_state.address_count,
+                                        watched_entry_count_total = current_watch_state.entry_count,
+                                        intake_chain_count = current_intake_state.chain_count,
+                                        intake_address_count = current_intake_state.address_count,
+                                        intake_entry_count_total = current_intake_state.entry_count,
+                                        "failed to sync repository manifests into storage during refresh; keeping last successful runtime state"
+                                    );
+                                }
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
-                        let current_watch_state = watched_chain_plan_state(&watched_chain_plan);
+                        let current_watch_state =
+                            watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
+                        let current_intake_state = intake_runtime_state(&intake_chain_tasks);
+                        warn!(
+                            service = "indexer",
+                            refresh_reason = "timer",
+                            plan_source = "repository_manifest_reload",
+                            error = ?error,
+                            manifests_root = %manifests_root.display(),
+                            watched_chain_count = current_watch_state.chain_count,
+                            watched_address_count = current_watch_state.address_count,
+                            watched_entry_count_total = current_watch_state.entry_count,
+                            intake_chain_count = current_intake_state.chain_count,
+                            intake_address_count = current_intake_state.address_count,
+                            intake_entry_count_total = current_intake_state.entry_count,
+                            "failed to load repository manifests during refresh; keeping last successful runtime state"
+                        );
+                    }
+                }
+
+                match refresh_intake_chain_tasks(
+                    pool,
+                    &intake_chain_tasks,
+                    &manifest_runtime_state.watched_chain_plan,
+                )
+                .await
+                {
+                    Ok(Some(next_tasks)) => {
+                        let previous_state = intake_runtime_state(&intake_chain_tasks);
+                        let next_state = intake_runtime_state(&next_tasks);
+                        info!(
+                            service = "indexer",
+                            refresh_reason = "timer",
+                            watched_plan_changed = false,
+                            checkpoint_state_changed = true,
+                            plan_source = "stored_manifest_state",
+                            previous_intake_chain_count = previous_state.chain_count,
+                            previous_intake_address_count = previous_state.address_count,
+                            previous_intake_entry_count_total = previous_state.entry_count,
+                            previous_intake_cold_start_chain_count = previous_state.cold_start_chain_count,
+                            previous_intake_resumable_chain_count = previous_state.resumable_chain_count,
+                            intake_chain_count = next_state.chain_count,
+                            intake_address_count = next_state.address_count,
+                            intake_entry_count_total = next_state.entry_count,
+                            intake_cold_start_chain_count = next_state.cold_start_chain_count,
+                            intake_resumable_chain_count = next_state.resumable_chain_count,
+                            intake_safe_checkpoint_chain_count = next_state.safe_checkpoint_chain_count,
+                            intake_finalized_checkpoint_chain_count = next_state.finalized_checkpoint_chain_count,
+                            "persisted checkpoint state changed for active intake chains"
+                        );
+                        log_intake_chain_tasks("checkpoint-refresh", &next_tasks);
+                        intake_chain_tasks = next_tasks;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let current_watch_state =
+                            watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
                         let current_intake_state = intake_runtime_state(&intake_chain_tasks);
                         warn!(
                             service = "indexer",
@@ -1772,7 +1949,7 @@ async fn run_poll_loop(
                             intake_chain_count = current_intake_state.chain_count,
                             intake_address_count = current_intake_state.address_count,
                             intake_entry_count_total = current_intake_state.entry_count,
-                            "failed to refresh runtime watched chain plan; keeping last successful runtime state"
+                            "failed to refresh runtime intake chain tasks; keeping last successful state"
                         );
                     }
                 }
@@ -1810,6 +1987,7 @@ fn init_tracing(service: &'static str) {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         str::FromStr,
         sync::{
             Arc,
@@ -1835,6 +2013,43 @@ mod tests {
     use super::*;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestManifestDir {
+        path: PathBuf,
+    }
+
+    impl TestManifestDir {
+        fn new() -> Result<Self> {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before unix epoch")?
+                .as_nanos();
+            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "bigname-indexer-manifests-tests-{}-{unique}-{sequence}",
+                std::process::id(),
+            ));
+            fs::create_dir_all(&path)
+                .with_context(|| format!("failed to create test directory {}", path.display()))?;
+            Ok(Self { path })
+        }
+
+        fn write_manifest(&self, contents: &str) -> Result<PathBuf> {
+            let directory = self.path.join("ens").join("ens_v2_registry_l1");
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("failed to create {}", directory.display()))?;
+            let path = directory.join("v1.toml");
+            fs::write(&path, contents)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            Ok(path)
+        }
+    }
+
+    impl Drop for TestManifestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     struct TestDatabase {
         admin_pool: PgPool,
@@ -1894,15 +2109,44 @@ mod tests {
             .context("failed to create canonicality_state type for indexer tests")?;
             sqlx::query(
                 r#"
+                CREATE TYPE manifest_rollout_status AS ENUM (
+                    'draft',
+                    'shadow',
+                    'active',
+                    'deprecated'
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create manifest_rollout_status type for indexer tests")?;
+            sqlx::query(
+                r#"
+                CREATE TYPE capability_support_status AS ENUM (
+                    'unsupported',
+                    'shadow',
+                    'supported'
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create capability_support_status type for indexer tests")?;
+            sqlx::query(
+                r#"
                 CREATE TABLE manifest_versions (
-                    manifest_id BIGINT PRIMARY KEY,
+                    manifest_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
                     manifest_version BIGINT NOT NULL DEFAULT 1,
                     namespace TEXT NOT NULL DEFAULT 'ens',
                     source_family TEXT NOT NULL DEFAULT 'ens_test',
                     chain TEXT NOT NULL,
                     deployment_epoch TEXT NOT NULL DEFAULT 'bootstrap',
-                    rollout_status TEXT NOT NULL,
-                    normalizer_version TEXT NOT NULL DEFAULT 'uts46-v1'
+                    rollout_status manifest_rollout_status NOT NULL,
+                    normalizer_version TEXT NOT NULL DEFAULT 'uts46-v1',
+                    file_path TEXT NOT NULL DEFAULT 'tests/v1.toml',
+                    manifest_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (namespace, source_family, chain, deployment_epoch, manifest_version)
                 )
                 "#,
             )
@@ -1913,7 +2157,10 @@ mod tests {
                 r#"
                 CREATE TABLE manifest_roots (
                     manifest_id BIGINT NOT NULL,
-                    address TEXT NOT NULL
+                    name TEXT NOT NULL DEFAULT 'RootRegistry',
+                    address TEXT NOT NULL,
+                    code_hash TEXT,
+                    abi_ref TEXT
                 )
                 "#,
             )
@@ -1926,6 +2173,7 @@ mod tests {
                     manifest_id BIGINT NOT NULL,
                     role TEXT NOT NULL,
                     address TEXT NOT NULL,
+                    proxy_kind TEXT NOT NULL DEFAULT 'none',
                     implementation TEXT
                 )
                 "#,
@@ -1933,6 +2181,19 @@ mod tests {
             .execute(&pool)
             .await
             .context("failed to create manifest_contracts table for indexer tests")?;
+            sqlx::query(
+                r#"
+                CREATE TABLE manifest_capability_flags (
+                    manifest_id BIGINT NOT NULL,
+                    capability_name TEXT NOT NULL,
+                    status capability_support_status NOT NULL,
+                    notes TEXT
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create manifest_capability_flags table for indexer tests")?;
             sqlx::query(
                 r#"
                 CREATE TABLE manifest_discovery_rules (
@@ -1950,8 +2211,17 @@ mod tests {
                 r#"
                 CREATE TABLE discovery_edges (
                     chain_id TEXT NOT NULL,
+                    edge_kind TEXT NOT NULL DEFAULT 'proxy_implementation',
+                    from_address TEXT NOT NULL DEFAULT '0x0000000000000000000000000000000000000000',
                     to_address TEXT NOT NULL,
-                    source_manifest_id BIGINT
+                    discovery_source TEXT NOT NULL DEFAULT 'test',
+                    source_manifest_id BIGINT,
+                    admission TEXT NOT NULL DEFAULT 'test',
+                    active_from_block_number BIGINT,
+                    active_from_block_hash TEXT,
+                    active_to_block_number BIGINT,
+                    active_to_block_hash TEXT,
+                    provenance JSONB NOT NULL DEFAULT '{}'::jsonb
                 )
                 "#,
             )
@@ -2182,6 +2452,37 @@ mod tests {
             removed_manifest_count: 0,
             cleared_discovery_edge_count: 0,
         }
+    }
+
+    fn manifest_contents(root_address: &str, capability_status: &str) -> String {
+        format!(
+            r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+exact_lookup = "{capability_status}"
+
+[[roots]]
+name = "RootRegistry"
+address = "{root_address}"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000000000000000000000000000000aa"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+        )
     }
 
     fn provider_block(
@@ -3144,6 +3445,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+        let manifest_repository = load_manifest_repository(&manifests_root)?;
+
+        let runtime_state =
+            build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
+
+        assert_eq!(
+            runtime_state.manifest_summary.status,
+            ManifestLoadStatus::Loaded
+        );
+        assert_eq!(runtime_state.manifest_summary.namespace_count, 2);
+        assert_eq!(runtime_state.manifest_summary.source_family_count, 3);
+        assert_eq!(runtime_state.manifest_summary.manifest_count, 3);
+        assert_eq!(
+            runtime_state.sync_summary.status,
+            ManifestSyncStatus::Synced
+        );
+        assert_eq!(runtime_state.sync_summary.synced_manifest_count, 3);
+        assert_eq!(runtime_state.sync_summary.active_manifest_count, 2);
+        assert_eq!(runtime_state.sync_summary.root_count, 2);
+        assert_eq!(runtime_state.sync_summary.contract_count, 2);
+        assert_eq!(runtime_state.sync_summary.capability_count, 5);
+        assert_eq!(runtime_state.sync_summary.discovery_rule_count, 1);
+        assert_eq!(runtime_state.discovery_admission.active_manifest_count, 2);
+        assert_eq!(runtime_state.discovery_admission.active_root_count, 2);
+        assert_eq!(runtime_state.discovery_admission.active_contract_count, 2);
+        assert_eq!(runtime_state.discovery_admission.active_rule_count, 1);
+        assert_eq!(
+            runtime_state
+                .manifest_normalized_event_summary
+                .total_synced_count,
+            6
+        );
+        assert_eq!(
+            runtime_state.watched_contract_summary.unique_contract_count,
+            2
+        );
+        assert_eq!(runtime_state.watched_contract_summary.source_entry_count, 4);
+        assert_eq!(
+            runtime_state.watched_contract_summary.manifest_root_count,
+            2
+        );
+        assert_eq!(
+            runtime_state
+                .watched_contract_summary
+                .manifest_contract_count,
+            2
+        );
+        assert_eq!(
+            runtime_state.watched_contract_summary.discovery_edge_count,
+            0
+        );
+        assert_eq!(
+            runtime_state.watched_chain_plan,
+            vec![WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+                    "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+                ],
+                manifest_root_entry_count: 2,
+                manifest_contract_entry_count: 2,
+                discovery_edge_entry_count: 0,
+            }]
+        );
+
+        let stored_admission = load_discovery_admission_state(database.pool()).await?;
+        assert_eq!(stored_admission.active_manifest_count, 2);
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn refresh_watched_chain_plan_detects_storage_changes() -> Result<()> {
         let database = TestDatabase::new().await?;
 
@@ -3271,6 +3648,115 @@ mod tests {
                 finalized_checkpoint_chain_count: 1,
             }
         );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_manifest_runtime_state_reloads_repository_changes_without_restart() -> Result<()>
+    {
+        let database = TestDatabase::new().await?;
+        let manifests = TestManifestDir::new()?;
+        let manifest_path = manifests.write_manifest(&manifest_contents(
+            "0x0000000000000000000000000000000000000001",
+            "shadow",
+        ))?;
+
+        let initial_repository = load_manifest_repository(&manifests.path)?;
+        assert_eq!(
+            initial_repository.summary().status,
+            ManifestLoadStatus::Loaded
+        );
+        let initial_state =
+            build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+        assert_eq!(initial_state.watched_chain_plan.len(), 1);
+        assert_eq!(
+            initial_state.watched_chain_plan[0].addresses,
+            vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+            ]
+        );
+        assert_eq!(
+            initial_state
+                .manifest_normalized_event_summary
+                .total_inserted_count,
+            2
+        );
+
+        fs::write(
+            &manifest_path,
+            manifest_contents("0x0000000000000000000000000000000000000002", "supported"),
+        )
+        .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+
+        let refreshed_repository = load_manifest_repository(&manifests.path)?;
+        let refreshed_state =
+            build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+        assert_eq!(
+            refreshed_state.watched_chain_plan,
+            vec![WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x0000000000000000000000000000000000000002".to_owned(),
+                    "0x00000000000000000000000000000000000000aa".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 1,
+                discovery_edge_entry_count: 0,
+            }]
+        );
+        assert_eq!(
+            refreshed_state
+                .manifest_normalized_event_summary
+                .total_inserted_count,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'CapabilityChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_manifest_runtime_state_accepts_empty_root_and_clears_watch_plan() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let manifests = TestManifestDir::new()?;
+        let manifest_path = manifests.write_manifest(&manifest_contents(
+            "0x0000000000000000000000000000000000000001",
+            "shadow",
+        ))?;
+
+        let initial_repository = load_manifest_repository(&manifests.path)?;
+        let initial_state =
+            build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+        assert_eq!(
+            initial_state.manifest_summary.status,
+            ManifestLoadStatus::Loaded
+        );
+        assert_eq!(initial_state.watched_chain_plan.len(), 1);
+
+        fs::remove_file(&manifest_path)
+            .with_context(|| format!("failed to remove {}", manifest_path.display()))?;
+
+        let empty_repository = load_manifest_repository(&manifests.path)?;
+        assert_eq!(empty_repository.summary().status, ManifestLoadStatus::Empty);
+        let empty_state = build_manifest_runtime_state(database.pool(), &empty_repository).await?;
+        assert_eq!(
+            empty_state.manifest_summary.status,
+            ManifestLoadStatus::Empty
+        );
+        assert!(empty_state.watched_chain_plan.is_empty());
+        assert_eq!(empty_state.discovery_admission.active_manifest_count, 0);
+        assert_eq!(empty_state.watched_contract_summary.source_entry_count, 0);
 
         database.cleanup().await?;
         Ok(())

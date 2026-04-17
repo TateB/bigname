@@ -1,0 +1,26 @@
+# Bootstrap seed for the canonical ENS registry on Ethereum mainnet.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }
+verified_resolution = { status = "shadow", notes = "tracked for downstream execution work" }
+
+[[roots]]
+name = "ENSRegistry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"

@@ -1170,11 +1170,8 @@ pub async fn sync_repository(
         sync_summary.removed_manifest_count += 1;
     }
 
-    sync_summary.cleared_discovery_edge_count = sqlx::query("DELETE FROM discovery_edges")
-        .execute(transaction.as_mut())
-        .await
-        .context("failed to clear stale discovery_edges during manifest sync")?
-        .rows_affected() as usize;
+    sync_summary.cleared_discovery_edge_count =
+        clear_manifest_declared_proxy_edges(transaction.as_mut()).await?;
     insert_manifest_declared_proxy_edges(transaction.as_mut()).await?;
 
     transaction
@@ -1183,6 +1180,26 @@ pub async fn sync_repository(
         .context("failed to commit manifest sync transaction")?;
 
     Ok(sync_summary)
+}
+
+async fn clear_manifest_declared_proxy_edges(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<usize> {
+    Ok(sqlx::query(
+        r#"
+        DELETE FROM discovery_edges
+        WHERE edge_kind = $1
+          AND discovery_source = $2
+          AND admission = $3
+        "#,
+    )
+    .bind(MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND)
+    .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+    .bind(MANIFEST_PROXY_IMPLEMENTATION_ADMISSION)
+    .execute(&mut *executor)
+    .await
+    .context("failed to clear stale manifest-declared proxy discovery_edges during manifest sync")?
+    .rows_affected() as usize)
 }
 
 async fn insert_manifest_declared_proxy_edges(
@@ -2333,13 +2350,106 @@ admission = "reachable_from_root"
             }]
         );
 
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = { status = "supported", notes = "declared children are enabled" }
+verified_resolution = "shadow"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x0000000000000000000000000000000000000001"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000000000000000000000000000000AA"
+proxy_kind = "erc1967"
+implementation = "0x00000000000000000000000000000000000000EE"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#,
+        )?;
+        let updated_repository = load_repository(&test_dir.path)?;
+        let updated_sync_summary = sync_repository(database.pool(), &updated_repository).await?;
+        assert_eq!(updated_sync_summary.status, ManifestSyncStatus::Synced);
+        assert_eq!(updated_sync_summary.synced_manifest_count, 2);
+        assert_eq!(updated_sync_summary.active_manifest_count, 1);
+        assert_eq!(updated_sync_summary.cleared_discovery_edge_count, 1);
+        assert_eq!(
+            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+                .fetch_one(database.pool())
+                .await?,
+            2
+        );
+        assert_eq!(
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'unit-test'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1"
+            )
+            .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            query_scalar::<_, Option<String>>(
+                "SELECT to_address FROM discovery_edges WHERE discovery_source = $1"
+            )
+            .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+            .fetch_one(database.pool())
+            .await?,
+            Some("0x00000000000000000000000000000000000000ee".to_owned())
+        );
+        let resynced_watched_chain_plan = load_watched_chain_plan(database.pool()).await?;
+        assert_eq!(
+            resynced_watched_chain_plan,
+            vec![WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x0000000000000000000000000000000000000001".to_owned(),
+                    "0x00000000000000000000000000000000000000aa".to_owned(),
+                    "0x00000000000000000000000000000000000000cc".to_owned(),
+                    "0x00000000000000000000000000000000000000ee".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 1,
+                discovery_edge_entry_count: 2,
+            }]
+        );
+
         let empty_dir = TestDir::new()?;
         let empty_repository = load_repository(&empty_dir.path)?;
         let empty_sync_summary = sync_repository(database.pool(), &empty_repository).await?;
         assert_eq!(empty_sync_summary.status, ManifestSyncStatus::Synced);
         assert_eq!(empty_sync_summary.synced_manifest_count, 0);
         assert_eq!(empty_sync_summary.removed_manifest_count, 2);
-        assert_eq!(empty_sync_summary.cleared_discovery_edge_count, 2);
+        assert_eq!(empty_sync_summary.cleared_discovery_edge_count, 1);
         assert_eq!(
             query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_versions")
                 .fetch_one(database.pool())
@@ -2350,7 +2460,15 @@ admission = "reachable_from_root"
             query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
                 .fetch_one(database.pool())
                 .await?,
-            0
+            1
+        );
+        assert_eq!(
+            query_scalar::<_, Option<i64>>(
+                "SELECT source_manifest_id FROM discovery_edges WHERE discovery_source = 'unit-test'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            None
         );
         let cleared_admission_state = load_discovery_admission_state(database.pool()).await?;
         assert_eq!(cleared_admission_state.active_manifest_count, 0);
@@ -2365,6 +2483,7 @@ admission = "reachable_from_root"
                 })
                 .is_empty()
         );
+        assert!(load_watched_contracts(database.pool()).await?.is_empty());
 
         database.cleanup().await?;
         Ok(())

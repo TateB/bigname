@@ -1,0 +1,22 @@
+# Bootstrap seed for the .eth registrar on Ethereum mainnet.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registrar_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+discovery_rules = []
+
+[capability_flags]
+exact_name_profile = { status = "shadow", notes = "registration lifecycle is indexed before product reads depend on it" }
+name_history = { status = "shadow", notes = "historical registration events remain downstream work" }
+
+[[roots]]
+name = "ETHRegistrar"
+address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+
+[[contracts]]
+role = "registrar"
+address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+proxy_kind = "none"

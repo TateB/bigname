@@ -1,0 +1,15 @@
+# Draft manifest reserved for the first Basenames authority slice.
+# Keep this non-active until the authoritative Base-side addresses are confirmed.
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_base_registry"
+chain = "base-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "draft"
+normalizer_version = "uts46-v1"
+roots = []
+contracts = []
+discovery_rules = []
+
+[capability_flags]
+exact_name_profile = { status = "shadow", notes = "manifest shape is reserved while authoritative addresses are still being confirmed" }

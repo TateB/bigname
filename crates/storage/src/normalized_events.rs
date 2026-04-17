@@ -429,14 +429,14 @@ fn validate_normalized_event(event: &NormalizedEvent) -> Result<()> {
             event.event_identity
         );
     }
-    if let Some(block_number) = event.block_number {
-        if block_number < 0 {
-            bail!(
-                "normalized event {} has negative block_number {}",
-                event.event_identity,
-                block_number
-            );
-        }
+    if let Some(block_number) = event.block_number
+        && block_number < 0
+    {
+        bail!(
+            "normalized event {} has negative block_number {}",
+            event.event_identity,
+            block_number
+        );
     }
     if let Some(log_index) = event.log_index {
         if log_index < 0 {

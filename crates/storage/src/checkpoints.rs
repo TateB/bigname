@@ -404,14 +404,14 @@ fn validate_monotonic_checkpoint_target(
             );
         }
 
-        if next.block_number == current_number
-            && current_hash.is_some()
-            && current_hash != Some(&next.block_hash)
+        if let Some(current_hash) = current_hash
+            && next.block_number == current_number
+            && current_hash != &next.block_hash
         {
             bail!(
                 "{checkpoint_name} checkpoint for chain {chain_id} cannot switch hash at block number {} from {} to {}",
                 current_number,
-                current_hash.expect("hash must exist when current_number exists"),
+                current_hash,
                 next.block_hash
             );
         }
