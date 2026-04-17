@@ -383,15 +383,17 @@ async fn load_active_proxy_contracts(
         r#"
         SELECT
             mv.manifest_id AS manifest_id,
-            mc.role AS role,
-            mc.address AS address,
-            mc.proxy_kind AS proxy_kind,
-            mc.implementation AS implementation
+            mci.role AS role,
+            mci.declared_address AS address,
+            mci.proxy_kind AS proxy_kind,
+            mci.declared_implementation_address AS implementation
         FROM manifest_versions mv
-        JOIN manifest_contracts mc ON mc.manifest_id = mv.manifest_id
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
         WHERE mv.rollout_status = 'active'
-          AND mc.implementation IS NOT NULL
-        ORDER BY mv.namespace, mv.source_family, mv.chain, mv.deployment_epoch, mv.manifest_version, mc.role, mc.address, mc.implementation
+          AND mci.declaration_kind = 'contract'
+          AND mci.implementation_contract_instance_id IS NOT NULL
+          AND mci.declared_implementation_address IS NOT NULL
+        ORDER BY mv.namespace, mv.source_family, mv.chain, mv.deployment_epoch, mv.manifest_version, mci.role, mci.declared_address, mci.declared_implementation_address
         "#,
     )
     .fetch_all(pool)
@@ -466,6 +468,7 @@ mod tests {
         PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
     };
+    use uuid::Uuid;
 
     use super::*;
 
@@ -613,34 +616,73 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_contract_instance(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        chain_id: &str,
+        contract_kind: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .bind(contract_kind)
+        .bind("{}")
+        .execute(pool)
+        .await
+        .context("failed to insert contract instance")?;
+        Ok(())
+    }
+
     async fn insert_contract(
         pool: &PgPool,
         manifest_id: i64,
+        contract_instance_id: Uuid,
+        declaration_name: &str,
         role: &str,
         address: &str,
         proxy_kind: &str,
+        implementation_contract_instance_id: Option<Uuid>,
         implementation: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO manifest_contracts (
+            INSERT INTO manifest_contract_instances (
                 manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                code_hash,
+                abi_ref,
                 role,
-                address,
                 proxy_kind,
-                implementation
+                implementation_contract_instance_id,
+                declared_implementation_address
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, 'contract', $2, $3, $4, NULL, NULL, $5, $6, $7, $8)
             "#,
         )
         .bind(manifest_id)
-        .bind(role)
+        .bind(declaration_name)
+        .bind(contract_instance_id)
         .bind(address)
+        .bind(role)
         .bind(proxy_kind)
+        .bind(implementation_contract_instance_id)
         .bind(implementation)
         .execute(pool)
         .await
-        .context("failed to insert manifest contract")?;
+        .context("failed to insert manifest contract instance")?;
         Ok(())
     }
 
@@ -699,21 +741,60 @@ mod tests {
         )
         .await?;
 
+        let active_contract_instance_id = Uuid::new_v4();
+        let active_implementation_contract_instance_id = Uuid::new_v4();
+        let inactive_contract_instance_id = Uuid::new_v4();
+        let inactive_implementation_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            active_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            active_implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            inactive_implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+
         insert_contract(
             database.pool(),
             active_manifest_id,
+            active_contract_instance_id,
+            "registry",
             "registry",
             "0x00000000000000000000000000000000000000aa",
             "erc1967",
+            Some(active_implementation_contract_instance_id),
             Some("0x00000000000000000000000000000000000000dd"),
         )
         .await?;
         insert_contract(
             database.pool(),
             inactive_manifest_id,
+            inactive_contract_instance_id,
+            "registry",
             "registry",
             "0x00000000000000000000000000000000000000bb",
             "erc1967",
+            Some(inactive_implementation_contract_instance_id),
             Some("0x00000000000000000000000000000000000000ee"),
         )
         .await?;
@@ -862,21 +943,60 @@ mod tests {
         )
         .await?;
 
+        let active_contract_instance_id = Uuid::new_v4();
+        let active_implementation_contract_instance_id = Uuid::new_v4();
+        let inactive_contract_instance_id = Uuid::new_v4();
+        let inactive_implementation_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            active_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            active_implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            inactive_implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+
         insert_contract(
             database.pool(),
             active_manifest_id,
+            active_contract_instance_id,
+            "registry",
             "registry",
             "0x00000000000000000000000000000000000000aa",
             "erc1967",
+            Some(active_implementation_contract_instance_id),
             Some("0x00000000000000000000000000000000000000dd"),
         )
         .await?;
         insert_contract(
             database.pool(),
             inactive_manifest_id,
+            inactive_contract_instance_id,
+            "registry",
             "registry",
             "0x00000000000000000000000000000000000000bb",
             "erc1967",
+            Some(inactive_implementation_contract_instance_id),
             Some("0x00000000000000000000000000000000000000ee"),
         )
         .await?;

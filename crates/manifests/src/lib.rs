@@ -9,13 +9,26 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
-/// Shared manifest-loader status for bootstrap logging and health reporting.
 pub const fn bootstrap_status() -> &'static str {
     "manifest-loader-ready"
 }
 
-/// Parsed and validated repository manifest tree.
+const DECLARATION_KIND_ROOT: &str = "root";
+const DECLARATION_KIND_CONTRACT: &str = "contract";
+const CONTRACT_KIND_ROOT: &str = "root";
+const CONTRACT_KIND_CONTRACT: &str = "contract";
+const MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND: &str = "proxy_implementation";
+const MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE: &str = "manifest_declared_proxy";
+const MANIFEST_PROXY_IMPLEMENTATION_ADMISSION: &str = "manifest_declared";
+const MANIFEST_SUCCESSOR_EDGE_KIND: &str = "migration";
+const MANIFEST_SUCCESSOR_DISCOVERY_SOURCE: &str = "manifest_successor";
+const MANIFEST_SUCCESSOR_ADMISSION: &str = "manifest_successor";
+const REACHABLE_FROM_ROOT_ADMISSION: &str = "reachable_from_root";
+const PROPAGATED_ROLE_PROVENANCE_FIELD: &str = "propagated_role";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestRepository {
     root: PathBuf,
@@ -37,7 +50,6 @@ impl ManifestRepository {
     }
 }
 
-/// One manifest file plus the validated repository-relative metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedManifest {
     pub path: PathBuf,
@@ -46,7 +58,6 @@ pub struct LoadedManifest {
     pub manifest: SourceManifest,
 }
 
-/// Summary used by binaries that only need startup status and counts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestLoadSummary {
     pub root: PathBuf,
@@ -56,7 +67,6 @@ pub struct ManifestLoadSummary {
     pub manifest_count: usize,
 }
 
-/// Repository-level load outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManifestLoadStatus {
     Loaded,
@@ -76,7 +86,6 @@ impl ManifestLoadStatus {
     }
 }
 
-/// Result of syncing the checked-in manifest repository into Postgres.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestSyncSummary {
     pub status: ManifestSyncStatus,
@@ -106,7 +115,6 @@ impl ManifestSyncSummary {
     }
 }
 
-/// Persistence outcome used for logging.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManifestSyncStatus {
     Synced,
@@ -124,11 +132,6 @@ impl ManifestSyncStatus {
     }
 }
 
-const MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND: &str = "proxy_implementation";
-const MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE: &str = "manifest_declared_proxy";
-const MANIFEST_PROXY_IMPLEMENTATION_ADMISSION: &str = "manifest_declared";
-
-/// Stored admission view rebuilt from the persisted manifest tables.
 #[derive(Clone, Debug)]
 pub struct DiscoveryAdmissionState {
     pub active_manifest_count: usize,
@@ -138,33 +141,41 @@ pub struct DiscoveryAdmissionState {
     active_roots: Vec<StoredActiveRoot>,
     active_root_manifest_ids: HashSet<i64>,
     active_contracts: Vec<StoredActiveContract>,
+    known_contract_instances_by_address: HashMap<(String, String), Uuid>,
     rules_by_manifest_id: HashMap<i64, Vec<StoredDiscoveryRule>>,
 }
 
 impl DiscoveryAdmissionState {
-    /// Whether an address is directly authoritative via an active manifest root or contract.
     pub fn has_authoritative_address(&self, chain: &str, address: &str) -> bool {
         let normalized_address = normalize_address(address);
+        let key = (chain.to_owned(), normalized_address);
 
         self.active_roots
             .iter()
-            .any(|root| root.chain == chain && root.address == normalized_address)
+            .any(|root| root.chain == key.0 && root.address == key.1)
             || self
                 .active_contracts
                 .iter()
-                .any(|contract| contract.chain == chain && contract.address == normalized_address)
+                .any(|contract| contract.chain == key.0 && contract.address == key.1)
     }
 
-    /// Admit a discovered edge using only the stored active manifest contracts and rules.
     pub fn admit_candidate(
         &self,
+        candidate: &DiscoveryCandidate<'_>,
+    ) -> Vec<AdmittedDiscoveryEdge> {
+        self.admit_candidate_against_contracts(&self.active_contracts, candidate)
+    }
+
+    fn admit_candidate_against_contracts(
+        &self,
+        active_contracts: &[StoredActiveContract],
         candidate: &DiscoveryCandidate<'_>,
     ) -> Vec<AdmittedDiscoveryEdge> {
         let normalized_from_address = normalize_address(candidate.from_address);
         let normalized_to_address = normalize_address(candidate.to_address);
         let mut admitted_edges = HashSet::new();
 
-        for contract in self.active_contracts.iter().filter(|contract| {
+        for contract in active_contracts.iter().filter(|contract| {
             contract.chain == candidate.chain && contract.address == normalized_from_address
         }) {
             if !self
@@ -184,6 +195,11 @@ impl DiscoveryAdmissionState {
                 admitted_edges.insert(AdmittedDiscoveryEdge {
                     source_manifest_id: contract.manifest_id,
                     chain: candidate.chain.to_owned(),
+                    from_contract_instance_id: contract.contract_instance_id,
+                    to_contract_instance_id: self
+                        .known_contract_instances_by_address
+                        .get(&(candidate.chain.to_owned(), normalized_to_address.clone()))
+                        .copied(),
                     from_address: normalized_from_address.clone(),
                     to_address: normalized_to_address.clone(),
                     edge_kind: candidate.edge_kind.to_owned(),
@@ -198,43 +214,77 @@ impl DiscoveryAdmissionState {
         admitted_edges.sort_by(|left, right| {
             (
                 left.source_manifest_id,
-                &left.chain,
-                &left.from_address,
-                &left.to_address,
-                &left.edge_kind,
-                &left.discovery_source,
-                &left.admission,
-                &left.from_role,
+                left.chain.as_str(),
+                left.from_contract_instance_id,
+                left.to_contract_instance_id,
+                left.to_address.as_str(),
+                left.edge_kind.as_str(),
+                left.discovery_source.as_str(),
+                left.admission.as_str(),
+                left.from_role.as_str(),
             )
                 .cmp(&(
                     right.source_manifest_id,
-                    &right.chain,
-                    &right.from_address,
-                    &right.to_address,
-                    &right.edge_kind,
-                    &right.discovery_source,
-                    &right.admission,
-                    &right.from_role,
+                    right.chain.as_str(),
+                    right.from_contract_instance_id,
+                    right.to_contract_instance_id,
+                    right.to_address.as_str(),
+                    right.edge_kind.as_str(),
+                    right.discovery_source.as_str(),
+                    right.admission.as_str(),
+                    right.from_role.as_str(),
                 ))
         });
         admitted_edges
     }
 }
 
-/// Admit one observed discovery candidate from stored active manifests and persist new edges.
 pub async fn persist_discovery_observation(
     pool: &PgPool,
     observation: &DiscoveryObservation,
 ) -> Result<DiscoveryPersistenceSummary> {
     let admission_state = load_discovery_admission_state(pool).await?;
-    let admitted_edges = admission_state.admit_candidate(&observation.candidate());
+    let admitted_candidates = admission_state.admit_candidate(&observation.candidate());
     let mut inserted_edge_count = 0;
+    let mut admitted_edges = Vec::new();
     let mut transaction = pool
         .begin()
         .await
         .context("failed to start discovery-edge persistence transaction")?;
 
-    for admitted_edge in &admitted_edges {
+    for mut admitted_edge in admitted_candidates {
+        let to_contract_instance_id = match admitted_edge.to_contract_instance_id {
+            Some(contract_instance_id) => contract_instance_id,
+            None => {
+                resolve_contract_instance_by_address(
+                    transaction.as_mut(),
+                    &admitted_edge.chain,
+                    &admitted_edge.to_address,
+                    CONTRACT_KIND_CONTRACT,
+                    &serde_json::json!({
+                        "source": "discovery_observation",
+                        "edge_kind": admitted_edge.edge_kind,
+                        "discovery_source": admitted_edge.discovery_source,
+                    }),
+                )
+                .await?
+            }
+        };
+        admitted_edge.to_contract_instance_id = Some(to_contract_instance_id);
+        ensure_contract_instance_address_seed(
+            transaction.as_mut(),
+            to_contract_instance_id,
+            &admitted_edge.chain,
+            &admitted_edge.to_address,
+            Some(admitted_edge.source_manifest_id),
+            &serde_json::json!({
+                "source": "discovery_observation_seed",
+                "edge_kind": admitted_edge.edge_kind,
+                "discovery_source": admitted_edge.discovery_source,
+            }),
+        )
+        .await?;
+
         let exists = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS(
@@ -242,8 +292,8 @@ pub async fn persist_discovery_observation(
                 FROM discovery_edges
                 WHERE chain_id = $1
                   AND edge_kind = $2
-                  AND from_address = $3
-                  AND to_address = $4
+                  AND from_contract_instance_id = $3
+                  AND to_contract_instance_id = $4
                   AND discovery_source = $5
                   AND source_manifest_id = $6
                   AND admission = $7
@@ -251,13 +301,14 @@ pub async fn persist_discovery_observation(
                   AND active_from_block_hash IS NOT DISTINCT FROM $9
                   AND active_to_block_number IS NOT DISTINCT FROM $10
                   AND active_to_block_hash IS NOT DISTINCT FROM $11
+                  AND deactivated_at IS NULL
             )
             "#,
         )
         .bind(&admitted_edge.chain)
         .bind(&admitted_edge.edge_kind)
-        .bind(&admitted_edge.from_address)
-        .bind(&admitted_edge.to_address)
+        .bind(admitted_edge.from_contract_instance_id)
+        .bind(to_contract_instance_id)
         .bind(&admitted_edge.discovery_source)
         .bind(admitted_edge.source_manifest_id)
         .bind(&admitted_edge.admission)
@@ -269,48 +320,53 @@ pub async fn persist_discovery_observation(
         .await
         .context("failed to check for an existing discovery edge")?;
 
-        if exists {
-            continue;
+        if !exists {
+            let provenance = serde_json::to_string(&with_propagated_role(
+                &observation.provenance,
+                &admitted_edge.from_role,
+            )?)
+            .context("failed to serialize discovery-edge provenance")?;
+            sqlx::query(
+                r#"
+                INSERT INTO discovery_edges (
+                    chain_id,
+                    edge_kind,
+                    from_contract_instance_id,
+                    to_contract_instance_id,
+                    discovery_source,
+                    source_manifest_id,
+                    admission,
+                    active_from_block_number,
+                    active_from_block_hash,
+                    active_to_block_number,
+                    active_to_block_hash,
+                    provenance
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+                "#,
+            )
+            .bind(&admitted_edge.chain)
+            .bind(&admitted_edge.edge_kind)
+            .bind(admitted_edge.from_contract_instance_id)
+            .bind(to_contract_instance_id)
+            .bind(&admitted_edge.discovery_source)
+            .bind(admitted_edge.source_manifest_id)
+            .bind(&admitted_edge.admission)
+            .bind(observation.active_from_block_number)
+            .bind(observation.active_from_block_hash.as_deref())
+            .bind(observation.active_to_block_number)
+            .bind(observation.active_to_block_hash.as_deref())
+            .bind(provenance)
+            .execute(transaction.as_mut())
+            .await
+            .context("failed to insert an admitted discovery edge")?;
+            inserted_edge_count += 1;
         }
 
-        let provenance = serde_json::to_string(&observation.provenance)
-            .context("failed to serialize discovery-edge provenance")?;
-        sqlx::query(
-            r#"
-            INSERT INTO discovery_edges (
-                chain_id,
-                edge_kind,
-                from_address,
-                to_address,
-                discovery_source,
-                source_manifest_id,
-                admission,
-                active_from_block_number,
-                active_from_block_hash,
-                active_to_block_number,
-                active_to_block_hash,
-                provenance
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
-            "#,
-        )
-        .bind(&admitted_edge.chain)
-        .bind(&admitted_edge.edge_kind)
-        .bind(&admitted_edge.from_address)
-        .bind(&admitted_edge.to_address)
-        .bind(&admitted_edge.discovery_source)
-        .bind(admitted_edge.source_manifest_id)
-        .bind(&admitted_edge.admission)
-        .bind(observation.active_from_block_number)
-        .bind(observation.active_from_block_hash.as_deref())
-        .bind(observation.active_to_block_number)
-        .bind(observation.active_to_block_hash.as_deref())
-        .bind(provenance)
-        .execute(transaction.as_mut())
-        .await
-        .context("failed to insert an admitted discovery edge")?;
-        inserted_edge_count += 1;
+        admitted_edges.push(admitted_edge);
     }
+
+    reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
 
     transaction
         .commit()
@@ -324,44 +380,541 @@ pub async fn persist_discovery_observation(
     })
 }
 
-/// Load the canonical watched contract set from active manifests plus admitted discovery edges.
+fn observation_key(observation: &DiscoveryObservation) -> Result<String> {
+    observation
+        .provenance
+        .get("observation_key")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| {
+            format!(
+                "discovery observation for {} {} is missing provenance.observation_key",
+                observation.discovery_source, observation.from_address
+            )
+        })
+}
+
+fn observation_terminal_states(
+    observations: &[DiscoveryObservation],
+) -> Result<HashMap<String, ObservationTerminalState>> {
+    observations
+        .iter()
+        .map(|observation| {
+            Ok((
+                observation_key(observation)?,
+                ObservationTerminalState {
+                    chain: observation.chain.clone(),
+                    block_number: observation.active_from_block_number,
+                    block_hash: observation.active_from_block_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn is_zero_address(value: &str) -> bool {
+    normalize_address(value) == ZERO_ADDRESS
+}
+
+fn with_propagated_role(
+    provenance: &serde_json::Value,
+    from_role: &str,
+) -> Result<serde_json::Value> {
+    let mut provenance = provenance.clone();
+    let Some(object) = provenance.as_object_mut() else {
+        bail!("discovery observation provenance must be a JSON object");
+    };
+    object.insert(
+        PROPAGATED_ROLE_PROVENANCE_FIELD.to_owned(),
+        serde_json::Value::String(from_role.to_owned()),
+    );
+    Ok(provenance)
+}
+
+fn cascade_deactivation_terminal_states(
+    existing_edges: &[ExistingReconciledDiscoveryEdge],
+    desired_set: &HashSet<ReconciledDiscoveryEdgeSpec>,
+    observations_by_key: &HashMap<String, &DiscoveryObservation>,
+    direct_terminal_states_by_key: &HashMap<String, ObservationTerminalState>,
+) -> Result<HashMap<String, ObservationTerminalState>> {
+    let mut terminal_states_by_key = HashMap::<String, ObservationTerminalState>::new();
+    let mut removed_parent_addresses = HashMap::<String, ObservationTerminalState>::new();
+
+    for existing_edge in existing_edges
+        .iter()
+        .filter(|edge| !desired_set.contains(&edge.spec))
+    {
+        let Some(observation) = observations_by_key.get(&existing_edge.spec.observation_key) else {
+            continue;
+        };
+        let Some(terminal_state) = direct_terminal_states_by_key
+            .get(&existing_edge.spec.observation_key)
+            .cloned()
+        else {
+            continue;
+        };
+        let next_address = normalize_address(&observation.to_address);
+        if !is_zero_address(&next_address) && next_address == existing_edge.to_address {
+            continue;
+        }
+
+        terminal_states_by_key.insert(
+            existing_edge.spec.observation_key.clone(),
+            terminal_state.clone(),
+        );
+        removed_parent_addresses.insert(existing_edge.to_address.clone(), terminal_state);
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for existing_edge in existing_edges
+            .iter()
+            .filter(|edge| !desired_set.contains(&edge.spec))
+        {
+            if terminal_states_by_key.contains_key(&existing_edge.spec.observation_key) {
+                continue;
+            }
+            let Some(observation) = observations_by_key.get(&existing_edge.spec.observation_key)
+            else {
+                continue;
+            };
+            let parent_address = normalize_address(&observation.from_address);
+            let Some(terminal_state) = removed_parent_addresses.get(&parent_address).cloned()
+            else {
+                continue;
+            };
+
+            terminal_states_by_key.insert(
+                existing_edge.spec.observation_key.clone(),
+                terminal_state.clone(),
+            );
+            removed_parent_addresses.insert(existing_edge.to_address.clone(), terminal_state);
+            changed = true;
+        }
+    }
+
+    Ok(terminal_states_by_key)
+}
+
+pub async fn reconcile_discovery_observations(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+) -> Result<DiscoveryReconciliationSummary> {
+    let admission_state =
+        load_discovery_admission_state_with_excluded_source(pool, Some(discovery_source)).await?;
+    let direct_terminal_states_by_key = observation_terminal_states(observations)?;
+    let observations_by_key = observations
+        .iter()
+        .map(|observation| Ok((observation_key(observation)?, observation)))
+        .collect::<Result<HashMap<_, _>>>()?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start discovery-edge reconciliation transaction")?;
+
+    let (desired_edges, admitted_edges) = resolve_reconciled_discovery_edge_specs(
+        &admission_state,
+        transaction.as_mut(),
+        observations,
+    )
+    .await?;
+    let existing_rows = sqlx::query(
+        r#"
+        SELECT
+            de.discovery_edge_id,
+            de.provenance ->> 'observation_key' AS observation_key,
+            de.chain_id,
+            de.edge_kind,
+            de.from_contract_instance_id,
+            de.to_contract_instance_id,
+            de.discovery_source,
+            de.source_manifest_id,
+            de.admission,
+            de.active_from_block_number,
+            de.active_from_block_hash,
+            de.provenance,
+            cia.address AS to_address
+        FROM discovery_edges de
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.deactivated_at IS NULL
+        WHERE de.discovery_source = $1
+          AND de.deactivated_at IS NULL
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(transaction.as_mut())
+    .await
+    .with_context(|| {
+        format!("failed to load active discovery edges for discovery_source {discovery_source}")
+    })?;
+
+    let existing_edges = existing_rows
+        .into_iter()
+        .map(|row| {
+            let observation_key = row
+                .try_get::<Option<String>, _>("observation_key")
+                .context("failed to read observation_key")?
+                .context(
+                    "active reconciled discovery edge is missing provenance.observation_key",
+                )?;
+            Ok(ExistingReconciledDiscoveryEdge {
+                discovery_edge_id: row
+                    .try_get("discovery_edge_id")
+                    .context("failed to read discovery_edge_id")?,
+                to_address: normalize_address(
+                    &row.try_get::<String, _>("to_address")
+                        .context("failed to read to_address")?,
+                ),
+                spec: ReconciledDiscoveryEdgeSpec {
+                    observation_key,
+                    chain: row.try_get("chain_id").context("failed to read chain_id")?,
+                    edge_kind: row
+                        .try_get("edge_kind")
+                        .context("failed to read edge_kind")?,
+                    from_contract_instance_id: row
+                        .try_get("from_contract_instance_id")
+                        .context("failed to read from_contract_instance_id")?,
+                    to_contract_instance_id: row
+                        .try_get("to_contract_instance_id")
+                        .context("failed to read to_contract_instance_id")?,
+                    discovery_source: row
+                        .try_get("discovery_source")
+                        .context("failed to read discovery_source")?,
+                    source_manifest_id: row
+                        .try_get::<Option<i64>, _>("source_manifest_id")
+                        .context("failed to read source_manifest_id")?
+                        .unwrap_or(-1),
+                    admission: row
+                        .try_get("admission")
+                        .context("failed to read admission")?,
+                    active_from_block_number: row
+                        .try_get("active_from_block_number")
+                        .context("failed to read active_from_block_number")?,
+                    active_from_block_hash: row
+                        .try_get("active_from_block_hash")
+                        .context("failed to read active_from_block_hash")?,
+                    provenance_json: row
+                        .try_get::<serde_json::Value, _>("provenance")
+                        .context("failed to read provenance")?
+                        .to_string(),
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let desired_set = desired_edges.iter().cloned().collect::<HashSet<_>>();
+    let existing_set = existing_edges
+        .iter()
+        .map(|edge| edge.spec.clone())
+        .collect::<HashSet<_>>();
+    let deactivation_terminal_states_by_key = cascade_deactivation_terminal_states(
+        &existing_edges,
+        &desired_set,
+        &observations_by_key,
+        &direct_terminal_states_by_key,
+    )?;
+
+    let mut deactivated_edge_count = 0;
+    for existing_edge in existing_edges {
+        if desired_set.contains(&existing_edge.spec) {
+            continue;
+        }
+
+        let terminal_state =
+            deactivation_terminal_states_by_key.get(&existing_edge.spec.observation_key);
+
+        sqlx::query(
+            r#"
+            UPDATE discovery_edges
+            SET active_to_block_number = COALESCE($2, active_to_block_number),
+                active_to_block_hash = COALESCE($3, active_to_block_hash),
+                deactivated_at = COALESCE(
+                    (
+                        SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
+                        FROM raw_blocks rb
+                        WHERE rb.chain_id = $4
+                          AND rb.block_hash = $3
+                        LIMIT 1
+                    ),
+                    now()
+                )
+            WHERE discovery_edge_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(existing_edge.discovery_edge_id)
+        .bind(terminal_state.and_then(|state| state.block_number))
+        .bind(terminal_state.and_then(|state| state.block_hash.as_deref()))
+        .bind(terminal_state.map(|state| state.chain.as_str()))
+        .execute(transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to deactivate reconciled discovery_edge_id {}",
+                existing_edge.discovery_edge_id
+            )
+        })?;
+        deactivated_edge_count += 1;
+    }
+
+    let mut inserted_edge_count = 0;
+    for desired_edge in &desired_edges {
+        if existing_set.contains(desired_edge) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                active_from_block_number,
+                active_from_block_hash,
+                active_to_block_number,
+                active_to_block_hash,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, $10::jsonb)
+            "#,
+        )
+        .bind(&desired_edge.chain)
+        .bind(&desired_edge.edge_kind)
+        .bind(desired_edge.from_contract_instance_id)
+        .bind(desired_edge.to_contract_instance_id)
+        .bind(&desired_edge.discovery_source)
+        .bind(desired_edge.source_manifest_id)
+        .bind(&desired_edge.admission)
+        .bind(desired_edge.active_from_block_number)
+        .bind(desired_edge.active_from_block_hash.as_deref())
+        .bind(&desired_edge.provenance_json)
+        .execute(transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to insert reconciled discovery edge {} {} -> {}",
+                desired_edge.edge_kind,
+                desired_edge.from_contract_instance_id,
+                desired_edge.to_contract_instance_id
+            )
+        })?;
+        inserted_edge_count += 1;
+    }
+
+    reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit discovery-edge reconciliation transaction")?;
+
+    Ok(DiscoveryReconciliationSummary {
+        active_edge_count: desired_edges.len(),
+        admitted_edge_count: admitted_edges.len(),
+        inserted_edge_count,
+        deactivated_edge_count,
+        admitted_edges,
+    })
+}
+
+async fn resolve_reconciled_discovery_edge_specs(
+    admission_state: &DiscoveryAdmissionState,
+    executor: &mut sqlx::postgres::PgConnection,
+    observations: &[DiscoveryObservation],
+) -> Result<(Vec<ReconciledDiscoveryEdgeSpec>, Vec<AdmittedDiscoveryEdge>)> {
+    let mut desired_edges = HashSet::new();
+    let mut admitted_edges = HashSet::new();
+    let mut active_contracts = admission_state.active_contracts.clone();
+
+    loop {
+        let mut changed = false;
+
+        for observation in observations {
+            let observation_key = observation_key(observation)?;
+            if is_zero_address(&observation.to_address) {
+                continue;
+            }
+
+            for mut admitted_edge in admission_state
+                .admit_candidate_against_contracts(&active_contracts, &observation.candidate())
+            {
+                let to_contract_instance_id = match admitted_edge.to_contract_instance_id {
+                    Some(contract_instance_id) => contract_instance_id,
+                    None => {
+                        resolve_contract_instance_by_address(
+                            executor,
+                            &admitted_edge.chain,
+                            &admitted_edge.to_address,
+                            CONTRACT_KIND_CONTRACT,
+                            &serde_json::json!({
+                                "source": "discovery_observation",
+                                "edge_kind": admitted_edge.edge_kind,
+                                "discovery_source": admitted_edge.discovery_source,
+                            }),
+                        )
+                        .await?
+                    }
+                };
+                admitted_edge.to_contract_instance_id = Some(to_contract_instance_id);
+                ensure_contract_instance_address_seed(
+                    executor,
+                    to_contract_instance_id,
+                    &admitted_edge.chain,
+                    &admitted_edge.to_address,
+                    Some(admitted_edge.source_manifest_id),
+                    &serde_json::json!({
+                        "source": "discovery_observation_seed",
+                        "edge_kind": admitted_edge.edge_kind,
+                        "discovery_source": admitted_edge.discovery_source,
+                    }),
+                )
+                .await?;
+
+                let provenance =
+                    with_propagated_role(&observation.provenance, &admitted_edge.from_role)?;
+                let desired_edge = ReconciledDiscoveryEdgeSpec {
+                    observation_key: observation_key.clone(),
+                    chain: admitted_edge.chain.clone(),
+                    edge_kind: admitted_edge.edge_kind.clone(),
+                    from_contract_instance_id: admitted_edge.from_contract_instance_id,
+                    to_contract_instance_id,
+                    discovery_source: admitted_edge.discovery_source.clone(),
+                    source_manifest_id: admitted_edge.source_manifest_id,
+                    admission: admitted_edge.admission.clone(),
+                    active_from_block_number: observation.active_from_block_number,
+                    active_from_block_hash: observation.active_from_block_hash.clone(),
+                    provenance_json: serde_json::to_string(&provenance)
+                        .context("failed to serialize reconciled discovery-edge provenance")?,
+                };
+                changed |= desired_edges.insert(desired_edge);
+                changed |= admitted_edges.insert(admitted_edge.clone());
+
+                if admitted_edge.admission == REACHABLE_FROM_ROOT_ADMISSION {
+                    let derived_contract = StoredActiveContract {
+                        manifest_id: admitted_edge.source_manifest_id,
+                        chain: admitted_edge.chain.clone(),
+                        role: admitted_edge.from_role.clone(),
+                        contract_instance_id: to_contract_instance_id,
+                        address: admitted_edge.to_address.clone(),
+                    };
+                    if !active_contracts.contains(&derived_contract) {
+                        active_contracts.push(derived_contract);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    let mut desired_edges = desired_edges.into_iter().collect::<Vec<_>>();
+    desired_edges.sort_by(|left, right| {
+        (
+            left.observation_key.as_str(),
+            left.chain.as_str(),
+            left.edge_kind.as_str(),
+            left.from_contract_instance_id,
+            left.to_contract_instance_id,
+            left.discovery_source.as_str(),
+            left.source_manifest_id,
+            left.admission.as_str(),
+            left.active_from_block_number,
+            left.active_from_block_hash.as_deref(),
+            left.provenance_json.as_str(),
+        )
+            .cmp(&(
+                right.observation_key.as_str(),
+                right.chain.as_str(),
+                right.edge_kind.as_str(),
+                right.from_contract_instance_id,
+                right.to_contract_instance_id,
+                right.discovery_source.as_str(),
+                right.source_manifest_id,
+                right.admission.as_str(),
+                right.active_from_block_number,
+                right.active_from_block_hash.as_deref(),
+                right.provenance_json.as_str(),
+            ))
+    });
+    let mut admitted_edges = admitted_edges.into_iter().collect::<Vec<_>>();
+    admitted_edges.sort_by(|left, right| {
+        (
+            left.source_manifest_id,
+            left.chain.as_str(),
+            left.from_contract_instance_id,
+            left.to_contract_instance_id,
+            left.to_address.as_str(),
+            left.edge_kind.as_str(),
+            left.discovery_source.as_str(),
+            left.admission.as_str(),
+            left.from_role.as_str(),
+        )
+            .cmp(&(
+                right.source_manifest_id,
+                right.chain.as_str(),
+                right.from_contract_instance_id,
+                right.to_contract_instance_id,
+                right.to_address.as_str(),
+                right.edge_kind.as_str(),
+                right.discovery_source.as_str(),
+                right.admission.as_str(),
+                right.from_role.as_str(),
+            ))
+    });
+
+    Ok((desired_edges, admitted_edges))
+}
+
 pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract>> {
     let rows = sqlx::query(
         r#"
-        SELECT chain, address, source, source_manifest_id
+        SELECT chain, address, contract_instance_id, source, source_manifest_id
         FROM (
             SELECT
                 mv.chain AS chain,
-                mr.address AS address,
-                'manifest_root'::text AS source,
+                cia.address AS address,
+                mci.contract_instance_id AS contract_instance_id,
+                CASE
+                    WHEN mci.declaration_kind = 'root' THEN 'manifest_root'
+                    ELSE 'manifest_contract'
+                END::TEXT AS source,
                 mv.manifest_id AS source_manifest_id
             FROM manifest_versions mv
-            JOIN manifest_roots mr ON mr.manifest_id = mv.manifest_id
-            WHERE mv.rollout_status = 'active'
-
-            UNION
-
-            SELECT
-                mv.chain AS chain,
-                mc.address AS address,
-                'manifest_contract'::text AS source,
-                mv.manifest_id AS source_manifest_id
-            FROM manifest_versions mv
-            JOIN manifest_contracts mc ON mc.manifest_id = mv.manifest_id
+            JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+            JOIN contract_instance_addresses cia
+              ON cia.contract_instance_id = mci.contract_instance_id
+             AND cia.deactivated_at IS NULL
             WHERE mv.rollout_status = 'active'
 
             UNION
 
             SELECT
                 de.chain_id AS chain,
-                de.to_address AS address,
-                'discovery_edge'::text AS source,
+                cia.address AS address,
+                de.to_contract_instance_id AS contract_instance_id,
+                'discovery_edge'::TEXT AS source,
                 de.source_manifest_id AS source_manifest_id
             FROM discovery_edges de
             JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            JOIN contract_instance_addresses cia
+              ON cia.contract_instance_id = de.to_contract_instance_id
+             AND cia.deactivated_at IS NULL
             WHERE mv.rollout_status = 'active'
+              AND de.deactivated_at IS NULL
+              AND de.edge_kind <> 'migration'
         ) watched_contracts
-        ORDER BY chain, address, source, source_manifest_id
+        ORDER BY chain, address, source, source_manifest_id, contract_instance_id
         "#,
     )
     .fetch_all(pool)
@@ -381,6 +934,9 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
                     &row.try_get::<String, _>("address")
                         .context("failed to read watched contract address")?,
                 ),
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read watched contract_instance_id")?,
                 source: WatchedContractSource::from_db_value(&source)?,
                 source_manifest_id: row
                     .try_get("source_manifest_id")
@@ -390,7 +946,6 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
         .collect()
 }
 
-/// Summarize the canonical watched-contract set for logging or startup checks.
 pub fn summarize_watched_contracts(
     watched_contracts: &[WatchedContract],
 ) -> WatchedContractSummary {
@@ -451,7 +1006,6 @@ pub fn summarize_watched_contracts(
     }
 }
 
-/// Build the per-chain runtime plan from the canonical watched-contract set.
 pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<WatchedChainPlan> {
     let mut plans = BTreeMap::<String, WatchedChainPlan>::new();
 
@@ -484,19 +1038,16 @@ pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<Watc
     plans
 }
 
-/// Load and summarize the canonical watched-contract set from active manifests and discovery edges.
 pub async fn load_watched_contract_summary(pool: &PgPool) -> Result<WatchedContractSummary> {
     let watched_contracts = load_watched_contracts(pool).await?;
     Ok(summarize_watched_contracts(&watched_contracts))
 }
 
-/// Load the per-chain runtime plan from the canonical watched-contract set.
 pub async fn load_watched_chain_plan(pool: &PgPool) -> Result<Vec<WatchedChainPlan>> {
     let watched_contracts = load_watched_contracts(pool).await?;
     Ok(plan_watched_contracts(&watched_contracts))
 }
 
-/// Load the active persisted manifests for one namespace.
 pub async fn load_active_manifests_for_namespace(
     pool: &PgPool,
     namespace: &str,
@@ -520,7 +1071,7 @@ pub async fn load_active_manifests_for_namespace(
         SELECT
             mv.manifest_id AS manifest_id,
             mcf.capability_name AS capability_name,
-            mcf.status::text AS status,
+            mcf.status::TEXT AS status,
             mcf.notes AS notes
         FROM manifest_versions mv
         JOIN manifest_capability_flags mcf ON mcf.manifest_id = mv.manifest_id
@@ -593,7 +1144,6 @@ pub async fn load_active_manifests_for_namespace(
         .collect()
 }
 
-/// Load the active persisted manifests and freshness timestamp for one namespace.
 pub async fn load_namespace_manifest_snapshot(
     pool: &PgPool,
     namespace: &str,
@@ -624,14 +1174,16 @@ pub async fn load_namespace_manifest_snapshot(
 struct StoredActiveRoot {
     manifest_id: i64,
     chain: String,
+    contract_instance_id: Uuid,
     address: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StoredActiveContract {
     manifest_id: i64,
     chain: String,
     role: String,
+    contract_instance_id: Uuid,
     address: String,
 }
 
@@ -642,7 +1194,6 @@ struct StoredDiscoveryRule {
     admission: String,
 }
 
-/// Candidate discovery edge to evaluate against stored manifest state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiscoveryCandidate<'a> {
     pub chain: &'a str,
@@ -652,11 +1203,12 @@ pub struct DiscoveryCandidate<'a> {
     pub discovery_source: &'a str,
 }
 
-/// One admitted discovery edge returned by `DiscoveryAdmissionState`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AdmittedDiscoveryEdge {
     pub source_manifest_id: i64,
     pub chain: String,
+    pub from_contract_instance_id: Uuid,
+    pub to_contract_instance_id: Option<Uuid>,
     pub from_address: String,
     pub to_address: String,
     pub edge_kind: String,
@@ -665,7 +1217,6 @@ pub struct AdmittedDiscoveryEdge {
     pub from_role: String,
 }
 
-/// Persistable discovery-edge observation with provenance and optional active ranges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryObservation {
     pub chain: String,
@@ -692,7 +1243,6 @@ impl DiscoveryObservation {
     }
 }
 
-/// Result of admitting and persisting discovery edges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryPersistenceSummary {
     pub admitted_edge_count: usize,
@@ -700,16 +1250,24 @@ pub struct DiscoveryPersistenceSummary {
     pub admitted_edges: Vec<AdmittedDiscoveryEdge>,
 }
 
-/// One watched contract address derived from active manifests and admitted discovery edges.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveryReconciliationSummary {
+    pub active_edge_count: usize,
+    pub admitted_edge_count: usize,
+    pub inserted_edge_count: usize,
+    pub deactivated_edge_count: usize,
+    pub admitted_edges: Vec<AdmittedDiscoveryEdge>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WatchedContract {
     pub chain: String,
     pub address: String,
+    pub contract_instance_id: Uuid,
     pub source: WatchedContractSource,
     pub source_manifest_id: Option<i64>,
 }
 
-/// Stored source explaining why a contract is watched.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum WatchedContractSource {
     ManifestRoot,
@@ -728,7 +1286,6 @@ impl WatchedContractSource {
     }
 }
 
-/// Summary of the canonical watched-contract set rebuilt from stored manifest state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchedContractSummary {
     pub unique_contract_count: usize,
@@ -739,7 +1296,6 @@ pub struct WatchedContractSummary {
     pub chains: Vec<WatchedContractChainSummary>,
 }
 
-/// Per-chain runtime plan rebuilt from the canonical watched-contract set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchedChainPlan {
     pub chain: String,
@@ -749,7 +1305,6 @@ pub struct WatchedChainPlan {
     pub discovery_edge_entry_count: usize,
 }
 
-/// Per-chain watched-contract summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchedContractChainSummary {
     pub chain: String,
@@ -759,7 +1314,6 @@ pub struct WatchedContractChainSummary {
     pub discovery_edge_count: usize,
 }
 
-/// One active persisted manifest exposed to consumers that only need version and capability state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ActiveManifestVersion {
     pub manifest_version: u64,
@@ -770,14 +1324,12 @@ pub struct ActiveManifestVersion {
     pub capability_flags: BTreeMap<String, CapabilityFlag>,
 }
 
-/// Active manifest view for one namespace plus the storage timestamp used for API freshness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceManifestSnapshot {
     pub manifests: Vec<ActiveManifestVersion>,
     pub last_updated: String,
 }
 
-/// Checked-in source manifest parsed from TOML.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceManifest {
     pub manifest_version: u64,
@@ -793,7 +1345,6 @@ pub struct SourceManifest {
     pub discovery_rules: Vec<DiscoveryRule>,
 }
 
-/// Manifest rollout states frozen in `docs/manifests.md`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RolloutStatus {
@@ -818,7 +1369,6 @@ impl RolloutStatus {
     }
 }
 
-/// Capability support states frozen in `docs/manifests.md`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySupportStatus {
@@ -846,14 +1396,12 @@ impl CapabilitySupportStatus {
     }
 }
 
-/// One named capability entry under `[capability_flags]`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CapabilityFlag {
     pub status: CapabilitySupportStatus,
     pub notes: Option<String>,
 }
 
-/// Root declaration from a manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestRoot {
     pub name: String,
@@ -862,7 +1410,6 @@ pub struct ManifestRoot {
     pub abi_ref: Option<String>,
 }
 
-/// Contract declaration from a manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestContract {
     pub role: String,
@@ -871,7 +1418,6 @@ pub struct ManifestContract {
     pub implementation: Option<String>,
 }
 
-/// Discovery rule declaration from a manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DiscoveryRule {
     pub edge_kind: String,
@@ -954,7 +1500,121 @@ impl From<RawSourceManifest> for SourceManifest {
     }
 }
 
-/// Load and validate the checked-in repository manifest tree.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DeclarationKey {
+    declaration_kind: String,
+    declaration_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PersistedManifestEntry {
+    key: DeclarationKey,
+    contract_instance_id: Uuid,
+    declared_address: String,
+    code_hash: Option<String>,
+    abi_ref: Option<String>,
+    role: Option<String>,
+    proxy_kind: Option<String>,
+    implementation_contract_instance_id: Option<Uuid>,
+    declared_implementation_address: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestTransition {
+    source_manifest_id: i64,
+    chain: String,
+    declaration_kind: String,
+    declaration_name: String,
+    from_contract_instance_id: Uuid,
+    from_address: String,
+    to_contract_instance_id: Uuid,
+    to_address: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ManagedEdgeSpec {
+    chain: String,
+    edge_kind: String,
+    from_contract_instance_id: Uuid,
+    to_contract_instance_id: Uuid,
+    discovery_source: String,
+    source_manifest_id: i64,
+    admission: String,
+    provenance_json: String,
+}
+
+#[derive(Clone, Debug)]
+struct ExistingManagedEdge {
+    discovery_edge_id: i64,
+    spec: ManagedEdgeSpec,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ReconciledDiscoveryEdgeSpec {
+    observation_key: String,
+    chain: String,
+    edge_kind: String,
+    from_contract_instance_id: Uuid,
+    to_contract_instance_id: Uuid,
+    discovery_source: String,
+    source_manifest_id: i64,
+    admission: String,
+    active_from_block_number: Option<i64>,
+    active_from_block_hash: Option<String>,
+    provenance_json: String,
+}
+
+#[derive(Clone, Debug)]
+struct ExistingReconciledDiscoveryEdge {
+    discovery_edge_id: i64,
+    spec: ReconciledDiscoveryEdgeSpec,
+    to_address: String,
+}
+
+#[derive(Clone, Debug)]
+struct ObservationTerminalState {
+    chain: String,
+    block_number: Option<i64>,
+    block_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ActiveAddressSpec {
+    contract_instance_id: Uuid,
+    chain: String,
+    address: String,
+    source_manifest_id: Option<i64>,
+    provenance_json: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ManifestLineageKey {
+    namespace: String,
+    source_family: String,
+    chain: String,
+    deployment_epoch: String,
+    declaration_kind: String,
+    declaration_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct OrderedManifestEntry {
+    manifest_id: i64,
+    manifest_version: i64,
+    rollout_status: String,
+    chain: String,
+    lineage_key: ManifestLineageKey,
+    contract_instance_id: Uuid,
+    declared_address: String,
+}
+
+#[derive(Clone, Debug)]
+struct CurrentActiveAddressRow {
+    contract_instance_id: Uuid,
+    chain: String,
+    address: String,
+}
+
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     let root = root.as_ref();
     let display_root = canonicalize_for_logging(root);
@@ -1070,7 +1730,6 @@ pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     })
 }
 
-/// Sync the repository snapshot into the persisted `manifest_*` tables.
 pub async fn sync_repository(
     pool: &PgPool,
     repository: &ManifestRepository,
@@ -1105,6 +1764,7 @@ pub async fn sync_repository(
     .context("failed to load existing manifest versions")?;
 
     let mut retained_keys = HashSet::new();
+    let mut in_place_transitions = Vec::new();
     let mut sync_summary = ManifestSyncSummary {
         status: ManifestSyncStatus::Synced,
         synced_manifest_count: repository.manifests().len(),
@@ -1126,8 +1786,42 @@ pub async fn sync_repository(
         retained_keys.insert(storage_key);
 
         let manifest_id = upsert_manifest_version(transaction.as_mut(), loaded_manifest).await?;
-        replace_manifest_children(transaction.as_mut(), manifest_id, &loaded_manifest.manifest)
-            .await?;
+        let existing_entries =
+            load_existing_manifest_entries(transaction.as_mut(), manifest_id).await?;
+        let planned_entries = plan_manifest_entries(
+            transaction.as_mut(),
+            manifest_id,
+            loaded_manifest,
+            &existing_entries,
+        )
+        .await?;
+
+        if loaded_manifest.manifest.rollout_status.is_active() {
+            for planned_entry in &planned_entries {
+                if let Some(existing_entry) = existing_entries.get(&planned_entry.key)
+                    && existing_entry.contract_instance_id != planned_entry.contract_instance_id
+                {
+                    in_place_transitions.push(ManifestTransition {
+                        source_manifest_id: manifest_id,
+                        chain: loaded_manifest.manifest.chain.clone(),
+                        declaration_kind: planned_entry.key.declaration_kind.clone(),
+                        declaration_name: planned_entry.key.declaration_name.clone(),
+                        from_contract_instance_id: existing_entry.contract_instance_id,
+                        from_address: existing_entry.declared_address.clone(),
+                        to_contract_instance_id: planned_entry.contract_instance_id,
+                        to_address: planned_entry.declared_address.clone(),
+                    });
+                }
+            }
+        }
+
+        replace_manifest_children(
+            transaction.as_mut(),
+            manifest_id,
+            &loaded_manifest.manifest,
+            &planned_entries,
+        )
+        .await?;
 
         sync_summary.root_count += loaded_manifest.manifest.roots.len();
         sync_summary.contract_count += loaded_manifest.manifest.contracts.len();
@@ -1171,8 +1865,7 @@ pub async fn sync_repository(
     }
 
     sync_summary.cleared_discovery_edge_count =
-        clear_manifest_declared_proxy_edges(transaction.as_mut()).await?;
-    insert_manifest_declared_proxy_edges(transaction.as_mut()).await?;
+        reconcile_manifest_source_graph(transaction.as_mut(), &in_place_transitions).await?;
 
     transaction
         .commit()
@@ -1182,112 +1875,14 @@ pub async fn sync_repository(
     Ok(sync_summary)
 }
 
-async fn clear_manifest_declared_proxy_edges(
-    executor: &mut sqlx::postgres::PgConnection,
-) -> Result<usize> {
-    Ok(sqlx::query(
-        r#"
-        DELETE FROM discovery_edges
-        WHERE edge_kind = $1
-          AND discovery_source = $2
-          AND admission = $3
-        "#,
-    )
-    .bind(MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND)
-    .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
-    .bind(MANIFEST_PROXY_IMPLEMENTATION_ADMISSION)
-    .execute(&mut *executor)
-    .await
-    .context("failed to clear stale manifest-declared proxy discovery_edges during manifest sync")?
-    .rows_affected() as usize)
-}
-
-async fn insert_manifest_declared_proxy_edges(
-    executor: &mut sqlx::postgres::PgConnection,
-) -> Result<()> {
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT
-            mv.manifest_id AS manifest_id,
-            mv.chain AS chain,
-            mc.address AS from_address,
-            mc.implementation AS to_address,
-            mc.proxy_kind AS proxy_kind
-        FROM manifest_versions mv
-        JOIN manifest_contracts mc ON mc.manifest_id = mv.manifest_id
-        WHERE mv.rollout_status = 'active'
-          AND mc.implementation IS NOT NULL
-        ORDER BY mv.manifest_id, mv.chain, mc.address, mc.implementation
-        "#,
-    )
-    .fetch_all(&mut *executor)
-    .await
-    .context("failed to load manifest-declared proxy implementation edges")?;
-
-    for row in rows {
-        let manifest_id = row
-            .try_get::<i64, _>("manifest_id")
-            .context("failed to read manifest-declared proxy edge manifest_id")?;
-        let chain = row
-            .try_get::<String, _>("chain")
-            .context("failed to read manifest-declared proxy edge chain")?;
-        let from_address = normalize_address(
-            &row.try_get::<String, _>("from_address")
-                .context("failed to read manifest-declared proxy edge from_address")?,
-        );
-        let to_address = normalize_address(
-            &row.try_get::<String, _>("to_address")
-                .context("failed to read manifest-declared proxy edge to_address")?,
-        );
-        let proxy_kind = row
-            .try_get::<String, _>("proxy_kind")
-            .context("failed to read manifest-declared proxy edge proxy_kind")?;
-        let provenance = serde_json::json!({
-            "source": "manifest_contract",
-            "proxy_kind": proxy_kind,
-        });
-
-        sqlx::query(
-            r#"
-            INSERT INTO discovery_edges (
-                chain_id,
-                edge_kind,
-                from_address,
-                to_address,
-                discovery_source,
-                source_manifest_id,
-                admission,
-                active_from_block_number,
-                active_from_block_hash,
-                active_to_block_number,
-                active_to_block_hash,
-                provenance
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, NULL, $8::jsonb)
-            "#,
-        )
-        .bind(chain)
-        .bind(MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND)
-        .bind(from_address)
-        .bind(to_address)
-        .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
-        .bind(manifest_id)
-        .bind(MANIFEST_PROXY_IMPLEMENTATION_ADMISSION)
-        .bind(provenance.to_string())
-        .execute(&mut *executor)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to insert manifest-declared proxy implementation edge for manifest_id {manifest_id}"
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
-/// Rebuild discovery admission directly from the stored active manifest state.
 pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAdmissionState> {
+    load_discovery_admission_state_with_excluded_source(pool, None).await
+}
+
+async fn load_discovery_admission_state_with_excluded_source(
+    pool: &PgPool,
+    excluded_discovery_source: Option<&str>,
+) -> Result<DiscoveryAdmissionState> {
     let active_manifest_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT FROM manifest_versions WHERE rollout_status = 'active'",
     )
@@ -1297,10 +1892,14 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
 
     let active_root_rows = sqlx::query(
         r#"
-        SELECT mv.manifest_id, mv.chain, mr.address
+        SELECT mv.manifest_id, mv.chain, mci.contract_instance_id, cia.address
         FROM manifest_versions mv
-        JOIN manifest_roots mr ON mr.manifest_id = mv.manifest_id
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+         AND cia.deactivated_at IS NULL
         WHERE mv.rollout_status = 'active'
+          AND mci.declaration_kind = 'root'
         "#,
     )
     .fetch_all(pool)
@@ -1309,15 +1908,47 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
 
     let active_contract_rows = sqlx::query(
         r#"
-        SELECT mv.manifest_id, mv.chain, mc.role, mc.address
+        SELECT mv.manifest_id, mv.chain, mci.role, mci.contract_instance_id, cia.address
         FROM manifest_versions mv
-        JOIN manifest_contracts mc ON mc.manifest_id = mv.manifest_id
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+         AND cia.deactivated_at IS NULL
         WHERE mv.rollout_status = 'active'
+          AND mci.declaration_kind = 'contract'
         "#,
     )
     .fetch_all(pool)
     .await
     .context("failed to load active manifest contracts")?;
+
+    let active_discovered_parent_rows = sqlx::query(
+        r#"
+        SELECT
+            mv.manifest_id,
+            mv.chain,
+            de.provenance ->> 'propagated_role' AS role,
+            de.to_contract_instance_id AS contract_instance_id,
+            cia.address AS address
+        FROM discovery_edges de
+        JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.deactivated_at IS NULL
+        WHERE mv.rollout_status = 'active'
+          AND de.deactivated_at IS NULL
+          AND de.edge_kind <> 'migration'
+          AND de.admission = $1
+          AND de.provenance ? $2
+          AND ($3::TEXT IS NULL OR de.discovery_source <> $3)
+        "#,
+    )
+    .bind(REACHABLE_FROM_ROOT_ADMISSION)
+    .bind(PROPAGATED_ROLE_PROVENANCE_FIELD)
+    .bind(excluded_discovery_source)
+    .fetch_all(pool)
+    .await
+    .context("failed to load active transitive discovery parents")?;
 
     let active_rule_rows = sqlx::query(
         r#"
@@ -1331,6 +1962,17 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
     .await
     .context("failed to load active discovery rules")?;
 
+    let known_address_rows = sqlx::query(
+        r#"
+        SELECT chain_id, address, contract_instance_id
+        FROM contract_instance_addresses
+        ORDER BY chain_id, address, (deactivated_at IS NULL) DESC, admitted_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load known contract-instance addresses")?;
+
     let active_roots = active_root_rows
         .into_iter()
         .map(|row| {
@@ -1341,6 +1983,9 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
                 chain: row
                     .try_get("chain")
                     .context("failed to read active root chain")?,
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read active root contract_instance_id")?,
                 address: normalize_address(
                     &row.try_get::<String, _>("address")
                         .context("failed to read active root address")?,
@@ -1352,6 +1997,7 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
 
     let active_contracts = active_contract_rows
         .into_iter()
+        .chain(active_discovered_parent_rows)
         .map(|row| {
             Ok(StoredActiveContract {
                 manifest_id: row
@@ -1363,13 +2009,18 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
                 role: row
                     .try_get("role")
                     .context("failed to read active contract role")?,
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read active contract contract_instance_id")?,
                 address: normalize_address(
                     &row.try_get::<String, _>("address")
                         .context("failed to read active contract address")?,
                 ),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<HashSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
 
     let mut rules_by_manifest_id: HashMap<i64, Vec<StoredDiscoveryRule>> = HashMap::new();
     for row in active_rule_rows {
@@ -1393,6 +2044,23 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
             .push(rule);
     }
 
+    let mut known_contract_instances_by_address = HashMap::new();
+    for row in known_address_rows {
+        let chain = row
+            .try_get::<String, _>("chain_id")
+            .context("failed to read known address chain_id")?;
+        let address = normalize_address(
+            &row.try_get::<String, _>("address")
+                .context("failed to read known address")?,
+        );
+        known_contract_instances_by_address
+            .entry((chain, address))
+            .or_insert(
+                row.try_get("contract_instance_id")
+                    .context("failed to read known address contract_instance_id")?,
+            );
+    }
+
     let active_rule_count = rules_by_manifest_id.values().map(Vec::len).sum();
 
     Ok(DiscoveryAdmissionState {
@@ -1403,6 +2071,7 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
         active_roots,
         active_root_manifest_ids,
         active_contracts,
+        known_contract_instances_by_address,
         rules_by_manifest_id,
     })
 }
@@ -1505,22 +2174,449 @@ async fn upsert_manifest_version(
         .context("failed to read manifest_id from manifest upsert")
 }
 
+async fn load_existing_manifest_entries(
+    executor: &mut sqlx::postgres::PgConnection,
+    manifest_id: i64,
+) -> Result<HashMap<DeclarationKey, PersistedManifestEntry>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            code_hash,
+            abi_ref,
+            role,
+            proxy_kind,
+            implementation_contract_instance_id,
+            declared_implementation_address
+        FROM manifest_contract_instances
+        WHERE manifest_id = $1
+        "#,
+    )
+    .bind(manifest_id)
+    .fetch_all(executor)
+    .await
+    .with_context(|| {
+        format!("failed to load existing manifest children for manifest_id {manifest_id}")
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let declaration_kind = row
+                .try_get::<String, _>("declaration_kind")
+                .context("failed to read declaration_kind")?;
+            let declaration_name = row
+                .try_get::<String, _>("declaration_name")
+                .context("failed to read declaration_name")?;
+            let entry = PersistedManifestEntry {
+                key: DeclarationKey {
+                    declaration_kind: declaration_kind.clone(),
+                    declaration_name: declaration_name.clone(),
+                },
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read contract_instance_id")?,
+                declared_address: row
+                    .try_get("declared_address")
+                    .context("failed to read declared_address")?,
+                code_hash: row
+                    .try_get("code_hash")
+                    .context("failed to read code_hash")?,
+                abi_ref: row.try_get("abi_ref").context("failed to read abi_ref")?,
+                role: row.try_get("role").context("failed to read role")?,
+                proxy_kind: row
+                    .try_get("proxy_kind")
+                    .context("failed to read proxy_kind")?,
+                implementation_contract_instance_id: row
+                    .try_get("implementation_contract_instance_id")
+                    .context("failed to read implementation_contract_instance_id")?,
+                declared_implementation_address: row
+                    .try_get("declared_implementation_address")
+                    .context("failed to read declared_implementation_address")?,
+            };
+            Ok((entry.key.clone(), entry))
+        })
+        .collect()
+}
+
+async fn plan_manifest_entries(
+    executor: &mut sqlx::postgres::PgConnection,
+    manifest_id: i64,
+    loaded_manifest: &LoadedManifest,
+    existing_entries: &HashMap<DeclarationKey, PersistedManifestEntry>,
+) -> Result<Vec<PersistedManifestEntry>> {
+    let mut planned_entries = Vec::new();
+    let mut planned_contract_instance_ids_by_address = HashMap::<String, Uuid>::new();
+
+    for root in &loaded_manifest.manifest.roots {
+        let key = DeclarationKey {
+            declaration_kind: DECLARATION_KIND_ROOT.to_owned(),
+            declaration_name: root.name.clone(),
+        };
+        let declared_address = normalize_address(&root.address);
+        let contract_instance_id =
+            match planned_contract_instance_ids_by_address.get(&declared_address) {
+                Some(contract_instance_id) => *contract_instance_id,
+                None => {
+                    let contract_instance_id = resolve_manifest_entry_contract_instance_id(
+                        executor,
+                        manifest_id,
+                        loaded_manifest,
+                        &key,
+                        &declared_address,
+                        existing_entries.get(&key),
+                        CONTRACT_KIND_ROOT,
+                    )
+                    .await?;
+                    planned_contract_instance_ids_by_address
+                        .insert(declared_address.clone(), contract_instance_id);
+                    contract_instance_id
+                }
+            };
+
+        planned_entries.push(PersistedManifestEntry {
+            key,
+            contract_instance_id,
+            declared_address,
+            code_hash: root.code_hash.clone(),
+            abi_ref: root.abi_ref.clone(),
+            role: None,
+            proxy_kind: None,
+            implementation_contract_instance_id: None,
+            declared_implementation_address: None,
+        });
+    }
+
+    for contract in &loaded_manifest.manifest.contracts {
+        let key = DeclarationKey {
+            declaration_kind: DECLARATION_KIND_CONTRACT.to_owned(),
+            declaration_name: contract.role.clone(),
+        };
+        let declared_address = normalize_address(&contract.address);
+        let contract_instance_id =
+            match planned_contract_instance_ids_by_address.get(&declared_address) {
+                Some(contract_instance_id) => *contract_instance_id,
+                None => {
+                    let contract_instance_id = resolve_manifest_entry_contract_instance_id(
+                        executor,
+                        manifest_id,
+                        loaded_manifest,
+                        &key,
+                        &declared_address,
+                        existing_entries.get(&key),
+                        CONTRACT_KIND_CONTRACT,
+                    )
+                    .await?;
+                    planned_contract_instance_ids_by_address
+                        .insert(declared_address.clone(), contract_instance_id);
+                    contract_instance_id
+                }
+            };
+
+        let declared_implementation_address = contract
+            .implementation
+            .as_ref()
+            .map(|value| normalize_address(value));
+        if declared_implementation_address.as_deref() == Some(declared_address.as_str()) {
+            bail!(
+                "manifest contract role {} in {} cannot declare the proxy address as its own implementation",
+                contract.role,
+                loaded_manifest.path.display()
+            );
+        }
+        let implementation_contract_instance_id =
+            if let Some(implementation_address) = &declared_implementation_address {
+                Some(
+                    resolve_contract_instance_by_address(
+                        executor,
+                        &loaded_manifest.manifest.chain,
+                        implementation_address,
+                        CONTRACT_KIND_CONTRACT,
+                        &serde_json::json!({
+                            "source": "manifest_contract_implementation",
+                            "manifest_id": manifest_id,
+                            "role": contract.role,
+                        }),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+
+        planned_entries.push(PersistedManifestEntry {
+            key,
+            contract_instance_id,
+            declared_address,
+            code_hash: None,
+            abi_ref: None,
+            role: Some(contract.role.clone()),
+            proxy_kind: Some(contract.proxy_kind.clone()),
+            implementation_contract_instance_id,
+            declared_implementation_address,
+        });
+    }
+
+    Ok(planned_entries)
+}
+
+async fn resolve_manifest_entry_contract_instance_id(
+    executor: &mut sqlx::postgres::PgConnection,
+    manifest_id: i64,
+    loaded_manifest: &LoadedManifest,
+    key: &DeclarationKey,
+    declared_address: &str,
+    existing_entry: Option<&PersistedManifestEntry>,
+    contract_kind: &str,
+) -> Result<Uuid> {
+    if let Some(existing_entry) = existing_entry
+        && existing_entry.declared_address == declared_address
+    {
+        return Ok(existing_entry.contract_instance_id);
+    }
+
+    if let Some(previous_entry) =
+        load_latest_related_manifest_entry(executor, manifest_id, loaded_manifest, key).await?
+        && previous_entry.declared_address == declared_address
+    {
+        return Ok(previous_entry.contract_instance_id);
+    }
+
+    resolve_contract_instance_by_address(
+        executor,
+        &loaded_manifest.manifest.chain,
+        declared_address,
+        contract_kind,
+        &serde_json::json!({
+            "source": "manifest_declaration",
+            "manifest_id": manifest_id,
+            "declaration_kind": key.declaration_kind,
+            "declaration_name": key.declaration_name,
+        }),
+    )
+    .await
+}
+
+async fn load_latest_related_manifest_entry(
+    executor: &mut sqlx::postgres::PgConnection,
+    manifest_id: i64,
+    loaded_manifest: &LoadedManifest,
+    key: &DeclarationKey,
+) -> Result<Option<PersistedManifestEntry>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            mci.contract_instance_id,
+            mci.declared_address,
+            mci.code_hash,
+            mci.abi_ref,
+            mci.role,
+            mci.proxy_kind,
+            mci.implementation_contract_instance_id,
+            mci.declared_implementation_address
+        FROM manifest_contract_instances mci
+        JOIN manifest_versions mv ON mv.manifest_id = mci.manifest_id
+        WHERE mv.namespace = $1
+          AND mv.source_family = $2
+          AND mv.chain = $3
+          AND mv.deployment_epoch = $4
+          AND mci.declaration_kind = $5
+          AND mci.declaration_name = $6
+          AND mci.manifest_id <> $7
+        ORDER BY mv.manifest_version DESC, mci.manifest_contract_instance_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&loaded_manifest.manifest.namespace)
+    .bind(&loaded_manifest.manifest.source_family)
+    .bind(&loaded_manifest.manifest.chain)
+    .bind(&loaded_manifest.manifest.deployment_epoch)
+    .bind(&key.declaration_kind)
+    .bind(&key.declaration_name)
+    .bind(manifest_id)
+    .fetch_optional(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load prior declaration state for {} {}",
+            key.declaration_kind, key.declaration_name
+        )
+    })?;
+
+    row.map(|row| {
+        Ok(PersistedManifestEntry {
+            key: key.clone(),
+            contract_instance_id: row
+                .try_get("contract_instance_id")
+                .context("failed to read prior contract_instance_id")?,
+            declared_address: row
+                .try_get("declared_address")
+                .context("failed to read prior declared_address")?,
+            code_hash: row
+                .try_get("code_hash")
+                .context("failed to read prior code_hash")?,
+            abi_ref: row
+                .try_get("abi_ref")
+                .context("failed to read prior abi_ref")?,
+            role: row.try_get("role").context("failed to read prior role")?,
+            proxy_kind: row
+                .try_get("proxy_kind")
+                .context("failed to read prior proxy_kind")?,
+            implementation_contract_instance_id: row
+                .try_get("implementation_contract_instance_id")
+                .context("failed to read prior implementation_contract_instance_id")?,
+            declared_implementation_address: row
+                .try_get("declared_implementation_address")
+                .context("failed to read prior declared_implementation_address")?,
+        })
+    })
+    .transpose()
+}
+
+async fn resolve_contract_instance_by_address(
+    executor: &mut sqlx::postgres::PgConnection,
+    chain: &str,
+    address: &str,
+    contract_kind: &str,
+    provenance: &serde_json::Value,
+) -> Result<Uuid> {
+    let normalized_address = normalize_address(address);
+
+    if let Some(contract_instance_id) =
+        find_contract_instance_by_address(executor, chain, &normalized_address).await?
+    {
+        return Ok(contract_instance_id);
+    }
+
+    let contract_instance_id = Uuid::new_v4();
+    let provenance = serde_json::to_string(provenance)
+        .context("failed to serialize contract-instance provenance")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, $2, $3, $4::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(chain)
+    .bind(contract_kind)
+    .bind(provenance)
+    .execute(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to insert contract_instance_id {contract_instance_id} for chain {chain} address {normalized_address}"
+        )
+    })?;
+
+    Ok(contract_instance_id)
+}
+
+async fn find_contract_instance_by_address(
+    executor: &mut sqlx::postgres::PgConnection,
+    chain: &str,
+    address: &str,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT contract_instance_id
+        FROM contract_instance_addresses
+        WHERE chain_id = $1
+          AND address = $2
+        ORDER BY (deactivated_at IS NULL) DESC, admitted_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(chain)
+    .bind(address)
+    .fetch_optional(executor)
+    .await
+    .with_context(|| {
+        format!("failed to resolve contract instance for chain {chain} address {address}")
+    })
+}
+
+async fn ensure_contract_instance_address_seed(
+    executor: &mut sqlx::postgres::PgConnection,
+    contract_instance_id: Uuid,
+    chain: &str,
+    address: &str,
+    source_manifest_id: Option<i64>,
+    provenance: &serde_json::Value,
+) -> Result<()> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM contract_instance_addresses
+            WHERE contract_instance_id = $1
+        )
+        "#,
+    )
+    .bind(contract_instance_id)
+    .fetch_one(&mut *executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check seeded address rows for contract_instance_id {contract_instance_id}"
+        )
+    })?;
+
+    if exists {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            source_manifest_id,
+            provenance
+        )
+        VALUES ($1, $2, $3, $4, $5::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(chain)
+    .bind(address)
+    .bind(source_manifest_id)
+    .bind(
+        serde_json::to_string(provenance)
+            .context("failed to serialize contract-instance address seed provenance")?,
+    )
+    .execute(&mut *executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to seed contract-instance address row for contract_instance_id {contract_instance_id}"
+        )
+    })?;
+
+    Ok(())
+}
+
 async fn replace_manifest_children(
     executor: &mut sqlx::postgres::PgConnection,
     manifest_id: i64,
     manifest: &SourceManifest,
+    planned_entries: &[PersistedManifestEntry],
 ) -> Result<()> {
-    sqlx::query("DELETE FROM manifest_roots WHERE manifest_id = $1")
-        .bind(manifest_id)
-        .execute(&mut *executor)
-        .await
-        .with_context(|| format!("failed to clear manifest_roots for manifest_id {manifest_id}"))?;
-    sqlx::query("DELETE FROM manifest_contracts WHERE manifest_id = $1")
+    sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id = $1")
         .bind(manifest_id)
         .execute(&mut *executor)
         .await
         .with_context(|| {
-            format!("failed to clear manifest_contracts for manifest_id {manifest_id}")
+            format!("failed to clear manifest_contract_instances for manifest_id {manifest_id}")
         })?;
     sqlx::query("DELETE FROM manifest_capability_flags WHERE manifest_id = $1")
         .bind(manifest_id)
@@ -1537,56 +2633,42 @@ async fn replace_manifest_children(
             format!("failed to clear manifest_discovery_rules for manifest_id {manifest_id}")
         })?;
 
-    for root in &manifest.roots {
+    for entry in planned_entries {
         sqlx::query(
             r#"
-            INSERT INTO manifest_roots (manifest_id, name, address, code_hash, abi_ref)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
-        )
-        .bind(manifest_id)
-        .bind(&root.name)
-        .bind(normalize_address(&root.address))
-        .bind(root.code_hash.as_deref())
-        .bind(root.abi_ref.as_deref())
-        .execute(&mut *executor)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to insert manifest root {} for manifest_id {manifest_id}",
-                root.name
-            )
-        })?;
-    }
-
-    for contract in &manifest.contracts {
-        let normalized_implementation = contract
-            .implementation
-            .as_ref()
-            .map(|value| normalize_address(value));
-        sqlx::query(
-            r#"
-            INSERT INTO manifest_contracts (
+            INSERT INTO manifest_contract_instances (
                 manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                code_hash,
+                abi_ref,
                 role,
-                address,
                 proxy_kind,
-                implementation
+                implementation_contract_instance_id,
+                declared_implementation_address
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(manifest_id)
-        .bind(&contract.role)
-        .bind(normalize_address(&contract.address))
-        .bind(&contract.proxy_kind)
-        .bind(normalized_implementation.as_deref())
+        .bind(&entry.key.declaration_kind)
+        .bind(&entry.key.declaration_name)
+        .bind(entry.contract_instance_id)
+        .bind(&entry.declared_address)
+        .bind(entry.code_hash.as_deref())
+        .bind(entry.abi_ref.as_deref())
+        .bind(entry.role.as_deref())
+        .bind(entry.proxy_kind.as_deref())
+        .bind(entry.implementation_contract_instance_id)
+        .bind(entry.declared_implementation_address.as_deref())
         .execute(&mut *executor)
         .await
         .with_context(|| {
             format!(
-                "failed to insert manifest contract role {} for manifest_id {manifest_id}",
-                contract.role
+                "failed to insert manifest entry {} {} for manifest_id {manifest_id}",
+                entry.key.declaration_kind, entry.key.declaration_name
             )
         })?;
     }
@@ -1644,6 +2726,632 @@ async fn replace_manifest_children(
     }
 
     Ok(())
+}
+
+async fn reconcile_manifest_source_graph(
+    executor: &mut sqlx::postgres::PgConnection,
+    in_place_transitions: &[ManifestTransition],
+) -> Result<usize> {
+    let desired_proxy_edges = load_desired_proxy_edges(executor).await?;
+    let desired_successor_edges =
+        load_desired_manifest_successor_edges(executor, in_place_transitions).await?;
+
+    let mut cleared_edge_count = 0;
+    cleared_edge_count += reconcile_managed_edges(
+        executor,
+        &desired_proxy_edges,
+        MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE,
+    )
+    .await?;
+    cleared_edge_count += reconcile_managed_edges(
+        executor,
+        &desired_successor_edges,
+        MANIFEST_SUCCESSOR_DISCOVERY_SOURCE,
+    )
+    .await?;
+
+    reconcile_active_contract_instance_addresses(executor).await?;
+
+    Ok(cleared_edge_count)
+}
+
+async fn load_desired_proxy_edges(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<Vec<ManagedEdgeSpec>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            mv.manifest_id,
+            mv.chain,
+            mci.contract_instance_id,
+            mci.implementation_contract_instance_id,
+            mci.declaration_name,
+            mci.proxy_kind,
+            mci.declared_address,
+            mci.declared_implementation_address
+        FROM manifest_versions mv
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        WHERE mv.rollout_status = 'active'
+          AND mci.declaration_kind = 'contract'
+          AND mci.implementation_contract_instance_id IS NOT NULL
+        ORDER BY mv.manifest_id, mci.declaration_name
+        "#,
+    )
+    .fetch_all(executor)
+    .await
+    .context("failed to load desired proxy edges")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let implementation_contract_instance_id = row
+                .try_get::<Uuid, _>("implementation_contract_instance_id")
+                .context("failed to read implementation_contract_instance_id")?;
+            let provenance_json = serde_json::json!({
+                "source": "manifest_contract",
+                "declaration_name": row
+                    .try_get::<String, _>("declaration_name")
+                    .context("failed to read declaration_name")?,
+                "proxy_kind": row
+                    .try_get::<String, _>("proxy_kind")
+                    .context("failed to read proxy_kind")?,
+                "from_address": row
+                    .try_get::<String, _>("declared_address")
+                    .context("failed to read declared_address")?,
+                "to_address": row
+                    .try_get::<Option<String>, _>("declared_implementation_address")
+                    .context("failed to read declared_implementation_address")?,
+            })
+            .to_string();
+            Ok(ManagedEdgeSpec {
+                chain: row.try_get("chain").context("failed to read chain")?,
+                edge_kind: MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND.to_owned(),
+                from_contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read contract_instance_id")?,
+                to_contract_instance_id: implementation_contract_instance_id,
+                discovery_source: MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE.to_owned(),
+                source_manifest_id: row
+                    .try_get("manifest_id")
+                    .context("failed to read manifest_id")?,
+                admission: MANIFEST_PROXY_IMPLEMENTATION_ADMISSION.to_owned(),
+                provenance_json,
+            })
+        })
+        .collect()
+}
+
+async fn load_desired_manifest_successor_edges(
+    executor: &mut sqlx::postgres::PgConnection,
+    in_place_transitions: &[ManifestTransition],
+) -> Result<Vec<ManagedEdgeSpec>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            mv.manifest_id,
+            mv.manifest_version,
+            mv.rollout_status::TEXT AS rollout_status,
+            mv.namespace,
+            mv.source_family,
+            mv.chain,
+            mv.deployment_epoch,
+            mci.declaration_kind,
+            mci.declaration_name,
+            mci.contract_instance_id,
+            mci.declared_address
+        FROM manifest_versions mv
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        ORDER BY
+            mv.namespace,
+            mv.source_family,
+            mv.chain,
+            mv.deployment_epoch,
+            mci.declaration_kind,
+            mci.declaration_name,
+            mv.manifest_version,
+            mv.manifest_id
+        "#,
+    )
+    .fetch_all(executor)
+    .await
+    .context("failed to load ordered manifest entries for successor continuity")?;
+
+    let mut desired = HashSet::new();
+    let mut last_by_lineage = HashMap::<ManifestLineageKey, OrderedManifestEntry>::new();
+
+    for row in rows {
+        let entry = OrderedManifestEntry {
+            manifest_id: row
+                .try_get("manifest_id")
+                .context("failed to read manifest_id")?,
+            manifest_version: row
+                .try_get("manifest_version")
+                .context("failed to read manifest_version")?,
+            rollout_status: row
+                .try_get("rollout_status")
+                .context("failed to read rollout_status")?,
+            chain: row.try_get("chain").context("failed to read chain")?,
+            lineage_key: ManifestLineageKey {
+                namespace: row
+                    .try_get("namespace")
+                    .context("failed to read namespace")?,
+                source_family: row
+                    .try_get("source_family")
+                    .context("failed to read source_family")?,
+                chain: row
+                    .try_get("chain")
+                    .context("failed to read lineage chain")?,
+                deployment_epoch: row
+                    .try_get("deployment_epoch")
+                    .context("failed to read deployment_epoch")?,
+                declaration_kind: row
+                    .try_get("declaration_kind")
+                    .context("failed to read declaration_kind")?,
+                declaration_name: row
+                    .try_get("declaration_name")
+                    .context("failed to read declaration_name")?,
+            },
+            contract_instance_id: row
+                .try_get("contract_instance_id")
+                .context("failed to read contract_instance_id")?,
+            declared_address: row
+                .try_get("declared_address")
+                .context("failed to read declared_address")?,
+        };
+
+        if let Some(previous_entry) =
+            last_by_lineage.insert(entry.lineage_key.clone(), entry.clone())
+            && entry.rollout_status == "active"
+            && previous_entry.contract_instance_id != entry.contract_instance_id
+            && previous_entry.declared_address != entry.declared_address
+        {
+            desired.insert(ManagedEdgeSpec {
+                chain: entry.chain.clone(),
+                edge_kind: MANIFEST_SUCCESSOR_EDGE_KIND.to_owned(),
+                from_contract_instance_id: previous_entry.contract_instance_id,
+                to_contract_instance_id: entry.contract_instance_id,
+                discovery_source: MANIFEST_SUCCESSOR_DISCOVERY_SOURCE.to_owned(),
+                source_manifest_id: entry.manifest_id,
+                admission: MANIFEST_SUCCESSOR_ADMISSION.to_owned(),
+                provenance_json: serde_json::json!({
+                    "source": "manifest_successor",
+                    "declaration_kind": entry.lineage_key.declaration_kind,
+                    "declaration_name": entry.lineage_key.declaration_name,
+                    "from_address": previous_entry.declared_address,
+                    "to_address": entry.declared_address,
+                    "manifest_version": entry.manifest_version,
+                })
+                .to_string(),
+            });
+        }
+    }
+
+    for transition in in_place_transitions {
+        desired.insert(ManagedEdgeSpec {
+            chain: transition.chain.clone(),
+            edge_kind: MANIFEST_SUCCESSOR_EDGE_KIND.to_owned(),
+            from_contract_instance_id: transition.from_contract_instance_id,
+            to_contract_instance_id: transition.to_contract_instance_id,
+            discovery_source: MANIFEST_SUCCESSOR_DISCOVERY_SOURCE.to_owned(),
+            source_manifest_id: transition.source_manifest_id,
+            admission: MANIFEST_SUCCESSOR_ADMISSION.to_owned(),
+            provenance_json: serde_json::json!({
+                "source": "manifest_successor",
+                "declaration_kind": transition.declaration_kind,
+                "declaration_name": transition.declaration_name,
+                "from_address": transition.from_address,
+                "to_address": transition.to_address,
+                "manifest_update": "in_place",
+            })
+            .to_string(),
+        });
+    }
+
+    Ok(desired.into_iter().collect())
+}
+
+async fn reconcile_managed_edges(
+    executor: &mut sqlx::postgres::PgConnection,
+    desired_edges: &[ManagedEdgeSpec],
+    discovery_source: &str,
+) -> Result<usize> {
+    let existing_rows = sqlx::query(
+        r#"
+        SELECT
+            discovery_edge_id,
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            provenance
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(&mut *executor)
+    .await
+    .with_context(|| {
+        format!("failed to load active managed edges for discovery_source {discovery_source}")
+    })?;
+
+    let existing_edges = existing_rows
+        .into_iter()
+        .map(|row| {
+            Ok(ExistingManagedEdge {
+                discovery_edge_id: row
+                    .try_get("discovery_edge_id")
+                    .context("failed to read discovery_edge_id")?,
+                spec: ManagedEdgeSpec {
+                    chain: row.try_get("chain_id").context("failed to read chain_id")?,
+                    edge_kind: row
+                        .try_get("edge_kind")
+                        .context("failed to read edge_kind")?,
+                    from_contract_instance_id: row
+                        .try_get("from_contract_instance_id")
+                        .context("failed to read from_contract_instance_id")?,
+                    to_contract_instance_id: row
+                        .try_get("to_contract_instance_id")
+                        .context("failed to read to_contract_instance_id")?,
+                    discovery_source: row
+                        .try_get("discovery_source")
+                        .context("failed to read discovery_source")?,
+                    source_manifest_id: row
+                        .try_get::<Option<i64>, _>("source_manifest_id")
+                        .context("failed to read source_manifest_id")?
+                        .unwrap_or(-1),
+                    admission: row
+                        .try_get("admission")
+                        .context("failed to read admission")?,
+                    provenance_json: row
+                        .try_get::<serde_json::Value, _>("provenance")
+                        .context("failed to read provenance")?
+                        .to_string(),
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let desired_set = desired_edges.iter().cloned().collect::<HashSet<_>>();
+    let existing_set = existing_edges
+        .iter()
+        .map(|edge| edge.spec.clone())
+        .collect::<HashSet<_>>();
+
+    let mut cleared_edge_count = 0;
+    for existing_edge in existing_edges {
+        if desired_set.contains(&existing_edge.spec) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE discovery_edges
+            SET deactivated_at = now()
+            WHERE discovery_edge_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(existing_edge.discovery_edge_id)
+        .execute(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to deactivate managed discovery_edge_id {}",
+                existing_edge.discovery_edge_id
+            )
+        })?;
+        cleared_edge_count += 1;
+    }
+
+    for desired_edge in desired_edges {
+        if existing_set.contains(desired_edge) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            "#,
+        )
+        .bind(&desired_edge.chain)
+        .bind(&desired_edge.edge_kind)
+        .bind(desired_edge.from_contract_instance_id)
+        .bind(desired_edge.to_contract_instance_id)
+        .bind(&desired_edge.discovery_source)
+        .bind(desired_edge.source_manifest_id)
+        .bind(&desired_edge.admission)
+        .bind(&desired_edge.provenance_json)
+        .execute(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to insert managed edge {} {} -> {}",
+                desired_edge.edge_kind,
+                desired_edge.from_contract_instance_id,
+                desired_edge.to_contract_instance_id
+            )
+        })?;
+    }
+
+    Ok(cleared_edge_count)
+}
+
+async fn reconcile_active_contract_instance_addresses(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<()> {
+    let desired_specs = load_desired_active_address_specs(executor).await?;
+    let desired_ids = desired_specs
+        .iter()
+        .map(|spec| spec.contract_instance_id)
+        .collect::<HashSet<_>>();
+
+    let existing_active_rows = sqlx::query(
+        r#"
+        SELECT contract_instance_id, chain_id, address
+        FROM contract_instance_addresses
+        WHERE deactivated_at IS NULL
+        "#,
+    )
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to load active contract-instance addresses")?;
+
+    let existing_active = existing_active_rows
+        .into_iter()
+        .map(|row| {
+            Ok(CurrentActiveAddressRow {
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read active contract_instance_id")?,
+                chain: row
+                    .try_get("chain_id")
+                    .context("failed to read active chain_id")?,
+                address: row
+                    .try_get("address")
+                    .context("failed to read active address")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for existing_row in &existing_active {
+        if desired_ids.contains(&existing_row.contract_instance_id) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET deactivated_at = now()
+            WHERE contract_instance_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(existing_row.contract_instance_id)
+        .execute(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to deactivate active address row for contract_instance_id {}",
+                existing_row.contract_instance_id
+            )
+        })?;
+    }
+
+    let existing_active_map = existing_active
+        .into_iter()
+        .map(|row| (row.contract_instance_id, row))
+        .collect::<HashMap<_, _>>();
+
+    for desired_spec in desired_specs {
+        if let Some(existing_row) = existing_active_map.get(&desired_spec.contract_instance_id) {
+            if existing_row.chain != desired_spec.chain
+                || existing_row.address != desired_spec.address
+            {
+                bail!(
+                    "contract_instance_id {} changed address from {}:{} to {}:{}; successor addresses must rotate IDs",
+                    desired_spec.contract_instance_id,
+                    existing_row.chain,
+                    existing_row.address,
+                    desired_spec.chain,
+                    desired_spec.address
+                );
+            }
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                source_manifest_id,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            "#,
+        )
+        .bind(desired_spec.contract_instance_id)
+        .bind(&desired_spec.chain)
+        .bind(&desired_spec.address)
+        .bind(desired_spec.source_manifest_id)
+        .bind(&desired_spec.provenance_json)
+        .execute(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to activate address {} for contract_instance_id {}",
+                desired_spec.address, desired_spec.contract_instance_id
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn load_desired_active_address_specs(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<Vec<ActiveAddressSpec>> {
+    let manifest_rows = sqlx::query(
+        r#"
+        SELECT
+            mv.manifest_id,
+            mv.chain,
+            mci.declaration_kind,
+            mci.declaration_name,
+            mci.contract_instance_id,
+            mci.declared_address,
+            mci.implementation_contract_instance_id,
+            mci.declared_implementation_address
+        FROM manifest_versions mv
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        WHERE mv.rollout_status = 'active'
+        ORDER BY mv.manifest_id, mci.declaration_kind, mci.declaration_name
+        "#,
+    )
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to load active manifest address specs")?;
+
+    let discovery_endpoint_rows = sqlx::query(
+        r#"
+        WITH active_discovery_endpoints AS (
+            SELECT de.source_manifest_id, de.from_contract_instance_id AS contract_instance_id
+            FROM discovery_edges de
+            JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            WHERE mv.rollout_status = 'active'
+              AND de.deactivated_at IS NULL
+              AND de.edge_kind <> 'migration'
+
+            UNION
+
+            SELECT de.source_manifest_id, de.to_contract_instance_id AS contract_instance_id
+            FROM discovery_edges de
+            JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            WHERE mv.rollout_status = 'active'
+              AND de.deactivated_at IS NULL
+              AND de.edge_kind <> 'migration'
+        )
+        SELECT
+            endpoints.source_manifest_id,
+            cia.contract_instance_id,
+            cia.chain_id,
+            cia.address
+        FROM active_discovery_endpoints endpoints
+        JOIN LATERAL (
+            SELECT contract_instance_id, chain_id, address
+            FROM contract_instance_addresses
+            WHERE contract_instance_id = endpoints.contract_instance_id
+            ORDER BY (deactivated_at IS NULL) DESC, admitted_at DESC
+            LIMIT 1
+        ) cia ON TRUE
+        "#,
+    )
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to load discovery-edge endpoint address specs")?;
+
+    let mut specs = HashMap::<Uuid, ActiveAddressSpec>::new();
+
+    for row in manifest_rows {
+        let contract_instance_id = row
+            .try_get::<Uuid, _>("contract_instance_id")
+            .context("failed to read manifest contract_instance_id")?;
+        let declaration_kind = row
+            .try_get::<String, _>("declaration_kind")
+            .context("failed to read declaration_kind")?;
+        let declaration_name = row
+            .try_get::<String, _>("declaration_name")
+            .context("failed to read declaration_name")?;
+        let chain: String = row.try_get("chain").context("failed to read chain")?;
+        let manifest_id = row
+            .try_get::<i64, _>("manifest_id")
+            .context("failed to read manifest_id")?;
+        let declared_address = row
+            .try_get::<String, _>("declared_address")
+            .context("failed to read declared_address")?;
+
+        specs
+            .entry(contract_instance_id)
+            .or_insert(ActiveAddressSpec {
+                contract_instance_id,
+                chain: chain.clone(),
+                address: declared_address.clone(),
+                source_manifest_id: Some(manifest_id),
+                provenance_json: serde_json::json!({
+                    "source": "manifest_declared",
+                    "declaration_kind": declaration_kind,
+                    "declaration_name": declaration_name,
+                })
+                .to_string(),
+            });
+
+        let implementation_contract_instance_id = row
+            .try_get::<Option<Uuid>, _>("implementation_contract_instance_id")
+            .context("failed to read implementation_contract_instance_id")?;
+        let declared_implementation_address = row
+            .try_get::<Option<String>, _>("declared_implementation_address")
+            .context("failed to read declared_implementation_address")?;
+        if let (Some(implementation_contract_instance_id), Some(implementation_address)) = (
+            implementation_contract_instance_id,
+            declared_implementation_address,
+        ) {
+            specs
+                .entry(implementation_contract_instance_id)
+                .or_insert(ActiveAddressSpec {
+                    contract_instance_id: implementation_contract_instance_id,
+                    chain: chain.clone(),
+                    address: implementation_address.clone(),
+                    source_manifest_id: Some(manifest_id),
+                    provenance_json: serde_json::json!({
+                        "source": "manifest_proxy_implementation",
+                        "proxy_contract_instance_id": contract_instance_id,
+                        "proxy_address": declared_address,
+                    })
+                    .to_string(),
+                });
+        }
+    }
+
+    for row in discovery_endpoint_rows {
+        let contract_instance_id = row
+            .try_get::<Uuid, _>("contract_instance_id")
+            .context("failed to read discovery endpoint contract_instance_id")?;
+        specs
+            .entry(contract_instance_id)
+            .or_insert(ActiveAddressSpec {
+                contract_instance_id,
+                chain: row
+                    .try_get("chain_id")
+                    .context("failed to read discovery endpoint chain_id")?,
+                address: row
+                    .try_get("address")
+                    .context("failed to read discovery endpoint address")?,
+                source_manifest_id: row
+                    .try_get("source_manifest_id")
+                    .context("failed to read discovery endpoint source_manifest_id")?,
+                provenance_json: serde_json::json!({
+                    "source": "discovery_edge_endpoint",
+                })
+                .to_string(),
+            });
+    }
+
+    Ok(specs.into_values().collect())
 }
 
 fn validate_manifest_metadata(
@@ -1834,6 +3542,68 @@ mod tests {
         }
     }
 
+    fn manifest_contents(
+        rollout_status: &str,
+        root_address: &str,
+        contract_address: &str,
+        implementation: Option<&str>,
+    ) -> String {
+        let implementation = implementation
+            .map(|value| format!("implementation = \"{value}\"\n"))
+            .unwrap_or_default();
+        format!(
+            r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "{rollout_status}"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "{root_address}"
+
+[[contracts]]
+role = "registry"
+address = "{contract_address}"
+proxy_kind = "erc1967"
+{implementation}
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+        )
+    }
+
+    async fn load_single_contract_instance_for_address(
+        pool: &PgPool,
+        chain: &str,
+        address: &str,
+    ) -> Result<Uuid> {
+        query_scalar::<_, Uuid>(
+            r#"
+            SELECT contract_instance_id
+            FROM contract_instance_addresses
+            WHERE chain_id = $1
+              AND address = $2
+            ORDER BY (deactivated_at IS NULL) DESC, admitted_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(chain)
+        .bind(normalize_address(address))
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to load contract instance for {chain} {address}"))
+    }
+
     #[test]
     fn reports_missing_root() -> Result<()> {
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
@@ -1855,68 +3625,18 @@ mod tests {
     }
 
     #[test]
-    fn reports_empty_root() -> Result<()> {
-        let test_dir = TestDir::new()?;
-
-        let repository = load_repository(&test_dir.path)?;
-
-        assert_eq!(repository.summary().status, ManifestLoadStatus::Empty);
-        assert_eq!(repository.summary().namespace_count, 0);
-        assert_eq!(repository.summary().source_family_count, 0);
-        assert_eq!(repository.summary().manifest_count, 0);
-
-        Ok(())
-    }
-
-    #[test]
     fn loads_valid_repository_manifest() -> Result<()> {
         let test_dir = TestDir::new()?;
         test_dir.write_manifest(
             "ens",
             "ens_v2_registry_l1",
             "v1",
-            r#"
-manifest_version = 1
-namespace = "ens"
-source_family = "ens_v2_registry_l1"
-chain = "ethereum-mainnet"
-deployment_epoch = "ens_v2"
-rollout_status = "active"
-normalizer_version = "uts46-v1"
-
-[capability_flags]
-declared_children = "supported"
-
-[capability_flags.verified_resolution]
-status = "shadow"
-notes = "tracked but not yet served"
-
-[[roots]]
-name = "RootRegistry"
-address = "0x0000000000000000000000000000000000000000"
-code_hash = "sha256:test"
-abi_ref = "abis/root_registry.json"
-
-[[contracts]]
-role = "registry"
-address = "0x0000000000000000000000000000000000000000"
-proxy_kind = "none"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-"#,
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
         )?;
 
         let repository = load_repository(&test_dir.path)?;
@@ -1928,25 +3648,6 @@ admission = "reachable_from_root"
         assert_eq!(repository.manifests().len(), 1);
         assert_eq!(repository.manifests()[0].version_tag, "v1");
         assert_eq!(repository.manifests()[0].manifest.namespace, "ens");
-        assert_eq!(
-            repository.manifests()[0]
-                .manifest
-                .capability_flags
-                .get("declared_children")
-                .expect("declared_children capability")
-                .status,
-            CapabilitySupportStatus::Supported
-        );
-        assert_eq!(
-            repository.manifests()[0]
-                .manifest
-                .capability_flags
-                .get("verified_resolution")
-                .expect("verified_resolution capability")
-                .notes
-                .as_deref(),
-            Some("tracked but not yet served")
-        );
 
         Ok(())
     }
@@ -1987,7 +3688,6 @@ admission = "reachable_from_root"
         )?;
 
         let error = load_repository(&test_dir.path).expect_err("namespace mismatch must fail");
-
         assert!(
             error.to_string().contains("does not match directory"),
             "unexpected error for {}: {error:#}",
@@ -1998,208 +3698,304 @@ admission = "reachable_from_root"
     }
 
     #[tokio::test]
-    async fn persists_repository_and_rebuilds_discovery_admission_from_storage() -> Result<()> {
+    async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
         let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
         test_dir.write_manifest(
             "ens",
             "ens_v2_registry_l1",
             "v1",
-            r#"
-manifest_version = 1
-namespace = "ens"
-source_family = "ens_v2_registry_l1"
-chain = "ethereum-mainnet"
-deployment_epoch = "ens_v2"
-rollout_status = "active"
-normalizer_version = "uts46-v1"
-
-[capability_flags]
-declared_children = { status = "supported", notes = "declared children are enabled" }
-verified_resolution = "shadow"
-
-[[roots]]
-name = "RootRegistry"
-address = "0x0000000000000000000000000000000000000001"
-
-[[contracts]]
-role = "registry"
-address = "0x00000000000000000000000000000000000000AA"
-proxy_kind = "erc1967"
-implementation = "0x00000000000000000000000000000000000000DD"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-"#,
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
         )?;
-        test_dir.write_manifest(
-            "basenames",
-            "base_registry",
-            "v1",
-            r#"
-manifest_version = 1
-namespace = "basenames"
-source_family = "base_registry"
-chain = "base-mainnet"
-deployment_epoch = "basenames_v1"
-rollout_status = "shadow"
-normalizer_version = "uts46-v1"
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+        let first_contract_instance_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?;
 
-[capability_flags]
-declared_children = "shadow"
-
-[[roots]]
-name = "BaseRoot"
-address = "0x0000000000000000000000000000000000000002"
-
-[[contracts]]
-role = "registry"
-address = "0x00000000000000000000000000000000000000BB"
-proxy_kind = "none"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-"#,
-        )?;
-
-        let repository = load_repository(&test_dir.path)?;
-        let database = TestDatabase::new().await?;
-
-        let sync_summary = sync_repository(database.pool(), &repository).await?;
-        assert_eq!(sync_summary.status, ManifestSyncStatus::Synced);
-        assert_eq!(sync_summary.synced_manifest_count, 2);
-        assert_eq!(sync_summary.active_manifest_count, 1);
-        assert_eq!(sync_summary.root_count, 2);
-        assert_eq!(sync_summary.contract_count, 2);
-        assert_eq!(sync_summary.capability_count, 3);
-        assert_eq!(sync_summary.discovery_rule_count, 3);
-        assert_eq!(sync_summary.removed_manifest_count, 0);
-        assert_eq!(sync_summary.cleared_discovery_edge_count, 0);
-
+        let empty_dir = TestDir::new()?;
+        sync_repository(database.pool(), &load_repository(&empty_dir.path)?).await?;
         assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_versions")
-                .fetch_one(database.pool())
-                .await?,
-            2
-        );
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_roots")
-                .fetch_one(database.pool())
-                .await?,
-            2
-        );
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_contracts")
-                .fetch_one(database.pool())
-                .await?,
-            2
-        );
-        assert_eq!(
-            query_scalar::<_, Option<String>>(
-                "SELECT implementation FROM manifest_contracts WHERE role = 'registry' AND address = '0x00000000000000000000000000000000000000aa'"
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
             )
+            .bind(first_contract_instance_id)
             .fetch_one(database.pool())
             .await?,
-            Some("0x00000000000000000000000000000000000000dd".to_owned())
+            0
         );
+
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+        let reused_contract_instance_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?;
+
+        assert_eq!(first_contract_instance_id, reused_contract_instance_id);
         assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_capability_flags")
-                .fetch_one(database.pool())
-                .await?,
-            3
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1"
+            )
+            .bind(first_contract_instance_id)
+            .fetch_one(database.pool())
+            .await?,
+            2
         );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keeps_proxy_instance_stable_across_implementation_churn() -> Result<()> {
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        let proxy_contract_instance_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?;
+        let first_implementation_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000dd",
+        )
+        .await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000EE"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        let proxy_after_churn = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?;
+        let second_implementation_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000ee",
+        )
+        .await?;
+
+        assert_eq!(proxy_contract_instance_id, proxy_after_churn);
+        assert_ne!(first_implementation_id, second_implementation_id);
         assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_discovery_rules")
-                .fetch_one(database.pool())
-                .await?,
-            3
-        );
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-                .fetch_one(database.pool())
-                .await?,
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+            )
+            .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+            .fetch_one(database.pool())
+            .await?,
             1
         );
-        let proxy_edge = sqlx::query(
-            r#"
-            SELECT
-                edge_kind,
-                from_address,
-                to_address,
-                discovery_source,
-                admission,
-                provenance
-            FROM discovery_edges
-            ORDER BY chain_id, from_address, to_address
-            LIMIT 1
-            "#,
-        )
-        .fetch_one(database.pool())
-        .await?;
         assert_eq!(
-            proxy_edge.try_get::<String, _>("edge_kind")?,
-            MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND
-        );
-        assert_eq!(
-            proxy_edge.try_get::<String, _>("from_address")?,
-            "0x00000000000000000000000000000000000000aa".to_owned()
-        );
-        assert_eq!(
-            proxy_edge.try_get::<String, _>("to_address")?,
-            "0x00000000000000000000000000000000000000dd".to_owned()
-        );
-        assert_eq!(
-            proxy_edge.try_get::<String, _>("discovery_source")?,
-            MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE
-        );
-        assert_eq!(
-            proxy_edge.try_get::<String, _>("admission")?,
-            MANIFEST_PROXY_IMPLEMENTATION_ADMISSION
-        );
-        assert_eq!(
-            proxy_edge.try_get::<serde_json::Value, _>("provenance")?,
-            serde_json::json!({
-                "source": "manifest_contract",
-                "proxy_kind": "erc1967",
-            })
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+            )
+            .bind(first_implementation_id)
+            .fetch_one(database.pool())
+            .await?,
+            0
         );
 
-        let admission_state = load_discovery_admission_state(database.pool()).await?;
-        assert_eq!(admission_state.active_manifest_count, 1);
-        assert_eq!(admission_state.active_root_count, 1);
-        assert_eq!(admission_state.active_contract_count, 1);
-        assert_eq!(admission_state.active_rule_count, 2);
-        assert!(admission_state.has_authoritative_address(
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rotates_successor_addresses_and_persists_migration_continuity() -> Result<()> {
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        let original_contract_instance_id = load_single_contract_instance_for_address(
+            database.pool(),
             "ethereum-mainnet",
-            "0x00000000000000000000000000000000000000aa"
-        ));
-        assert!(!admission_state.has_authoritative_address(
-            "base-mainnet",
-            "0x00000000000000000000000000000000000000bb"
-        ));
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?;
 
-        let admitted_edges = admission_state.admit_candidate(&DiscoveryCandidate {
-            chain: "ethereum-mainnet",
-            from_address: "0x00000000000000000000000000000000000000AA",
-            to_address: "0x00000000000000000000000000000000000000CC",
-            edge_kind: "subregistry",
-            discovery_source: "unit-test",
-        });
-        assert_eq!(admitted_edges.len(), 1);
-        assert_eq!(admitted_edges[0].admission, "reachable_from_root");
-        assert_eq!(admitted_edges[0].from_role, "registry");
-        assert_eq!(
-            admitted_edges[0].to_address,
-            "0x00000000000000000000000000000000000000cc"
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000BB",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        let successor_contract_instance_id = load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+        )
+        .await?;
+        assert_ne!(
+            original_contract_instance_id,
+            successor_contract_instance_id
         );
+        assert_eq!(
+            query_scalar::<_, i64>(
+                r#"
+                SELECT COUNT(*)::BIGINT
+                FROM discovery_edges
+                WHERE discovery_source = $1
+                  AND edge_kind = $2
+                  AND from_contract_instance_id = $3
+                  AND to_contract_instance_id = $4
+                  AND deactivated_at IS NULL
+                "#
+            )
+            .bind(MANIFEST_SUCCESSOR_DISCOVERY_SOURCE)
+            .bind(MANIFEST_SUCCESSOR_EDGE_KIND)
+            .bind(original_contract_instance_id)
+            .bind(successor_contract_instance_id)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watched_plan_does_not_expand_migration_edges() -> Result<()> {
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000BB",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        assert_eq!(
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = $1 AND deactivated_at IS NULL"
+            )
+            .bind(MANIFEST_SUCCESSOR_EDGE_KIND)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+        let watched_summary = load_watched_contract_summary(database.pool()).await?;
+        assert_eq!(watched_summary.unique_contract_count, 3);
+        assert_eq!(watched_summary.manifest_root_count, 1);
+        assert_eq!(watched_summary.manifest_contract_count, 1);
+        assert_eq!(watched_summary.discovery_edge_count, 1);
+
+        let watched_chain_plan = load_watched_chain_plan(database.pool()).await?;
+        assert_eq!(
+            watched_chain_plan,
+            vec![WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x0000000000000000000000000000000000000001".to_owned(),
+                    "0x00000000000000000000000000000000000000bb".to_owned(),
+                    "0x00000000000000000000000000000000000000dd".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 1,
+                discovery_edge_entry_count: 1,
+            }]
+        );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() -> Result<()> {
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "v1",
+            &manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
         let persistence_summary = persist_discovery_observation(
             database.pool(),
             &DiscoveryObservation {
@@ -2223,116 +4019,37 @@ admission = "reachable_from_root"
         .await?;
         assert_eq!(persistence_summary.admitted_edge_count, 1);
         assert_eq!(persistence_summary.inserted_edge_count, 1);
-
-        let repeated_persistence_summary = persist_discovery_observation(
-            database.pool(),
-            &DiscoveryObservation {
-                chain: "ethereum-mainnet".to_owned(),
-                from_address: "0x00000000000000000000000000000000000000AA".to_owned(),
-                to_address: "0x00000000000000000000000000000000000000CC".to_owned(),
-                edge_kind: "subregistry".to_owned(),
-                discovery_source: "unit-test".to_owned(),
-                active_from_block_number: Some(123),
-                active_from_block_hash: Some(
-                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                ),
-                active_to_block_number: None,
-                active_to_block_hash: None,
-                provenance: serde_json::json!({
-                    "provider": "unit-test",
-                    "kind": "subregistry",
-                }),
-            },
-        )
-        .await?;
-        assert_eq!(repeated_persistence_summary.admitted_edge_count, 1);
-        assert_eq!(repeated_persistence_summary.inserted_edge_count, 0);
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-                .fetch_one(database.pool())
-                .await?,
-            2
+        assert!(
+            persistence_summary.admitted_edges[0]
+                .to_contract_instance_id
+                .is_some()
         );
 
         let watched_contracts = load_watched_contracts(database.pool()).await?;
         assert_eq!(watched_contracts.len(), 4);
         assert!(watched_contracts.iter().any(|contract| {
-            contract.chain == "ethereum-mainnet"
-                && contract.address == "0x0000000000000000000000000000000000000001"
+            contract.address == "0x0000000000000000000000000000000000000001"
                 && contract.source == WatchedContractSource::ManifestRoot
         }));
         assert!(watched_contracts.iter().any(|contract| {
-            contract.chain == "ethereum-mainnet"
-                && contract.address == "0x00000000000000000000000000000000000000aa"
+            contract.address == "0x00000000000000000000000000000000000000aa"
                 && contract.source == WatchedContractSource::ManifestContract
         }));
         assert!(watched_contracts.iter().any(|contract| {
-            contract.chain == "ethereum-mainnet"
-                && contract.address == "0x00000000000000000000000000000000000000dd"
+            contract.address == "0x00000000000000000000000000000000000000dd"
                 && contract.source == WatchedContractSource::DiscoveryEdge
         }));
         assert!(watched_contracts.iter().any(|contract| {
-            contract.chain == "ethereum-mainnet"
-                && contract.address == "0x00000000000000000000000000000000000000cc"
+            contract.address == "0x00000000000000000000000000000000000000cc"
                 && contract.source == WatchedContractSource::DiscoveryEdge
         }));
 
-        let active_ens_manifests =
-            load_active_manifests_for_namespace(database.pool(), "ens").await?;
-        assert_eq!(active_ens_manifests.len(), 1);
-        assert_eq!(active_ens_manifests[0].manifest_version, 1);
-        assert_eq!(active_ens_manifests[0].source_family, "ens_v2_registry_l1");
-        assert_eq!(active_ens_manifests[0].chain, "ethereum-mainnet");
-        assert_eq!(active_ens_manifests[0].deployment_epoch, "ens_v2");
-        assert_eq!(active_ens_manifests[0].normalizer_version, "uts46-v1");
-        assert_eq!(
-            active_ens_manifests[0]
-                .capability_flags
-                .get("declared_children")
-                .expect("declared_children capability"),
-            &CapabilityFlag {
-                status: CapabilitySupportStatus::Supported,
-                notes: Some("declared children are enabled".to_owned()),
-            }
-        );
-        assert_eq!(
-            active_ens_manifests[0]
-                .capability_flags
-                .get("verified_resolution")
-                .expect("verified_resolution capability"),
-            &CapabilityFlag {
-                status: CapabilitySupportStatus::Shadow,
-                notes: None,
-            }
-        );
-        assert!(
-            load_active_manifests_for_namespace(database.pool(), "basenames")
-                .await?
-                .is_empty()
-        );
-        let ens_snapshot = load_namespace_manifest_snapshot(database.pool(), "ens").await?;
-        assert_eq!(ens_snapshot.manifests, active_ens_manifests);
-        assert!(ens_snapshot.last_updated.ends_with('Z'));
-        let basenames_snapshot =
-            load_namespace_manifest_snapshot(database.pool(), "basenames").await?;
-        assert!(basenames_snapshot.manifests.is_empty());
-        assert!(basenames_snapshot.last_updated.ends_with('Z'));
         let watched_summary = load_watched_contract_summary(database.pool()).await?;
         assert_eq!(watched_summary.unique_contract_count, 4);
-        assert_eq!(watched_summary.source_entry_count, 4);
         assert_eq!(watched_summary.manifest_root_count, 1);
         assert_eq!(watched_summary.manifest_contract_count, 1);
         assert_eq!(watched_summary.discovery_edge_count, 2);
-        assert_eq!(
-            watched_summary.chains,
-            vec![WatchedContractChainSummary {
-                chain: "ethereum-mainnet".to_owned(),
-                unique_contract_count: 4,
-                manifest_root_count: 1,
-                manifest_contract_count: 1,
-                discovery_edge_count: 2,
-            }]
-        );
+
         let watched_chain_plan = load_watched_chain_plan(database.pool()).await?;
         assert_eq!(
             watched_chain_plan,
@@ -2349,141 +4066,6 @@ admission = "reachable_from_root"
                 discovery_edge_entry_count: 2,
             }]
         );
-
-        test_dir.write_manifest(
-            "ens",
-            "ens_v2_registry_l1",
-            "v1",
-            r#"
-manifest_version = 1
-namespace = "ens"
-source_family = "ens_v2_registry_l1"
-chain = "ethereum-mainnet"
-deployment_epoch = "ens_v2"
-rollout_status = "active"
-normalizer_version = "uts46-v1"
-
-[capability_flags]
-declared_children = { status = "supported", notes = "declared children are enabled" }
-verified_resolution = "shadow"
-
-[[roots]]
-name = "RootRegistry"
-address = "0x0000000000000000000000000000000000000001"
-
-[[contracts]]
-role = "registry"
-address = "0x00000000000000000000000000000000000000AA"
-proxy_kind = "erc1967"
-implementation = "0x00000000000000000000000000000000000000EE"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-"#,
-        )?;
-        let updated_repository = load_repository(&test_dir.path)?;
-        let updated_sync_summary = sync_repository(database.pool(), &updated_repository).await?;
-        assert_eq!(updated_sync_summary.status, ManifestSyncStatus::Synced);
-        assert_eq!(updated_sync_summary.synced_manifest_count, 2);
-        assert_eq!(updated_sync_summary.active_manifest_count, 1);
-        assert_eq!(updated_sync_summary.cleared_discovery_edge_count, 1);
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-                .fetch_one(database.pool())
-                .await?,
-            2
-        );
-        assert_eq!(
-            query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'unit-test'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            1
-        );
-        assert_eq!(
-            query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1"
-            )
-            .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
-            .fetch_one(database.pool())
-            .await?,
-            1
-        );
-        assert_eq!(
-            query_scalar::<_, Option<String>>(
-                "SELECT to_address FROM discovery_edges WHERE discovery_source = $1"
-            )
-            .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
-            .fetch_one(database.pool())
-            .await?,
-            Some("0x00000000000000000000000000000000000000ee".to_owned())
-        );
-        let resynced_watched_chain_plan = load_watched_chain_plan(database.pool()).await?;
-        assert_eq!(
-            resynced_watched_chain_plan,
-            vec![WatchedChainPlan {
-                chain: "ethereum-mainnet".to_owned(),
-                addresses: vec![
-                    "0x0000000000000000000000000000000000000001".to_owned(),
-                    "0x00000000000000000000000000000000000000aa".to_owned(),
-                    "0x00000000000000000000000000000000000000cc".to_owned(),
-                    "0x00000000000000000000000000000000000000ee".to_owned(),
-                ],
-                manifest_root_entry_count: 1,
-                manifest_contract_entry_count: 1,
-                discovery_edge_entry_count: 2,
-            }]
-        );
-
-        let empty_dir = TestDir::new()?;
-        let empty_repository = load_repository(&empty_dir.path)?;
-        let empty_sync_summary = sync_repository(database.pool(), &empty_repository).await?;
-        assert_eq!(empty_sync_summary.status, ManifestSyncStatus::Synced);
-        assert_eq!(empty_sync_summary.synced_manifest_count, 0);
-        assert_eq!(empty_sync_summary.removed_manifest_count, 2);
-        assert_eq!(empty_sync_summary.cleared_discovery_edge_count, 1);
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM manifest_versions")
-                .fetch_one(database.pool())
-                .await?,
-            0
-        );
-        assert_eq!(
-            query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-                .fetch_one(database.pool())
-                .await?,
-            1
-        );
-        assert_eq!(
-            query_scalar::<_, Option<i64>>(
-                "SELECT source_manifest_id FROM discovery_edges WHERE discovery_source = 'unit-test'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            None
-        );
-        let cleared_admission_state = load_discovery_admission_state(database.pool()).await?;
-        assert_eq!(cleared_admission_state.active_manifest_count, 0);
-        assert!(
-            cleared_admission_state
-                .admit_candidate(&DiscoveryCandidate {
-                    chain: "ethereum-mainnet",
-                    from_address: "0x00000000000000000000000000000000000000AA",
-                    to_address: "0x00000000000000000000000000000000000000CC",
-                    edge_kind: "subregistry",
-                    discovery_source: "unit-test",
-                })
-                .is_empty()
-        );
-        assert!(load_watched_contracts(database.pool()).await?.is_empty());
 
         database.cleanup().await?;
         Ok(())

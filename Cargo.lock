@@ -163,11 +163,13 @@ name = "bigname-adapters"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bigname-manifests",
  "bigname-storage",
  "serde_json",
  "sha3",
  "sqlx",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -231,6 +233,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "toml",
+ "uuid",
 ]
 
 [[package]]

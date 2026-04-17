@@ -21,6 +21,18 @@ Use four distinct identity anchors:
 - `token_lineage_id`: opaque stable identity for tokenized ownership history
 - `contract_instance_id`: opaque stable identity for registry, registrar, resolver, wrapper, or transport instances
 
+Contract-instance rules:
+
+- mint a `contract_instance_id` when a manifest-declared contract or discovery-admitted contract first enters the canonical source graph
+- one admitted contract address on one chain maps to one `contract_instance_id` across all manifest and discovery epochs
+- reuse the same `contract_instance_id` while the same admitted contract address remains authoritative on the same chain
+- if the same admitted contract address becomes active again after an inactive gap, reuse the prior `contract_instance_id` and record a new non-overlapping active range
+- treat a change to the watched contract's own admitted address as a new contract instance; close the predecessor's active range and mint a successor ID instead of reusing the old one
+- roots follow the same contract-instance rules as ordinary manifest-declared and discovery-admitted contracts
+- model proxy contracts and implementation contracts as separate contract instances linked by time-ranged proxy / implementation edges
+- represent continuity between distinct contract instances with `migration` edges in the manifest/discovery graph
+- resolve discovery and watch-plan lookup from `(chain, address, point in time)` to `contract_instance_id`; raw addresses are attributes used for lookup, not graph identity
+
 Public identity rules:
 
 - exact lookup is surface-first and keyed by `logical_name_id`
@@ -60,3 +72,11 @@ Two public surfaces may bind to the same `resource_id`. Permissions and role his
 ### Token regeneration
 
 Token regeneration does not change `logical_name_id`, and it does not require a new `resource_id` when the backing authority is the same. Token attributes change within the token-lineage history rather than becoming the primary identity.
+
+### Proxy implementation upgrade
+
+The proxy contract keeps the same `contract_instance_id`. The old proxy / implementation edge closes and a new edge opens to the implementation contract instance for the new implementation address. If a prior implementation address returns later, its prior `contract_instance_id` is reused.
+
+### Declared contract replacement
+
+If a manifest changes a watched contract's own address, the prior contract instance ends and a new `contract_instance_id` begins for the successor deployment. Any continuity is represented with a `migration` edge, not by reusing the predecessor's ID. If the predecessor address returns later, its prior `contract_instance_id` is reused with a new active range.

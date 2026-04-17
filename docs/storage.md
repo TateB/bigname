@@ -49,6 +49,17 @@ Rules:
 - `resource_id` and `token_lineage_id` must survive projection rebuilds
 - token IDs, node hashes, and resolver addresses are attributes, not identity anchors
 
+`contract_instance_id` rules:
+
+- mint a new `contract_instance_id` when a manifest-declared contract or discovery-admitted contract first enters the canonical source graph
+- one admitted contract address on one chain maps to one stable `contract_instance_id` across all admission epochs
+- reuse the same `contract_instance_id` when the same contract address remains admitted on the same chain and only manifest version, rollout state, code-hash observations, or edge activity changes
+- if the same admitted contract address becomes active again after an inactive gap, reuse the prior `contract_instance_id` and record a new non-overlapping active range instead of minting another ID
+- model proxy contracts and implementation contracts as separate contract instances; proxy implementation churn mutates discovery edges and active ranges, not the proxy ID
+- if the watched contract's own admitted address changes, close the old instance active range and mint a new `contract_instance_id`; do not reuse the prior ID to represent the successor deployment, and represent any continuity between distinct instances with `migration` edges
+- store contract addresses as time-ranged attributes for raw-fact lookup, log routing, and watch-plan materialization; addresses are never the primary key of the source graph
+- roots use the same `contract_instance_id` rules as ordinary manifest-declared and discovery-admitted contracts
+
 ### Append-only event IDs
 
 Use `bigint generated always as identity` for:
@@ -63,14 +74,21 @@ Use `bigint generated always as identity` for:
 | --- | --- | --- |
 | `chain_*` | intake | lineage and canonical block graph |
 | `raw_*` | intake | immutable blockchain and execution inputs |
-| `manifest_*` | manifests/discovery | source manifests and capability versions |
-| `discovery_*` | manifests/discovery | canonical reachable contract graph |
+| `manifest_*` | manifests/discovery | source manifests, declared contract admission, capability versions |
+| `discovery_*` | manifests/discovery | canonical reachable contract graph and watch-plan expansion keyed by `contract_instance_id` |
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
 | `normalized_events` | adapters | append-only normalized protocol events |
 | `projection_*` | projection workers | disposable read models |
 | `execution_*` | execution workers | traces, cached answers, invalidations |
 
 The API process is read-only against storage.
+
+At minimum, manifests/discovery persistence must carry:
+
+- `contract_instances`: one row per stable `contract_instance_id` with chain, contract kind, and provenance; roots use the same identity family as other contract instances
+- `contract_instance_addresses`: time-ranged address attributes keyed by `contract_instance_id` for lookup from raw facts and watch targets to source-graph identity; one `contract_instance_id` may carry multiple non-overlapping active ranges when the same address is re-admitted after an inactive gap
+- `discovery_edges`: edges keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, and canonicality
+- any materialized watch-plan table keyed by `contract_instance_id` plus chain and range, including root start nodes keyed by the root `contract_instance_id`; raw address is a derived watch target, not the durable identity
 
 ## 5. Partitioning Baseline
 

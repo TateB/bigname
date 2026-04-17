@@ -4,6 +4,7 @@
 use std::sync::{Arc, OnceLock};
 
 mod block_derived_normalized_events;
+mod ens_v1_subregistry_discovery;
 mod manifest_normalized_events;
 
 /// Current adapter bootstrap status.
@@ -14,6 +15,9 @@ pub const fn bootstrap_status() -> &'static str {
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
     sync_block_derived_normalized_events,
+};
+pub use ens_v1_subregistry_discovery::{
+    EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,

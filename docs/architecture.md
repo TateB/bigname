@@ -304,6 +304,27 @@ This is required because token IDs can change or be replaced while the backing r
 
 Stable identity for registry, registrar, resolver, wrapper, or compatibility transport instances.
 
+Mint a new `contract_instance_id` when a manifest-declared contract or a discovery-admitted contract is first added to the canonical source graph.
+
+One admitted contract address on one chain maps to one `contract_instance_id` across all manifest and discovery epochs.
+
+A contract instance keeps its ID when:
+
+- the same admitted contract address on the same chain remains authoritative across manifest versions or discovery refresh
+- the same admitted contract address on the same chain returns after an inactive gap; record a new non-overlapping active range on the existing `contract_instance_id`
+- only code-hash observations, ABI metadata, rollout state, or active ranges change
+- a proxy stays the watched contract while its implementation edge changes
+
+A contract instance rotates when the watched contract itself is replaced by a different admitted contract address. In that case:
+
+- close the prior instance's active range
+- mint a new `contract_instance_id` for the successor address
+- represent continuity, if any, with a `migration` edge in the manifest/discovery graph rather than ID reuse
+
+Contract addresses are time-ranged attributes used for raw-fact matching and chain watching. Implementation addresses are modeled as separate contract instances linked by time-ranged proxy / implementation edges.
+
+These rules apply equally to manifest `[[roots]]`, manifest `[[contracts]]`, and discovery-admitted contracts.
+
 ### Rule
 
 A current token ID is never treated as stable logical identity.
@@ -501,8 +522,12 @@ Manifest changes are first-class normalized events:
 
 Rules:
 
-- root manifests bootstrap the canonical contract graph
+- root manifests bootstrap the canonical contract graph through root `contract_instance_id` nodes
 - a discovered contract becomes authoritative only if it is reachable from a canonical root or explicitly admitted by a manifest
+- manifest-declared roots and contracts admit `contract_instance_id` nodes; declared addresses are lookup attributes for those nodes, not the source-graph identity
+- re-declaring the same root or contract address on the same chain, including after an inactive gap, carries forward the existing `contract_instance_id` and records a new non-overlapping active range
+- changing the declared root or contract address mints a new contract instance and closes the old active range; any continuity to the predecessor is represented with a `migration` edge
+- declared proxy implementations resolve to separate implementation `contract_instance_id` nodes; a proxy implementation change updates the proxy / implementation edge, not the proxy identity
 - manifest versions are carried forward into normalized events and projections
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
@@ -532,6 +557,18 @@ Persist a source graph with:
 - `active_to`
 - provenance
 - canonicality state
+
+Endpoint rules:
+
+- manifest-declared and discovered edges share the same endpoint model: each endpoint is a `contract_instance_id`
+- discovery first resolves `(chain, address, point in time)` to the active `contract_instance_id`; if the address was admitted previously on that chain and is admitted again after an inactive gap, discovery reuses the historical `contract_instance_id` and records a new active range; only an address that has never been admitted on that chain mints a new `contract_instance_id`
+- addresses, implementation addresses, code hashes, and roles remain attributes or provenance on the endpoint instances; they are never the primary key of the graph
+
+Watch-plan expansion rules:
+
+- watch-plan expansion starts from active root `contract_instance_id`s admitted from `[[roots]]` and traverses active discovery edges by `contract_instance_id`
+- the watch target for intake is the address range attached to each active contract instance at the requested time
+- address-only watch rows are derived execution detail and must remain explainable back to a manifest root or discovery edge through `contract_instance_id`
 
 This graph is part of the truth model and audit surface. It is not a throwaway implementation detail.
 

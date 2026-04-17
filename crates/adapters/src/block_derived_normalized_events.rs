@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
+use bigname_manifests::{WatchedContractSource, load_watched_contracts};
 use bigname_storage::{CanonicalityState, NormalizedEvent, upsert_normalized_events};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
@@ -40,6 +41,26 @@ struct WatchedRawLogRow {
     data: Vec<u8>,
     canonicality_state: CanonicalityState,
     source_manifest_id: i64,
+    namespace: String,
+    source_family: String,
+    manifest_version: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveEmitter {
+    address: String,
+    contract_instance_id: sqlx::types::Uuid,
+    source_manifest_id: i64,
+    namespace: String,
+    source_family: String,
+    manifest_version: i64,
+    source_rank: i32,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveManifestMetadata {
+    manifest_id: i64,
+    chain: String,
     namespace: String,
     source_family: String,
     manifest_version: i64,
@@ -249,6 +270,17 @@ async fn load_watched_raw_logs(
     chain: &str,
     block_hashes: &[String],
 ) -> Result<Vec<WatchedRawLogRow>> {
+    let active_emitters = load_active_emitters(pool, chain).await?;
+    if active_emitters.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let emitters_by_address = active_emitters
+        .into_iter()
+        .map(|emitter| (emitter.address.clone(), emitter))
+        .collect::<HashMap<_, _>>();
+    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+
     let rows = sqlx::query(
         r#"
         SELECT
@@ -261,77 +293,21 @@ async fn load_watched_raw_logs(
             rl.emitting_address AS emitting_address,
             rl.topics AS topics,
             rl.data AS data,
-            rl.canonicality_state::TEXT AS canonicality_state,
-            active_emitters.source_manifest_id AS source_manifest_id,
-            active_emitters.namespace AS namespace,
-            active_emitters.source_family AS source_family,
-            active_emitters.manifest_version AS manifest_version
+            rl.canonicality_state::TEXT AS canonicality_state
         FROM raw_logs rl
-        JOIN (
-            SELECT DISTINCT ON (chain, address)
-                namespace,
-                source_family,
-                manifest_version,
-                source_manifest_id,
-                chain,
-                address
-            FROM (
-                SELECT
-                    mv.namespace AS namespace,
-                    mv.source_family AS source_family,
-                    mv.manifest_version AS manifest_version,
-                    mv.manifest_id AS source_manifest_id,
-                    mv.chain AS chain,
-                    lower(mr.address) AS address,
-                    0 AS source_rank
-                FROM manifest_versions mv
-                JOIN manifest_roots mr ON mr.manifest_id = mv.manifest_id
-                WHERE mv.rollout_status = 'active'
-
-                UNION ALL
-
-                SELECT
-                    mv.namespace AS namespace,
-                    mv.source_family AS source_family,
-                    mv.manifest_version AS manifest_version,
-                    mv.manifest_id AS source_manifest_id,
-                    mv.chain AS chain,
-                    lower(mc.address) AS address,
-                    1 AS source_rank
-                FROM manifest_versions mv
-                JOIN manifest_contracts mc ON mc.manifest_id = mv.manifest_id
-                WHERE mv.rollout_status = 'active'
-
-                UNION ALL
-
-                SELECT
-                    mv.namespace AS namespace,
-                    mv.source_family AS source_family,
-                    mv.manifest_version AS manifest_version,
-                    mv.manifest_id AS source_manifest_id,
-                    mv.chain AS chain,
-                    lower(de.to_address) AS address,
-                    2 AS source_rank
-                FROM discovery_edges de
-                JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
-                WHERE mv.rollout_status = 'active'
-            ) watched_contracts
-            ORDER BY chain, address, source_rank, source_manifest_id
-        ) active_emitters
-          ON active_emitters.chain = rl.chain_id
-         AND active_emitters.address = lower(rl.emitting_address)
         WHERE rl.chain_id = $1
           AND rl.block_hash = ANY($2::TEXT[])
+          AND lower(rl.emitting_address) = ANY($3::TEXT[])
           AND rl.canonicality_state <> 'orphaned'::canonicality_state
         ORDER BY
             rl.block_number,
             rl.transaction_index,
-            rl.log_index,
-            active_emitters.source_manifest_id
+            rl.log_index
         "#,
     )
     .bind(chain)
     .bind(block_hashes)
+    .bind(&watched_addresses)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -343,6 +319,19 @@ async fn load_watched_raw_logs(
 
     rows.into_iter()
         .map(|row| {
+            let emitting_address = row
+                .try_get::<String, _>("emitting_address")
+                .context("missing emitting_address")?;
+            let normalized_emitting_address = emitting_address.to_ascii_lowercase();
+            let active_emitter = emitters_by_address
+                .get(&normalized_emitting_address)
+                .with_context(|| {
+                    format!(
+                        "missing active emitter attribution for chain {} address {}",
+                        chain, emitting_address
+                    )
+                })?;
+
             Ok(WatchedRawLogRow {
                 chain_id: row.try_get("chain_id").context("missing chain_id")?,
                 block_hash: row.try_get("block_hash").context("missing block_hash")?,
@@ -356,18 +345,117 @@ async fn load_watched_raw_logs(
                     .try_get("transaction_index")
                     .context("missing transaction_index")?,
                 log_index: row.try_get("log_index").context("missing log_index")?,
-                emitting_address: row
-                    .try_get("emitting_address")
-                    .context("missing emitting_address")?,
+                emitting_address,
                 topics: row.try_get("topics").context("missing topics")?,
                 data: row.try_get("data").context("missing data")?,
                 canonicality_state: parse_canonicality_state(
                     &row.try_get::<String, _>("canonicality_state")
                         .context("missing canonicality_state")?,
                 )?,
-                source_manifest_id: row
-                    .try_get("source_manifest_id")
-                    .context("missing source_manifest_id")?,
+                source_manifest_id: active_emitter.source_manifest_id,
+                namespace: active_emitter.namespace.clone(),
+                source_family: active_emitter.source_family.clone(),
+                manifest_version: active_emitter.manifest_version,
+            })
+        })
+        .collect()
+}
+
+async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+    let watched_contracts = load_watched_contracts(pool)
+        .await
+        .context("failed to load watched contracts for adapter emitter attribution")?;
+    let watched_contracts = watched_contracts
+        .into_iter()
+        .filter(|contract| contract.chain == chain)
+        .collect::<Vec<_>>();
+    if watched_contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let manifest_ids = watched_contracts
+        .iter()
+        .map(|contract| {
+            contract.source_manifest_id.with_context(|| {
+                format!(
+                    "watched contract {} on {} is missing source_manifest_id",
+                    contract.address, contract.chain
+                )
+            })
+        })
+        .collect::<Result<HashSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
+
+    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
+    for watched_contract in watched_contracts {
+        let source_manifest_id = watched_contract
+            .source_manifest_id
+            .context("watched contract missing source_manifest_id after validation")?;
+        let manifest = active_manifests.get(&source_manifest_id).with_context(|| {
+            format!("missing active manifest metadata for manifest_id {source_manifest_id}")
+        })?;
+        if manifest.chain != watched_contract.chain {
+            bail!(
+                "watched contract chain {} does not match active manifest chain {} for manifest_id {}",
+                watched_contract.chain,
+                manifest.chain,
+                source_manifest_id
+            );
+        }
+
+        let candidate = ActiveEmitter {
+            address: watched_contract.address.clone(),
+            contract_instance_id: watched_contract.contract_instance_id,
+            source_manifest_id,
+            namespace: manifest.namespace.clone(),
+            source_family: manifest.source_family.clone(),
+            manifest_version: manifest.manifest_version,
+            source_rank: source_rank(watched_contract.source),
+        };
+
+        match emitters_by_address.get(&candidate.address) {
+            Some(current) if !candidate_precedes(&candidate, current) => {}
+            _ => {
+                emitters_by_address.insert(candidate.address.clone(), candidate);
+            }
+        }
+    }
+
+    let mut emitters = emitters_by_address.into_values().collect::<Vec<_>>();
+    emitters.sort_by(|left, right| {
+        left.address
+            .cmp(&right.address)
+            .then(left.source_rank.cmp(&right.source_rank))
+            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
+            .then(left.contract_instance_id.cmp(&right.contract_instance_id))
+    });
+    Ok(emitters)
+}
+
+async fn load_active_manifest_metadata(
+    pool: &PgPool,
+    manifest_ids: &[i64],
+) -> Result<HashMap<i64, ActiveManifestMetadata>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT manifest_id, chain, namespace, source_family, manifest_version
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+          AND manifest_id = ANY($1::BIGINT[])
+        "#,
+    )
+    .bind(manifest_ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to load active manifest metadata for watched contracts")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let manifest = ActiveManifestMetadata {
+                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
+                chain: row.try_get("chain").context("missing chain")?,
                 namespace: row.try_get("namespace").context("missing namespace")?,
                 source_family: row
                     .try_get("source_family")
@@ -375,9 +463,30 @@ async fn load_watched_raw_logs(
                 manifest_version: row
                     .try_get("manifest_version")
                     .context("missing manifest_version")?,
-            })
+            };
+            Ok((manifest.manifest_id, manifest))
         })
         .collect()
+}
+
+fn source_rank(source: WatchedContractSource) -> i32 {
+    match source {
+        WatchedContractSource::ManifestRoot => 0,
+        WatchedContractSource::ManifestContract => 1,
+        WatchedContractSource::DiscoveryEdge => 2,
+    }
+}
+
+fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {
+    (
+        candidate.source_rank,
+        candidate.source_manifest_id,
+        candidate.contract_instance_id,
+    ) < (
+        current.source_rank,
+        current.source_manifest_id,
+        current.contract_instance_id,
+    )
 }
 
 async fn load_existing_event_identities(
@@ -569,6 +678,7 @@ mod tests {
         postgres::{PgConnectOptions, PgPoolOptions},
         types::time::OffsetDateTime,
     };
+    use uuid::Uuid;
 
     use super::*;
 
@@ -688,30 +798,161 @@ mod tests {
         .context("failed to insert manifest version")
     }
 
-    async fn insert_manifest_contract(
+    async fn insert_manifest_contract_instance(
         pool: &PgPool,
         manifest_id: i64,
-        role: &str,
-        address: &str,
+        declaration_kind: &str,
+        declaration_name: &str,
+        contract_instance_id: Uuid,
+        declared_address: &str,
+        role: Option<&str>,
+        proxy_kind: Option<&str>,
+        implementation_contract_instance_id: Option<Uuid>,
+        declared_implementation_address: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO manifest_contracts (
+            INSERT INTO manifest_contract_instances (
                 manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                code_hash,
+                abi_ref,
                 role,
-                address,
                 proxy_kind,
-                implementation
+                implementation_contract_instance_id,
+                declared_implementation_address
             )
-            VALUES ($1, $2, $3, 'none', NULL)
+            VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8, $9)
             "#,
         )
         .bind(manifest_id)
+        .bind(declaration_kind)
+        .bind(declaration_name)
+        .bind(contract_instance_id)
+        .bind(declared_address)
         .bind(role)
-        .bind(address)
+        .bind(proxy_kind)
+        .bind(implementation_contract_instance_id)
+        .bind(declared_implementation_address)
         .execute(pool)
         .await
-        .context("failed to insert manifest contract")?;
+        .context("failed to insert manifest contract instance")?;
+        Ok(())
+    }
+
+    async fn insert_contract_instance(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        chain_id: &str,
+        contract_kind: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .bind(contract_kind)
+        .bind("{}")
+        .execute(pool)
+        .await
+        .context("failed to insert contract instance")?;
+        Ok(())
+    }
+
+    async fn insert_contract_instance_address(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        chain_id: &str,
+        address: &str,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                source_manifest_id,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .bind("{}")
+        .execute(pool)
+        .await
+        .context("failed to insert contract-instance address")?;
+        Ok(())
+    }
+
+    async fn deactivate_active_contract_instance_addresses(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET deactivated_at = now()
+            WHERE contract_instance_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to deactivate contract-instance address rows")?;
+        Ok(())
+    }
+
+    async fn insert_discovery_edge(
+        pool: &PgPool,
+        chain_id: &str,
+        edge_kind: &str,
+        from_contract_instance_id: Uuid,
+        to_contract_instance_id: Uuid,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            "#,
+        )
+        .bind(chain_id)
+        .bind(edge_kind)
+        .bind(from_contract_instance_id)
+        .bind(to_contract_instance_id)
+        .bind(format!("test:{edge_kind}"))
+        .bind(source_manifest_id)
+        .bind("automatic")
+        .bind("{}")
+        .execute(pool)
+        .await
+        .context("failed to insert discovery edge")?;
         Ok(())
     }
 
@@ -844,18 +1085,64 @@ mod tests {
         )
         .await?;
 
-        insert_manifest_contract(
+        let active_contract_instance_id = Uuid::new_v4();
+        let inactive_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
             database.pool(),
-            active_manifest_id,
-            "wrapper",
-            "0x00000000000000000000000000000000000000aa",
+            active_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
         )
         .await?;
-        insert_manifest_contract(
+        insert_contract_instance(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+
+        insert_manifest_contract_instance(
+            database.pool(),
+            active_manifest_id,
+            "contract",
+            "wrapper",
+            active_contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("wrapper"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            active_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            active_manifest_id,
+        )
+        .await?;
+
+        insert_manifest_contract_instance(
             database.pool(),
             inactive_manifest_id,
+            "contract",
             "wrapper",
+            inactive_contract_instance_id,
             "0x00000000000000000000000000000000000000bb",
+            Some("wrapper"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+            inactive_manifest_id,
         )
         .await?;
 
@@ -910,6 +1197,7 @@ mod tests {
             DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION
         );
         assert_eq!(events[0].canonicality_state, CanonicalityState::Canonical);
+        assert_eq!(events[0].source_manifest_id, Some(active_manifest_id));
         assert_eq!(events[0].after_state["decoded_name"], "wrapped.eth");
 
         let second = sync_block_derived_normalized_events(
@@ -933,6 +1221,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_block_derived_normalized_events_uses_active_manifest_after_reactivation_gap()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let previous_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            "ens_v1_name_wrapper",
+            "ethereum-mainnet",
+            "ens_v0",
+            "deprecated",
+            "uts46-v1",
+            "manifests/ens/ens_v1_name_wrapper/0.toml",
+        )
+        .await?;
+        let active_manifest_id = insert_manifest_version(
+            database.pool(),
+            2,
+            "ens",
+            "ens_v1_name_wrapper",
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_name_wrapper/1.toml",
+        )
+        .await?;
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            active_manifest_id,
+            "contract",
+            "wrapper",
+            contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("wrapper"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            previous_manifest_id,
+        )
+        .await?;
+        deactivate_active_contract_instance_addresses(database.pool(), contract_instance_id)
+            .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            active_manifest_id,
+        )
+        .await?;
+        insert_raw_name_wrapped_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            42,
+            "0x00000000000000000000000000000000000000aa",
+            CanonicalityState::Canonical,
+        )
+        .await?;
+
+        let first = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+        )
+        .await?;
+        assert_eq!(first.scanned_log_count, 1);
+        assert_eq!(first.matched_log_count, 1);
+        assert_eq!(first.total_synced_count, 1);
+        assert_eq!(first.total_inserted_count, 1);
+
+        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source_manifest_id, Some(active_manifest_id));
+        assert_eq!(events[0].manifest_version, 2);
+        assert_eq!(
+            events[0].raw_fact_ref["emitting_address"],
+            "0x00000000000000000000000000000000000000aa"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_watches_proxy_implementations_but_not_migrations()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-mainnet",
+            "ens_v2",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v2_registry_l1/1.toml",
+        )
+        .await?;
+        let proxy_contract_instance_id = Uuid::new_v4();
+        let implementation_contract_instance_id = Uuid::new_v4();
+        let successor_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            proxy_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            successor_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            "registry",
+            proxy_contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registry"),
+            Some("erc1967"),
+            Some(implementation_contract_instance_id),
+            Some("0x00000000000000000000000000000000000000dd"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            proxy_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            implementation_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000dd",
+            manifest_id,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            successor_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000ee",
+            manifest_id,
+        )
+        .await?;
+        insert_discovery_edge(
+            database.pool(),
+            "ethereum-mainnet",
+            "proxy_implementation",
+            proxy_contract_instance_id,
+            implementation_contract_instance_id,
+            manifest_id,
+        )
+        .await?;
+        insert_discovery_edge(
+            database.pool(),
+            "ethereum-mainnet",
+            "migration",
+            proxy_contract_instance_id,
+            successor_contract_instance_id,
+            manifest_id,
+        )
+        .await?;
+
+        insert_raw_name_wrapped_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            43,
+            "0x00000000000000000000000000000000000000dd",
+            CanonicalityState::Canonical,
+        )
+        .await?;
+        insert_raw_name_wrapped_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            44,
+            "0x00000000000000000000000000000000000000ee",
+            CanonicalityState::Canonical,
+        )
+        .await?;
+
+        let summary = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &[
+                "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+                "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
+            ],
+        )
+        .await?;
+        assert_eq!(summary.scanned_log_count, 2);
+        assert_eq!(summary.matched_log_count, 1);
+        assert_eq!(summary.total_synced_count, 1);
+        assert_eq!(summary.total_inserted_count, 1);
+
+        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source_manifest_id, Some(manifest_id));
+        assert_eq!(
+            events[0].raw_fact_ref["emitting_address"],
+            "0x00000000000000000000000000000000000000dd"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn sync_block_derived_normalized_events_skips_inactive_manifests() -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let database = TestDatabase::new().await?;
@@ -949,11 +1482,33 @@ mod tests {
             "manifests/ens/ens_v1_name_wrapper/1.toml",
         )
         .await?;
-        insert_manifest_contract(
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
             database.pool(),
             manifest_id,
+            "contract",
             "wrapper",
+            contract_instance_id,
             "0x00000000000000000000000000000000000000aa",
+            Some("wrapper"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
         )
         .await?;
         insert_raw_name_wrapped_log(

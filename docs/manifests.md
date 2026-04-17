@@ -86,7 +86,24 @@ declared_children = "supported"
 verified_resolution = "shadow"
 ```
 
-## 5. Discovery Admission Rules
+## 5. Contract Instance Admission And Continuity
+
+Manifest loading admits source-graph nodes as `contract_instance_id`s, not as raw addresses.
+
+A manifest-declared root or contract instance keeps its ID only while the same declared contract address remains admitted on the same chain.
+
+Rules:
+
+- each active `[[roots]]` and `[[contracts]]` entry resolves to one admitted `contract_instance_id`
+- `[[roots]]` seed canonical graph expansion and watch-plan expansion, but otherwise follow the same identity and continuity rules as `[[contracts]]`
+- reusing the same declared address on the same chain across manifest versions, including after an inactive gap, carries forward the existing `contract_instance_id` and records a new non-overlapping active range
+- changing a root or contract entry's own declared address closes the prior instance active range and admits a new `contract_instance_id`; any continuity to the predecessor is expressed by a `migration` edge, not by ID reuse
+- when `proxy_kind != "none"`, the proxy address and the `implementation` address refer to separate contract instances linked by a time-ranged proxy / implementation edge
+- changing only `implementation` keeps the proxy's `contract_instance_id`; reuse the prior implementation instance if that implementation address reappears, otherwise mint a new implementation instance
+
+Contract addresses remain stored as time-ranged attributes for raw-fact matching and watch-plan expansion.
+
+## 6. Discovery Admission Rules
 
 A discovered contract becomes authoritative only if one of the following is true:
 
@@ -96,13 +113,21 @@ A discovered contract becomes authoritative only if one of the following is true
 
 Every admitted discovery edge stores:
 
+- `from_contract_instance_id`
+- `to_contract_instance_id`
 - source manifest version
 - edge kind
 - discovery source
 - active range
 - provenance
 
-## 6. Manifest Change Propagation
+Discovery uses raw addresses only as lookup inputs. It resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the canonical edge.
+
+If discovery re-admits an address that was admitted previously on the same chain and later became inactive, it reuses the prior `contract_instance_id` and records a new non-overlapping active range. It mints a new `contract_instance_id` only when that address has never been admitted on that chain.
+
+Manifest-declared and discovered proxy / implementation links use the same edge and active-range rules.
+
+## 7. Manifest Change Propagation
 
 Manifest changes produce normalized events:
 
@@ -116,7 +141,17 @@ They also:
 - invalidate relevant execution cache entries
 - trigger projection recomputation where capability boundaries change
 
-## 7. Capability Policy
+## 8. Watch-Plan Expansion
+
+Watch-plan expansion starts from active manifest roots by `contract_instance_id` and traverses active discovery edges by `contract_instance_id`.
+
+Rules:
+
+- the chain-intake watch target is the address range attached to each active contract instance at the requested time
+- watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root -> discovery edge(s) -> contract_instance_id`
+- address-only watch state is derived and may be rebuilt from manifests, contract-instance address attributes, and active discovery edges
+
+## 9. Capability Policy
 
 Capabilities gate behavior, not public-contract existence.
 
@@ -126,7 +161,7 @@ Rules:
 - shadow capabilities may write facts and traces without being enabled for general reads
 - adding a new capability is additive if it does not change prior semantics
 
-## 8. Ownership And Workflow
+## 10. Ownership And Workflow
 
 - manifest/discovery owners maintain the TOML files
 - adapter owners consume manifest versions as inputs, not hidden configuration
