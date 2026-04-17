@@ -22,9 +22,9 @@ Split work along `docs/workstreams.md` boundaries when possible.
 
 ## Modes
 
-- **default** — bounded task; fan out only if needed.
-- **broad** (triggered by `$parallel-pickup` or requests to parallelize) — split a large task into disjoint owned slices and run workers concurrently.
-- **continuation** (triggered by `$phased-continuation` or "keep going") — loop: research → execute → research. See that skill for loop-specific rules.
+- **default** — bounded task. Parallelize subtasks whenever they have approximately disjoint work zones; only serialize when the task genuinely has one unit of work.
+- **broad** (triggered by `$parallel-pickup` or explicit fan-out requests) — split a large task into owned slices and run workers concurrently. With the parallel-first defaults below, this is now a thin wrapper on `default`; keep it as an entry-point name for discoverability.
+- **continuation** (triggered by `$phased-continuation` or "keep going") — run the scheduler loop: research while executing, refill in-flight queue from the pending pool, commit after each completed slice. See that skill for loop-specific rules.
 
 ## Subagents
 
@@ -88,12 +88,14 @@ Bounded deliverables only — no vague goals like "figure it out". Tell each sub
 
 ## Preferred fan-out pattern
 
-1. Read the relevant docs and classify the change (`$change-gate` if shared-interface risk).
-2. If the real question is what to do next, delegate slice selection to `next_slice_researcher`.
-3. If the slice is broad or underspecified, delegate decomposition to `task_designer`.
-4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit, and append to the slice log. Prefer fewer workers each owning a larger cohesive chunk (capability + tests + wiring) over many thin workers — extra workers only help when the chunks are genuinely independent and the coordination cost is smaller than the wall-clock gain.
+Pipeline the read-only stages. Parallelize within every stage that allows it. Workers at task level stay bundled (code + tests + wiring per task); the parallelism sits in how many tasks run concurrently, not in slicing a single capability across workers.
+
+1. If the real question is what to do next, delegate slice selection to `next_slice_researcher`. Expect 2–4 envelopes back.
+2. For every returned envelope, fire `$change-gate` and `task_designer` in parallel — they are read-only, share no write ownership, and there is no correctness reason to serialize them.
+3. Dispatch workers from `task_designer`'s `concurrent_wave` groupings up to `max_threads=6` across the whole in-flight set. Append every dispatched slice to the slice log.
+4. As soon as workers are dispatched, if more slices may be available, spawn another `next_slice_researcher` so the next cycle's pending pool is ready when workers drain. Research runs *during* execution; waiting until workers return is a cache miss.
 5. Use `docs_writer` for doc and task-writeup changes.
-6. Use `verification_reviewer` for cross-slice checking when risk is high or multiple workers edited adjacent surfaces.
+6. Use `verification_reviewer` for cross-slice checking when `parallel_risk` was `coordinated` or when multiple in-flight slices actually touched adjacent surfaces.
 7. Steer live agents: answer blockers, redirect unclear work, request tighter follow-up. Close agents when their work is integrated.
 8. Synthesize results for the user without taking over implementation.
 

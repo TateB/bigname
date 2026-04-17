@@ -1,0 +1,19 @@
+# Auto-approved commands for the bigname orchestrator.
+#
+# Rationale: $phased-continuation runs a parallel scheduler loop that commits
+# after each completed slice. Prompting the user for every `git add` and
+# `git commit` defeats the loop. Both are safe, local, reversible operations.
+# Any other git invocation (push, reset, checkout, rebase, etc.) still falls
+# through to the normal approval flow.
+
+prefix_rule(
+    pattern = ["git", "add"],
+    decision = "allow",
+    justification = "Staging orchestrator-driven changes is safe and local.",
+)
+
+prefix_rule(
+    pattern = ["git", "commit"],
+    decision = "allow",
+    justification = "Committing per-slice keeps the log bisection-friendly; push stays a user action.",
+)
