@@ -994,6 +994,9 @@ Rules:
 - if a later additive slice ships richer tuple-present claimed payloads, `claimed_primary_name` is frozen to the field boundary `{status, name?, raw_claim_name?, unsupported_reason?, provenance?}`; `name`, when later shipped, carries the normalized claim identity using the shared `NameRef` shape, `raw_claim_name` appears only for `status=invalid_name`, and `failure_reason` is not used on this declared object
 - if a later additive slice ships richer tuple-present verified payloads, `verified_primary_name` is frozen to the field boundary `{status, name?, unsupported_reason?, failure_reason?, provenance?}`; its `name`, when later shipped, uses that same `NameRef` shape, and `raw_claim_name` never appears on this execution-derived object
 - in the shipped Phase 7 bootstrap slice, richer ENS tuple-present payloads remain blocked: reverse tuple presence, reverse-only claim precedence, or verification establishing a concrete normalized name target do not by themselves populate `claimed_primary_name.name`, `claimed_primary_name.raw_claim_name`, or claim-local section provenance
+- the first additive ENS `verified_primary_name` slice, when later shipped, is limited to persisted readback for the same requested tuple and stable execution identity `request_type=verified_primary_name`; this mixed route does not become a fresh execution trigger
+- for that additive slice, the verified execution `request key` identity is the exact normalized route tuple `{namespace}:{normalized_address}:{coin_type}`, where `normalized_address` uses the same lowercase normalization as the route lookup; claimed text, normalized name identity, verified target address, result status, and section-local provenance do not participate in that key
+- `primary_names_current(address, coin_type, namespace)` is the only admitted claim-side lookup / invalidation anchor for that verified tuple; tuple presence or claim-local invalidation inputs projected there do not by themselves populate richer `claimed_primary_name` or `verified_primary_name` fields
 - when those additive fields later ship, `claimed_primary_name.name` appears only for `status=success`; `verified_primary_name.name` appears only for `status=success` or `status=mismatch`, where the route established a concrete normalized name target for verification
 - the richer tuple-present fields above are prose-frozen only until additive handler support ships; the current bootstrap handler and current `docs/api-v1.openapi.json` publication remain limited to the already shipped bootstrap envelope
 - `verified_primary_name` is authoritative only when `status=success`
@@ -1005,10 +1008,11 @@ Rules:
 - no declared or verified primary-name answer for the requested tuple returns `200` with `status=not_found`; it does not turn the route into `404`
 - unsupported claim surfaces or unsupported verified entrypoints return `200` with the corresponding object `status=unsupported`
 - top-level `provenance` summarizes the declared claim inputs and, when an execution-derived verified answer is present, the verification trace
+- top-level `provenance` is the only response-wide join between claim-side inputs and any persisted verification trace; later section-local `claimed_primary_name.provenance` and `verified_primary_name.provenance` must remain strict refinements of that top-level identity rather than a second route-level truth system
 - `claimed_primary_name.provenance`, when later shipped, is claim-local declared provenance and must not introduce a second `execution_trace_id`
 - `verified_primary_name.provenance`, when later shipped, is verification-local provenance and must stay within top-level `provenance.execution_trace_id`
 - in the shipped bootstrap handler, route-level `coverage` remains bootstrap-only for primary-name lookup: `status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason="primary-name coverage is not yet supported"`
-- tuple presence, tuple absence, a verified mismatch, or resolver-backed verification detail does not by itself graduate that bootstrap primary-name coverage summary
+- tuple presence, tuple absence, a verified mismatch, persisted ENS `verified_primary_name` readback, or resolver-backed verification detail does not by itself graduate that bootstrap primary-name coverage summary
 
 ## 6. Sorting And Pagination Defaults
 

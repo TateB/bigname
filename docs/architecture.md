@@ -1060,6 +1060,9 @@ Rules:
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
 - in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; richer ENS tuple-present claimed payloads remain blocked until a later doc-first contract update freezes an honest declared source for them
+- the first additive ENS verified-primary readback slice uses stable execution identity `request_type=verified_primary_name` with request-key identity `{namespace}:{normalized_address}:{coin_type}` for the exact route tuple; claimed text, normalized name identity, verified target address, result status, and section-local provenance are outside that cache identity
+- the matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that verified request; the projection may carry claim-local lookup and invalidation inputs only, and it does not become a second verified ledger
+- top-level route provenance joins declared claim inputs with any persisted verification trace; section-local claim provenance stays declared-only, and section-local verified provenance stays within the top-level `execution_trace_id`
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
@@ -1278,7 +1281,7 @@ Rules:
 - wildcard and offchain name classes are not globally enumerable in general
 - record inventory is `best_effort` unless a resolver family exposes explicit enumeration or the platform has a source-specific index
 - child enumeration is authoritative only for declared direct children unless the caller explicitly opts into other surface classes
-- the shipped primary-name route remains bootstrap-only for coverage: route presence or tuple lookup does not by itself graduate primary-name coverage beyond `status=unsupported` and `exhaustiveness=not_applicable`
+- the shipped primary-name route remains bootstrap-only for coverage: route presence, tuple lookup, or persisted ENS `verified_primary_name` readback does not by itself graduate primary-name coverage beyond `status=unsupported` and `exhaustiveness=not_applicable`
 - reverse tuple presence and resolver-backed verification detail do not by themselves unlock richer ENS claimed-payload fields or change that bootstrap primary-name coverage state
 - deferred primary-claim fallback sources are outside the current primary-name coverage basis until a later doc-first contract change admits them explicitly
 

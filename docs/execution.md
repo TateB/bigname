@@ -77,6 +77,11 @@ Rules:
 - for ENS on Ethereum Mainnet in the current contract, the admitted declared claim surface is reverse-only: `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
 - for ENS on Ethereum Mainnet, the verification step for that claimed name reuses the `ens_execution` source family and its manifest-declared `universal_resolver` entrypoint at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; declared claim ownership and verified execution ownership stay separate
 - that declared-vs-verified split means Phase 7 does not synthesize richer ENS `claimed_primary_name` payloads by combining reverse tuple intake with resolver-backed or execution-derived name identity; those richer claimed payloads remain blocked
+- the first additive ENS verified-primary slice, when later shipped, is persisted readback only for the exact route tuple; the read path does not become a fresh execution entrypoint
+- that slice uses stable execution identity `request_type=verified_primary_name`
+- its `request key` identity is the exact normalized route tuple `{namespace}:{normalized_address}:{coin_type}`, where `normalized_address` uses the same lowercase normalization as `GET /v1/primary-names/{address}`; claimed text, normalized claim or verified name identity, verified target address, result status, and section-local provenance do not participate in that key
+- `primary_names_current(address, coin_type, namespace)` is the claim-side lookup / invalidation anchor for that same tuple; projection-owned claim state may explain tuple admission or claim invalidation, but it must not persist `execution_trace_id` or `verified_primary_name`
+- top-level route provenance joins claim-side and verification-side context; section-local provenance stays narrower, and only the verified section may carry data anchored to the persisted `execution_trace_id`
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - manifest rollout and capability state remain source-family-local inputs only: they may admit reverse claim intake or shadow execution traces and cache ownership, but they do not by themselves widen ENS claim precedence, graduate route-level primary-name coverage, or ship richer tuple-present `claimed_primary_name` or `verified_primary_name` payloads
 - the shipped bootstrap route may still return explicit verified `status=unsupported` without surfacing the richer tuple-present claimed or verified payloads above
@@ -99,6 +104,8 @@ Each verified answer persists:
 - finished timestamp
 
 For resolution, one persisted answer may include multiple selector-scoped outputs under the same `execution_trace_id`.
+
+For the first additive ENS verified-primary slice, one persisted answer covers exactly one `{address, namespace=ens, coin_type}` tuple under `request_type=verified_primary_name`.
 
 Each step records:
 
@@ -129,6 +136,8 @@ Invalidate on:
 - primary claim change
 
 For resolution, `request key` includes the normalized explicit selector set so the cache boundary matches `verified_queries`.
+
+For ENS verified primary-name, `request key` is the normalized tuple string `ens:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that key; projection updates for that row may invalidate request-matching verified answers, but the projection does not persist verified result payloads or trace IDs.
 
 ## 6. Explain Requirements
 
@@ -161,5 +170,5 @@ For the first implementation slice:
 - for that support check, use the same declared topology snapshot as the mixed route: resolver selection must stay anchored to the requested surface, `wildcard.source` must be `null` with `matched_labels=[]`, `alias.final_target` must be `null` with `hops=[]`, and all `transport` fields must be `null`
 - ENS non-direct verified requests, including ancestor-selected resolver paths, wildcard-derived paths, alias-rewritten paths, and transport-assisted paths, remain deferred and return explicit selector-local `status=unsupported` on the mixed route; the shipped explain route does not synthesize public traces for them
 - Basenames verified execution is scaffolded but the public verified route remains bootstrap-scaffolded and explicit unsupported until Base-side authority and L1 transport are both wired
-- ENS primary-name support remains bootstrap-only: the public route may be present and the owning source families may be admitted, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
+- ENS primary-name support remains bootstrap-only: the public route may be present, the owning source families may be admitted, and later persisted ENS `verified_primary_name` readback may land, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all

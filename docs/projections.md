@@ -24,7 +24,7 @@ The exact-name explain routes for surface-binding and authority-control now ship
 | `permissions_current` | `(resource_id, subject, scope)` | resource permissions reads (shipped) | permission and transfer events |
 | `resolver_current` | `(chain_id, resolver_address)` | resolver overview (shipped) | resolver, alias, permission, inventory events |
 | `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution inventory + cache | record and version-boundary events |
-| `primary_names_current` | `(address, coin_type, namespace)` | declared primary claim + verification lookup key | reverse, primary claim, verified primary events |
+| `primary_names_current` | `(address, coin_type, namespace)` | declared primary claim + verified-primary lookup / invalidation anchor | reverse, primary claim, verified primary events |
 | `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
 
 History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. The shipped address-history view composes address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
@@ -119,12 +119,15 @@ History reads use normalized events plus thin cursor support rather than a separ
 - the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
 - projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name`; richer claimed payload fields remain additive-only
 - for ENS on Ethereum Mainnet in Phase 7, the shipped projection is tuple-presence only: reverse tuple admission supplies lookup and invalidation state only, and it does not join resolver-backed or execution-derived name identity into richer `claimed_primary_name` fields
+- `primary_names_current(address, coin_type, namespace)` is the only projection-owned claim-side lookup / invalidation identity admitted for later ENS `verified_primary_name` support
+- that identity stays tied to the exact requested tuple and may support tuple presence, declared claim state, and request-matching invalidation only; it does not own execution `request_type`, execution `request key`, `execution_trace_id`, verified status, verified name identity, or verification-local failure payloads
 - the richer claimed field boundary `{name?, raw_claim_name?, provenance?}` remains blocked until a later doc-first contract update freezes an honest declared source for those fields
 - tuple presence is a bootstrap lookup and invalidation hook only; it does not by itself widen claim precedence, graduate route-level coverage, or imply richer tuple-present claimed payload support
 - `raw_claim_name` is projection-owned claim state only; it exists to preserve the declared raw input when normalization fails and must not be copied into `verified_primary_name`
 - projection rows do not own verified-only states or failure payloads: `mismatch`, `execution_failed`, and verification-local `failure_reason` stay execution-derived even when the tuple row exists
-- projection-local provenance may explain the claimed tuple and its invalidation inputs, but it must not mint an execution trace or a second verified truth system
+- projection-local provenance may explain the claimed tuple and its invalidation inputs, but it must not mint an execution trace or a second verified truth system; top-level route provenance remains the only response-wide join between claim-side and verification-side data
 - `verified_primary_name` in `mode=verified|both` remains execution-derived even when verified-primary normalized events are also projected for lookup and invalidation support
+- even if later ENS `verified_primary_name` readback lands, that projection-owned lookup / invalidation identity does not by itself graduate route-level primary-name coverage beyond its bootstrap unsupported state
 
 ## 4. Invalidation Rules
 
