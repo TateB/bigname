@@ -26,17 +26,17 @@ mod shipped_api {
         use bigname_storage::{
             CanonicalityState, ExecutionBoundaryInvalidation, ExecutionCacheKey,
             ExecutionManifestInvalidation, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
-            NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, RawBlock,
-            RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
-            SurfaceBindingKind, TokenLineage, default_database_url,
-            invalidate_execution_outcomes_for_manifest_version,
+            NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
+            PrimaryNameClaimStatus, PrimaryNameCurrentRow, RawBlock, RecordInventoryCurrentRow,
+            ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+            default_database_url, invalidate_execution_outcomes_for_manifest_version,
             invalidate_execution_outcomes_for_manifest_version_and_request_key,
             invalidate_execution_outcomes_for_record_boundary,
             invalidate_execution_outcomes_for_record_boundary_and_request_key,
             invalidate_execution_outcomes_for_topology_boundary,
             invalidate_execution_outcomes_for_topology_boundary_and_request_key,
             load_execution_outcome, load_execution_trace, upsert_execution_outcome,
-            upsert_execution_trace,
+            upsert_execution_trace, upsert_primary_name_current_rows,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -511,6 +511,18 @@ mod shipped_api {
                 .await
                 .context("worker primary_names_current rebuild task panicked")??;
 
+                Ok(())
+            }
+
+            async fn insert_primary_name_current_row(
+                &self,
+                row: PrimaryNameCurrentRow,
+            ) -> Result<()> {
+                upsert_primary_name_current_rows(&self.pool, &[row])
+                    .await
+                    .context(
+                        "failed to upsert primary_names_current row for conformance harness",
+                    )?;
                 Ok(())
             }
 
@@ -3945,6 +3957,129 @@ mod shipped_api {
 
             assert_eq!(both_payload.declared_state, declared_payload.declared_state);
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+
+            for payload in [&declared_payload, &verified_payload, &both_payload] {
+                assert_primary_name_bootstrap_invariants(payload);
+            }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn primary_names_contract_reads_raw_claim_name_for_invalid_name_exact_tuple()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000abc";
+            let expected_data = json!({
+                "address": address,
+                "namespace": "ens",
+                "coin_type": "60",
+            });
+
+            database
+                .insert_primary_name_current_row(PrimaryNameCurrentRow {
+                    address: address.to_owned(),
+                    namespace: "ens".to_owned(),
+                    coin_type: "60".to_owned(),
+                    claim_status: PrimaryNameClaimStatus::InvalidName,
+                    raw_claim_name: Some("alice..eth".to_owned()),
+                    claim_provenance: json!({
+                        "seed": "target_invalid_name",
+                    }),
+                })
+                .await?;
+            database
+                .insert_primary_name_current_row(PrimaryNameCurrentRow {
+                    address: address.to_owned(),
+                    namespace: "ens".to_owned(),
+                    coin_type: "61".to_owned(),
+                    claim_status: PrimaryNameClaimStatus::InvalidName,
+                    raw_claim_name: Some("sibling..eth".to_owned()),
+                    claim_provenance: json!({
+                        "seed": "sibling_invalid_name",
+                    }),
+                })
+                .await?;
+
+            let declared_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=declared"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("declared invalid-name primary-name request failed")?;
+            let verified_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("verified invalid-name primary-name request failed")?;
+            let both_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=both"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed invalid-name primary-name request failed")?;
+
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            assert_eq!(verified_response.status(), StatusCode::OK);
+            assert_eq!(both_response.status(), StatusCode::OK);
+
+            let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+            let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+            let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+            assert_eq!(declared_payload.data, expected_data);
+            assert_eq!(verified_payload.data, expected_data);
+            assert_eq!(both_payload.data, expected_data);
+            assert_eq!(
+                declared_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "invalid_name",
+                        "raw_claim_name": "alice..eth",
+                    }
+                }))
+            );
+            assert_eq!(declared_payload.verified_state, None);
+            assert_eq!(verified_payload.declared_state, None);
+            assert_eq!(
+                verified_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+            assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+
+            let claimed_primary_name = both_payload
+                .declared_state
+                .as_ref()
+                .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+                .and_then(Value::as_object)
+                .expect("declared invalid-name payload must include claimed_primary_name");
+            assert!(
+                !claimed_primary_name.contains_key("name"),
+                "declared invalid-name readback must not imply claimed_primary_name.name"
+            );
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
                 assert_primary_name_bootstrap_invariants(payload);
