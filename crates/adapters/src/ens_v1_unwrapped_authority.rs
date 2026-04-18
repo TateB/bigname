@@ -9,7 +9,7 @@ use bigname_storage::{
     upsert_name_surfaces, upsert_normalized_events, upsert_resources, upsert_surface_bindings,
     upsert_token_lineages,
 };
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha3::{Digest, Keccak256};
 use sqlx::{
     PgPool, Row,
@@ -39,6 +39,7 @@ const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,u
 const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
 const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
 const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
+const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
 const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
@@ -49,9 +50,12 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
 const ENS_NATIVE_COIN_TYPE: &str = "60";
+const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const PERMISSION_POWER_RESOURCE_CONTROL: &str = "resource_control";
 const PERMISSION_POWER_RESOLVER_CONTROL: &str = "resolver_control";
 const PERMISSION_TRANSFER_BEHAVIOR: &str = "replace_on_authority_change";
+const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
+const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1UnwrappedAuthoritySyncSummary {
@@ -180,6 +184,7 @@ struct RecordChangeObservation {
     namehash: String,
     resolver: String,
     selector: RecordSelector,
+    raw_name: Option<String>,
     reference: ObservationRef,
 }
 
@@ -200,6 +205,50 @@ enum AuthorityObservation {
     ResolverChanged(ResolverObservation),
     RecordChanged(RecordChangeObservation),
     RecordVersionChanged(RecordVersionObservation),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReverseClaimProvenance {
+    source_family: String,
+    contract_role: String,
+    contract_instance_id: Option<String>,
+    emitting_address: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReverseClaimSource {
+    address: String,
+    namespace: String,
+    coin_type: String,
+    reverse_name: String,
+    reverse_node: String,
+    claim_provenance: ReverseClaimProvenance,
+}
+
+#[derive(Clone, Debug)]
+struct ReverseClaimSourceHistory {
+    claim_source: ReverseClaimSource,
+    current_resolver: Option<String>,
+    current_record_version: Option<i64>,
+    events: Vec<NormalizedEvent>,
+}
+
+impl ReverseClaimSource {
+    fn as_value(&self) -> Value {
+        json!({
+            "address": self.address,
+            "namespace": self.namespace,
+            "coin_type": self.coin_type,
+            "reverse_name": self.reverse_name,
+            "reverse_node": self.reverse_node,
+            "claim_provenance": {
+                "source_family": self.claim_provenance.source_family,
+                "contract_role": self.claim_provenance.contract_role,
+                "contract_instance_id": self.claim_provenance.contract_instance_id,
+                "emitting_address": self.claim_provenance.emitting_address,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +395,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
     let block_index = CanonicalBlockIndex {
         blocks: canonical_blocks,
     };
+    let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
     let raw_logs = load_authority_raw_logs(pool, chain, &active_emitters).await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
@@ -361,6 +411,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
     }
 
     let mut histories = BTreeMap::<String, NameHistory>::new();
+    let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
     let mut matched_log_count = 0usize;
     for raw_log in &raw_logs {
@@ -370,10 +421,22 @@ pub async fn sync_ens_v1_unwrapped_authority(
         matched_log_count += 1;
 
         let labelhash = if let Some(namehash) = observation_namehash(&observation) {
-            let Some(labelhash) = namehash_to_labelhash.get(namehash).cloned() else {
+            if let Some(labelhash) = namehash_to_labelhash.get(namehash).cloned() {
+                labelhash
+            } else if let Some(claim_source) = reverse_claim_sources.get(namehash).cloned() {
+                let history = reverse_histories
+                    .entry(namehash.to_owned())
+                    .or_insert_with(|| ReverseClaimSourceHistory {
+                        claim_source,
+                        current_resolver: None,
+                        current_record_version: None,
+                        events: Vec::new(),
+                    });
+                apply_reverse_claim_source_observation(history, observation)?;
                 continue;
-            };
-            labelhash
+            } else {
+                continue;
+            }
         } else {
             observation_labelhash(&observation)
         };
@@ -504,6 +567,9 @@ pub async fn sync_ens_v1_unwrapped_authority(
             );
         }
         events.extend(finalized.events);
+    }
+    for history in reverse_histories.into_values() {
+        events.extend(history.events);
     }
 
     let by_kind = count_events_by_kind(&events);
@@ -695,6 +761,111 @@ fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
         *counts.entry(event.event_kind.clone()).or_default() += 1;
     }
     counts
+}
+
+async fn load_reverse_claim_sources(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<HashMap<String, ReverseClaimSource>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (LOWER(ne.after_state->>'reverse_node'))
+            LOWER(ne.after_state->>'reverse_node') AS reverse_node,
+            LOWER(ne.after_state->>'address') AS address,
+            COALESCE(ne.after_state->>'namespace', ne.namespace) AS namespace,
+            ne.after_state->>'coin_type' AS coin_type,
+            ne.after_state->>'reverse_name' AS reverse_name,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'source_family',
+                ne.source_family
+            ) AS claim_source_family,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'contract_role',
+                $3
+            ) AS claim_contract_role,
+            ne.after_state->'claim_provenance'->>'contract_instance_id' AS claim_contract_instance_id,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'emitting_address',
+                ne.raw_fact_ref->>'emitting_address'
+            ) AS claim_emitting_address
+        FROM normalized_events ne
+        WHERE ne.chain_id = $1
+          AND ne.namespace = $2
+          AND ne.event_kind = $4
+          AND ne.derivation_kind = $5
+          AND ne.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND ne.after_state->>'reverse_node' IS NOT NULL
+          AND ne.after_state->>'reverse_node' <> ''
+          AND ne.after_state->>'address' IS NOT NULL
+          AND ne.after_state->>'address' <> ''
+          AND ne.after_state->>'coin_type' IS NOT NULL
+          AND ne.after_state->>'coin_type' <> ''
+          AND ne.after_state->>'reverse_name' IS NOT NULL
+          AND ne.after_state->>'reverse_name' <> ''
+        ORDER BY
+            LOWER(ne.after_state->>'reverse_node'),
+            ne.block_number DESC NULLS LAST,
+            ne.log_index DESC NULLS LAST,
+            ne.normalized_event_id DESC
+        "#,
+    )
+    .bind(chain)
+    .bind("ens")
+    .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
+    .bind(EVENT_KIND_REVERSE_CHANGED)
+    .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load ENS reverse claim sources for chain {chain}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let reverse_node = row
+                .try_get::<String, _>("reverse_node")
+                .context("missing reverse_node")?;
+            let address = row
+                .try_get::<String, _>("address")
+                .context("missing reverse claim address")?;
+            let namespace = row
+                .try_get::<String, _>("namespace")
+                .context("missing reverse claim namespace")?;
+            let coin_type = row
+                .try_get::<String, _>("coin_type")
+                .context("missing reverse claim coin_type")?;
+            let reverse_name = row
+                .try_get::<String, _>("reverse_name")
+                .context("missing reverse claim reverse_name")?;
+
+            Ok((
+                reverse_node.clone(),
+                ReverseClaimSource {
+                    address,
+                    namespace,
+                    coin_type,
+                    reverse_name,
+                    reverse_node,
+                    claim_provenance: ReverseClaimProvenance {
+                        source_family: row
+                            .try_get::<String, _>("claim_source_family")
+                            .context("missing reverse claim source_family")?,
+                        contract_role: row
+                            .try_get::<String, _>("claim_contract_role")
+                            .context("missing reverse claim contract_role")?,
+                        contract_instance_id: row
+                            .try_get("claim_contract_instance_id")
+                            .context("missing reverse claim contract_instance_id column")?,
+                        emitting_address: row
+                            .try_get("claim_emitting_address")
+                            .context("missing reverse claim emitting_address column")?,
+                    },
+                },
+            ))
+        })
+        .collect()
 }
 
 async fn build_name_surface(
@@ -1183,10 +1354,7 @@ async fn apply_observation(
                 json!({
                     "resolver": before_resolver,
                 }),
-                json!({
-                    "resolver": event.resolver,
-                    "namehash": event.namehash,
-                }),
+                resolver_changed_after_state(&event, None),
                 format!(
                     "resolver:{}:{}:{}",
                     event.reference.block_hash,
@@ -1268,11 +1436,7 @@ async fn apply_observation(
                 Some(authority.resource_id),
                 EVENT_KIND_RECORD_CHANGED,
                 json!({}),
-                json!({
-                    "record_key": event.selector.record_key,
-                    "record_family": event.selector.record_family,
-                    "selector_key": event.selector.selector_key,
-                }),
+                record_changed_after_state(&event, None),
                 format!(
                     "record-change:{}:{}:{}",
                     event.reference.block_hash,
@@ -1306,9 +1470,7 @@ async fn apply_observation(
                 json!({
                     "record_version": before_version,
                 }),
-                json!({
-                    "record_version": event.record_version,
-                }),
+                record_version_changed_after_state(&event, None),
                 format!(
                     "record-version:{}:{}:{}",
                     event.reference.block_hash,
@@ -1410,6 +1572,175 @@ async fn apply_observation(
     }
 
     Ok(())
+}
+
+fn apply_reverse_claim_source_observation(
+    history: &mut ReverseClaimSourceHistory,
+    observation: AuthorityObservation,
+) -> Result<()> {
+    match observation {
+        AuthorityObservation::ResolverChanged(event) => {
+            let before_resolver = history.current_resolver.clone();
+            let before_normalized_resolver = nonzero_address(before_resolver.as_deref());
+            let after_normalized_resolver = nonzero_address(Some(event.resolver.as_str()));
+            if before_normalized_resolver != after_normalized_resolver {
+                history.current_record_version = None;
+            }
+            history.current_resolver = Some(event.resolver.clone());
+            history.events.push(build_normalized_event(
+                &event.reference,
+                None,
+                None,
+                EVENT_KIND_RESOLVER_CHANGED,
+                json!({
+                    "resolver": before_resolver,
+                }),
+                resolver_changed_after_state(&event, Some(&history.claim_source)),
+                format!(
+                    "resolver:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
+        AuthorityObservation::RecordChanged(event) => {
+            if !current_reverse_source_resolver_matches(history, &event.resolver) {
+                return Ok(());
+            }
+            if event.selector.record_key != "name" {
+                return Ok(());
+            }
+            history.events.push(build_normalized_event(
+                &event.reference,
+                None,
+                None,
+                EVENT_KIND_RECORD_CHANGED,
+                json!({}),
+                record_changed_after_state(&event, Some(&history.claim_source)),
+                format!(
+                    "record-change:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
+        AuthorityObservation::RecordVersionChanged(event) => {
+            if !current_reverse_source_resolver_matches(history, &event.resolver) {
+                return Ok(());
+            }
+            let before_version = history.current_record_version;
+            history.current_record_version = Some(event.record_version);
+            history.events.push(build_normalized_event(
+                &event.reference,
+                None,
+                None,
+                EVENT_KIND_RECORD_VERSION_CHANGED,
+                json!({
+                    "record_version": before_version,
+                }),
+                record_version_changed_after_state(&event, Some(&history.claim_source)),
+                format!(
+                    "record-version:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
+        AuthorityObservation::RegistrationGranted(_)
+        | AuthorityObservation::RegistrationRenewed(_)
+        | AuthorityObservation::TokenTransferred(_)
+        | AuthorityObservation::RegistryOwnerChanged(_) => {}
+    }
+
+    Ok(())
+}
+
+fn current_reverse_source_resolver_matches(
+    history: &ReverseClaimSourceHistory,
+    observed_resolver: &str,
+) -> bool {
+    match (
+        nonzero_address(history.current_resolver.as_deref()),
+        nonzero_address(Some(observed_resolver)),
+    ) {
+        (Some(current), Some(observed)) => current == observed,
+        _ => false,
+    }
+}
+
+fn resolver_changed_after_state(
+    event: &ResolverObservation,
+    claim_source: Option<&ReverseClaimSource>,
+) -> Value {
+    let mut state = Map::from_iter([
+        ("resolver".to_owned(), Value::String(event.resolver.clone())),
+        ("namehash".to_owned(), Value::String(event.namehash.clone())),
+    ]);
+    if let Some(claim_source) = claim_source {
+        state.insert("primary_claim_source".to_owned(), claim_source.as_value());
+    }
+    Value::Object(state)
+}
+
+fn record_changed_after_state(
+    event: &RecordChangeObservation,
+    claim_source: Option<&ReverseClaimSource>,
+) -> Value {
+    let mut state = Map::from_iter([
+        (
+            "record_key".to_owned(),
+            Value::String(event.selector.record_key.clone()),
+        ),
+        (
+            "record_family".to_owned(),
+            Value::String(event.selector.record_family.clone()),
+        ),
+        (
+            "selector_key".to_owned(),
+            event
+                .selector
+                .selector_key
+                .as_ref()
+                .map(|value| Value::String(value.clone()))
+                .unwrap_or(Value::Null),
+        ),
+    ]);
+    if let Some(raw_name) = event.raw_name.as_ref() {
+        state.insert("raw_name".to_owned(), Value::String(raw_name.clone()));
+    }
+    if let Some(claim_source) = claim_source {
+        state.insert("primary_claim_source".to_owned(), claim_source.as_value());
+    }
+    Value::Object(state)
+}
+
+fn record_version_changed_after_state(
+    event: &RecordVersionObservation,
+    claim_source: Option<&ReverseClaimSource>,
+) -> Value {
+    let mut state = Map::from_iter([(
+        "record_version".to_owned(),
+        Value::Number(event.record_version.into()),
+    )]);
+    if let Some(claim_source) = claim_source {
+        state.insert("primary_claim_source".to_owned(), claim_source.as_value());
+    }
+    Value::Object(state)
 }
 
 fn transition_authority(
@@ -2201,6 +2532,30 @@ fn build_authority_observation(
                     record_family: "text".to_owned(),
                     selector_key: None,
                 },
+                raw_name: None,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && topic0.eq_ignore_ascii_case(&name_changed_topic0())
+    {
+        return Ok(Some(AuthorityObservation::RecordChanged(
+            RecordChangeObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("NameChanged log is missing indexed node")?,
+                )?,
+                resolver: raw_log.emitting_address.clone(),
+                selector: RecordSelector {
+                    record_key: "name".to_owned(),
+                    record_family: "name".to_owned(),
+                    selector_key: None,
+                },
+                raw_name: Some(decode_first_dynamic_string(&raw_log.data)?),
                 reference: raw_log.reference(),
             },
         )));
@@ -2224,6 +2579,7 @@ fn build_authority_observation(
                     record_family: "addr".to_owned(),
                     selector_key: Some(ENS_NATIVE_COIN_TYPE.to_owned()),
                 },
+                raw_name: None,
                 reference: raw_log.reference(),
             },
         )));
@@ -2253,6 +2609,7 @@ fn build_authority_observation(
                     record_family: "addr".to_owned(),
                     selector_key: Some(coin_type.to_string()),
                 },
+                raw_name: None,
                 reference: raw_log.reference(),
             },
         )));
@@ -2762,6 +3119,10 @@ fn new_resolver_topic0() -> String {
     keccak256_hex(NEW_RESOLVER_SIGNATURE.as_bytes())
 }
 
+fn name_changed_topic0() -> String {
+    keccak256_hex(NAME_CHANGED_SIGNATURE.as_bytes())
+}
+
 fn addr_changed_topic0() -> String {
     keccak256_hex(ADDR_CHANGED_SIGNATURE.as_bytes())
 }
@@ -2796,9 +3157,9 @@ mod tests {
 
     use anyhow::{Context, Result};
     use bigname_storage::{
-        RawBlock, RawLog, default_database_url, load_name_surface,
+        NormalizedEvent, RawBlock, RawLog, default_database_url, load_name_surface,
         load_normalized_event_counts_by_kind, load_surface_bindings_by_logical_name_id,
-        upsert_raw_blocks, upsert_raw_logs,
+        upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
     };
     use sqlx::{
         PgPool,
@@ -3160,6 +3521,76 @@ mod tests {
         abi_word_u64(version).to_vec()
     }
 
+    fn reverse_claim_event(
+        source_manifest_id: i64,
+        block_hash: &str,
+        transaction_hash: &str,
+        log_index: i64,
+        claimed_address: &str,
+        reverse_node: &str,
+        reverse_name: &str,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!(
+                "{DERIVATION_KIND_ENS_V1_REVERSE_CLAIM}:{EVENT_KIND_REVERSE_CHANGED}:{block_hash}:{transaction_hash}:{log_index}:{claimed_address}"
+            ),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: EVENT_KIND_REVERSE_CHANGED.to_owned(),
+            source_family: "ens_v1_reverse_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(source_manifest_id),
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(42),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(transaction_hash.to_owned()),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-mainnet",
+                "block_hash": block_hash,
+                "block_number": 42,
+                "transaction_hash": transaction_hash,
+                "transaction_index": 0,
+                "log_index": log_index,
+                "emitting_address": "0x00000000000000000000000000000000000000ad",
+            }),
+            derivation_kind: DERIVATION_KIND_ENS_V1_REVERSE_CLAIM.to_owned(),
+            canonicality_state: CanonicalityState::Canonical,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ReverseClaimed",
+                "address": claimed_address,
+                "coin_type": ENS_NATIVE_COIN_TYPE,
+                "namespace": "ens",
+                "reverse_namespace": "ens",
+                "reverse_label": claimed_address.trim_start_matches("0x").to_ascii_lowercase(),
+                "reverse_name": reverse_name,
+                "reverse_node": reverse_node,
+                "claim_provenance": {
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": CONTRACT_ROLE_REVERSE_REGISTRAR,
+                    "contract_instance_id": Uuid::from_u128(0x44).to_string(),
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }),
+        }
+    }
+
+    fn reverse_label_for_address(address: &str) -> String {
+        address.trim_start_matches("0x").to_ascii_lowercase()
+    }
+
+    fn reverse_node_for_address(address: &str) -> String {
+        let reverse_label = reverse_label_for_address(address);
+        namehash_hex(&[
+            reverse_label.into_bytes(),
+            b"addr".to_vec(),
+            b"reverse".to_vec(),
+        ])
+    }
+
     fn resolver_raw_log(
         emitting_address: &str,
         topics: Vec<String>,
@@ -3215,7 +3646,31 @@ mod tests {
                     record_family: "text".to_owned(),
                     selector_key: None,
                 },
+                raw_name: None,
                 reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 0)
+                    .reference(),
+            })
+        );
+
+        let name_observation = build_authority_observation(&resolver_raw_log(
+            resolver_address,
+            vec![name_changed_topic0(), alice.namehash.clone()],
+            encode_dynamic_string_log_data("alice.eth"),
+            1,
+        ))?
+        .context("NameChanged observation should decode")?;
+        assert_eq!(
+            name_observation,
+            AuthorityObservation::RecordChanged(RecordChangeObservation {
+                namehash: alice.namehash.clone(),
+                resolver: resolver_address.to_owned(),
+                selector: RecordSelector {
+                    record_key: "name".to_owned(),
+                    record_family: "name".to_owned(),
+                    selector_key: None,
+                },
+                raw_name: Some("alice.eth".to_owned()),
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 1)
                     .reference(),
             })
         );
@@ -3224,7 +3679,7 @@ mod tests {
             resolver_address,
             vec![addr_changed_topic0(), alice.namehash.clone()],
             encode_resolver_addr_changed_log_data("0x00000000000000000000000000000000000000aa"),
-            1,
+            2,
         ))?
         .context("AddrChanged observation should decode")?;
         assert_eq!(
@@ -3237,7 +3692,8 @@ mod tests {
                     record_family: "addr".to_owned(),
                     selector_key: Some("60".to_owned()),
                 },
-                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 1)
+                raw_name: None,
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 2)
                     .reference(),
             })
         );
@@ -3246,7 +3702,7 @@ mod tests {
             resolver_address,
             vec![address_changed_topic0(), alice.namehash.clone()],
             encode_resolver_address_changed_log_data(61, &[0xde, 0xad, 0xbe, 0xef]),
-            2,
+            3,
         ))?
         .context("AddressChanged observation should decode")?;
         assert_eq!(
@@ -3259,7 +3715,8 @@ mod tests {
                     record_family: "addr".to_owned(),
                     selector_key: Some("61".to_owned()),
                 },
-                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 2)
+                raw_name: None,
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 3)
                     .reference(),
             })
         );
@@ -3268,7 +3725,7 @@ mod tests {
             resolver_address,
             vec![version_changed_topic0(), alice.namehash.clone()],
             encode_resolver_version_changed_log_data(7),
-            3,
+            4,
         ))?
         .context("VersionChanged observation should decode")?;
         assert_eq!(
@@ -3277,7 +3734,7 @@ mod tests {
                 namehash: alice.namehash,
                 resolver: resolver_address.to_owned(),
                 record_version: 7,
-                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 3)
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 4)
                     .reference(),
             })
         );
@@ -3710,6 +4167,191 @@ mod tests {
                 .fetch_one(database.pool())
                 .await?,
             7
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_emits_reverse_claim_source_observations() -> Result<()>
+    {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let reverse_manifest_id = insert_active_contract_fixture(
+            database.pool(),
+            "ens_v1_reverse_l1",
+            "reverse_registrar",
+            "0x00000000000000000000000000000000000000ad",
+            Some(CONTRACT_ROLE_REVERSE_REGISTRAR),
+            "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "registry",
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            "manifests/ens/ens_v1_registry_l1/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "resolver",
+            "0x00000000000000000000000000000000000000cc",
+            Some("resolver"),
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+
+        let block_hash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let transaction_hash = "0xtxdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let claimed_address = "0x0000000000000000000000000000000000001234";
+        let reverse_node = reverse_node_for_address(claimed_address);
+        let reverse_name = format!(
+            "{}.addr.reverse",
+            reverse_label_for_address(claimed_address)
+        );
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                block_hash,
+                Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                42,
+                1_700_000_042,
+            )],
+        )
+        .await?;
+        upsert_normalized_events(
+            database.pool(),
+            &[reverse_claim_event(
+                reverse_manifest_id,
+                block_hash,
+                transaction_hash,
+                0,
+                claimed_address,
+                &reverse_node,
+                &reverse_name,
+            )],
+        )
+        .await?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), reverse_node.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 2,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![name_changed_topic0(), reverse_node.clone()],
+                    data: encode_dynamic_string_log_data("alice.eth"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 3,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![version_changed_topic0(), reverse_node.clone()],
+                    data: encode_resolver_version_changed_log_data(7),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let first = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(first.scanned_log_count, 3);
+        assert_eq!(first.matched_log_count, 3);
+        assert_eq!(first.total_name_surface_count, 0);
+        assert_eq!(first.total_resource_count, 0);
+        assert_eq!(first.total_surface_binding_count, 0);
+        assert_eq!(first.total_normalized_event_count, 3);
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+            Some(&1_usize)
+        );
+        assert_eq!(first.by_kind.get(EVENT_KIND_RECORD_CHANGED), Some(&1_usize));
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+            Some(&1_usize)
+        );
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged' AND logical_name_id IS NULL AND resource_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->>'address' FROM normalized_events WHERE event_kind = 'ResolverChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            claimed_address.to_ascii_lowercase()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'raw_name' FROM normalized_events WHERE event_kind = 'RecordChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "alice.eth".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->>'reverse_node' FROM normalized_events WHERE event_kind = 'RecordChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            reverse_node.to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->'claim_provenance'->>'contract_role' FROM normalized_events WHERE event_kind = 'RecordVersionChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            CONTRACT_ROLE_REVERSE_REGISTRAR.to_owned()
+        );
+
+        let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(second.scanned_log_count, 3);
+        assert_eq!(second.matched_log_count, 3);
+        assert_eq!(second.total_normalized_event_count, 3);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE logical_name_id IS NULL AND event_kind IN ('ResolverChanged', 'RecordChanged', 'RecordVersionChanged')"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            3
         );
 
         database.cleanup().await

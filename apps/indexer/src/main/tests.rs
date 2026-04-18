@@ -1288,6 +1288,10 @@ fn resolver_text_changed_topic0() -> String {
     keccak256_hex(b"TextChanged(bytes32,string,string)")
 }
 
+fn resolver_name_changed_topic0() -> String {
+    keccak256_hex(b"NameChanged(bytes32,string)")
+}
+
 fn resolver_version_changed_topic0() -> String {
     keccak256_hex(b"VersionChanged(bytes32,uint64)")
 }
@@ -1536,6 +1540,28 @@ fn rpc_registry_new_resolver_log_payload(
     })
 }
 
+fn rpc_registry_new_resolver_log_payload_for_namehash(
+    block: &ProviderBlock,
+    address: &str,
+    namehash: &str,
+    resolver: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            registry_new_resolver_topic0(),
+            namehash
+        ],
+        "data": encode_registry_new_resolver_log_data(resolver)
+    })
+}
+
 fn rpc_resolver_text_changed_log_payload(
     block: &ProviderBlock,
     address: &str,
@@ -1558,6 +1584,28 @@ fn rpc_resolver_text_changed_log_payload(
             keccak256_hex(key.as_bytes())
         ],
         "data": encode_dynamic_string_log_data(key)
+    })
+}
+
+fn rpc_resolver_name_changed_log_payload_for_namehash(
+    block: &ProviderBlock,
+    address: &str,
+    namehash: &str,
+    value: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_name_changed_topic0(),
+            namehash
+        ],
+        "data": encode_dynamic_string_log_data(value)
     })
 }
 
@@ -1604,6 +1652,28 @@ fn rpc_resolver_version_changed_log_payload(
         "topics": [
             resolver_version_changed_topic0(),
             namehash_for_dns_name(&dns_name)
+        ],
+        "data": encode_resolver_version_changed_log_data(version)
+    })
+}
+
+fn rpc_resolver_version_changed_log_payload_for_namehash(
+    block: &ProviderBlock,
+    address: &str,
+    namehash: &str,
+    version: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_version_changed_topic0(),
+            namehash
         ],
         "data": encode_resolver_version_changed_log_data(version)
     })
@@ -2808,6 +2878,248 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
         .fetch_one(database.pool())
         .await?,
         reverse_address.to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observations() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x343);
+    let registry_contract_instance_id = Uuid::from_u128(0x344);
+    let resolver_contract_instance_id = Uuid::from_u128(0x345);
+    let reverse_address = "0x00000000000000000000000000000000000000ad";
+    let registry_address = "0x00000000000000000000000000000000000000ae";
+    let resolver_address = "0x00000000000000000000000000000000000000af";
+    let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
+    let reverse_node = reverse_node_for_address(claimed_address);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'ens',
+                    'ens_v1_reverse_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_reverse_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'ens',
+                    'ens_v1_registry_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_registry_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    3,
+                    1,
+                    'ens',
+                    'ens_v1_resolver_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_resolver_l1/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for primary-claim source reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        registry_address,
+        Some(2),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        resolver_address,
+        Some(3),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        2,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        3,
+        "resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+        Some("0xbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd"),
+        65,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![
+            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &reverse_node,
+                resolver_address,
+                1,
+            ),
+            rpc_resolver_name_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &reverse_node,
+                "alice.eth",
+                2,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &reverse_node,
+                7,
+                3,
+            ),
+        ],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("primary-claim source reconciliation must update task state");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE logical_name_id IS NULL AND resource_id IS NULL AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->>'address' FROM normalized_events WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        claimed_address.to_ascii_lowercase()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->>'reverse_node' FROM normalized_events WHERE logical_name_id IS NULL AND event_kind = 'RecordVersionChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_node
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->'claim_provenance'->>'contract_role' FROM normalized_events WHERE logical_name_id IS NULL AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        REVERSE_REGISTRAR_ROLE.to_owned()
     );
 
     server.abort();
