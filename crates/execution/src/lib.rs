@@ -1,5 +1,7 @@
 //! ENS verified-resolution direct-path execution persistence bootstrap.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot, upsert_execution_outcome,
@@ -88,6 +90,14 @@ struct VerifiedQuerySummary {
     record_key: String,
     coin_type: String,
     status: VerifiedQueryStatus,
+    value: Option<String>,
+    failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestedSelectorSet {
+    surface: String,
+    ordered_record_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,125 +109,258 @@ struct RequestedChainPosition {
 
 fn validate_direct_request(
     request: &PersistEnsExactNameVerifiedResolutionRequest,
-) -> Result<VerifiedQuerySummary> {
-    let query = extract_supported_verified_query(&request.outcome)?;
-    validate_trace(&request.trace, &request.outcome, &query)?;
-    validate_outcome(&request.outcome, &request.trace, &query)?;
-    validate_raw_call_snapshots(&request.raw_call_snapshots, &request.outcome, &query)?;
-    Ok(query)
+) -> Result<Vec<VerifiedQuerySummary>> {
+    let requested_selectors = extract_requested_selectors(&request.trace)?;
+    let queries = extract_supported_verified_queries(&request.outcome)?;
+    ensure_requested_selectors_match_queries(&requested_selectors, &queries)?;
+    validate_trace(
+        &request.trace,
+        &request.outcome,
+        &requested_selectors,
+        &queries,
+    )?;
+    validate_outcome(&request.outcome, &request.trace, &queries)?;
+    validate_raw_call_snapshots(
+        &request.raw_call_snapshots,
+        &request.outcome,
+        &requested_selectors,
+    )?;
+    Ok(queries)
 }
 
-fn extract_supported_verified_query(outcome: &ExecutionOutcome) -> Result<VerifiedQuerySummary> {
+fn extract_requested_selectors(trace: &ExecutionTrace) -> Result<RequestedSelectorSet> {
+    let request_metadata = required_object(
+        Some(&trace.request_metadata),
+        "ENS direct-path verified resolution trace.request_metadata",
+    )?;
+    let surface = required_string(
+        request_metadata,
+        "surface",
+        "ENS direct-path verified resolution trace.request_metadata",
+    )?
+    .to_owned();
+
+    let ordered_record_keys = match (
+        request_metadata.get("record_keys"),
+        request_metadata.get("record_key"),
+    ) {
+        (Some(record_keys), Some(record_key)) => {
+            let parsed_record_keys = parse_requested_record_keys(
+                record_keys,
+                "ENS direct-path verified resolution trace.request_metadata.record_keys",
+            )?;
+            let singular_record_key = record_key
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .context(
+                    "ENS direct-path verified resolution trace.request_metadata must include non-empty string field record_key",
+                )?;
+            if parsed_record_keys.len() != 1 || parsed_record_keys[0] != singular_record_key {
+                bail!(
+                    "ENS direct-path verified resolution trace.request_metadata.record_key must match record_keys when both are present"
+                );
+            }
+            parsed_record_keys
+        }
+        (Some(record_keys), None) => parse_requested_record_keys(
+            record_keys,
+            "ENS direct-path verified resolution trace.request_metadata.record_keys",
+        )?,
+        (None, Some(_)) => vec![
+            required_string(
+                request_metadata,
+                "record_key",
+                "ENS direct-path verified resolution trace.request_metadata",
+            )?
+            .to_owned(),
+        ],
+        (None, None) => bail!(
+            "ENS direct-path verified resolution trace.request_metadata must include record_key or record_keys"
+        ),
+    };
+
+    validate_ordered_record_keys(
+        &ordered_record_keys,
+        "ENS direct-path verified resolution trace.request_metadata",
+    )?;
+
+    Ok(RequestedSelectorSet {
+        surface,
+        ordered_record_keys,
+    })
+}
+
+fn parse_requested_record_keys(value: &Value, context: &str) -> Result<Vec<String>> {
+    let items = required_array(Some(value), context)?;
+    if items.is_empty() {
+        bail!("{context} must include at least one selector");
+    }
+
+    let mut record_keys = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        record_keys.push(
+            item.as_str()
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| format!("{context}[{index}] must be a non-empty string"))?
+                .to_owned(),
+        );
+    }
+    Ok(record_keys)
+}
+
+fn validate_ordered_record_keys(record_keys: &[String], context: &str) -> Result<()> {
+    if record_keys.is_empty() {
+        bail!("{context} must include at least one selector");
+    }
+
+    let mut seen = BTreeSet::new();
+    for record_key in record_keys {
+        parse_supported_addr_record_key(record_key)?;
+        if !seen.insert(record_key.clone()) {
+            bail!("{context} must not contain duplicate selectors ({record_key})");
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_supported_verified_queries(
+    outcome: &ExecutionOutcome,
+) -> Result<Vec<VerifiedQuerySummary>> {
     let outcome_payload = outcome
         .outcome_payload
         .as_ref()
         .context("ENS direct-path verified resolution outcome must set outcome_payload")?;
-    let payload = required_object(
-        Some(outcome_payload),
+    extract_verified_queries_from_payload(
+        outcome_payload,
         "ENS direct-path verified resolution outcome_payload",
-    )?;
+    )
+}
+
+fn extract_verified_queries_from_payload(
+    payload: &Value,
+    context: &str,
+) -> Result<Vec<VerifiedQuerySummary>> {
+    let payload = required_object(Some(payload), context)?;
     let verified_queries = required_array(
         payload.get("verified_queries"),
-        "ENS direct-path verified resolution outcome_payload.verified_queries",
+        &format!("{context}.verified_queries"),
     )?;
-    if verified_queries.len() != 1 {
+    if verified_queries.is_empty() {
+        bail!("{context} must include at least one verified query");
+    }
+
+    let mut queries = Vec::with_capacity(verified_queries.len());
+    let mut seen_record_keys = BTreeSet::new();
+    for (index, query) in verified_queries.iter().enumerate() {
+        let query_context = format!("{context}.verified_queries[{index}]");
+        let query = required_object(Some(query), &query_context)?;
+        if query.contains_key("unsupported_reason") {
+            bail!("ENS direct-path verified resolution does not persist unsupported selectors");
+        }
+
+        let record_key = required_string(query, "record_key", &query_context)?.to_owned();
+        if !seen_record_keys.insert(record_key.clone()) {
+            bail!("{context}.verified_queries must not contain duplicate selectors ({record_key})");
+        }
+
+        let coin_type = parse_supported_addr_record_key(&record_key)?;
+        let (status, value, failure_reason) = match required_string(
+            query,
+            "status",
+            &query_context,
+        )? {
+            "success" => {
+                let value = required_object(query.get("value"), &format!("{query_context}.value"))?;
+                let value_coin_type =
+                    required_string(value, "coin_type", &format!("{query_context}.value"))?;
+                if value_coin_type != coin_type {
+                    bail!(
+                        "ENS direct-path verified resolution query value coin_type {} does not match record_key {}",
+                        value_coin_type,
+                        record_key
+                    );
+                }
+                let resolved_value = required_nonempty_string_field(
+                    value,
+                    "value",
+                    &format!("{query_context}.value"),
+                )?;
+                if query.contains_key("failure_reason") {
+                    bail!(
+                        "ENS direct-path verified resolution success query must not set failure_reason"
+                    );
+                }
+                (VerifiedQueryStatus::Success, Some(resolved_value), None)
+            }
+            "not_found" => {
+                ensure_absent(query, "value", &query_context)?;
+                let failure_reason =
+                    optional_nonempty_string_field(query, "failure_reason", &query_context)?;
+                (VerifiedQueryStatus::NotFound, None, failure_reason)
+            }
+            "execution_failed" => {
+                ensure_absent(query, "value", &query_context)?;
+                let failure_reason =
+                    required_nonempty_string_field(query, "failure_reason", &query_context)?;
+                (
+                    VerifiedQueryStatus::ExecutionFailed,
+                    None,
+                    Some(failure_reason),
+                )
+            }
+            status => bail!(
+                "ENS direct-path verified resolution only supports success, not_found, and execution_failed selector results; found {status}"
+            ),
+        };
+
+        queries.push(VerifiedQuerySummary {
+            record_key,
+            coin_type,
+            status,
+            value,
+            failure_reason,
+        });
+    }
+
+    Ok(queries)
+}
+
+fn ensure_requested_selectors_match_queries(
+    requested_selectors: &RequestedSelectorSet,
+    queries: &[VerifiedQuerySummary],
+) -> Result<()> {
+    if requested_selectors.ordered_record_keys.len() != queries.len() {
         bail!(
-            "ENS direct-path verified resolution outcome_payload must include exactly one verified query, found {}",
-            verified_queries.len()
+            "ENS direct-path verified resolution trace.request_metadata selectors {} do not match outcome verified query count {}",
+            requested_selectors.ordered_record_keys.len(),
+            queries.len()
         );
     }
 
-    let query = required_object(
-        Some(&verified_queries[0]),
-        "ENS direct-path verified resolution outcome_payload.verified_queries[0]",
-    )?;
-    if query.contains_key("unsupported_reason") {
-        bail!("ENS direct-path verified resolution does not persist unsupported selectors");
+    for (index, (requested_record_key, query)) in requested_selectors
+        .ordered_record_keys
+        .iter()
+        .zip(queries.iter())
+        .enumerate()
+    {
+        if requested_record_key != &query.record_key {
+            bail!(
+                "ENS direct-path verified resolution trace.request_metadata.record_keys[{index}] {} does not match outcome verified_queries[{index}] {}",
+                requested_record_key,
+                query.record_key
+            );
+        }
     }
 
-    let record_key = required_string(
-        query,
-        "record_key",
-        "ENS direct-path verified resolution outcome query",
-    )?
-    .to_owned();
-    let coin_type = parse_supported_addr_record_key(&record_key)?;
-    let status = match required_string(
-        query,
-        "status",
-        "ENS direct-path verified resolution outcome query",
-    )? {
-        "success" => {
-            let value = required_object(
-                query.get("value"),
-                "ENS direct-path verified resolution outcome query.value",
-            )?;
-            let value_coin_type = required_string(
-                value,
-                "coin_type",
-                "ENS direct-path verified resolution outcome query.value",
-            )?;
-            if value_coin_type != coin_type {
-                bail!(
-                    "ENS direct-path verified resolution outcome query value coin_type {} does not match record_key {}",
-                    value_coin_type,
-                    record_key
-                );
-            }
-            required_nonempty_string_field(
-                value,
-                "value",
-                "ENS direct-path verified resolution outcome query.value",
-            )?;
-            if query.contains_key("failure_reason") {
-                bail!(
-                    "ENS direct-path verified resolution success query must not set failure_reason"
-                );
-            }
-            VerifiedQueryStatus::Success
-        }
-        "not_found" => {
-            ensure_absent(
-                query,
-                "value",
-                "ENS direct-path verified resolution not_found query",
-            )?;
-            optional_nonempty_string_field(
-                query,
-                "failure_reason",
-                "ENS direct-path verified resolution not_found query",
-            )?;
-            VerifiedQueryStatus::NotFound
-        }
-        "execution_failed" => {
-            ensure_absent(
-                query,
-                "value",
-                "ENS direct-path verified resolution execution_failed query",
-            )?;
-            required_nonempty_string_field(
-                query,
-                "failure_reason",
-                "ENS direct-path verified resolution execution_failed query",
-            )?;
-            VerifiedQueryStatus::ExecutionFailed
-        }
-        status => bail!(
-            "ENS direct-path verified resolution only supports success, not_found, and execution_failed selector results; found {status}"
-        ),
-    };
-
-    Ok(VerifiedQuerySummary {
-        record_key,
-        coin_type,
-        status,
-    })
+    Ok(())
 }
 
 fn validate_trace(
     trace: &ExecutionTrace,
     outcome: &ExecutionOutcome,
-    query: &VerifiedQuerySummary,
+    requested_selectors: &RequestedSelectorSet,
+    queries: &[VerifiedQuerySummary],
 ) -> Result<()> {
     if trace.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE {
         bail!(
@@ -241,29 +384,10 @@ fn validate_trace(
         );
     }
 
-    let request_metadata = required_object(
-        Some(&trace.request_metadata),
-        "ENS direct-path verified resolution trace.request_metadata",
-    )?;
-    let surface = required_string(
-        request_metadata,
-        "surface",
-        "ENS direct-path verified resolution trace.request_metadata",
-    )?;
-    let metadata_record_key = required_string(
-        request_metadata,
-        "record_key",
-        "ENS direct-path verified resolution trace.request_metadata",
-    )?;
-    if metadata_record_key != query.record_key {
-        bail!(
-            "ENS direct-path verified resolution trace.request_metadata.record_key {} does not match outcome record_key {}",
-            metadata_record_key,
-            query.record_key
-        );
-    }
-
-    let expected_request_key = format!("{ENS_NAMESPACE}:{surface}:{}", query.record_key);
+    let expected_request_key = normalized_request_key(
+        &requested_selectors.surface,
+        &requested_selectors.ordered_record_keys,
+    );
     if trace.request_key != expected_request_key {
         bail!(
             "ENS direct-path verified resolution trace {} request_key {} does not match expected {}",
@@ -302,59 +426,7 @@ fn validate_trace(
 
     ensure_contains_universal_resolver_call(&trace.contracts_called, trace.execution_trace_id)?;
     ensure_steps_are_direct_path_only(&trace.steps, trace.execution_trace_id)?;
-
-    match query.status {
-        VerifiedQueryStatus::Success => {
-            if trace.failure_payload.is_some() {
-                bail!(
-                    "ENS direct-path verified resolution success trace {} must not set failure_payload",
-                    trace.execution_trace_id
-                );
-            }
-            let final_payload = trace.final_payload.as_ref().with_context(|| {
-                format!(
-                    "ENS direct-path verified resolution success trace {} must set final_payload",
-                    trace.execution_trace_id
-                )
-            })?;
-            validate_success_final_payload(final_payload, query)?;
-        }
-        VerifiedQueryStatus::NotFound => {
-            if trace.failure_payload.is_some() {
-                bail!(
-                    "ENS direct-path verified resolution not_found trace {} must not set failure_payload",
-                    trace.execution_trace_id
-                );
-            }
-            let final_payload = trace.final_payload.as_ref().with_context(|| {
-                format!(
-                    "ENS direct-path verified resolution not_found trace {} must set final_payload",
-                    trace.execution_trace_id
-                )
-            })?;
-            let final_payload_object = required_object(
-                Some(final_payload),
-                "ENS direct-path verified resolution not_found trace.final_payload",
-            )?;
-            optional_nonempty_string_field(
-                final_payload_object,
-                "failure_reason",
-                "ENS direct-path verified resolution not_found trace.final_payload",
-            )?;
-        }
-        VerifiedQueryStatus::ExecutionFailed => {
-            if trace.final_payload.is_some() {
-                bail!(
-                    "ENS direct-path verified resolution execution_failed trace {} must not set final_payload",
-                    trace.execution_trace_id
-                );
-            }
-            required_object(
-                trace.failure_payload.as_ref(),
-                "ENS direct-path verified resolution execution_failed trace.failure_payload",
-            )?;
-        }
-    }
+    validate_trace_terminal_payloads(trace, queries)?;
 
     Ok(())
 }
@@ -362,7 +434,7 @@ fn validate_trace(
 fn validate_outcome(
     outcome: &ExecutionOutcome,
     trace: &ExecutionTrace,
-    query: &VerifiedQuerySummary,
+    queries: &[VerifiedQuerySummary],
 ) -> Result<()> {
     if outcome.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE {
         bail!(
@@ -427,30 +499,92 @@ fn validate_outcome(
         );
     }
 
-    match query.status {
-        VerifiedQueryStatus::ExecutionFailed => {
-            required_object(
-                outcome.failure_payload.as_ref(),
-                "ENS direct-path verified resolution execution_failed outcome.failure_payload",
-            )?;
-        }
-        VerifiedQueryStatus::Success | VerifiedQueryStatus::NotFound => {
-            if outcome.failure_payload.is_some() {
-                bail!(
-                    "ENS direct-path verified resolution non-failed outcome for request_key {} must not set failure_payload",
-                    outcome.cache_key.request_key
-                );
-            }
-        }
+    if queries
+        .iter()
+        .all(|query| query.status == VerifiedQueryStatus::ExecutionFailed)
+    {
+        required_object(
+            outcome.failure_payload.as_ref(),
+            "ENS direct-path verified resolution execution_failed outcome.failure_payload",
+        )?;
+    } else if outcome.failure_payload.is_some() {
+        bail!(
+            "ENS direct-path verified resolution outcome for request_key {} must not set failure_payload unless every selector status is execution_failed",
+            outcome.cache_key.request_key
+        );
     }
 
     Ok(())
 }
 
+fn validate_trace_terminal_payloads(
+    trace: &ExecutionTrace,
+    queries: &[VerifiedQuerySummary],
+) -> Result<()> {
+    let all_execution_failed = queries
+        .iter()
+        .all(|query| query.status == VerifiedQueryStatus::ExecutionFailed);
+
+    if all_execution_failed {
+        if trace.final_payload.is_some() {
+            bail!(
+                "ENS direct-path verified resolution execution_failed trace {} must not set final_payload",
+                trace.execution_trace_id
+            );
+        }
+        required_object(
+            trace.failure_payload.as_ref(),
+            "ENS direct-path verified resolution execution_failed trace.failure_payload",
+        )?;
+        return Ok(());
+    }
+
+    if trace.failure_payload.is_some() {
+        bail!(
+            "ENS direct-path verified resolution trace {} must not set failure_payload unless every selector status is execution_failed",
+            trace.execution_trace_id
+        );
+    }
+
+    let final_payload = trace.final_payload.as_ref().with_context(|| {
+        format!(
+            "ENS direct-path verified resolution trace {} must set final_payload when any selector resolves or returns not_found",
+            trace.execution_trace_id
+        )
+    })?;
+    if final_payload_contains_verified_queries(final_payload)? {
+        let final_queries = extract_verified_queries_from_payload(
+            final_payload,
+            "ENS direct-path verified resolution trace.final_payload",
+        )?;
+        if final_queries != queries {
+            bail!(
+                "ENS direct-path verified resolution trace.final_payload.verified_queries must match outcome_payload.verified_queries"
+            );
+        }
+        return Ok(());
+    }
+
+    if queries.len() != 1 {
+        bail!(
+            "ENS direct-path verified resolution multi-selector trace {} final_payload must include verified_queries",
+            trace.execution_trace_id
+        );
+    }
+
+    match queries[0].status {
+        VerifiedQueryStatus::Success => validate_success_final_payload(final_payload, &queries[0]),
+        VerifiedQueryStatus::NotFound => {
+            validate_not_found_final_payload(final_payload, &queries[0])
+        }
+        VerifiedQueryStatus::ExecutionFailed => unreachable!("all execution_failed handled above"),
+    }
+}
+
 fn validate_raw_call_snapshots(
     raw_call_snapshots: &[RawCallSnapshot],
     outcome: &ExecutionOutcome,
-    query: &VerifiedQuerySummary,
+    requested_selectors: &RequestedSelectorSet,
 ) -> Result<()> {
     if raw_call_snapshots.is_empty() {
         return Ok(());
@@ -471,7 +605,10 @@ fn validate_raw_call_snapshots(
         {
             bail!(
                 "ENS direct-path verified resolution raw call snapshot for request {} must align with requested chain position {} {} {}",
-                query.record_key,
+                normalized_request_key(
+                    &requested_selectors.surface,
+                    &requested_selectors.ordered_record_keys,
+                ),
                 requested_position.chain_id,
                 requested_position.block_number,
                 requested_position.block_hash
@@ -529,12 +666,63 @@ fn validate_success_final_payload(
             query.record_key
         );
     }
-    required_nonempty_string_field(
+    let value = required_nonempty_string_field(
         object,
         "value",
         "ENS direct-path verified resolution success trace.final_payload",
     )?;
+    if query
+        .value
+        .as_deref()
+        .is_some_and(|expected_value| expected_value != value)
+    {
+        bail!(
+            "ENS direct-path verified resolution success trace.final_payload.value {} does not match outcome query value {}",
+            value,
+            query.value.as_deref().unwrap_or_default()
+        );
+    }
     Ok(())
+}
+
+fn validate_not_found_final_payload(
+    final_payload: &Value,
+    query: &VerifiedQuerySummary,
+) -> Result<()> {
+    let final_payload_object = required_object(
+        Some(final_payload),
+        "ENS direct-path verified resolution not_found trace.final_payload",
+    )?;
+    let failure_reason = optional_nonempty_string_field(
+        final_payload_object,
+        "failure_reason",
+        "ENS direct-path verified resolution not_found trace.final_payload",
+    )?;
+    if failure_reason != query.failure_reason {
+        bail!(
+            "ENS direct-path verified resolution not_found trace.final_payload.failure_reason {:?} does not match outcome query failure_reason {:?}",
+            failure_reason,
+            query.failure_reason
+        );
+    }
+    Ok(())
+}
+
+fn final_payload_contains_verified_queries(final_payload: &Value) -> Result<bool> {
+    Ok(required_object(
+        Some(final_payload),
+        "ENS direct-path verified resolution trace.final_payload",
+    )?
+    .contains_key("verified_queries"))
+}
+
+fn normalized_request_key(surface: &str, ordered_record_keys: &[String]) -> String {
+    let mut normalized_record_keys = ordered_record_keys.to_vec();
+    normalized_record_keys.sort_unstable();
+    format!(
+        "{ENS_NAMESPACE}:{surface}:{}",
+        normalized_record_keys.join(",")
+    )
 }
 
 fn manifest_versions_include_source_family(
@@ -1068,6 +1256,59 @@ mod tests {
         request
     }
 
+    fn multi_selector_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = success_request();
+        let ordered_record_keys = vec![
+            "addr:60".to_owned(),
+            "addr:0".to_owned(),
+            "addr:2".to_owned(),
+        ];
+        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000014);
+        let finished_at = timestamp(1_717_171_900);
+        let verified_queries = json!([
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            },
+            {
+                "record_key": "addr:0",
+                "status": "not_found",
+                "failure_reason": "no_addr_record"
+            },
+            {
+                "record_key": "addr:2",
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_reverted"
+            }
+        ]);
+
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "verified_queries": verified_queries.clone()
+        }));
+        request.trace.failure_payload = None;
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_keys": ordered_record_keys,
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.finished_at = Some(finished_at);
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": verified_queries
+        }));
+        request.outcome.failure_payload = None;
+        request.outcome.finished_at = finished_at;
+        request
+    }
+
     #[tokio::test]
     async fn persists_successful_direct_path_and_reads_back_storage_identity() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -1118,6 +1359,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persists_multi_selector_direct_path_with_ordered_mixed_results() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = multi_selector_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+        assert_eq!(
+            persisted.cache_key.request_key,
+            "ens:alice.eth:addr:0,addr:2,addr:60"
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        let loaded_verified_queries = loaded_outcome
+            .outcome_payload
+            .as_ref()
+            .and_then(|payload| payload.get("verified_queries"))
+            .and_then(Value::as_array)
+            .expect("verified_queries must be present");
+        let ordered_record_keys = loaded_verified_queries
+            .iter()
+            .filter_map(|query| query.get("record_key"))
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_record_keys, vec!["addr:60", "addr:0", "addr:2"]);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn persists_execution_failed_direct_path_without_raw_call_snapshots() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = execution_failed_request();
@@ -1153,26 +1439,124 @@ mod tests {
         database.cleanup().await
     }
 
+    #[test]
+    fn validates_stable_request_key_normalization_for_multi_selector_requests() -> Result<()> {
+        let request = multi_selector_request();
+        validate_direct_request(&request)?;
+        assert_eq!(
+            request.trace.request_key,
+            "ens:alice.eth:addr:0,addr:2,addr:60"
+        );
+
+        let mut unnormalized_request = request.clone();
+        unnormalized_request.trace.request_key = "ens:alice.eth:addr:60,addr:0,addr:2".to_owned();
+        unnormalized_request.outcome.cache_key.request_key =
+            unnormalized_request.trace.request_key.clone();
+
+        let error = validate_direct_request(&unnormalized_request)
+            .expect_err("unnormalized request_key must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match expected ens:alice.eth:addr:0,addr:2,addr:60"),
+            "unexpected error: {error:#}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
-    async fn rejects_non_addr_selector_before_writing_any_storage() -> Result<()> {
+    async fn rejects_duplicate_selectors_before_writing_any_storage() -> Result<()> {
         let database = TestDatabase::new().await?;
-        let mut request = success_request();
-        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000013);
-        request.trace.request_key = "ens:alice.eth:text:com.twitter".to_owned();
+        let mut request = multi_selector_request();
+        let duplicate_record_keys = vec!["addr:60".to_owned(), "addr:60".to_owned()];
+        let request_key = normalized_request_key("alice.eth", &duplicate_record_keys);
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000015);
+        request.trace.request_key = request_key.clone();
         request.trace.request_metadata = json!({
             "surface": "alice.eth",
-            "record_key": "text:com.twitter",
+            "record_keys": duplicate_record_keys,
             "normalizer_version": "uts46-v1"
         });
         request.trace.final_payload = Some(json!({
-            "record_kind": "text",
-            "key": "com.twitter",
-            "value": "@alice"
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    }
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "not_found",
+                    "failure_reason": "no_addr_record"
+                }
+            ]
         }));
         request.outcome.execution_trace_id = request.trace.execution_trace_id;
-        request.outcome.cache_key.request_key = request.trace.request_key.clone();
-        request.outcome.outcome_payload = Some(json!({
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.outcome_payload = request.trace.final_payload.clone();
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("duplicate selectors must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must not contain duplicate selectors"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected request must not persist outcome rows"
+        );
+        assert!(
+            load_raw_call_snapshots_by_block_hash(
+                database.pool(),
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc123",
+            )
+            .await?
+            .is_empty(),
+            "rejected request must not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_non_addr_selector_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = multi_selector_request();
+        let ordered_record_keys = vec!["addr:60".to_owned(), "text:com.twitter".to_owned()];
+        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000013);
+        request.trace.request_key = request_key.clone();
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_keys": ordered_record_keys,
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.final_payload = Some(json!({
             "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    }
+                },
                 {
                     "record_key": "text:com.twitter",
                     "status": "success",
@@ -1182,6 +1566,9 @@ mod tests {
                 }
             ]
         }));
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.outcome_payload = request.trace.final_payload.clone();
 
         let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
             .await
