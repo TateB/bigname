@@ -42,9 +42,13 @@ Execution notes:
   surfaces, resources, token lineage, and bindings; the harness covers the base
   `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`, and
   `dedupe_by` query handling
+- the exact-name contract seeds a `name_current` row with the frozen exact-name `control`,
+  `resolver`, and `history` summary objects and asserts only those declared-state sections on
+  `GET /v1/names/{namespace}/{name}`
 - the coverage contract reuses the exact-name projection seed and asserts that
-  `GET /v1/coverage/{namespace}/{name}` preserves the shipped name payload envelope while moving
-  the explain block into `declared_state`
+  `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
+  `coverage` object as exact-name lookup while exposing the explain-only coverage block in
+  `declared_state`
 - the resource-permissions contract seeds `permissions_current` rows and covers both the base
   `GET /v1/resources/{resource_id}/permissions` collection response and the shipped `subject` and
   `scope` query filters

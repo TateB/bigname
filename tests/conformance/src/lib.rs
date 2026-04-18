@@ -1128,7 +1128,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn exact_name_contract_includes_declared_sections_and_authority_fallback()
+        async fn exact_name_contract_returns_frozen_control_resolver_and_history_summaries()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
@@ -1170,45 +1170,18 @@ mod shipped_api {
                 .declared_state
                 .as_object()
                 .expect("declared_state must be an object");
-            let expected_resource_id = resource_id.to_string();
 
-            assert_eq!(payload.verified_state, None);
-            assert_eq!(payload.consistency, "finalized");
             assert_eq!(
-                payload.data.get("resource_id").and_then(Value::as_str),
-                Some(expected_resource_id.as_str())
+                declared_state.get("control"),
+                Some(&exact_name_control_summary())
             );
             assert_eq!(
-                declared_state
-                    .get("registration")
-                    .and_then(Value::as_object)
-                    .and_then(|value| value.get("status"))
-                    .and_then(Value::as_str),
-                Some("active")
+                declared_state.get("resolver"),
+                Some(&exact_name_resolver_summary())
             );
             assert_eq!(
-                declared_state
-                    .get("authority")
-                    .and_then(Value::as_object)
-                    .and_then(|value| value.get("resource_id"))
-                    .and_then(Value::as_str),
-                Some(expected_resource_id.as_str())
-            );
-            assert_eq!(
-                declared_state
-                    .get("control")
-                    .and_then(Value::as_object)
-                    .and_then(|value| value.get("status"))
-                    .and_then(Value::as_str),
-                Some("unsupported")
-            );
-            assert_eq!(
-                declared_state
-                    .get("history")
-                    .and_then(Value::as_object)
-                    .and_then(|value| value.get("unsupported_reason"))
-                    .and_then(Value::as_str),
-                Some("declared history pointers are not yet projected")
+                declared_state.get("history"),
+                Some(&exact_name_history_summary())
             );
 
             database.cleanup().await?;
@@ -1265,17 +1238,27 @@ mod shipped_api {
 
             let coverage_payload: NameResponse = read_json(coverage_response).await?;
             let name_payload: NameResponse = read_json(name_response).await?;
+            let name_declared_state = name_payload
+                .declared_state
+                .as_object()
+                .expect("declared_state must be an object");
 
             assert_eq!(coverage_payload.data, name_payload.data);
             assert_eq!(coverage_payload.coverage, name_payload.coverage);
-            assert_eq!(coverage_payload.provenance, name_payload.provenance);
-            assert_eq!(
-                coverage_payload.chain_positions,
-                name_payload.chain_positions
-            );
-            assert_eq!(coverage_payload.consistency, name_payload.consistency);
-            assert_eq!(coverage_payload.last_updated, name_payload.last_updated);
             assert_eq!(coverage_payload.verified_state, None);
+            assert_eq!(
+                name_declared_state.get("control"),
+                Some(&exact_name_control_summary())
+            );
+            assert_eq!(
+                name_declared_state.get("resolver"),
+                Some(&exact_name_resolver_summary())
+            );
+            assert_eq!(
+                name_declared_state.get("history"),
+                Some(&exact_name_history_summary())
+            );
+            assert_eq!(coverage_payload.declared_state, coverage_payload.coverage);
             assert_eq!(
                 coverage_payload.declared_state,
                 json!({
@@ -3379,9 +3362,9 @@ mod shipped_api {
                         "status": "active",
                         "authority_kind": "registrar"
                     },
-                    "resolver": {
-                        "address": "0x0000000000000000000000000000000000000abc"
-                    }
+                    "control": exact_name_control_summary(),
+                    "resolver": exact_name_resolver_summary(),
+                    "history": exact_name_history_summary(),
                 }),
                 provenance: json!({
                     "normalized_event_ids": [101, 102],
@@ -3427,6 +3410,60 @@ mod shipped_api {
                 manifest_version: 3,
                 last_recomputed_at: timestamp(1_717_171_717),
             }
+        }
+
+        fn exact_name_control_summary() -> Value {
+            json!({
+                "registrant": "0x00000000000000000000000000000000000000aa",
+                "registry_owner": "0x00000000000000000000000000000000000000bb",
+                "latest_event_kind": "RegistryTransferred",
+            })
+        }
+
+        fn exact_name_resolver_summary() -> Value {
+            json!({
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged",
+            })
+        }
+
+        fn exact_name_history_summary() -> Value {
+            json!({
+                "surface_head": exact_name_history_pointer(
+                    301,
+                    "RegistryTransferred",
+                    21_000_010,
+                    "0xhistorysurface",
+                    "2026-04-17T00:00:10Z",
+                ),
+                "resource_head": exact_name_history_pointer(
+                    302,
+                    "ResolverChanged",
+                    21_000_009,
+                    "0xhistoryresource",
+                    "2026-04-17T00:00:09Z",
+                ),
+            })
+        }
+
+        fn exact_name_history_pointer(
+            normalized_event_id: i64,
+            event_kind: &str,
+            block_number: i64,
+            block_hash: &str,
+            timestamp: &str,
+        ) -> Value {
+            json!({
+                "normalized_event_id": normalized_event_id.to_string(),
+                "event_kind": event_kind,
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": block_number,
+                    "block_hash": block_hash,
+                    "timestamp": timestamp,
+                },
+            })
         }
     }
 }
