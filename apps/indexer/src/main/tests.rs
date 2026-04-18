@@ -1239,6 +1239,18 @@ fn registry_new_resolver_topic0() -> String {
     keccak256_hex(b"NewResolver(bytes32,address)")
 }
 
+fn resolver_addr_changed_topic0() -> String {
+    keccak256_hex(b"AddrChanged(bytes32,address)")
+}
+
+fn resolver_text_changed_topic0() -> String {
+    keccak256_hex(b"TextChanged(bytes32,string,string)")
+}
+
+fn resolver_version_changed_topic0() -> String {
+    keccak256_hex(b"VersionChanged(bytes32,uint64)")
+}
+
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
     let mut labels = Vec::<Vec<u8>>::new();
     let mut cursor = 0usize;
@@ -1290,6 +1302,16 @@ fn encode_name_wrapped_log_data(dns_name: &[u8]) -> String {
     data.resize(32 * 5 + padded_length, 0);
 
     hex_string(&data)
+}
+
+fn dns_encoded_eth_name(label: &str) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.push(u8::try_from(label.len()).expect("resolver label length must fit in u8"));
+    output.extend_from_slice(label.as_bytes());
+    output.push(3);
+    output.extend_from_slice(b"eth");
+    output.push(0);
+    output
 }
 
 fn abi_word_u64(value: u64) -> [u8; 32] {
@@ -1370,6 +1392,27 @@ fn encode_registry_new_resolver_log_data(resolver: &str) -> String {
     hex_string(&abi_word_address(resolver))
 }
 
+fn encode_dynamic_string_log_data(value: &str) -> String {
+    let value_bytes = value.as_bytes();
+    let mut output = Vec::new();
+    output.extend_from_slice(&abi_word_u64(32));
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
+    ));
+    output.extend_from_slice(value_bytes);
+    let padded_length = ((value_bytes.len() + 31) / 32) * 32;
+    output.resize(64 + padded_length, 0);
+    hex_string(&output)
+}
+
+fn encode_resolver_addr_changed_log_data(address: &str) -> String {
+    hex_string(&abi_word_address(address))
+}
+
+fn encode_resolver_version_changed_log_data(version: u64) -> String {
+    hex_string(&abi_word_u64(version))
+}
+
 fn rpc_registry_new_resolver_log_payload(
     block: &ProviderBlock,
     address: &str,
@@ -1377,15 +1420,7 @@ fn rpc_registry_new_resolver_log_payload(
     resolver: &str,
     log_index: u64,
 ) -> Value {
-    let dns_name = {
-        let mut output = Vec::new();
-        output.push(u8::try_from(label.len()).expect("resolver label length must fit in u8"));
-        output.extend_from_slice(label.as_bytes());
-        output.push(3);
-        output.extend_from_slice(b"eth");
-        output.push(0);
-        output
-    };
+    let dns_name = dns_encoded_eth_name(label);
 
     json!({
         "blockHash": block.block_hash.clone(),
@@ -1399,6 +1434,79 @@ fn rpc_registry_new_resolver_log_payload(
             namehash_for_dns_name(&dns_name)
         ],
         "data": encode_registry_new_resolver_log_data(resolver)
+    })
+}
+
+fn rpc_resolver_text_changed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    key: &str,
+    log_index: u64,
+) -> Value {
+    let dns_name = dns_encoded_eth_name(label);
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_text_changed_topic0(),
+            namehash_for_dns_name(&dns_name),
+            keccak256_hex(key.as_bytes())
+        ],
+        "data": encode_dynamic_string_log_data(key)
+    })
+}
+
+fn rpc_resolver_addr_changed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    resolved_address: &str,
+    log_index: u64,
+) -> Value {
+    let dns_name = dns_encoded_eth_name(label);
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_addr_changed_topic0(),
+            namehash_for_dns_name(&dns_name)
+        ],
+        "data": encode_resolver_addr_changed_log_data(resolved_address)
+    })
+}
+
+fn rpc_resolver_version_changed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    version: u64,
+    log_index: u64,
+) -> Value {
+    let dns_name = dns_encoded_eth_name(label);
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_version_changed_topic0(),
+            namehash_for_dns_name(&dns_name)
+        ],
+        "data": encode_resolver_version_changed_log_data(version)
     })
 }
 
@@ -2338,7 +2446,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
         &tasks[0],
         &provider,
         &ProviderHeadSnapshot {
-            canonical: canonical_head,
+            canonical: canonical_head.clone(),
             safe: None,
             finalized: None,
         },
@@ -2406,8 +2514,10 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
     let database = TestDatabase::new().await?;
     let registrar_contract_instance_id = Uuid::from_u128(33);
     let registry_contract_instance_id = Uuid::from_u128(34);
+    let resolver_contract_instance_id = Uuid::from_u128(35);
     let registrar_address = "0x00000000000000000000000000000000000000ab";
     let registry_address = "0x00000000000000000000000000000000000000ac";
+    let resolver_address = "0x00000000000000000000000000000000000000cc";
 
     sqlx::query(
         r#"
@@ -2473,6 +2583,39 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
     .context(
         "failed to insert registry manifest_versions for unwrapped authority reconciliation test",
     )?;
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                3,
+                1,
+                'ens',
+                'ens_v1_resolver_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_resolver_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context(
+        "failed to insert resolver manifest_versions for unwrapped authority reconciliation test",
+    )?;
     insert_contract_instance(
         database.pool(),
         registrar_contract_instance_id,
@@ -2485,6 +2628,13 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         registry_contract_instance_id,
         "ethereum-mainnet",
         "root",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
     )
     .await?;
     insert_active_contract_instance_address(
@@ -2503,6 +2653,14 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         Some(2),
     )
     .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        resolver_address,
+        Some(3),
+    )
+    .await?;
     insert_manifest_contract_instance(
         database.pool(),
         1,
@@ -2519,6 +2677,17 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         2,
         registry_contract_instance_id,
         registry_address,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        3,
+        "resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+        "none",
+        None,
+        None,
     )
     .await?;
 
@@ -2541,8 +2710,29 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 &canonical_head,
                 registry_address,
                 "alice",
-                "0x00000000000000000000000000000000000000cc",
+                resolver_address,
                 1,
+            ),
+            rpc_resolver_text_changed_log_payload(
+                &canonical_head,
+                resolver_address,
+                "alice",
+                "com.twitter",
+                2,
+            ),
+            rpc_resolver_addr_changed_log_payload(
+                &canonical_head,
+                resolver_address,
+                "alice",
+                "0x00000000000000000000000000000000000000aa",
+                3,
+            ),
+            rpc_resolver_version_changed_log_payload(
+                &canonical_head,
+                resolver_address,
+                "alice",
+                7,
+                4,
             ),
         ],
         block: canonical_head.clone(),
@@ -2554,7 +2744,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         &tasks[0],
         &provider,
         &ProviderHeadSnapshot {
-            canonical: canonical_head,
+            canonical: canonical_head.clone(),
             safe: None,
             finalized: None,
         },
@@ -2650,6 +2840,42 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         .fetch_one(database.pool())
         .await?,
         2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordChanged' AND canonicality_state = 'canonical'::canonicality_state"
+        )
+        .bind(&canonical_head.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordVersionChanged' AND canonicality_state = 'canonical'::canonicality_state"
+        )
+        .bind(&canonical_head.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(after_state->>'record_key' ORDER BY after_state->>'record_key') FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordChanged'"
+        )
+        .bind(&canonical_head.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        vec!["addr:60".to_owned(), "text".to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'record_version' FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordVersionChanged'"
+        )
+        .bind(&canonical_head.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        "7".to_owned()
     );
     let resolver_event_resource_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT resource_id FROM normalized_events WHERE event_kind = 'ResolverChanged'",
@@ -3997,6 +4223,96 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
     .execute(database.pool())
     .await
     .context("failed to insert ResolverChanged event for reorg reconciliation test")?;
+    sqlx::query(
+        r#"
+            INSERT INTO normalized_events (
+                event_identity,
+                namespace,
+                logical_name_id,
+                resource_id,
+                event_kind,
+                source_family,
+                manifest_version,
+                source_manifest_id,
+                chain_id,
+                block_number,
+                block_hash,
+                transaction_hash,
+                log_index,
+                raw_fact_ref,
+                derivation_kind,
+                canonicality_state,
+                before_state,
+                after_state
+            )
+            VALUES
+            (
+                'ens_v1_unwrapped_authority:RecordChanged:record-change:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:2',
+                'ens',
+                'ens:reorg.eth',
+                $1,
+                'RecordChanged',
+                'ens_v1_resolver_l1',
+                1,
+                1,
+                'ethereum-mainnet',
+                42,
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                $2,
+                2,
+                '{"kind":"raw_log"}'::jsonb,
+                'ens_v1_unwrapped_authority',
+                'canonical'::canonicality_state,
+                '{}'::jsonb,
+                '{"record_key":"text","record_family":"text","selector_key":null}'::jsonb
+            ),
+            (
+                'ens_v1_unwrapped_authority:RecordChanged:record-change:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:3',
+                'ens',
+                'ens:reorg.eth',
+                $1,
+                'RecordChanged',
+                'ens_v1_resolver_l1',
+                1,
+                1,
+                'ethereum-mainnet',
+                42,
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                $2,
+                3,
+                '{"kind":"raw_log"}'::jsonb,
+                'ens_v1_unwrapped_authority',
+                'canonical'::canonicality_state,
+                '{}'::jsonb,
+                '{"record_key":"addr:60","record_family":"addr","selector_key":"60"}'::jsonb
+            ),
+            (
+                'ens_v1_unwrapped_authority:RecordVersionChanged:record-version:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:4',
+                'ens',
+                'ens:reorg.eth',
+                $1,
+                'RecordVersionChanged',
+                'ens_v1_resolver_l1',
+                1,
+                1,
+                'ethereum-mainnet',
+                42,
+                '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                $2,
+                4,
+                '{"kind":"raw_log"}'::jsonb,
+                'ens_v1_unwrapped_authority',
+                'canonical'::canonicality_state,
+                '{"record_version":null}'::jsonb,
+                '{"record_version":7}'::jsonb
+            )
+            "#,
+    )
+    .bind(resource_id)
+    .bind(transaction_hash_for_block(&losing_block))
+    .execute(database.pool())
+    .await
+    .context("failed to insert record change events for reorg reconciliation test")?;
     tasks[0].checkpoint = advance_chain_checkpoints(
         database.pool(),
         &ChainCheckpointUpdate {
@@ -4136,6 +4452,33 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         .fetch_one(database.pool())
         .await?,
         "orphaned".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordChanged' AND canonicality_state = 'orphaned'::canonicality_state"
+        )
+        .bind(&losing_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1 AND event_kind = 'RecordVersionChanged' AND canonicality_state = 'orphaned'::canonicality_state"
+        )
+        .bind(&losing_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged') AND canonicality_state = 'canonical'::canonicality_state"
+        )
+        .bind(&losing_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(

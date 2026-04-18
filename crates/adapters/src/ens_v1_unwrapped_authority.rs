@@ -18,12 +18,15 @@ use sqlx::{
 
 const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
 const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
 const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
+const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
+const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
 const EVENT_KIND_REGISTRATION_RELEASED: &str = "RegistrationReleased";
 const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
@@ -34,13 +37,18 @@ const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 
 const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256,uint256)";
 const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
+const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
+const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
+const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
+const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
+const ENS_NATIVE_COIN_TYPE: &str = "60";
 const PERMISSION_POWER_RESOURCE_CONTROL: &str = "resource_control";
 const PERMISSION_POWER_RESOLVER_CONTROL: &str = "resolver_control";
 const PERMISSION_TRANSFER_BEHAVIOR: &str = "replace_on_authority_change";
@@ -161,12 +169,37 @@ struct ResolverObservation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordSelector {
+    record_key: String,
+    record_family: String,
+    selector_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordChangeObservation {
+    namehash: String,
+    resolver: String,
+    selector: RecordSelector,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordVersionObservation {
+    namehash: String,
+    resolver: String,
+    record_version: i64,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AuthorityObservation {
     RegistrationGranted(NameRegistrationObservation),
     RegistrationRenewed(NameRenewalObservation),
     TokenTransferred(TokenTransferObservation),
     RegistryOwnerChanged(RegistryOwnerObservation),
     ResolverChanged(ResolverObservation),
+    RecordChanged(RecordChangeObservation),
+    RecordVersionChanged(RecordVersionObservation),
 }
 
 #[derive(Clone, Debug)]
@@ -271,6 +304,7 @@ struct NameHistory {
     current_registration: Option<RegistrationLease>,
     current_registry_owner: Option<String>,
     current_resolver: Option<String>,
+    current_record_version: Option<i64>,
     open_binding: Option<OpenBinding>,
     bindings: Vec<BindingSegment>,
     events: Vec<NormalizedEvent>,
@@ -335,14 +369,13 @@ pub async fn sync_ens_v1_unwrapped_authority(
         };
         matched_log_count += 1;
 
-        let labelhash = match &observation {
-            AuthorityObservation::ResolverChanged(event) => {
-                let Some(labelhash) = namehash_to_labelhash.get(&event.namehash).cloned() else {
-                    continue;
-                };
-                labelhash
-            }
-            _ => observation_labelhash(&observation),
+        let labelhash = if let Some(namehash) = observation_namehash(&observation) {
+            let Some(labelhash) = namehash_to_labelhash.get(namehash).cloned() else {
+                continue;
+            };
+            labelhash
+        } else {
+            observation_labelhash(&observation)
         };
         let history = histories
             .entry(labelhash.clone())
@@ -353,6 +386,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
                 current_registration: None,
                 current_registry_owner: None,
                 current_resolver: None,
+                current_record_version: None,
                 open_binding: None,
                 bindings: Vec::new(),
                 events: Vec::new(),
@@ -1130,6 +1164,11 @@ async fn apply_observation(
         }
         AuthorityObservation::ResolverChanged(event) => {
             let before_resolver = history.current_resolver.clone();
+            let before_normalized_resolver = nonzero_address(before_resolver.as_deref());
+            let after_normalized_resolver = nonzero_address(Some(event.resolver.as_str()));
+            if before_normalized_resolver != after_normalized_resolver {
+                history.current_record_version = None;
+            }
             history.current_resolver = Some(event.resolver.clone());
 
             let Some(name) = history.name.clone() else {
@@ -1170,8 +1209,8 @@ async fn apply_observation(
             if let (Some(anchor), Some(subject)) =
                 (authority.as_ref(), nonzero_address(authority_subject))
             {
-                let before_resolver = nonzero_address(before_resolver.as_deref());
-                let after_resolver = nonzero_address(Some(event.resolver.as_str()));
+                let before_resolver = before_normalized_resolver;
+                let after_resolver = after_normalized_resolver;
                 if before_resolver != after_resolver {
                     if let Some(previous_resolver) = before_resolver.as_deref() {
                         history
@@ -1211,6 +1250,76 @@ async fn apply_observation(
                     }
                 }
             }
+        }
+        AuthorityObservation::RecordChanged(event) => {
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            if !current_resolver_matches(history, &event.resolver) {
+                return Ok(());
+            }
+            let Some(authority) = active_anchor_for_history(history, &event.reference.chain_id)
+            else {
+                return Ok(());
+            };
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(name.logical_name_id.clone()),
+                Some(authority.resource_id),
+                EVENT_KIND_RECORD_CHANGED,
+                json!({}),
+                json!({
+                    "record_key": event.selector.record_key,
+                    "record_family": event.selector.record_family,
+                    "selector_key": event.selector.selector_key,
+                }),
+                format!(
+                    "record-change:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
+        AuthorityObservation::RecordVersionChanged(event) => {
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            if !current_resolver_matches(history, &event.resolver) {
+                return Ok(());
+            }
+            let Some(authority) = active_anchor_for_history(history, &event.reference.chain_id)
+            else {
+                return Ok(());
+            };
+            let before_version = history.current_record_version;
+            history.current_record_version = Some(event.record_version);
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(name.logical_name_id.clone()),
+                Some(authority.resource_id),
+                EVENT_KIND_RECORD_VERSION_CHANGED,
+                json!({
+                    "record_version": before_version,
+                }),
+                json!({
+                    "record_version": event.record_version,
+                }),
+                format!(
+                    "record-version:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
         }
         AuthorityObservation::RegistryOwnerChanged(event) => {
             let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
@@ -1313,6 +1422,8 @@ fn transition_authority(
     if authority_eq(before.as_ref(), after.as_ref()) {
         return Ok(());
     }
+
+    history.current_record_version = None;
 
     if let Some(open_binding) = history.open_binding.take()
         && open_binding.active_from < effective_time
@@ -1461,6 +1572,11 @@ fn active_anchor_for_history(history: &NameHistory, chain: &str) -> Option<Autho
         return Some(build_registrar_anchor(registration));
     }
     registry_anchor_for_history(history, chain, &history.labelhash)
+}
+
+fn current_resolver_matches(history: &NameHistory, resolver: &str) -> bool {
+    nonzero_address(history.current_resolver.as_deref())
+        .is_some_and(|current| current.eq_ignore_ascii_case(resolver))
 }
 
 fn nonzero_address(value: Option<&str>) -> Option<String> {
@@ -1881,9 +1997,20 @@ fn observation_labelhash(observation: &AuthorityObservation) -> String {
         AuthorityObservation::RegistrationRenewed(value) => value.labelhash.clone(),
         AuthorityObservation::TokenTransferred(value) => value.labelhash.clone(),
         AuthorityObservation::RegistryOwnerChanged(value) => value.labelhash.clone(),
-        AuthorityObservation::ResolverChanged(_) => {
+        AuthorityObservation::ResolverChanged(_)
+        | AuthorityObservation::RecordChanged(_)
+        | AuthorityObservation::RecordVersionChanged(_) => {
             unreachable!("resolver observations must be resolved by namehash before use")
         }
+    }
+}
+
+fn observation_namehash(observation: &AuthorityObservation) -> Option<&str> {
+    match observation {
+        AuthorityObservation::ResolverChanged(value) => Some(&value.namehash),
+        AuthorityObservation::RecordChanged(value) => Some(&value.namehash),
+        AuthorityObservation::RecordVersionChanged(value) => Some(&value.namehash),
+        _ => None,
     }
 }
 
@@ -2042,6 +2169,113 @@ fn build_authority_observation(
                         .context("NewResolver log is missing indexed node")?,
                 )?,
                 resolver: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && topic0.eq_ignore_ascii_case(&text_changed_topic0())
+    {
+        let key = decode_first_dynamic_string(&raw_log.data)?;
+        let indexed_key_hash = normalize_hex_32(
+            raw_log
+                .topics
+                .get(2)
+                .context("TextChanged log is missing indexed key hash")?,
+        )?;
+        if indexed_key_hash != keccak256_hex(key.as_bytes()) {
+            bail!("TextChanged indexed key hash does not match decoded key");
+        }
+        return Ok(Some(AuthorityObservation::RecordChanged(
+            RecordChangeObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("TextChanged log is missing indexed node")?,
+                )?,
+                resolver: raw_log.emitting_address.clone(),
+                selector: RecordSelector {
+                    record_key: "text".to_owned(),
+                    record_family: "text".to_owned(),
+                    selector_key: None,
+                },
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && topic0.eq_ignore_ascii_case(&addr_changed_topic0())
+    {
+        decode_owner_address(&raw_log.data)?;
+        return Ok(Some(AuthorityObservation::RecordChanged(
+            RecordChangeObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("AddrChanged log is missing indexed node")?,
+                )?,
+                resolver: raw_log.emitting_address.clone(),
+                selector: RecordSelector {
+                    record_key: format!("addr:{ENS_NATIVE_COIN_TYPE}"),
+                    record_family: "addr".to_owned(),
+                    selector_key: Some(ENS_NATIVE_COIN_TYPE.to_owned()),
+                },
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && topic0.eq_ignore_ascii_case(&address_changed_topic0())
+    {
+        let coin_type = abi_word_to_i64(
+            raw_log
+                .data
+                .get(..32)
+                .context("AddressChanged log is missing coin type")?,
+        )?;
+        decode_nth_dynamic_bytes(&raw_log.data, 1)?;
+        return Ok(Some(AuthorityObservation::RecordChanged(
+            RecordChangeObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("AddressChanged log is missing indexed node")?,
+                )?,
+                resolver: raw_log.emitting_address.clone(),
+                selector: RecordSelector {
+                    record_key: format!("addr:{coin_type}"),
+                    record_family: "addr".to_owned(),
+                    selector_key: Some(coin_type.to_string()),
+                },
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && topic0.eq_ignore_ascii_case(&version_changed_topic0())
+    {
+        return Ok(Some(AuthorityObservation::RecordVersionChanged(
+            RecordVersionObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("VersionChanged log is missing indexed node")?,
+                )?,
+                resolver: raw_log.emitting_address.clone(),
+                record_version: abi_word_to_i64(
+                    raw_log
+                        .data
+                        .get(..32)
+                        .context("VersionChanged log is missing record version")?,
+                )?,
                 reference: raw_log.reference(),
             },
         )));
@@ -2254,6 +2488,7 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         };
         if manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRY_L1
+            && manifest.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
         {
             continue;
         }
@@ -2374,10 +2609,21 @@ fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
 }
 
 fn decode_first_dynamic_bytes(data: &[u8]) -> Result<Vec<u8>> {
+    decode_nth_dynamic_bytes(data, 0)
+}
+
+fn decode_nth_dynamic_bytes(data: &[u8], parameter_index: usize) -> Result<Vec<u8>> {
+    let offset_start = parameter_index
+        .checked_mul(32)
+        .context("dynamic ABI parameter index overflowed")?;
     if data.len() < 64 {
         bail!("event data is too short to decode a dynamic bytes parameter");
     }
-    let offset = word_to_usize(&data[0..32]).context("invalid ABI offset")?;
+    let offset = word_to_usize(
+        data.get(offset_start..offset_start + 32)
+            .context("event data is missing dynamic bytes offset")?,
+    )
+    .context("invalid ABI offset")?;
     if data.len() < offset + 32 {
         bail!("event data is missing dynamic bytes length");
     }
@@ -2514,6 +2760,22 @@ fn new_owner_topic0() -> String {
 
 fn new_resolver_topic0() -> String {
     keccak256_hex(NEW_RESOLVER_SIGNATURE.as_bytes())
+}
+
+fn addr_changed_topic0() -> String {
+    keccak256_hex(ADDR_CHANGED_SIGNATURE.as_bytes())
+}
+
+fn address_changed_topic0() -> String {
+    keccak256_hex(ADDRESS_CHANGED_SIGNATURE.as_bytes())
+}
+
+fn text_changed_topic0() -> String {
+    keccak256_hex(TEXT_CHANGED_SIGNATURE.as_bytes())
+}
+
+fn version_changed_topic0() -> String {
+    keccak256_hex(VERSION_CHANGED_SIGNATURE.as_bytes())
 }
 
 fn hex_string(bytes: &[u8]) -> String {
@@ -2760,6 +3022,51 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_active_contract_fixture(
+        pool: &PgPool,
+        source_family: &str,
+        declaration_name: &str,
+        address: &str,
+        role: Option<&str>,
+        file_path: &str,
+    ) -> Result<i64> {
+        let manifest_id = insert_manifest_version(
+            pool,
+            1,
+            "ens",
+            source_family,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            file_path,
+        )
+        .await?;
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(pool, contract_instance_id, "ethereum-mainnet", "contract")
+            .await?;
+        insert_manifest_contract_instance(
+            pool,
+            manifest_id,
+            "contract",
+            declaration_name,
+            contract_instance_id,
+            address,
+            role,
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            pool,
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            manifest_id,
+        )
+        .await?;
+        Ok(manifest_id)
+    }
+
     fn raw_block(
         block_hash: &str,
         parent_hash: Option<&str>,
@@ -2817,6 +3124,165 @@ mod tests {
 
     fn encode_registry_new_resolver_log_data(resolver: &str) -> Vec<u8> {
         abi_word_address(resolver).to_vec()
+    }
+
+    fn encode_dynamic_string_log_data(value: &str) -> Vec<u8> {
+        let value_bytes = value.as_bytes();
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(32));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
+        ));
+        output.extend_from_slice(value_bytes);
+        let padded_length = ((value_bytes.len() + 31) / 32) * 32;
+        output.resize(64 + padded_length, 0);
+        output
+    }
+
+    fn encode_resolver_addr_changed_log_data(address: &str) -> Vec<u8> {
+        abi_word_address(address).to_vec()
+    }
+
+    fn encode_resolver_address_changed_log_data(coin_type: u64, address_bytes: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(coin_type));
+        output.extend_from_slice(&abi_word_u64(64));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(address_bytes.len()).expect("test address length must fit in u64"),
+        ));
+        output.extend_from_slice(address_bytes);
+        let padded_length = ((address_bytes.len() + 31) / 32) * 32;
+        output.resize(96 + padded_length, 0);
+        output
+    }
+
+    fn encode_resolver_version_changed_log_data(version: u64) -> Vec<u8> {
+        abi_word_u64(version).to_vec()
+    }
+
+    fn resolver_raw_log(
+        emitting_address: &str,
+        topics: Vec<String>,
+        data: Vec<u8>,
+        log_index: i64,
+    ) -> AuthorityRawLogRow {
+        AuthorityRawLogRow {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 42,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)
+                .expect("test timestamp must be valid"),
+            transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_owned(),
+            topics,
+            data,
+            canonicality_state: CanonicalityState::Canonical,
+            source_manifest_id: 3,
+            namespace: "ens".to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            manifest_version: 1,
+            normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+        }
+    }
+
+    #[test]
+    fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
+        let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+        let resolver_address = "0x00000000000000000000000000000000000000cc";
+
+        let text_observation = build_authority_observation(&resolver_raw_log(
+            resolver_address,
+            vec![
+                text_changed_topic0(),
+                alice.namehash.clone(),
+                keccak256_hex(b"com.twitter"),
+            ],
+            encode_dynamic_string_log_data("com.twitter"),
+            0,
+        ))?
+        .context("TextChanged observation should decode")?;
+        assert_eq!(
+            text_observation,
+            AuthorityObservation::RecordChanged(RecordChangeObservation {
+                namehash: alice.namehash.clone(),
+                resolver: resolver_address.to_owned(),
+                selector: RecordSelector {
+                    record_key: "text".to_owned(),
+                    record_family: "text".to_owned(),
+                    selector_key: None,
+                },
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 0)
+                    .reference(),
+            })
+        );
+
+        let addr_observation = build_authority_observation(&resolver_raw_log(
+            resolver_address,
+            vec![addr_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_addr_changed_log_data("0x00000000000000000000000000000000000000aa"),
+            1,
+        ))?
+        .context("AddrChanged observation should decode")?;
+        assert_eq!(
+            addr_observation,
+            AuthorityObservation::RecordChanged(RecordChangeObservation {
+                namehash: alice.namehash.clone(),
+                resolver: resolver_address.to_owned(),
+                selector: RecordSelector {
+                    record_key: "addr:60".to_owned(),
+                    record_family: "addr".to_owned(),
+                    selector_key: Some("60".to_owned()),
+                },
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 1)
+                    .reference(),
+            })
+        );
+
+        let multicoin_addr_observation = build_authority_observation(&resolver_raw_log(
+            resolver_address,
+            vec![address_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_address_changed_log_data(61, &[0xde, 0xad, 0xbe, 0xef]),
+            2,
+        ))?
+        .context("AddressChanged observation should decode")?;
+        assert_eq!(
+            multicoin_addr_observation,
+            AuthorityObservation::RecordChanged(RecordChangeObservation {
+                namehash: alice.namehash.clone(),
+                resolver: resolver_address.to_owned(),
+                selector: RecordSelector {
+                    record_key: "addr:61".to_owned(),
+                    record_family: "addr".to_owned(),
+                    selector_key: Some("61".to_owned()),
+                },
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 2)
+                    .reference(),
+            })
+        );
+
+        let record_version_observation = build_authority_observation(&resolver_raw_log(
+            resolver_address,
+            vec![version_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_version_changed_log_data(7),
+            3,
+        ))?
+        .context("VersionChanged observation should decode")?;
+        assert_eq!(
+            record_version_observation,
+            AuthorityObservation::RecordVersionChanged(RecordVersionObservation {
+                namehash: alice.namehash,
+                resolver: resolver_address.to_owned(),
+                record_version: 7,
+                reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 3)
+                    .reference(),
+            })
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -3244,6 +3710,393 @@ mod tests {
                 .fetch_one(database.pool())
                 .await?,
             7
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_idempotently()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "registrar",
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "registry",
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            "manifests/ens/ens_v1_registry_l1/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "resolver",
+            "0x00000000000000000000000000000000000000cc",
+            Some("resolver"),
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+
+        let block_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let transaction_hash = "0xtxcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                block_hash,
+                Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                42,
+                1_700_000_042,
+            )],
+        )
+        .await?;
+
+        let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        name_registered_topic0(),
+                        keccak256_hex(b"alice"),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                    ],
+                    data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 2,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![
+                        text_changed_topic0(),
+                        alice.namehash.clone(),
+                        keccak256_hex(b"com.twitter"),
+                    ],
+                    data: encode_dynamic_string_log_data("com.twitter"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 3,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![addr_changed_topic0(), alice.namehash.clone()],
+                    data: encode_resolver_addr_changed_log_data(
+                        "0x00000000000000000000000000000000000000aa",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 4,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                    data: encode_resolver_version_changed_log_data(7),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let first = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(first.scanned_log_count, 5);
+        assert_eq!(first.matched_log_count, 5);
+        assert_eq!(first.total_resource_count, 1);
+        assert_eq!(first.total_normalized_event_count, 10);
+        assert_eq!(first.by_kind.get(EVENT_KIND_RECORD_CHANGED), Some(&2_usize));
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+            Some(&1_usize)
+        );
+
+        let authority_resource_id =
+            sqlx::query_scalar::<_, Uuid>("SELECT resource_id FROM resources LIMIT 1")
+                .fetch_one(database.pool())
+                .await?;
+        let record_change_resource_ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM normalized_events WHERE event_kind = 'RecordChanged' ORDER BY log_index",
+        )
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(record_change_resource_ids, vec![authority_resource_id; 2]);
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT resource_id FROM normalized_events WHERE event_kind = 'RecordVersionChanged'",
+            )
+            .fetch_one(database.pool())
+            .await?,
+            authority_resource_id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT ARRAY_AGG(after_state->>'record_key' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            vec!["text".to_owned(), "addr:60".to_owned()]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<Option<String>>>(
+                "SELECT ARRAY_AGG(after_state->>'selector_key' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            vec![None, Some("60".to_owned())]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'record_version' FROM normalized_events WHERE event_kind = 'RecordVersionChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "7".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE source_family = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')"
+            )
+            .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            .fetch_one(database.pool())
+            .await?,
+            3
+        );
+
+        let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(second.scanned_log_count, 5);
+        assert_eq!(second.matched_log_count, 5);
+        assert_eq!(second.total_normalized_event_count, 10);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordVersionChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_current_context()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "registrar",
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "registry",
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            "manifests/ens/ens_v1_registry_l1/v1.toml",
+        )
+        .await?;
+        let resolver_manifest_id = insert_active_contract_fixture(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "resolver",
+            "0x00000000000000000000000000000000000000cc",
+            Some("resolver"),
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+        let alternate_resolver_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            alternate_resolver_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            resolver_manifest_id,
+            "contract",
+            "resolver_alt",
+            alternate_resolver_contract_instance_id,
+            "0x00000000000000000000000000000000000000dd",
+            Some("resolver"),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            alternate_resolver_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000dd",
+            resolver_manifest_id,
+        )
+        .await?;
+
+        let block_hash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let transaction_hash = "0xtxdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                block_hash,
+                Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+                42,
+                1_700_000_042,
+            )],
+        )
+        .await?;
+
+        let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        name_registered_topic0(),
+                        keccak256_hex(b"alice"),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                    ],
+                    data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![
+                        text_changed_topic0(),
+                        alice.namehash.clone(),
+                        keccak256_hex(b"com.twitter"),
+                    ],
+                    data: encode_dynamic_string_log_data("com.twitter"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 2,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 3,
+                    emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                    topics: vec![
+                        text_changed_topic0(),
+                        alice.namehash.clone(),
+                        keccak256_hex(b"com.github"),
+                    ],
+                    data: encode_dynamic_string_log_data("com.github"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(summary.scanned_log_count, 4);
+        assert_eq!(summary.matched_log_count, 4);
+        assert_eq!(summary.total_normalized_event_count, 7);
+        assert_eq!(summary.by_kind.get(EVENT_KIND_RECORD_CHANGED), None);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordVersionChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
         );
 
         database.cleanup().await
