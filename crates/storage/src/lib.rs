@@ -1,5 +1,6 @@
 //! Shared PostgreSQL bootstrap utilities.
 
+mod address_names;
 mod checkpoints;
 mod children;
 mod execution;
@@ -18,6 +19,12 @@ use clap::Args;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::info;
 
+pub use address_names::{
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentDedupe,
+    clear_address_names_current, collapse_address_name_current_rows, delete_address_names_current,
+    load_address_names_current, load_address_names_current_including_noncanonical,
+    upsert_address_names_current_rows,
+};
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
     sync_chain_checkpoints,

@@ -16,10 +16,11 @@ use bigname_manifests::{
     load_namespace_manifest_snapshot,
 };
 use bigname_storage::{
-    ChildrenCurrentRow, DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow,
-    load_children_current, load_name_current, load_name_history, load_name_surface, load_resource,
-    load_resource_history, load_surface_bindings_by_logical_name_id,
-    load_surface_bindings_by_resource_id,
+    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
+    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, collapse_address_name_current_rows,
+    load_address_names_current, load_children_current, load_name_current, load_name_history,
+    load_name_surface, load_resource, load_resource_history,
+    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -173,6 +174,14 @@ struct ChildrenQuery {
     include: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct AddressNamesQuery {
+    namespace: Option<String>,
+    relation: Option<String>,
+    dedupe_by: Option<String>,
+    include: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct HistoryResponse {
     data: Vec<JsonValue>,
@@ -188,6 +197,19 @@ struct HistoryResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ChildrenResponse {
+    data: Vec<JsonValue>,
+    declared_state: JsonValue,
+    verified_state: Option<()>,
+    provenance: JsonValue,
+    coverage: CoverageResponse,
+    chain_positions: JsonValue,
+    page: HistoryPageResponse,
+    consistency: String,
+    last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct AddressNamesResponse {
     data: Vec<JsonValue>,
     declared_state: JsonValue,
     verified_state: Option<()>,
@@ -343,6 +365,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route("/v1/addresses/{address}/names", get(address_names))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
@@ -440,6 +463,44 @@ async fn name_current(
     };
 
     Ok(Json(build_name_response(row)))
+}
+
+async fn address_names(
+    Path(address): Path<String>,
+    Query(query): Query<AddressNamesQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<AddressNamesResponse>> {
+    let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
+    let relation = parse_address_name_relation(query.relation.as_deref())?;
+    let dedupe_by = parse_address_names_dedupe_by(query.dedupe_by.as_deref())?;
+    parse_address_names_include(query.include.as_deref())?;
+    let normalized_address = normalize_address(&address);
+
+    let rows = load_address_names_current(
+        &state.pool,
+        &normalized_address,
+        namespace.as_deref(),
+        relation,
+    )
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            address = %normalized_address,
+            namespace = ?namespace,
+            relation = relation.map(|value| value.as_str()),
+            dedupe_by = address_names_dedupe_label(dedupe_by),
+            error = ?load_error,
+            "failed to load address_names_current rows"
+        );
+        ApiError::internal_error(format!(
+            "failed to load current address-name collection for address {normalized_address}"
+        ))
+    })?;
+
+    Ok(Json(build_address_names_response(
+        collapse_address_name_current_rows(&rows, dedupe_by),
+    )))
 }
 
 async fn name_children(
@@ -737,6 +798,41 @@ fn build_children_response(
     }
 }
 
+fn build_address_names_response(entries: Vec<AddressNameCurrentEntry>) -> AddressNamesResponse {
+    let last_updated = entries
+        .iter()
+        .map(|entry| entry.last_recomputed_at)
+        .max()
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+
+    AddressNamesResponse {
+        data: entries.iter().map(build_address_name_item).collect(),
+        declared_state: empty_object(),
+        verified_state: None,
+        provenance: build_address_names_provenance(&entries),
+        coverage: CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["ensv1_registry_path".to_owned()],
+            enumeration_basis: "surface_current_relations".to_owned(),
+            unsupported_reason: None,
+        },
+        chain_positions: build_address_names_chain_positions(&entries),
+        page: HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: entries.len() as u64,
+            sort: "display_name_asc".to_owned(),
+        },
+        consistency: collection_consistency(
+            entries.iter().map(|entry| &entry.canonicality_summary),
+        )
+        .to_owned(),
+        last_updated,
+    }
+}
+
 fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> HistoryResponse {
     let last_updated = rows
         .iter()
@@ -779,6 +875,37 @@ fn build_child_item(row: &ChildrenCurrentRow) -> JsonValue {
     );
     insert_string_field(&mut value, "namehash", row.namehash.clone());
     insert_string_field(&mut value, "surface_class", row.surface_class.clone());
+    value
+}
+
+fn build_address_name_item(entry: &AddressNameCurrentEntry) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(&mut value, "logical_name_id", entry.logical_name_id.clone());
+    insert_string_field(&mut value, "namespace", entry.namespace.clone());
+    insert_string_field(&mut value, "normalized_name", entry.normalized_name.clone());
+    insert_string_field(
+        &mut value,
+        "canonical_display_name",
+        entry.canonical_display_name.clone(),
+    );
+    insert_string_field(&mut value, "namehash", entry.namehash.clone());
+    insert_string_field(&mut value, "resource_id", entry.resource_id.to_string());
+    insert_string_field(
+        &mut value,
+        "binding_kind",
+        entry.binding_kind.as_str().to_owned(),
+    );
+    insert_value_field(
+        &mut value,
+        "relation_facets",
+        JsonValue::Array(
+            entry
+                .relations
+                .iter()
+                .map(|relation| JsonValue::String(relation.as_str().to_owned()))
+                .collect(),
+        ),
+    );
     value
 }
 
@@ -831,10 +958,71 @@ fn build_children_provenance(rows: &[ChildrenCurrentRow]) -> JsonValue {
     value
 }
 
+fn build_address_names_provenance(entries: &[AddressNameCurrentEntry]) -> JsonValue {
+    let mut value = empty_object();
+    insert_value_field(
+        &mut value,
+        "normalized_event_ids",
+        JsonValue::Array(
+            collect_address_names_provenance_values(entries, "normalized_event_ids")
+                .into_iter()
+                .filter_map(|value| value_to_string(&value).map(JsonValue::String))
+                .collect(),
+        ),
+    );
+    insert_value_field(
+        &mut value,
+        "raw_fact_refs",
+        JsonValue::Array(collect_address_names_provenance_values(
+            entries,
+            "raw_fact_refs",
+        )),
+    );
+    insert_value_field(
+        &mut value,
+        "manifest_versions",
+        JsonValue::Array(collect_address_names_provenance_values(
+            entries,
+            "manifest_versions",
+        )),
+    );
+    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    insert_string_field(
+        &mut value,
+        "derivation_kind",
+        entries
+            .iter()
+            .filter_map(|entry| {
+                string_field(provenance_field(&entry.provenance, "derivation_kind"))
+            })
+            .next()
+            .unwrap_or_else(|| "declared".to_owned()),
+    );
+    value
+}
+
 fn collect_children_provenance_values(rows: &[ChildrenCurrentRow], key: &str) -> Vec<JsonValue> {
     let mut deduped = Vec::new();
     for row in rows {
         let Some(JsonValue::Array(values)) = provenance_field(&row.provenance, key) else {
+            continue;
+        };
+        for value in values {
+            if !deduped.contains(value) {
+                deduped.push(value.clone());
+            }
+        }
+    }
+    deduped
+}
+
+fn collect_address_names_provenance_values(
+    entries: &[AddressNameCurrentEntry],
+    key: &str,
+) -> Vec<JsonValue> {
+    let mut deduped = Vec::new();
+    for entry in entries {
+        let Some(JsonValue::Array(values)) = provenance_field(&entry.provenance, key) else {
             continue;
         };
         for value in values {
@@ -862,6 +1050,24 @@ fn build_children_chain_positions(rows: &[ChildrenCurrentRow]) -> JsonValue {
     }
 
     serde_json::to_value(chain_positions).expect("children chain positions must serialize")
+}
+
+fn build_address_names_chain_positions(entries: &[AddressNameCurrentEntry]) -> JsonValue {
+    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
+    for entry in entries {
+        let Some(position_values) = entry.chain_positions.as_object() else {
+            continue;
+        };
+
+        for (slot, position_value) in position_values {
+            let Some(candidate) = chain_position_from_value(position_value) else {
+                continue;
+            };
+            merge_chain_position(&mut chain_positions, slot.clone(), candidate);
+        }
+    }
+
+    serde_json::to_value(chain_positions).expect("address names chain positions must serialize")
 }
 
 fn build_name_data(row: &NameCurrentRow) -> JsonValue {
@@ -1375,6 +1581,77 @@ fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {
     parse_children_include_counts(query.include.as_deref())
 }
 
+fn parse_address_names_namespace(namespace: Option<&str>) -> ApiResult<Option<String>> {
+    let Some(namespace) = namespace.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if PUBLIC_NAMESPACES.contains(&namespace) {
+        Ok(Some(namespace.to_owned()))
+    } else {
+        Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "namespace must be one of: ens, basenames".to_owned(),
+        })
+    }
+}
+
+fn parse_address_name_relation(relation: Option<&str>) -> ApiResult<Option<AddressNameRelation>> {
+    match relation.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("registrant") => Ok(Some(AddressNameRelation::Registrant)),
+        Some("token_holder") => Ok(Some(AddressNameRelation::TokenHolder)),
+        Some("effective_controller") => Ok(Some(AddressNameRelation::EffectiveController)),
+        Some(_) => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "relation must be one of: registrant, token_holder, effective_controller"
+                .to_owned(),
+        }),
+    }
+}
+
+fn parse_address_names_dedupe_by(dedupe_by: Option<&str>) -> ApiResult<AddressNamesCurrentDedupe> {
+    match dedupe_by.unwrap_or("surface") {
+        "surface" => Ok(AddressNamesCurrentDedupe::Surface),
+        "resource" => Ok(AddressNamesCurrentDedupe::Resource),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "dedupe_by must be one of: surface, resource".to_owned(),
+        }),
+    }
+}
+
+fn parse_address_names_include(include: Option<&str>) -> ApiResult<()> {
+    for value in include
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match value {
+            "role_summary" => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "unsupported",
+                    message: "include=role_summary is not yet supported".to_owned(),
+                });
+            }
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "invalid_input",
+                    message: "include must contain only role_summary".to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_children_surface_classes(surface_classes: Option<&str>) -> ApiResult<()> {
     let mut requested_non_declared = false;
 
@@ -1432,6 +1709,17 @@ fn parse_children_include_counts(include: Option<&str>) -> ApiResult<bool> {
     }
 
     Ok(include_counts)
+}
+
+fn normalize_address(address: &str) -> String {
+    address.to_ascii_lowercase()
+}
+
+fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {
+    match dedupe_by {
+        AddressNamesCurrentDedupe::Surface => "surface",
+        AddressNamesCurrentDedupe::Resource => "resource",
+    }
 }
 
 async fn resource_ids_for_name(pool: &PgPool, logical_name_id: &str) -> ApiResult<Vec<Uuid>> {

@@ -1,3 +1,4 @@
+mod address_names;
 mod children;
 mod name_current;
 
@@ -21,6 +22,7 @@ struct Cli {
 enum Command {
     Run(RunArgs),
     Migrate(MigrateArgs),
+    AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
     NameCurrent(NameCurrentArgs),
 }
@@ -50,6 +52,12 @@ struct NameCurrentArgs {
 }
 
 #[derive(Args, Debug)]
+struct AddressNamesCurrentArgs {
+    #[command(subcommand)]
+    command: AddressNamesCurrentCommand,
+}
+
+#[derive(Args, Debug)]
 struct ChildrenCurrentArgs {
     #[command(subcommand)]
     command: ChildrenCurrentCommand,
@@ -58,6 +66,11 @@ struct ChildrenCurrentArgs {
 #[derive(Subcommand, Debug)]
 enum NameCurrentCommand {
     Rebuild(NameCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum AddressNamesCurrentCommand {
+    Rebuild(AddressNamesCurrentRebuildArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -71,6 +84,14 @@ struct NameCurrentRebuildArgs {
     database: DatabaseConfig,
     #[arg(long)]
     logical_name_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct AddressNamesCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    address: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -88,6 +109,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Migrate(args) => migrate(args).await,
+        Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::NameCurrent(args) => name_current(args).await,
     }
@@ -124,6 +146,12 @@ async fn name_current(args: NameCurrentArgs) -> Result<()> {
     }
 }
 
+async fn address_names_current(args: AddressNamesCurrentArgs) -> Result<()> {
+    match args.command {
+        AddressNamesCurrentCommand::Rebuild(args) => rebuild_address_names_current(args).await,
+    }
+}
+
 async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
     match args.command {
         ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
@@ -143,6 +171,24 @@ async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
         deleted_row_count = summary.deleted_row_count,
         logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
         "name_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary =
+        address_names::rebuild_address_names_current(&pool, args.address.as_deref()).await?;
+
+    info!(
+        service = "worker",
+        projection = "address_names_current",
+        requested_address_count = summary.requested_address_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        address = args.address.as_deref().unwrap_or("all"),
+        "address_names_current rebuild completed"
     );
 
     Ok(())
