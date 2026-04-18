@@ -3243,7 +3243,7 @@ async fn load_resolution_verified_outcome(
     if record_inventory_row.is_none() {
         return Ok(None);
     }
-    if build_supported_record_version_boundary(row).is_none() {
+    if build_supported_resolution_verified_boundary(row).is_none() {
         return Ok(None);
     }
 
@@ -3671,7 +3671,7 @@ fn resolution_record_version_boundary(
 ) -> Option<JsonValue> {
     record_inventory_row
         .map(|record_inventory_row| record_inventory_row.record_version_boundary.clone())
-        .or_else(|| build_supported_record_version_boundary(row))
+        .or_else(|| build_supported_resolution_verified_boundary(row))
 }
 
 fn build_resolution_execution_cache_key(
@@ -3690,7 +3690,7 @@ fn build_resolution_execution_cache_key(
         );
     }
 
-    let topology_version_boundary = build_supported_record_version_boundary(row)
+    let topology_version_boundary = build_supported_resolution_verified_boundary(row)
         .or_else(|| resolution_record_version_boundary(row, record_inventory_row))
         .with_context(|| {
             format!(
@@ -3699,7 +3699,7 @@ fn build_resolution_execution_cache_key(
             )
         })?;
     let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
-        .or_else(|| build_supported_record_version_boundary(row))
+        .or_else(|| build_supported_resolution_verified_boundary(row))
         .with_context(|| {
             format!(
                 "resolution execution explain requires a record boundary for {}",
@@ -3837,13 +3837,16 @@ async fn load_supported_record_inventory_current(
 fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
     Some((
         row.resource_id?,
-        build_supported_record_version_boundary(row)?,
+        build_supported_resolution_verified_boundary(row)?,
     ))
 }
 
-fn build_supported_record_version_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
+fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
     if row.namespace != "ens"
-        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+        || !matches!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
+        )
         || row.resource_id.is_none()
     {
         return None;

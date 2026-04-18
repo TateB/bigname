@@ -2744,6 +2744,226 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
 }
 
 #[tokio::test]
+async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_answers_for_ens_alias_binding()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000025);
+    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-via-alias"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+    let alias_target = json!({
+        "logical_name_id": "ens:profile.alice.eth",
+        "namespace": "ens",
+        "normalized_name": "profile.alice.eth",
+        "canonical_display_name": "Profile.alice.eth",
+        "namehash": "namehash:profile.alice.eth",
+        "resource_id": resource_id.to_string(),
+        "binding_kind": "resolver_alias_path"
+    });
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ResolverAliasPath);
+    database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter"],
+        persisted_verified_queries.clone(),
+    );
+    trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": ["text:com.twitter"],
+        "entrypoint": "universal_resolver",
+        "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+        "alias": {
+            "final_target": alias_target.clone(),
+            "hops": [alias_target.clone()]
+        }
+    });
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain alias request failed")?;
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution alias request failed")?;
+
+    assert_eq!(explain_response.status(), StatusCode::OK);
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+    let expected_resolution_verified_state = json!({
+        "verified_queries": [
+            {
+                "record_key": "text:com.twitter",
+                "status": "success",
+                "value": {
+                    "value": "@alice-via-alias"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]
+    });
+
+    assert_eq!(explain_payload.data, resolution_payload.data);
+    assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+    assert_eq!(explain_payload.provenance, resolution_payload.provenance);
+    assert_eq!(
+        explain_payload.chain_positions,
+        resolution_payload.chain_positions
+    );
+    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(
+        explain_payload.last_updated,
+        resolution_payload.last_updated
+    );
+    assert_eq!(explain_payload.declared_state, None);
+    assert_eq!(
+        resolution_payload.verified_state,
+        Some(expected_resolution_verified_state)
+    );
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": {
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "ens_execution",
+                    "role": "universal_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+                },
+                "resolver_discovery_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged"
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": []
+                },
+                "alias": {
+                    "final_target": alias_target.clone(),
+                    "hops": [alias_target.clone()]
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_universal_resolver",
+                        "input_digest": "sha256:resolver-input",
+                        "output_digest": "sha256:resolver-output",
+                        "latency": 28,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900))
+            },
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice-via-alias"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_verified_state_uses_supported_persisted_answers_and_preserves_request_order()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2885,6 +3105,127 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     );
     assert!(both_payload.declared_state.is_some());
     assert_eq!(both_payload.verified_state, Some(expected_verified_state));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_for_ens_alias_binding()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000026);
+    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-via-alias"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ResolverAliasPath);
+    database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed resolution alias request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::String(execution_trace_id.to_string()))
+    );
+    assert_eq!(
+        declared_state.get("topology"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution topology is not yet projected",
+        }))
+    );
+    assert!(
+        declared_state
+            .get("record_inventory")
+            .and_then(|value| value.get("record_version_boundary"))
+            .is_some(),
+        "record inventory should still load through the persisted readback lane"
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice-via-alias"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
 
     database.cleanup().await?;
     Ok(())

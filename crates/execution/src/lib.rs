@@ -1,4 +1,4 @@
-//! ENS verified-resolution direct-path execution persistence bootstrap.
+//! ENS verified-resolution exact-surface execution persistence bootstrap.
 
 use std::collections::BTreeSet;
 
@@ -30,6 +30,12 @@ pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
+pub const DECLARED_REGISTRY_PATH_BINDING_KIND: &str = "declared_registry_path";
+pub const LINKED_SUBREGISTRY_PATH_BINDING_KIND: &str = "linked_subregistry_path";
+pub const RESOLVER_ALIAS_PATH_BINDING_KIND: &str = "resolver_alias_path";
+pub const OBSERVED_WILDCARD_PATH_BINDING_KIND: &str = "observed_wildcard_path";
+pub const MIGRATION_REBIND_BINDING_KIND: &str = "migration_rebind";
+pub const OBSERVED_ONLY_BINDING_KIND: &str = "observed_only";
 
 /// One narrow direct-path ENS verified-resolution persistence request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +81,7 @@ pub const fn bootstrap_status() -> &'static str {
     "ens-verified-resolution-direct-producer-ready"
 }
 
-/// Persist one exact-name ENS verified-resolution direct-path result and return
+/// Persist one exact-name ENS verified-resolution supported-path result and return
 /// the storage identity the route layer can load back.
 pub async fn persist_ens_exact_name_verified_resolution_direct(
     pool: &PgPool,
@@ -262,6 +268,7 @@ enum SupportedVerifiedRecordKey {
 struct RequestedSelectorSet {
     surface: String,
     ordered_record_keys: Vec<String>,
+    binding_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -269,6 +276,18 @@ struct RequestedChainPosition {
     chain_id: String,
     block_number: i64,
     block_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedResolutionPathClass {
+    Direct,
+    AliasOnly,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SupportedResolutionStepSummary {
+    saw_universal_resolver_call: bool,
+    saw_alias_step: bool,
 }
 
 fn validate_verified_primary_request(
@@ -542,7 +561,7 @@ fn validate_verified_primary_trace(
         );
     }
 
-    let saw_universal_resolver_call = ensure_steps_do_not_use_deferred_execution_paths(
+    let step_summary = ensure_steps_do_not_use_deferred_execution_paths(
         &trace.steps,
         trace.execution_trace_id,
         "ENS verified-primary",
@@ -551,7 +570,7 @@ fn validate_verified_primary_trace(
         verified_primary_name.status,
         VerifiedPrimaryNameStatus::Success | VerifiedPrimaryNameStatus::Mismatch
     ) {
-        if !saw_universal_resolver_call {
+        if !step_summary.saw_universal_resolver_call {
             bail!(
                 "ENS verified-primary trace {} must include step_kind call_universal_resolver for status {:?}",
                 trace.execution_trace_id,
@@ -803,9 +822,16 @@ fn extract_requested_selectors(trace: &ExecutionTrace) -> Result<RequestedSelect
         "ENS direct-path verified resolution trace.request_metadata",
     )?;
 
+    let binding_kind = optional_nonempty_string_field(
+        request_metadata,
+        "binding_kind",
+        "ENS direct-path verified resolution trace.request_metadata",
+    )?;
+
     Ok(RequestedSelectorSet {
         surface,
         ordered_record_keys,
+        binding_kind,
     })
 }
 
@@ -1052,7 +1078,11 @@ fn validate_trace(
         trace.execution_trace_id,
         "ENS direct-path verified resolution",
     )?;
-    ensure_steps_are_direct_path_only(&trace.steps, trace.execution_trace_id)?;
+    ensure_steps_are_supported_exact_surface_path(
+        trace,
+        requested_selectors,
+        trace.execution_trace_id,
+    )?;
     validate_trace_terminal_payloads(trace, queries)?;
 
     Ok(())
@@ -1485,18 +1515,38 @@ fn ensure_contains_universal_resolver_call(
     )
 }
 
-fn ensure_steps_are_direct_path_only(
-    steps: &[bigname_storage::ExecutionTraceStep],
+fn ensure_steps_are_supported_exact_surface_path(
+    trace: &ExecutionTrace,
+    requested_selectors: &RequestedSelectorSet,
     execution_trace_id: Uuid,
 ) -> Result<()> {
-    if !ensure_steps_do_not_use_deferred_execution_paths(
-        steps,
+    let path_class = classify_supported_resolution_path(
+        requested_selectors.binding_kind.as_deref(),
+        execution_trace_id,
+    )?;
+    let step_summary = ensure_steps_do_not_use_deferred_execution_paths(
+        &trace.steps,
         execution_trace_id,
         "ENS direct-path verified resolution",
-    )? {
+    )?;
+    if !step_summary.saw_universal_resolver_call {
         bail!(
             "ENS direct-path verified resolution trace {} must include step_kind call_universal_resolver",
             execution_trace_id
+        );
+    }
+    ensure_universal_resolver_steps_anchor_to_surface(
+        &trace.steps,
+        &requested_selectors.surface,
+        execution_trace_id,
+        "ENS direct-path verified resolution",
+    )?;
+    validate_supported_exact_surface_runtime_details(trace, path_class, execution_trace_id)?;
+    if path_class == SupportedResolutionPathClass::Direct && step_summary.saw_alias_step {
+        bail!(
+            "ENS direct-path verified resolution trace {} must not persist alias steps without binding_kind {}",
+            execution_trace_id,
+            RESOLVER_ALIAS_PATH_BINDING_KIND
         );
     }
 
@@ -1507,13 +1557,16 @@ fn ensure_steps_do_not_use_deferred_execution_paths(
     steps: &[bigname_storage::ExecutionTraceStep],
     execution_trace_id: Uuid,
     context: &str,
-) -> Result<bool> {
-    let mut saw_universal_resolver_call = false;
+) -> Result<SupportedResolutionStepSummary> {
+    let mut summary = SupportedResolutionStepSummary::default();
     for step in steps {
         let normalized = step.step_kind.to_ascii_lowercase();
-        if normalized.contains("alias")
-            || normalized.contains("wildcard")
+        if normalized.contains("wildcard")
             || normalized.contains("ccip")
+            || normalized.contains("transport")
+            || normalized.contains("subregistry")
+            || normalized.contains("ancestor")
+            || normalized.contains("basename")
         {
             bail!(
                 "{context} trace {} must not persist non-direct step {}",
@@ -1521,12 +1574,231 @@ fn ensure_steps_do_not_use_deferred_execution_paths(
                 step.step_kind
             );
         }
+        if normalized.contains("alias") {
+            summary.saw_alias_step = true;
+        }
         if step.step_kind == "call_universal_resolver" {
-            saw_universal_resolver_call = true;
+            summary.saw_universal_resolver_call = true;
         }
     }
 
-    Ok(saw_universal_resolver_call)
+    Ok(summary)
+}
+
+fn classify_supported_resolution_path(
+    binding_kind: Option<&str>,
+    execution_trace_id: Uuid,
+) -> Result<SupportedResolutionPathClass> {
+    match binding_kind {
+        None | Some(DECLARED_REGISTRY_PATH_BINDING_KIND) => {
+            Ok(SupportedResolutionPathClass::Direct)
+        }
+        Some(RESOLVER_ALIAS_PATH_BINDING_KIND) => Ok(SupportedResolutionPathClass::AliasOnly),
+        Some(LINKED_SUBREGISTRY_PATH_BINDING_KIND) => bail!(
+            "ENS direct-path verified resolution trace {} must not persist non-alias ancestor-selected binding_kind {}",
+            execution_trace_id,
+            LINKED_SUBREGISTRY_PATH_BINDING_KIND
+        ),
+        Some(OBSERVED_WILDCARD_PATH_BINDING_KIND) => bail!(
+            "ENS direct-path verified resolution trace {} must not persist wildcard-derived binding_kind {}",
+            execution_trace_id,
+            OBSERVED_WILDCARD_PATH_BINDING_KIND
+        ),
+        Some(MIGRATION_REBIND_BINDING_KIND | OBSERVED_ONLY_BINDING_KIND) => bail!(
+            "ENS direct-path verified resolution trace {} must not persist unsupported binding_kind {}",
+            execution_trace_id,
+            binding_kind.unwrap_or_default()
+        ),
+        Some(other) => bail!(
+            "ENS direct-path verified resolution trace {} must use binding_kind {}, {}, or omit binding_kind; found {}",
+            execution_trace_id,
+            DECLARED_REGISTRY_PATH_BINDING_KIND,
+            RESOLVER_ALIAS_PATH_BINDING_KIND,
+            other
+        ),
+    }
+}
+
+fn validate_supported_exact_surface_runtime_details(
+    trace: &ExecutionTrace,
+    path_class: SupportedResolutionPathClass,
+    execution_trace_id: Uuid,
+) -> Result<()> {
+    let alias_present =
+        persisted_alias_detail_is_present(trace, "ENS direct-path verified resolution")?;
+    ensure_wildcard_detail_absent(trace, "ENS direct-path verified resolution")?;
+    ensure_transport_detail_absent(trace, "ENS direct-path verified resolution")?;
+
+    match path_class {
+        SupportedResolutionPathClass::Direct => {
+            if alias_present {
+                bail!(
+                    "ENS direct-path verified resolution trace {} must not persist alias detail unless binding_kind is {}",
+                    execution_trace_id,
+                    RESOLVER_ALIAS_PATH_BINDING_KIND
+                );
+            }
+        }
+        SupportedResolutionPathClass::AliasOnly => {
+            if !alias_present {
+                bail!(
+                    "ENS direct-path verified resolution trace {} must persist alias.final_target and non-empty alias.hops for binding_kind {}",
+                    execution_trace_id,
+                    RESOLVER_ALIAS_PATH_BINDING_KIND
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_universal_resolver_steps_anchor_to_surface(
+    steps: &[bigname_storage::ExecutionTraceStep],
+    surface: &str,
+    execution_trace_id: Uuid,
+    context: &str,
+) -> Result<()> {
+    for step in steps {
+        if step.step_kind != "call_universal_resolver" {
+            continue;
+        }
+
+        let payload = required_object(
+            Some(&step.step_payload),
+            &format!("{context} trace.steps.call_universal_resolver.step_payload"),
+        )?;
+        if let Some(name) = payload.get("name").and_then(Value::as_str) {
+            if name != surface {
+                bail!(
+                    "{context} trace {} must anchor call_universal_resolver name {} to request surface {}",
+                    execution_trace_id,
+                    name,
+                    surface
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn persisted_alias_detail_is_present(trace: &ExecutionTrace, context: &str) -> Result<bool> {
+    let Some(alias) = persisted_trace_detail_object(trace, "alias") else {
+        return Ok(false);
+    };
+
+    let alias_context = format!("{context} trace alias detail");
+    let alias = required_object(Some(&alias), &alias_context)?;
+    ensure_only_allowed_fields(alias, &["final_target", "hops"], &alias_context)?;
+
+    let final_target = match alias.get("final_target") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            validate_verified_primary_name_ref(
+                Some(value),
+                &format!("{alias_context}.final_target"),
+            )?;
+            Some(value)
+        }
+    };
+    let hops = required_array(alias.get("hops"), &format!("{alias_context}.hops"))?;
+
+    if final_target.is_none() && hops.is_empty() {
+        return Ok(false);
+    }
+    if final_target.is_none() || hops.is_empty() {
+        bail!("{alias_context} must set final_target and non-empty hops together");
+    }
+
+    for (index, hop) in hops.iter().enumerate() {
+        validate_verified_primary_name_ref(Some(hop), &format!("{alias_context}.hops[{index}]"))?;
+    }
+    if hops.last() != final_target {
+        bail!("{alias_context}.hops last element must match final_target");
+    }
+
+    Ok(true)
+}
+
+fn ensure_wildcard_detail_absent(trace: &ExecutionTrace, context: &str) -> Result<()> {
+    let Some(wildcard) = persisted_trace_detail_object(trace, "wildcard") else {
+        return Ok(());
+    };
+
+    let wildcard_context = format!("{context} trace wildcard detail");
+    let wildcard = required_object(Some(&wildcard), &wildcard_context)?;
+    ensure_only_allowed_fields(wildcard, &["source", "matched_labels"], &wildcard_context)?;
+
+    let source_present = match wildcard.get("source") {
+        None | Some(Value::Null) => false,
+        Some(source) => {
+            validate_verified_primary_name_ref(
+                Some(source),
+                &format!("{wildcard_context}.source"),
+            )?;
+            true
+        }
+    };
+    let matched_labels = required_array(
+        wildcard.get("matched_labels"),
+        &format!("{wildcard_context}.matched_labels"),
+    )?;
+    if source_present || !matched_labels.is_empty() {
+        bail!(
+            "{context} only supports wildcard.source=null with matched_labels=[] for persisted exact-surface requests"
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_transport_detail_absent(trace: &ExecutionTrace, context: &str) -> Result<()> {
+    let Some(transport) = persisted_trace_detail_object(trace, "transport") else {
+        return Ok(());
+    };
+
+    let transport_context = format!("{context} trace transport detail");
+    let transport = required_object(Some(&transport), &transport_context)?;
+    ensure_only_allowed_fields(
+        transport,
+        &[
+            "source_chain_id",
+            "target_chain_id",
+            "contract_address",
+            "latest_event_kind",
+        ],
+        &transport_context,
+    )?;
+
+    for field_name in [
+        "source_chain_id",
+        "target_chain_id",
+        "contract_address",
+        "latest_event_kind",
+    ] {
+        if !matches!(transport.get(field_name), None | Some(Value::Null)) {
+            bail!("{context} transport-assisted persisted requests remain unsupported");
+        }
+    }
+
+    Ok(())
+}
+
+fn persisted_trace_detail_object(trace: &ExecutionTrace, key: &str) -> Option<Value> {
+    trace
+        .request_metadata
+        .get(key)
+        .filter(|value| value.is_object())
+        .cloned()
+        .or_else(|| {
+            trace.steps.iter().find_map(|step| {
+                step.step_payload
+                    .get(key)
+                    .filter(|value| value.is_object())
+                    .cloned()
+            })
+        })
 }
 
 fn ensure_single_ethereum_mainnet_position(
@@ -1812,6 +2084,18 @@ mod tests {
             }),
             canonicality_state: CanonicalityState::Canonical,
         }
+    }
+
+    fn alias_target(resource_id: Uuid) -> Value {
+        json!({
+            "logical_name_id": "ens:profile.alice.eth",
+            "namespace": ENS_NAMESPACE,
+            "normalized_name": "profile.alice.eth",
+            "canonical_display_name": "Profile.alice.eth",
+            "namehash": "namehash:profile.alice.eth",
+            "resource_id": resource_id.to_string(),
+            "binding_kind": RESOLVER_ALIAS_PATH_BINDING_KIND
+        })
     }
 
     fn success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
@@ -2158,6 +2442,49 @@ mod tests {
         request
     }
 
+    fn alias_only_text_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = success_request();
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001c);
+        let request_key = normalized_request_key("alice.eth", &["text:com.twitter".to_owned()]);
+        let alias_target = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab3));
+
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "record_kind": "text",
+            "value": "@alice-via-alias"
+        }));
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "text:com.twitter",
+            "binding_kind": RESOLVER_ALIAS_PATH_BINDING_KIND,
+            "alias": {
+                "final_target": alias_target.clone(),
+                "hops": [alias_target.clone()]
+            },
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.steps[1].step_payload = json!({
+            "name": "alice.eth",
+            "text_key": "com.twitter",
+            "value": "@alice-via-alias"
+        });
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice-via-alias"
+                    }
+                }
+            ]
+        }));
+        request
+    }
+
     #[tokio::test]
     async fn persists_successful_direct_path_and_reads_back_storage_identity() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -2412,6 +2739,34 @@ mod tests {
             ordered_record_keys,
             vec!["text:com.twitter", "contenthash", "addr:60"]
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_exact_surface_alias_only_path_with_resolver_alias_binding() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = alias_only_text_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after alias-only persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after alias-only persistence");
+        assert_eq!(loaded_outcome, request.outcome);
 
         database.cleanup().await
     }
@@ -2687,6 +3042,118 @@ mod tests {
             .await?
             .is_empty(),
             "rejected request must not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_linked_subregistry_binding_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = success_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001d);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "addr:60",
+            "binding_kind": LINKED_SUBREGISTRY_PATH_BINDING_KIND,
+            "normalizer_version": "uts46-v1"
+        });
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("linked-subregistry path must remain unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("must not persist non-alias ancestor-selected binding_kind"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected linked-subregistry request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected linked-subregistry request must not persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_wildcard_derived_alias_only_path_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = alias_only_text_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001e);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.request_metadata["wildcard"] = json!({
+            "source": alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab4)),
+            "matched_labels": ["profile"]
+        });
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("wildcard-derived alias-only path must remain unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("only supports wildcard.source=null with matched_labels=[]"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected wildcard-derived request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected wildcard-derived request must not persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_transport_assisted_alias_only_path_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = alias_only_text_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001f);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.request_metadata["transport"] = json!({
+            "source_chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "target_chain_id": "base",
+            "contract_address": "0x0000000000000000000000000000000000000bad",
+            "latest_event_kind": "TransportConfigured"
+        });
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("transport-assisted alias-only path must remain unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("transport-assisted persisted requests remain unsupported"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected transport-assisted request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected transport-assisted request must not persist outcome rows"
         );
 
         database.cleanup().await
