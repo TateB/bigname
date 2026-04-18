@@ -927,6 +927,9 @@ Track for each grant:
 
 Public reads must expose `effective_powers` directly so callers do not reconstruct authority from raw role bitmaps or low-level assignments.
 
+The first public declared-state permissions route is resource-centric: `GET /v1/resources/{resource_id}/permissions`.
+Name-, address-, and resolver-centric permission views summarize or filter the same resource-anchored truth model; they do not introduce separate grant systems.
+
 Required indexes include:
 
 - permissions by resource
@@ -976,15 +979,18 @@ The answer must include:
 
 - normalized surface identity
 - current surface binding
-- backing resource summary
-- declared control / registration
-- declared resolver topology
-- record inventory
-- verified resolution when requested
-- history pointers
+- declared summary sections for registration, authority, control, resolver, record inventory, and history
 - provenance / coverage
 
 Exact lookup is authoritative for supported source classes.
+
+Rules:
+
+- route-level exact-lookup coverage and subdocument support are separate concerns
+- each declared summary section is always present as an object
+- any declared summary section that is not yet projected must return an explicit unsupported object instead of disappearing silently
+- `authority` may fall back to the current binding identifiers when the binding is known but a richer authority summary is not yet projected
+- verified resolution remains a separate route family; exact-name lookup does not inline verified execution in the declared-state baseline
 
 ### 21.2 Address → names
 
@@ -993,10 +999,10 @@ Address-to-name reads return **surfaces**, not backing resources.
 Each item must include:
 
 - `logical_name_id`
+- stable surface identity
 - `resource_id`
-- relation facets (`token_holder`, `registrant`, `effective_controller`, `record_manager`, etc.)
+- relation facets (`registrant`, `token_holder`, `effective_controller` in the first declared-state slice)
 - binding kind
-- summary counts
 - provenance / coverage
 
 Rules:
@@ -1004,6 +1010,7 @@ Rules:
 - callers may request de-duplicated results by `resource_id`, but surface-first semantics remain the default
 - exhaustiveness is only authoritative for source classes with enumerable ownership / assignment surfaces
 - wildcard- and offchain-derived names are never silently treated as exhaustive enumeration results
+- role-summary expansion is additive; it must not change item identity, grouping semantics, or coverage meaning
 
 ### 21.3 Address → names with roles
 
@@ -1035,11 +1042,17 @@ Rules:
 - linked, alias-derived, and wildcard-observed child counts are separate metrics
 - a child can appear in multiple public surfaces when backing resources are shared
 
-### 21.5 Name / resource → role holders
+### 21.5 Resource → permissions
 
-Role-holder reads are resource-centric.
+The first declared permissions collection is resource-centric.
 
-They may be projected back onto name surfaces for display, but the truth anchor is `resource_id`.
+One current row represents the effective permission state for a `(resource_id, subject, scope)` key.
+
+Rules:
+
+- the truth anchor is `resource_id`
+- subject- or resolver-centric summaries may be projected for display, but they derive from the same resource-anchored effective grant rows
+- resolver-scoped permissions are part of this collection through scope detail, not a separate permission ledger
 
 ### 21.6 History
 
@@ -1057,6 +1070,14 @@ Examples:
 - an alias bind may affect the surface answer
 - a resolver version change affects resolution but not public naming text
 
+Rules:
+
+- history reads are canonical normalized-event reads, not separate denormalized truth tables
+- `scope` selects anchor sets, not alternate storage families
+- name-history `resource` scope includes every resource ever bound to the requested surface
+- resource-history `surface` scope includes every surface ever bound to the requested resource
+- any future address-centric history view must compose address anchor resolution with the same normalized-event history contract rather than introducing a separate address-history truth system
+
 ### 21.7 Resolver overview
 
 Resolvers are first-class read targets.
@@ -1072,6 +1093,13 @@ A resolver overview must be able to answer:
 
 This is not a derived debug-only view; it is part of the product surface.
 
+Rules:
+
+- resolver overview is a declared-state route in the initial contract
+- bindings, alias mappings, permissions, role-holder detail, and event/count summaries are separate declared summary sections
+- any such summary that is not yet projected must remain explicit through an unsupported object
+- detailed effective permission rows still live on the resource-centric permissions route
+
 ---
 
 ## 22. Coverage And Exhaustiveness Rules
@@ -1081,6 +1109,7 @@ Coverage is contractual, not incidental.
 Rules:
 
 - exact name lookup must be authoritative for supported source classes
+- exact-name route coverage may still be authoritative when some declared summary subdocuments are explicitly unsupported
 - address-to-name enumeration is exhaustive only for source classes with enumerable ownership / assignment surfaces
 - wildcard and offchain name classes are not globally enumerable in general
 - record inventory is `best_effort` unless a resolver family exposes explicit enumeration or the platform has a source-specific index

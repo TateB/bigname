@@ -23,6 +23,8 @@ This document freezes the external `v1` read contract strongly enough for API, p
 - `cursor`: opaque pagination cursor
 - `page_size`: default `50`, max `200`
 
+Routes declare which subset of these parameters they honor. Unlisted parameters are reserved for additive route support and do not widen the shipped declared-state contract.
+
 Defaults:
 
 - `consistency=head`
@@ -83,9 +85,11 @@ Collection reads replace `data` with an array and add:
 Rules:
 
 - `declared_state` is present whenever the route has declared semantics
-- `verified_state` is present only when `mode=verified|both` and the route supports verified execution
+- `verified_state` is always present in the response envelope; routes without verified semantics return `null`
+- routes that support verified execution populate `verified_state` only when the request asks for verified output
 - `coverage` explains completeness and enumeration basis, not just freshness
 - `chain_positions` may contain multiple chains for cross-chain answers
+- route-level `coverage` and subdocument support are separate: a read may be authoritative for exact lookup while one or more declared summary sections still return explicit unsupported objects
 
 ## 3. Shared Objects
 
@@ -105,6 +109,13 @@ Rules:
 - `authority_epoch`
 - `token_lineage_id`
 - `current_resolver`
+
+### `UnsupportedSummary`
+
+- `status`: always `unsupported`
+- `unsupported_reason`
+
+Use this object when a declared-state subdocument is part of the route contract but is not yet projected. The field stays present; unsupported detail is never omitted silently.
 
 ### `Coverage`
 
@@ -139,20 +150,22 @@ Each position object contains:
 
 These routes define the baseline `v1` surface. Later additions must be additive within `v1`.
 
-| Route | Purpose | First milestone |
+The current API binary ships only the declared-state subset below. Queued routes remain part of the frozen `v1` contract so projection and SDK work can proceed without changing wire semantics later.
+
+| Route | Purpose | Contract state |
 | --- | --- | --- |
-| `GET /v1/namespaces/{namespace}` | Namespace metadata and support status | B |
-| `GET /v1/names/{namespace}/{name}` | Exact name lookup | B |
-| `GET /v1/names/{namespace}/{name}/children` | Declared child collection by default | B |
-| `GET /v1/addresses/{address}/names` | Address-to-surface collection | B |
-| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | B |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | B |
-| `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | B/C |
-| `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | C |
-| `GET /v1/history/names/{namespace}/{name}` | Surface or combined history | B |
-| `GET /v1/history/resources/{resource_id}` | Resource history | B |
-| `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities | B |
-| `GET /v1/coverage/{namespace}/{name}` | Coverage and explain-oriented coverage details | B |
+| `GET /v1/namespaces/{namespace}` | Namespace metadata and support status | shipped declared-state |
+| `GET /v1/names/{namespace}/{name}` | Exact name lookup | shipped declared-state |
+| `GET /v1/names/{namespace}/{name}/children` | Declared child collection by default | shipped declared-state |
+| `GET /v1/history/names/{namespace}/{name}` | Surface or combined history | shipped declared-state |
+| `GET /v1/history/resources/{resource_id}` | Resource history | shipped declared-state |
+| `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities | shipped declared-state |
+| `GET /v1/addresses/{address}/names` | Address-to-surface collection | queued declared-state |
+| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | queued declared-state |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | queued declared-state |
+| `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | queued mixed declared+verified |
+| `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | queued mixed declared+verified |
+| `GET /v1/coverage/{namespace}/{name}` | Coverage and explain-oriented coverage details | queued declared-state |
 
 ## 5. Route-Level Semantics
 
@@ -177,41 +190,81 @@ Rules:
 
 Returns:
 
-- normalized surface identity
-- current binding to `resource_id`
-- registration and authority summary
-- control summary
-- resolver summary
-- record inventory summary
-- history pointers
+- `data` surface identity: `logical_name_id`, `namespace`, `normalized_name`, `canonical_display_name`, `namehash`
+- `data` binding identifiers: `resource_id`, `token_lineage_id`, `binding_kind`
+- `declared_state.registration`
+- `declared_state.authority`
+- `declared_state.control`
+- `declared_state.resolver`
+- `declared_state.record_inventory`
+- `declared_state.history`
 
-Optional includes:
+Rules:
 
-- `resolution`
-- `permissions`
-- `history`
-- `primary_name`
+- the exact-name route is authoritative for supported source classes even when one or more declared summary sections are still unsupported
+- every declared summary section above is always present as an object
+- if a section is not yet projected, it returns `UnsupportedSummary`
+- `declared_state.authority` may fall back to `{resource_id, token_lineage_id, binding_kind}` when a dedicated authority summary is not yet projected but the current binding is known
+- the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
+- `verified_state` is `null` for the shipped exact-name route
 
 ### `GET /v1/addresses/{address}/names`
 
+This route is queued but frozen now to unblock address-read work.
+
 Returns surfaces, not backing resources.
 
-Supported filters:
+Supported filters in the first declared-state contract:
 
 - `namespace`
-- `relation`
+- `relation=registrant|token_holder|effective_controller`
 - `dedupe_by=surface|resource`
-- `include=role_summary`
 
 Each item includes:
 
 - `logical_name_id`
+- `namespace`
+- `normalized_name`
+- `canonical_display_name`
+- `namehash`
 - `resource_id`
 - `binding_kind`
 - `relation_facets`
-- `expiry`
-- `status`
-- `summary_counts`
+
+Rules:
+
+- `dedupe_by=surface` is the default truth model
+- `dedupe_by=resource` changes grouping only; it does not change coverage semantics or turn the route into a resource collection
+- a later `include=role_summary` expansion is additive and must not change enumeration basis, default sort, or item identity
+- later additive fields such as expiry, status, or counts must not replace the required surface identity and relation facets
+
+### `GET /v1/resources/{resource_id}/permissions`
+
+This route is queued but frozen now to unblock resource-centric declared reads.
+
+Returns current effective permission rows anchored to one `resource_id`.
+
+Supported filters:
+
+- `subject`
+- `scope`
+
+Each item includes:
+
+- `resource_id`
+- `subject`
+- `scope`
+- `effective_powers`
+- `grant_source`
+- `revocation_source`
+- `inheritance_path`
+- `transfer_behavior`
+
+Rules:
+
+- `resource_id` is the truth anchor; surface names or resolver addresses may appear only as explanatory context
+- resolver-scoped permissions remain rows in this same collection with resolver-specific scope detail; they are not a separate truth system
+- this route is declared-state only and `verified_state` remains `null`
 
 ### `GET /v1/names/{namespace}/{name}/children`
 
@@ -219,8 +272,63 @@ Defaults to declared direct children only.
 
 Optional query parameters:
 
-- `surface_classes=declared,linked,alias,wildcard`
+- `surface_classes=declared`
 - `include=counts`
+
+Rules:
+
+- requesting `linked`, `alias`, or `wildcard` surface classes is reserved for additive expansion and currently returns `unsupported`
+
+### `GET /v1/history/names/{namespace}/{name}`
+
+Returns canonical normalized-event history for one logical name anchor.
+
+Supported query parameters:
+
+- `scope=surface|resource|both` with default `both`
+
+Rules:
+
+- `scope=surface` returns events anchored by the requested `logical_name_id`
+- `scope=resource` returns events anchored by any `resource_id` ever bound to that surface
+- `scope=both` returns the union of those anchor sets
+- observed and orphaned events are excluded from the shipped history routes
+- `declared_state` is `{}` for history routes; the normalized-event rows themselves are the declared answer
+
+### `GET /v1/history/resources/{resource_id}`
+
+Returns canonical normalized-event history for one resource anchor.
+
+Supported query parameters:
+
+- `scope=surface|resource|both` with default `both`
+
+Rules:
+
+- `resource_id` must be a UUID or the route returns `400 invalid_input`
+- `scope=resource` returns events anchored by the requested `resource_id`
+- `scope=surface` returns events anchored by any `logical_name_id` ever bound to that resource
+- `scope=both` returns the union of those anchor sets
+- observed and orphaned events are excluded from the shipped history routes
+- no dedicated address-history route is frozen in the shipped subset; queued address activity views must reuse these same anchor and coverage semantics rather than invent a second history contract
+
+### `GET /v1/resolvers/{chain_id}/{resolver_address}`
+
+This route is queued but frozen now to unblock resolver-overview reads.
+
+`data` identifies the resolver target. `declared_state` groups:
+
+- current bindings
+- alias mappings
+- resolver-scoped permissions
+- role-holder summary
+- resolver event summary
+
+Rules:
+
+- resolver overview is declared-state only and `verified_state` remains `null`
+- counts for nodes, aliases, and role holders live inside those declared summaries rather than as a separate truth system
+- any declared summary that is not yet projected returns `UnsupportedSummary`
 
 ### `GET /v1/resolutions/{namespace}/{name}`
 
