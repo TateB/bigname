@@ -2094,7 +2094,7 @@ async fn resolution_current(
         });
     };
 
-    let record_inventory_current = if mode.includes_declared() {
+    let record_inventory_current = if mode.includes_declared() || mode.includes_verified() {
         load_supported_record_inventory_current(&state.pool, &row)
             .await
             .map_err(|load_error| {
@@ -2117,12 +2117,56 @@ async fn resolution_current(
         None
     };
 
+    let persisted_verified_outcome = if mode.includes_verified() {
+        load_resolution_verified_outcome(
+            &state.pool,
+            &row,
+            &records,
+            record_inventory_current.as_ref(),
+        )
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                resource_id = ?row.resource_id,
+                mode = ?mode,
+                records = ?records,
+                error = ?load_error,
+                "failed to load persisted verified resolution outcome for resolution route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load verified resolution for name {namespace}/{name}"
+            ))
+        })?
+    } else {
+        None
+    };
+
     Ok(Json(build_resolution_response(
         row,
         mode,
         &records,
         record_inventory_current.as_ref(),
-    )))
+        persisted_verified_outcome.as_ref(),
+    )
+    .map_err(|build_error| {
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            logical_name_id = %logical_name_id,
+            mode = ?mode,
+            records = ?records,
+            error = ?build_error,
+            "failed to build resolution response"
+        );
+        ApiError::internal_error(format!(
+            "failed to load resolution projection for name {namespace}/{name}"
+        ))
+    })?))
 }
 
 async fn primary_names(
@@ -2828,21 +2872,26 @@ fn build_resolution_response(
     mode: ResolutionMode,
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> ResolutionResponse {
+    persisted_verified_outcome: Option<&ExecutionOutcome>,
+) -> Result<ResolutionResponse> {
     let data = build_name_data(&row);
     let declared_state = mode
         .includes_declared()
         .then(|| build_resolution_declared_state(&row, record_inventory_row, records));
     let verified_state = mode
         .includes_verified()
-        .then(|| build_resolution_verified_state(records));
-    let provenance = build_name_provenance(&row.provenance);
+        .then(|| build_resolution_verified_state(records, persisted_verified_outcome))
+        .transpose()?;
+    let provenance = build_name_provenance_with_execution_trace(
+        &row.provenance,
+        persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
+    );
     let coverage = build_name_coverage(&row.coverage);
     let chain_positions = ensure_object(&row.chain_positions);
     let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
     let last_updated = format_timestamp(row.last_recomputed_at);
 
-    ResolutionResponse {
+    Ok(ResolutionResponse {
         data,
         declared_state,
         verified_state,
@@ -2851,7 +2900,7 @@ fn build_resolution_response(
         chain_positions,
         consistency,
         last_updated,
-    }
+    })
 }
 
 fn build_resolution_execution_explain_response(
@@ -2863,7 +2912,8 @@ fn build_resolution_execution_explain_response(
     let data = build_name_data(&row);
     let verified_state =
         build_resolution_execution_explain_verified_state(&row, records, trace, outcome)?;
-    let provenance = build_name_provenance(&row.provenance);
+    let provenance =
+        build_name_provenance_with_execution_trace(&row.provenance, Some(trace.execution_trace_id));
     let coverage = build_name_coverage(&row.coverage);
     let chain_positions = ensure_object(&row.chain_positions);
     let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
@@ -3040,19 +3090,45 @@ fn build_resolution_declared_state(
     declared_state
 }
 
-fn build_resolution_verified_state(records: &[ResolutionRecordKey]) -> JsonValue {
+fn build_resolution_verified_state(
+    records: &[ResolutionRecordKey],
+    persisted_outcome: Option<&ExecutionOutcome>,
+) -> Result<JsonValue> {
     let mut verified_state = empty_object();
+    let persisted_queries_by_record_key = persisted_outcome
+        .map(|outcome| {
+            let supported_records = supported_resolution_verified_records(records);
+            let persisted_queries = reordered_persisted_verified_queries(outcome, &supported_records)?
+                .as_array()
+                .cloned()
+                .context("persisted verified queries must serialize as an array")?;
+            persisted_queries
+                .into_iter()
+                .map(|query| {
+                    let record_key = string_field(provenance_field(&query, "record_key"))
+                        .context("persisted verified query must include record_key")?;
+                    Ok((record_key, query))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     insert_value_field(
         &mut verified_state,
         "verified_queries",
         JsonValue::Array(
             records
                 .iter()
-                .map(build_resolution_verified_query)
+                .map(|record| {
+                    persisted_queries_by_record_key
+                        .get(&record.record_key)
+                        .cloned()
+                        .unwrap_or_else(|| build_resolution_verified_query(record))
+                })
                 .collect(),
         ),
     );
-    verified_state
+    Ok(verified_state)
 }
 
 fn build_resolution_execution_explain_verified_state(
@@ -3085,6 +3161,48 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
         "verified resolution entrypoint is not yet supported".to_owned(),
     );
     query
+}
+
+fn supported_resolution_verified_records(
+    records: &[ResolutionRecordKey],
+) -> Vec<ResolutionRecordKey> {
+    records
+        .iter()
+        .filter(|record| {
+            record.record_family == "addr"
+                && record
+                    .selector_key
+                    .as_deref()
+                    .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit))
+        })
+        .cloned()
+        .collect()
+}
+
+async fn load_resolution_verified_outcome(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Result<Option<ExecutionOutcome>> {
+    if record_inventory_row.is_none() {
+        return Ok(None);
+    }
+    if build_supported_record_version_boundary(row).is_none() {
+        return Ok(None);
+    }
+
+    let supported_records = supported_resolution_verified_records(records);
+    if supported_records.is_empty() {
+        return Ok(None);
+    }
+
+    let Ok(cache_key) =
+        build_resolution_execution_cache_key(row, &supported_records, record_inventory_row)
+    else {
+        return Ok(None);
+    };
+    load_execution_outcome(pool, &cache_key).await
 }
 
 fn build_resolution_execution_summary(
@@ -4522,6 +4640,21 @@ fn build_name_provenance(provenance: &JsonValue) -> JsonValue {
         "derivation_kind",
         string_field(provenance_field(provenance, "derivation_kind"))
             .unwrap_or_else(|| "declared".to_owned()),
+    );
+    normalized
+}
+
+fn build_name_provenance_with_execution_trace(
+    provenance: &JsonValue,
+    execution_trace_id: Option<Uuid>,
+) -> JsonValue {
+    let mut normalized = build_name_provenance(provenance);
+    insert_nullable_string_field(
+        &mut normalized,
+        "execution_trace_id",
+        execution_trace_id
+            .map(|value| value.to_string())
+            .or_else(|| string_field(provenance_field(provenance, "execution_trace_id"))),
     );
     normalized
 }
