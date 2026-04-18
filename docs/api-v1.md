@@ -442,7 +442,7 @@ Rules:
 - supported `declared_state.record_inventory` reuses the same `ResolutionRecordInventory` object shape as `GET /v1/resolutions/{namespace}/{name}` and, for the same snapshot, must expose the same `record_version_boundary`
 - supported `declared_state.history.surface_head` and `declared_state.history.resource_head` point at the first canonical rows of the dedicated name-history route under `scope=surface` and `scope=resource`; the exact-name route does not add `both_head`, pagination state, or a second history truth system
 - for the same `{namespace}`, `{name}`, and snapshot selection, the top-level `coverage` object matches `GET /v1/coverage/{namespace}/{name}`
-- the exact-name explain routes `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are thin views over this same exact-name target, current binding, and declared summary contract; they do not introduce alternate binding, authority, or control truth systems
+- the only exact-name explain routes in Phase 6 are `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control`; they are thin views over this same exact-name target, current binding, and declared summary contract, while history explanation stays on the shipped `GET /v1/history/...` routes plus `declared_state.history.{surface_head,resource_head}` and does not introduce a separate exact-name history-explain endpoint or truth system
 - the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
 - `verified_state` is `null` for the shipped exact-name route
 

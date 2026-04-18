@@ -4,7 +4,7 @@ Status: Phase 0 baseline
 
 This document freezes the read-model boundaries between normalized events, current-state projections, and API reads.
 
-Only the exact-name explain routes and the primary-name route family are still queued in the API binary. Their projection boundaries are nevertheless normative here so the read contract can freeze before those handlers ship.
+Only the exact-name explain routes for surface-binding and authority-control, plus the primary-name route family, are still queued in the API binary. Their projection boundaries are nevertheless normative here so the read contract can freeze before those handlers ship. No separate history-explain route is queued: the shipped history routes remain the declared history answer, and exact-name `history` only stores head pointers into that contract.
 
 ## 1. Projection Rules
 
@@ -42,6 +42,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 - `resolver` is the exact-name summary form of the current resolver target and, in the initial contract, carries `chain_id`, `address`, and `latest_event_kind`; `chain_id=null` and `address=null` mean the current binding has no declared resolver rather than that the resolver summary itself is unsupported
 - `history` is a pair of head pointers derived from canonical normalized events: `surface_head` and `resource_head`, each pointing at the first row the dedicated name-history route would return for the same target under `scope=surface` or `scope=resource`
 - `history` summary stays in `name_current` only as these scope-specific head pointers; paginated history rows and `scope=both` union ordering remain on the dedicated history reads and do not create a separate history projection
+- Phase 6 does not add an explain-only history route or projection family; shipped history routes remain the explainable declared answer, and `name_current.history` only links callers into those rows
 - the queued explain routes `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are thin reads over the same exact-name target, `surface_bindings_current`, `name_current`, and `permissions_current` truth families; they do not add explain-specific projection families or ledgers
 
 ### Coverage by exact name

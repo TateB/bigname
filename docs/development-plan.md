@@ -268,7 +268,7 @@ Expose the first stable native `v1` surface for declared-state product reads.
   - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
   - `GET /v1/explain/names/{namespace}/{name}/authority-control`
   - `GET /v1/coverage/{namespace}/{name}`
-  - shared history routes
+- shipped shared history routes plus exact-name `declared_state.history.{surface_head,resource_head}` satisfy the Phase 6 history-explain deliverable; no separate exact-name history-explain route is introduced in this phase
 - OpenAPI or equivalent contract output
 - replay-stable `cursor` / `page_size` plus frozen default sorts for shipped collection reads
 - resolver overview alias summary sourced from current resolver-linked bindings

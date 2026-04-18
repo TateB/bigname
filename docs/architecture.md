@@ -1078,6 +1078,7 @@ Rules:
 - exact-name `resolver` does not inline alias traversal, wildcard traversal, transport context, record inventory, or resolver-overview subdocuments; those remain on `Resolution.topology`, `Resolution.record_inventory`, and resolver-centric reads
 - exact-name `history` is a pair of head pointers into the canonical name-history contract rather than embedded rows; it carries `surface_head` and `resource_head`, each meaning “the first canonical row under `chain_position_desc` for the matching scope”
 - exact-name `history` intentionally omits a `both_head` field; the dedicated history route keeps the `scope=both` union contract, row shape, and pagination behavior
+- Phase 6 does not add a separate exact-name history-explain route; the shipped history routes are the history explain surface, and exact-name `history` only links into that declared answer with `surface_head` and `resource_head`
 - for the same exact-name target and snapshot, the top-level `coverage` object matches the shared `Coverage` summary returned by `GET /v1/coverage/{namespace}/{name}`
 - verified resolution remains a separate route family; exact-name lookup does not inline verified execution in the declared-state baseline
 
