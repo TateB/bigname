@@ -27,7 +27,7 @@ Some declared-state route families are still queued in the API binary. Their pro
 | `primary_names_current` | `(address, coin_type, namespace)` | declared primary claim + verification lookup key | reverse, primary claim, verified primary events |
 | `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
 
-History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. Queued address-history views must compose address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
+History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. The shipped address-history view composes address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
 
 ## 3. Collection Semantics
 
@@ -42,6 +42,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 - `resolver` is the exact-name summary form of the current resolver target and, in the initial contract, carries `chain_id`, `address`, and `latest_event_kind`; `chain_id=null` and `address=null` mean the current binding has no declared resolver rather than that the resolver summary itself is unsupported
 - `history` is a pair of head pointers derived from canonical normalized events: `surface_head` and `resource_head`, each pointing at the first row the dedicated name-history route would return for the same target under `scope=surface` or `scope=resource`
 - `history` summary stays in `name_current` only as these scope-specific head pointers; paginated history rows and `scope=both` union ordering remain on the dedicated history reads and do not create a separate history projection
+- the queued explain routes `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are thin reads over the same exact-name target, `surface_bindings_current`, `name_current`, and `permissions_current` truth families; they do not add explain-specific projection families or ledgers
 
 ### Coverage by exact name
 
@@ -88,6 +89,8 @@ History reads use normalized events plus thin cursor support rather than a separ
 
 - keyed by `(chain_id, resolver_address)`
 - serves declared summary sections for bindings, aliases, permissions, role holders, and event/count summaries
+- supported `aliases` reuses the same supported `{status, count, items}` envelope as `bindings`, with `items` sourced only from current resolver-linked bindings whose `binding_kind=resolver_alias_path`
+- resolver-overview alias support stays within `resolver_current`; it does not add an alias-only projection family, historical alias ledger, or second resolver-binding truth system
 - unsupported declared summary sections stay explicit until the corresponding overview detail is projected
 
 ### Resolution

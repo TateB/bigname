@@ -67,3 +67,18 @@ Execution notes:
   normalized-event provenance, and default `both` scope behavior, plus the shipped
   `namespace=ens&relation=registrant` filter combination and
   `relation=effective_controller` with `scope=surface`, `scope=resource`, and `scope=both`
+- collection-route conformance currently asserts the shared page envelope, returned default
+  `page.sort`, and returned `page.page_size`; dedicated request-side `cursor` / `page_size`
+  coverage is still needed for `GET /v1/addresses/{address}/names`,
+  `GET /v1/names/{namespace}/{name}/children`,
+  `GET /v1/resources/{resource_id}/permissions`,
+  `GET /v1/history/addresses/{address}`,
+  `GET /v1/history/names/{namespace}/{name}`, and
+  `GET /v1/history/resources/{resource_id}`
+- the shipped resolver-overview harness currently asserts `declared_state.aliases` as
+  `UnsupportedSummary`; when alias support lands, that section must switch to the shared supported
+  `{status, count, items}` envelope backed only by current `binding_kind=resolver_alias_path`
+  bindings for the same resolver target
+- exact-name explain-route conformance for
+  `GET /v1/explain/names/{namespace}/{name}/surface-binding` and
+  `GET /v1/explain/names/{namespace}/{name}/authority-control` is not covered yet

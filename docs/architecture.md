@@ -1202,10 +1202,37 @@ Rules:
 
 - resolver overview is a declared-state route in the initial contract
 - bindings, alias mappings, permissions, role-holder detail, and event/count summaries are separate declared summary sections
+- supported alias mappings reuse the same `{status, count, items}` summary envelope as resolver bindings, but `items` is only the current `binding_kind=resolver_alias_path` subset of the same resolver-linked binding rows
+- resolver alias mappings are sourced from current resolver-linked bindings only; they do not create a separate alias ledger or history family
 - any such summary that is not yet projected must remain explicit through an unsupported object
 - detailed effective permission rows still live on the resource-centric permissions route
 
-### 21.8 Coverage / explain by exact name
+### 21.8 Surface-binding explain by exact name
+
+`GET /v1/explain/names/{namespace}/{name}/surface-binding` is the exact-name-scoped declared-state explain route for the current surface binding.
+
+Rules:
+
+- it is scoped to the same exact-name target and point-in-time snapshot rules as exact-name lookup
+- its top-level `coverage` field matches the exact-name lookup answer for the same target and snapshot
+- its declared-state detail is a thin view over the current `SurfaceBinding` plus the same exact-name history head pointers already defined for the exact-name route
+- it reuses `surface_bindings_current` together with the shared normalized-event history contract; it does not introduce a second explain ledger or a binding-only history family
+- it remains a declared-state route; it does not introduce verified execution semantics or collection semantics
+
+### 21.9 Authority / control explain by exact name
+
+`GET /v1/explain/names/{namespace}/{name}/authority-control` is the exact-name-scoped declared-state explain route for current authority and control.
+
+Rules:
+
+- it is scoped to the same exact-name target and point-in-time snapshot rules as exact-name lookup
+- its top-level `coverage` field matches the exact-name lookup answer for the same target and snapshot
+- its declared-state detail reuses the same exact-name `authority` and `control` summaries rather than widening those objects for a separate explain surface
+- detailed permission lineage stays on the resource-centric permissions route, so this explain route does not become a second control or permissions ledger
+- it reuses `name_current` plus the existing resource-anchored permissions truth family; it does not introduce a second authority or control truth system
+- it remains a declared-state route; it does not introduce verified execution semantics or collection semantics
+
+### 21.10 Coverage / explain by exact name
 
 `GET /v1/coverage/{namespace}/{name}` is a single-name declared-state coverage / explain route.
 

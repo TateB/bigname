@@ -265,12 +265,13 @@ Expose the first stable native `v1` surface for declared-state product reads.
 - `Permissions` read
 - declared `Resolution` read with topology + record inventory + record cache
 - explain views for:
-  - surface binding
-  - authority / control
-  - coverage
-  - history
+  - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
+  - `GET /v1/explain/names/{namespace}/{name}/authority-control`
+  - `GET /v1/coverage/{namespace}/{name}`
+  - shared history routes
 - OpenAPI or equivalent contract output
-- pagination and sorting for collection reads
+- replay-stable `cursor` / `page_size` plus frozen default sorts for shipped collection reads
+- resolver overview alias summary sourced from current resolver-linked bindings
 
 ### Minimum supported reads
 
@@ -291,6 +292,12 @@ Expose the first stable native `v1` surface for declared-state product reads.
 - first-party app data requirements that rely only on declared state can be served from native `v1`
 - every response includes provenance, coverage, and chain-position context
 - collection semantics match the frozen phase 0 definitions
+
+### Current contract-freeze status
+
+- `phase6-surface-binding-authority-explain-contract-clarification`: `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are frozen in the shared docs as exact-name-scoped declared-state explain routes over existing truth families; implementation remains queued
+- `phase6-shipped-read-pagination`: `cursor` and `page_size` are frozen for `GET /v1/addresses/{address}/names`, `GET /v1/names/{namespace}/{name}/children`, `GET /v1/resources/{resource_id}/permissions`, `GET /v1/history/addresses/{address}`, `GET /v1/history/names/{namespace}/{name}`, and `GET /v1/history/resources/{resource_id}`; no other shipped route honors those query parameters in the initial contract
+- `phase6-resolver-overview-alias-summary-support`: supported `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}` is frozen as the `binding_kind=resolver_alias_path` subset of current resolver-linked bindings with the shared `{status, count, items}` summary envelope; the shipped route may still return `UnsupportedSummary` until that projection support lands
 
 ---
 
