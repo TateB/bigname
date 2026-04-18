@@ -1296,6 +1296,8 @@ fn reverse_claimed_topic0() -> String {
     keccak256_hex(b"ReverseClaimed(address,bytes32)")
 }
 
+const REVERSE_REGISTRAR_ROLE: &str = "reverse_registrar";
+
 fn reverse_label_for_address(address: &str) -> String {
     let normalized = address
         .strip_prefix("0x")
@@ -2753,6 +2755,14 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'namespace' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
             "SELECT after_state->>'reverse_name' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
         )
         .fetch_one(database.pool())
@@ -2766,6 +2776,38 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
         .fetch_one(database.pool())
         .await?,
         reverse_node_for_address(claimed_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'source_family' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_reverse_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'contract_role' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        REVERSE_REGISTRAR_ROLE.to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'contract_instance_id' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_contract_instance_id.to_string()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'emitting_address' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_address.to_owned()
     );
 
     server.abort();
@@ -4257,11 +4299,51 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'namespace' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
             "SELECT after_state->>'reverse_name' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
         )
         .fetch_one(database.pool())
         .await?,
         reverse_name_for_address(claimed_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'source_family' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_reverse_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'contract_role' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        REVERSE_REGISTRAR_ROLE.to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'contract_instance_id' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_contract_instance_id.to_string()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'emitting_address' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_address.to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(

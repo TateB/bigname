@@ -11,7 +11,7 @@ mod manifest_normalized_events;
 
 /// Current adapter bootstrap status.
 pub const fn bootstrap_status() -> &'static str {
-    "manifest-normalized-sync-ready"
+    "reverse-claim-primary-enrichment-ready"
 }
 
 pub use block_derived_normalized_events::{

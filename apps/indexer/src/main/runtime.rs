@@ -259,8 +259,9 @@ pub(crate) fn log_ens_v1_reverse_claim_sync_summary(
         matched_raw_log_count = summary.matched_log_count,
         normalized_event_sync_total_count = summary.total_synced_count,
         normalized_event_inserted_total_count = summary.total_inserted_count,
+        primary_claim_enriched_event_count = summary.total_synced_count,
         normalized_event_kind_count = summary.by_kind.len(),
-        "ENSv1 reverse claim synced from stored raw logs"
+        "ENSv1 reverse claim synced from stored raw logs with additive primary-claim enrichment"
     );
 
     for (event_kind, kind_summary) in &summary.by_kind {

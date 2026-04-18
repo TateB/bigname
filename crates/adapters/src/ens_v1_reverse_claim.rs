@@ -12,6 +12,7 @@ const SOURCE_EVENT_REVERSE_CLAIMED: &str = "ReverseClaimed";
 const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const ENS_NATIVE_COIN_TYPE: &str = "60";
+const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
 const REVERSE_CLAIMED_SIGNATURE: &str = "ReverseClaimed(address,bytes32)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,6 +39,7 @@ struct ReverseRawLogRow {
     transaction_index: i64,
     log_index: i64,
     emitting_address: String,
+    emitting_contract_instance_id: sqlx::types::Uuid,
     topics: Vec<String>,
     canonicality_state: CanonicalityState,
     source_manifest_id: i64,
@@ -223,10 +225,17 @@ fn build_reverse_changed_event(raw_log: &ReverseRawLogRow) -> Result<Option<Norm
             "source_event": SOURCE_EVENT_REVERSE_CLAIMED,
             "address": claimed_address,
             "coin_type": ENS_NATIVE_COIN_TYPE,
+            "namespace": raw_log.namespace,
             "reverse_namespace": raw_log.namespace,
             "reverse_label": reverse_label,
             "reverse_name": reverse_name,
             "reverse_node": derived_reverse_node,
+            "claim_provenance": {
+                "source_family": raw_log.source_family,
+                "contract_role": CONTRACT_ROLE_REVERSE_REGISTRAR,
+                "contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+                "emitting_address": raw_log.emitting_address,
+            },
         }),
     }))
 }
@@ -296,6 +305,7 @@ async fn load_reverse_raw_logs(
                     .context("missing transaction_index")?,
                 log_index: row.try_get("log_index").context("missing log_index")?,
                 emitting_address: address,
+                emitting_contract_instance_id: emitter.contract_instance_id,
                 topics: row.try_get("topics").context("missing topics")?,
                 canonicality_state: parse_canonicality_state(
                     &row.try_get::<String, _>("canonicality_state")
@@ -953,6 +963,7 @@ mod tests {
             claimed_address.to_ascii_lowercase()
         );
         assert_eq!(events[0].after_state["coin_type"], ENS_NATIVE_COIN_TYPE);
+        assert_eq!(events[0].after_state["namespace"], "ens");
         assert_eq!(
             events[0].after_state["reverse_node"],
             reverse_node_for_address(claimed_address)?
@@ -965,6 +976,22 @@ mod tests {
                     .trim_start_matches("0x")
                     .to_ascii_lowercase()
             )
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["source_family"],
+            SOURCE_FAMILY_ENS_V1_REVERSE_L1
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["contract_role"],
+            CONTRACT_ROLE_REVERSE_REGISTRAR
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["contract_instance_id"],
+            active_contract_instance_id.to_string()
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["emitting_address"],
+            active_emitter
         );
 
         let second = sync_ens_v1_reverse_claim(database.pool(), "ethereum-mainnet").await?;
@@ -1046,6 +1073,19 @@ mod tests {
         events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonicality_state, CanonicalityState::Finalized);
+        assert_eq!(events[0].after_state["namespace"], "ens");
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["contract_role"],
+            CONTRACT_ROLE_REVERSE_REGISTRAR
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["contract_instance_id"],
+            contract_instance_id.to_string()
+        );
+        assert_eq!(
+            events[0].after_state["claim_provenance"]["emitting_address"],
+            emitter
+        );
 
         database.cleanup().await
     }
