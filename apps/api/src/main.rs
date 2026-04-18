@@ -165,6 +165,18 @@ struct NameResponse {
     last_updated: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ResolutionResponse {
+    data: JsonValue,
+    declared_state: Option<JsonValue>,
+    verified_state: Option<JsonValue>,
+    provenance: JsonValue,
+    coverage: JsonValue,
+    chain_positions: JsonValue,
+    consistency: String,
+    last_updated: String,
+}
+
 type ResolverResponse = NameResponse;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -202,6 +214,34 @@ struct AddressHistoryQuery {
     namespace: Option<String>,
     relation: Option<String>,
     scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ResolutionQuery {
+    mode: Option<String>,
+    records: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolutionMode {
+    Declared,
+    Verified,
+    Both,
+}
+
+impl ResolutionMode {
+    fn includes_declared(self) -> bool {
+        matches!(self, Self::Declared | Self::Both)
+    }
+
+    fn includes_verified(self) -> bool {
+        matches!(self, Self::Verified | Self::Both)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolutionRecordKey {
+    record_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -432,6 +472,10 @@ fn app_router(state: AppState) -> Router {
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
         .route(
+            "/v1/resolutions/{namespace}/{name}",
+            get(resolution_current),
+        )
+        .route(
             "/v1/resolvers/{chain_id}/{resolver_address}",
             get(resolver_current),
         )
@@ -567,6 +611,45 @@ async fn coverage_current(
     };
 
     Ok(Json(build_name_coverage_response(row)))
+}
+
+async fn resolution_current(
+    Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ResolutionQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ResolutionResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let mode = parse_resolution_mode(query.mode.as_deref())?;
+    let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                mode = ?mode,
+                records = ?records,
+                error = ?load_error,
+                "failed to load exact-name current projection for resolution route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    Ok(Json(build_resolution_response(row, mode, &records)))
 }
 
 async fn resolver_current(
@@ -1079,6 +1162,27 @@ fn build_name_coverage_response(row: NameCurrentRow) -> NameResponse {
     }
 }
 
+fn build_resolution_response(
+    row: NameCurrentRow,
+    mode: ResolutionMode,
+    records: &[ResolutionRecordKey],
+) -> ResolutionResponse {
+    ResolutionResponse {
+        data: build_name_data(&row),
+        declared_state: mode
+            .includes_declared()
+            .then(build_resolution_declared_state),
+        verified_state: mode
+            .includes_verified()
+            .then(|| build_resolution_verified_state(records)),
+        provenance: build_name_provenance(&row.provenance),
+        coverage: build_name_coverage(&row.coverage),
+        chain_positions: ensure_object(&row.chain_positions),
+        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
+        last_updated: format_timestamp(row.last_recomputed_at),
+    }
+}
+
 fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
     ResolverResponse {
         data: build_resolver_data(&row),
@@ -1126,6 +1230,53 @@ fn build_children_response(
             .to_owned(),
         last_updated,
     }
+}
+
+fn build_resolution_declared_state() -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_value_field(
+        &mut declared_state,
+        "topology",
+        unsupported_section("declared resolution topology is not yet projected"),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "record_inventory",
+        unsupported_section("declared resolution record inventory is not yet projected"),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "record_cache",
+        unsupported_section("declared resolution record cache is not yet projected"),
+    );
+    declared_state
+}
+
+fn build_resolution_verified_state(records: &[ResolutionRecordKey]) -> JsonValue {
+    let mut verified_state = empty_object();
+    insert_value_field(
+        &mut verified_state,
+        "verified_queries",
+        JsonValue::Array(
+            records
+                .iter()
+                .map(build_resolution_verified_query)
+                .collect(),
+        ),
+    );
+    verified_state
+}
+
+fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
+    let mut query = empty_object();
+    insert_string_field(&mut query, "record_key", record.record_key.clone());
+    insert_string_field(&mut query, "status", "unsupported".to_owned());
+    insert_string_field(
+        &mut query,
+        "unsupported_reason",
+        "verified resolution entrypoint is not yet supported".to_owned(),
+    );
+    query
 }
 
 impl AddressNamesResponseSupplement {
@@ -2326,6 +2477,90 @@ fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
             code: "invalid_input",
             message: "scope must be one of: surface, resource, both".to_owned(),
         }),
+    }
+}
+
+fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionMode> {
+    match mode.unwrap_or("declared") {
+        "declared" => Ok(ResolutionMode::Declared),
+        "verified" => Ok(ResolutionMode::Verified),
+        "both" => Ok(ResolutionMode::Both),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "mode must be one of: declared, verified, both".to_owned(),
+        }),
+    }
+}
+
+fn parse_resolution_record_keys(
+    records: Option<&str>,
+    mode: ResolutionMode,
+) -> ApiResult<Vec<ResolutionRecordKey>> {
+    let Some(records) = records.map(str::trim).filter(|value| !value.is_empty()) else {
+        return if mode.includes_verified() {
+            Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "records is required when mode is verified or both".to_owned(),
+            })
+        } else {
+            Ok(Vec::new())
+        };
+    };
+
+    let mut parsed = Vec::new();
+    let mut deduped = BTreeSet::new();
+
+    for record_key in records.split(',').map(str::trim) {
+        let Some(record) = parse_resolution_record_key(record_key) else {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "records must contain only valid record selectors".to_owned(),
+            });
+        };
+
+        if mode.includes_verified() && !deduped.insert(record.record_key.clone()) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "records must not contain duplicate selectors".to_owned(),
+            });
+        }
+
+        parsed.push(record);
+    }
+
+    Ok(parsed)
+}
+
+fn parse_resolution_record_key(record_key: &str) -> Option<ResolutionRecordKey> {
+    if record_key.is_empty()
+        || record_key
+            .chars()
+            .any(|character| character.is_ascii_whitespace() || character == ',')
+    {
+        return None;
+    }
+
+    let is_valid_family = |family: &str| {
+        !family.is_empty()
+            && family.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+            })
+    };
+
+    match record_key.split_once(':') {
+        None if is_valid_family(record_key) => Some(ResolutionRecordKey {
+            record_key: record_key.to_owned(),
+        }),
+        Some((family, selector)) if is_valid_family(family) && !selector.is_empty() => {
+            Some(ResolutionRecordKey {
+                record_key: record_key.to_owned(),
+            })
+        }
+        _ => None,
     }
 }
 

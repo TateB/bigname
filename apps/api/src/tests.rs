@@ -1442,6 +1442,368 @@ async fn get_coverage_returns_declared_state_explain_with_shared_top_level_cover
 }
 
 #[tokio::test]
+async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let default_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("default resolution request failed")?;
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution request failed")?;
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified resolution request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed resolution request failed")?;
+
+    assert_eq!(default_response.status(), StatusCode::OK);
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let default_payload: ResolutionResponse = read_json(default_response).await?;
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let verified_payload: ResolutionResponse = read_json(verified_response).await?;
+    let both_payload: ResolutionResponse = read_json(both_response).await?;
+
+    assert!(default_payload.declared_state.is_some());
+    assert_eq!(default_payload.verified_state, None);
+    assert!(declared_payload.declared_state.is_some());
+    assert_eq!(declared_payload.verified_state, None);
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+    assert!(both_payload.declared_state.is_some());
+    assert_eq!(
+        both_payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_requires_records_for_verified_modes() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified resolution request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed resolution request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(both_response.status(), StatusCode::BAD_REQUEST);
+
+    let verified_payload: ErrorResponse = read_json(verified_response).await?;
+    let both_payload: ErrorResponse = read_json(both_response).await?;
+    assert_eq!(verified_payload.error.code, "invalid_input");
+    assert_eq!(both_payload.error.code, "invalid_input");
+    assert_eq!(
+        verified_payload.error.message,
+        "records is required when mode is verified or both"
+    );
+    assert_eq!(both_payload.error.message, verified_payload.error.message);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_rejects_duplicate_records_for_verified_modes() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("duplicate resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "records must not contain duplicate selectors"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_rejects_malformed_records() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=:avatar")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("malformed resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "records must contain only valid record selectors"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_returns_unsupported_declared_sections() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "topology": {
+                "status": "unsupported",
+                "unsupported_reason": "declared resolution topology is not yet projected",
+            },
+            "record_inventory": {
+                "status": "unsupported",
+                "unsupported_reason": "declared resolution record inventory is not yet projected",
+            },
+            "record_cache": {
+                "status": "unsupported",
+                "unsupported_reason": "declared resolution record cache is not yet projected",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request failed")?;
+    let name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+    assert_eq!(name_response.status(), StatusCode::OK);
+
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+    let name_payload: NameResponse = read_json(name_response).await?;
+
+    assert_eq!(resolution_payload.data, name_payload.data);
+    assert_eq!(resolution_payload.provenance, name_payload.provenance);
+    assert_eq!(resolution_payload.coverage, name_payload.coverage);
+    assert_eq!(
+        resolution_payload.chain_positions,
+        name_payload.chain_positions
+    );
+    assert_eq!(resolution_payload.consistency, name_payload.consistency);
+    assert_eq!(resolution_payload.last_updated, name_payload.last_updated);
+    assert_eq!(
+        resolution_payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolver_overview_returns_declared_state_with_shared_projection_envelope() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
