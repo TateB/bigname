@@ -5,15 +5,18 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot,
-    upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
-    upsert_raw_call_snapshots_in_transaction,
+    load_primary_name_current, upsert_execution_outcome_in_transaction,
+    upsert_execution_trace_in_transaction, upsert_raw_call_snapshots_in_transaction,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 #[cfg(test)]
-use bigname_storage::{upsert_execution_outcome, upsert_execution_trace};
+use bigname_storage::{
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, upsert_execution_outcome,
+    upsert_execution_trace, upsert_primary_name_current_rows,
+};
 
 pub use bigname_storage::{
     CanonicalityState, ExecutionTraceStep, load_execution_outcome, load_execution_trace,
@@ -21,6 +24,7 @@ pub use bigname_storage::{
 };
 
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
+pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";
 pub const ENS_NAMESPACE: &str = "ens";
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
@@ -40,6 +44,30 @@ pub struct PersistEnsExactNameVerifiedResolutionRequest {
 pub struct PersistedVerifiedResolutionIdentity {
     pub execution_trace_id: Uuid,
     pub cache_key: ExecutionCacheKey,
+}
+
+/// One narrow ENS verified-primary persistence request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistEnsVerifiedPrimaryNameRequest {
+    pub trace: ExecutionTrace,
+    pub outcome: ExecutionOutcome,
+}
+
+/// Persisted verified-primary identity the route layer can read back through storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedVerifiedPrimaryNameIdentity {
+    pub execution_trace_id: Uuid,
+    pub cache_key: ExecutionCacheKey,
+}
+
+/// Persisted ENS verified-primary result plus the validated stored execution pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedEnsVerifiedPrimaryName {
+    pub execution_trace_id: Uuid,
+    pub cache_key: ExecutionCacheKey,
+    pub verified_primary_name: Value,
+    pub trace: ExecutionTrace,
+    pub outcome: ExecutionOutcome,
 }
 
 /// Current execution bootstrap status.
@@ -95,11 +123,123 @@ pub async fn persist_ens_exact_name_verified_resolution_direct(
     })
 }
 
+/// Persist one ENS verified-primary result for an exact `{address, namespace, coin_type}` tuple
+/// and return the storage identity the route layer can load back.
+pub async fn persist_ens_verified_primary_name(
+    pool: &PgPool,
+    request: &PersistEnsVerifiedPrimaryNameRequest,
+) -> Result<PersistedVerifiedPrimaryNameIdentity> {
+    let validated = validate_verified_primary_request(request)?;
+    ensure_primary_name_anchor_exists(pool, &validated.tuple).await?;
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for ENS verified-primary persistence")?;
+
+    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    let outcome =
+        upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
+
+    if trace.execution_trace_id != outcome.execution_trace_id {
+        bail!(
+            "persisted ENS verified-primary trace {} does not match outcome trace {}",
+            trace.execution_trace_id,
+            outcome.execution_trace_id
+        );
+    }
+    if outcome.cache_key.request_key != trace.request_key {
+        bail!(
+            "persisted ENS verified-primary request_key {} does not match trace request_key {}",
+            outcome.cache_key.request_key,
+            trace.request_key
+        );
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit ENS verified-primary persistence")?;
+
+    Ok(PersistedVerifiedPrimaryNameIdentity {
+        execution_trace_id: trace.execution_trace_id,
+        cache_key: outcome.cache_key,
+    })
+}
+
+/// Load one persisted ENS verified-primary answer by cache key. Readback remains gated by the
+/// matching `primary_names_current(address, coin_type, namespace)` tuple anchor.
+pub async fn load_persisted_ens_verified_primary_name(
+    pool: &PgPool,
+    cache_key: &ExecutionCacheKey,
+) -> Result<Option<LoadedEnsVerifiedPrimaryName>> {
+    let Some(outcome) = load_execution_outcome(pool, cache_key).await? else {
+        return Ok(None);
+    };
+
+    let trace = load_execution_trace(pool, outcome.execution_trace_id)
+        .await?
+        .with_context(|| {
+            format!(
+                "failed to load persisted ENS verified-primary trace {}",
+                outcome.execution_trace_id
+            )
+        })?;
+
+    let validated = validate_verified_primary_trace_and_outcome(&trace, &outcome)?;
+    if load_primary_name_current(
+        pool,
+        &validated.tuple.normalized_address,
+        ENS_NAMESPACE,
+        &validated.tuple.coin_type,
+    )
+    .await?
+    .is_none()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(LoadedEnsVerifiedPrimaryName {
+        execution_trace_id: trace.execution_trace_id,
+        cache_key: outcome.cache_key.clone(),
+        verified_primary_name: validated.verified_primary_name.section,
+        trace,
+        outcome,
+    }))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VerifiedQueryStatus {
     Success,
     NotFound,
     ExecutionFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerifiedPrimaryNameStatus {
+    Success,
+    NotFound,
+    Mismatch,
+    InvalidName,
+    ExecutionFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedPrimaryNameTuple {
+    normalized_address: String,
+    coin_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedPrimaryNameSection {
+    section: Value,
+    status: VerifiedPrimaryNameStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidatedVerifiedPrimaryName {
+    tuple: VerifiedPrimaryNameTuple,
+    verified_primary_name: VerifiedPrimaryNameSection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,6 +270,51 @@ struct RequestedChainPosition {
     block_hash: String,
 }
 
+fn validate_verified_primary_request(
+    request: &PersistEnsVerifiedPrimaryNameRequest,
+) -> Result<ValidatedVerifiedPrimaryName> {
+    let tuple = extract_verified_primary_tuple(&request.trace)?;
+    let verified_primary_name = extract_verified_primary_name_section(
+        request.outcome.outcome_payload.as_ref(),
+        "ENS verified-primary outcome_payload",
+    )?;
+    validate_verified_primary_trace(
+        &request.trace,
+        &request.outcome,
+        &tuple,
+        &verified_primary_name,
+    )?;
+    validate_verified_primary_outcome(
+        &request.outcome,
+        &request.trace,
+        &tuple,
+        &verified_primary_name,
+    )?;
+
+    Ok(ValidatedVerifiedPrimaryName {
+        tuple,
+        verified_primary_name,
+    })
+}
+
+fn validate_verified_primary_trace_and_outcome(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<ValidatedVerifiedPrimaryName> {
+    let tuple = extract_verified_primary_tuple(trace)?;
+    let verified_primary_name = extract_verified_primary_name_section(
+        outcome.outcome_payload.as_ref(),
+        "ENS verified-primary outcome_payload",
+    )?;
+    validate_verified_primary_trace(trace, outcome, &tuple, &verified_primary_name)?;
+    validate_verified_primary_outcome(outcome, trace, &tuple, &verified_primary_name)?;
+
+    Ok(ValidatedVerifiedPrimaryName {
+        tuple,
+        verified_primary_name,
+    })
+}
+
 fn validate_direct_request(
     request: &PersistEnsExactNameVerifiedResolutionRequest,
 ) -> Result<Vec<VerifiedQuerySummary>> {
@@ -149,6 +334,416 @@ fn validate_direct_request(
         &requested_selectors,
     )?;
     Ok(queries)
+}
+
+fn extract_verified_primary_tuple(trace: &ExecutionTrace) -> Result<VerifiedPrimaryNameTuple> {
+    let request_metadata = required_object(
+        Some(&trace.request_metadata),
+        "ENS verified-primary trace.request_metadata",
+    )?;
+    let normalized_address = required_string(
+        request_metadata,
+        "normalized_address",
+        "ENS verified-primary trace.request_metadata",
+    )?
+    .to_owned();
+    if normalized_address != normalize_address(&normalized_address) {
+        bail!(
+            "ENS verified-primary trace.request_metadata.normalized_address must already be lowercase"
+        );
+    }
+
+    let coin_type = required_coin_type_field(
+        request_metadata,
+        "coin_type",
+        "ENS verified-primary trace.request_metadata",
+    )?;
+    if let Some(namespace) = optional_nonempty_string_field(
+        request_metadata,
+        "namespace",
+        "ENS verified-primary trace.request_metadata",
+    )? {
+        if namespace != ENS_NAMESPACE {
+            bail!(
+                "ENS verified-primary trace.request_metadata.namespace must be {}",
+                ENS_NAMESPACE
+            );
+        }
+    }
+
+    Ok(VerifiedPrimaryNameTuple {
+        normalized_address,
+        coin_type,
+    })
+}
+
+fn extract_verified_primary_name_section(
+    payload: Option<&Value>,
+    context: &str,
+) -> Result<VerifiedPrimaryNameSection> {
+    let payload = required_object(payload, context)?;
+    ensure_only_allowed_fields(payload, &["verified_primary_name"], context)?;
+
+    let section_context = format!("{context}.verified_primary_name");
+    let section = required_object(payload.get("verified_primary_name"), &section_context)?;
+    ensure_only_allowed_fields(
+        section,
+        &["status", "name", "failure_reason"],
+        &section_context,
+    )?;
+
+    let status = match required_string(section, "status", &section_context)? {
+        "success" => {
+            validate_verified_primary_name_ref(
+                section.get("name"),
+                &format!("{section_context}.name"),
+            )?;
+            ensure_absent(section, "failure_reason", &section_context)?;
+            VerifiedPrimaryNameStatus::Success
+        }
+        "not_found" => {
+            ensure_absent(section, "name", &section_context)?;
+            optional_nonempty_string_field(section, "failure_reason", &section_context)?;
+            VerifiedPrimaryNameStatus::NotFound
+        }
+        "mismatch" => {
+            validate_verified_primary_name_ref(
+                section.get("name"),
+                &format!("{section_context}.name"),
+            )?;
+            optional_nonempty_string_field(section, "failure_reason", &section_context)?;
+            VerifiedPrimaryNameStatus::Mismatch
+        }
+        "invalid_name" => {
+            ensure_absent(section, "name", &section_context)?;
+            optional_nonempty_string_field(section, "failure_reason", &section_context)?;
+            VerifiedPrimaryNameStatus::InvalidName
+        }
+        "execution_failed" => {
+            ensure_absent(section, "name", &section_context)?;
+            required_nonempty_string_field(section, "failure_reason", &section_context)?;
+            VerifiedPrimaryNameStatus::ExecutionFailed
+        }
+        status => bail!(
+            "ENS verified-primary only supports success, not_found, mismatch, invalid_name, and execution_failed; found {status}"
+        ),
+    };
+
+    Ok(VerifiedPrimaryNameSection {
+        section: Value::Object(section.clone()),
+        status,
+    })
+}
+
+fn validate_verified_primary_name_ref(value: Option<&Value>, context: &str) -> Result<()> {
+    let name = required_object(value, context)?;
+    ensure_only_allowed_fields(
+        name,
+        &[
+            "logical_name_id",
+            "namespace",
+            "normalized_name",
+            "canonical_display_name",
+            "namehash",
+            "resource_id",
+            "binding_kind",
+        ],
+        context,
+    )?;
+
+    let logical_name_id = required_string(name, "logical_name_id", context)?;
+    let namespace = required_string(name, "namespace", context)?;
+    let normalized_name = required_string(name, "normalized_name", context)?;
+    required_string(name, "canonical_display_name", context)?;
+    required_string(name, "namehash", context)?;
+    optional_nonempty_string_field(name, "resource_id", context)?;
+    optional_nonempty_string_field(name, "binding_kind", context)?;
+
+    if namespace != ENS_NAMESPACE {
+        bail!("{context}.namespace must be {ENS_NAMESPACE}");
+    }
+    if logical_name_id != format!("{ENS_NAMESPACE}:{normalized_name}") {
+        bail!(
+            "{context}.logical_name_id {} does not match normalized_name {}",
+            logical_name_id,
+            normalized_name
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_verified_primary_trace(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    tuple: &VerifiedPrimaryNameTuple,
+    verified_primary_name: &VerifiedPrimaryNameSection,
+) -> Result<()> {
+    if trace.request_type != VERIFIED_PRIMARY_NAME_REQUEST_TYPE {
+        bail!(
+            "ENS verified-primary trace {} must use request_type {}",
+            trace.execution_trace_id,
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+        );
+    }
+    if trace.namespace != ENS_NAMESPACE {
+        bail!(
+            "ENS verified-primary trace {} must use namespace {}",
+            trace.execution_trace_id,
+            ENS_NAMESPACE
+        );
+    }
+    if outcome.execution_trace_id != trace.execution_trace_id {
+        bail!(
+            "ENS verified-primary outcome trace {} does not match trace {}",
+            outcome.execution_trace_id,
+            trace.execution_trace_id
+        );
+    }
+
+    let expected_request_key =
+        normalized_verified_primary_name_request_key(&tuple.normalized_address, &tuple.coin_type);
+    if trace.request_key != expected_request_key {
+        bail!(
+            "ENS verified-primary trace {} request_key {} does not match expected {}",
+            trace.execution_trace_id,
+            trace.request_key,
+            expected_request_key
+        );
+    }
+
+    let requested_positions = required_chain_positions(
+        trace.chain_context.get("requested_positions"),
+        "ENS verified-primary trace.chain_context.requested_positions",
+    )?;
+    ensure_single_ethereum_mainnet_position(
+        &requested_positions,
+        "ENS verified-primary trace.chain_context.requested_positions",
+    )?;
+
+    let gateway_digests = required_array(
+        Some(&trace.gateway_digests),
+        "ENS verified-primary trace.gateway_digests",
+    )?;
+    if !gateway_digests.is_empty() {
+        bail!("ENS verified-primary must keep gateway_digests empty");
+    }
+
+    if !manifest_versions_include_source_family_for_context(
+        Some(&trace.manifest_context),
+        Some(&outcome.cache_key.manifest_versions),
+        ENS_EXECUTION_SOURCE_FAMILY,
+        "ENS verified-primary",
+    )? {
+        bail!(
+            "ENS verified-primary must include source_family {} in manifest context or cache key",
+            ENS_EXECUTION_SOURCE_FAMILY
+        );
+    }
+
+    let saw_universal_resolver_call = ensure_steps_do_not_use_deferred_execution_paths(
+        &trace.steps,
+        trace.execution_trace_id,
+        "ENS verified-primary",
+    )?;
+    if matches!(
+        verified_primary_name.status,
+        VerifiedPrimaryNameStatus::Success | VerifiedPrimaryNameStatus::Mismatch
+    ) {
+        if !saw_universal_resolver_call {
+            bail!(
+                "ENS verified-primary trace {} must include step_kind call_universal_resolver for status {:?}",
+                trace.execution_trace_id,
+                verified_primary_name.status
+            );
+        }
+        ensure_contains_universal_resolver_call(
+            &trace.contracts_called,
+            trace.execution_trace_id,
+            "ENS verified-primary",
+        )?;
+    } else if !required_array(
+        Some(&trace.contracts_called),
+        "ENS verified-primary trace.contracts_called",
+    )?
+    .is_empty()
+    {
+        ensure_contains_universal_resolver_call(
+            &trace.contracts_called,
+            trace.execution_trace_id,
+            "ENS verified-primary",
+        )?;
+    }
+
+    validate_verified_primary_trace_terminal_payloads(trace, verified_primary_name)?;
+
+    Ok(())
+}
+
+fn validate_verified_primary_outcome(
+    outcome: &ExecutionOutcome,
+    trace: &ExecutionTrace,
+    tuple: &VerifiedPrimaryNameTuple,
+    verified_primary_name: &VerifiedPrimaryNameSection,
+) -> Result<()> {
+    if outcome.request_type != VERIFIED_PRIMARY_NAME_REQUEST_TYPE {
+        bail!(
+            "ENS verified-primary outcome for request_key {} must use request_type {}",
+            outcome.cache_key.request_key,
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+        );
+    }
+    if outcome.namespace != ENS_NAMESPACE {
+        bail!(
+            "ENS verified-primary outcome for request_key {} must use namespace {}",
+            outcome.cache_key.request_key,
+            ENS_NAMESPACE
+        );
+    }
+    if outcome.execution_trace_id != trace.execution_trace_id {
+        bail!(
+            "ENS verified-primary outcome trace {} does not match trace {}",
+            outcome.execution_trace_id,
+            trace.execution_trace_id
+        );
+    }
+
+    let trace_finished_at = trace.finished_at.with_context(|| {
+        format!(
+            "ENS verified-primary trace {} must set finished_at",
+            trace.execution_trace_id
+        )
+    })?;
+    if outcome.finished_at != trace_finished_at {
+        bail!(
+            "ENS verified-primary outcome finished_at {} does not match trace finished_at {}",
+            outcome.finished_at,
+            trace_finished_at
+        );
+    }
+
+    let expected_request_key =
+        normalized_verified_primary_name_request_key(&tuple.normalized_address, &tuple.coin_type);
+    if outcome.cache_key.request_key != expected_request_key {
+        bail!(
+            "ENS verified-primary outcome request_key {} does not match expected {}",
+            outcome.cache_key.request_key,
+            expected_request_key
+        );
+    }
+    if outcome.cache_key.request_key != trace.request_key {
+        bail!(
+            "ENS verified-primary outcome request_key {} does not match trace request_key {}",
+            outcome.cache_key.request_key,
+            trace.request_key
+        );
+    }
+
+    let requested_positions = required_chain_positions(
+        Some(&outcome.cache_key.requested_chain_positions),
+        "ENS verified-primary cache_key.requested_chain_positions",
+    )?;
+    ensure_single_ethereum_mainnet_position(
+        &requested_positions,
+        "ENS verified-primary cache_key.requested_chain_positions",
+    )?;
+
+    let trace_positions = required_chain_positions(
+        trace.chain_context.get("requested_positions"),
+        "ENS verified-primary trace.chain_context.requested_positions",
+    )?;
+    if trace_positions != requested_positions {
+        bail!(
+            "ENS verified-primary trace.chain_context.requested_positions must match cache_key.requested_chain_positions"
+        );
+    }
+
+    match verified_primary_name.status {
+        VerifiedPrimaryNameStatus::ExecutionFailed => {
+            required_object(
+                outcome.failure_payload.as_ref(),
+                "ENS verified-primary execution_failed outcome.failure_payload",
+            )?;
+        }
+        _ if outcome.failure_payload.is_some() => {
+            bail!(
+                "ENS verified-primary outcome for request_key {} must not set failure_payload unless status is execution_failed",
+                outcome.cache_key.request_key
+            );
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn validate_verified_primary_trace_terminal_payloads(
+    trace: &ExecutionTrace,
+    verified_primary_name: &VerifiedPrimaryNameSection,
+) -> Result<()> {
+    match verified_primary_name.status {
+        VerifiedPrimaryNameStatus::ExecutionFailed => {
+            if trace.final_payload.is_some() {
+                bail!(
+                    "ENS verified-primary execution_failed trace {} must not set final_payload",
+                    trace.execution_trace_id
+                );
+            }
+            required_object(
+                trace.failure_payload.as_ref(),
+                "ENS verified-primary execution_failed trace.failure_payload",
+            )?;
+        }
+        _ => {
+            if trace.failure_payload.is_some() {
+                bail!(
+                    "ENS verified-primary trace {} must not set failure_payload unless status is execution_failed",
+                    trace.execution_trace_id
+                );
+            }
+            let final_payload = trace.final_payload.as_ref().with_context(|| {
+                format!(
+                    "ENS verified-primary trace {} must set final_payload when status is not execution_failed",
+                    trace.execution_trace_id
+                )
+            })?;
+            let final_verified_primary_name = extract_verified_primary_name_section(
+                Some(final_payload),
+                "ENS verified-primary trace.final_payload",
+            )?;
+            if final_verified_primary_name != *verified_primary_name {
+                bail!(
+                    "ENS verified-primary trace.final_payload.verified_primary_name must match outcome_payload.verified_primary_name"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn ensure_primary_name_anchor_exists(
+    pool: &PgPool,
+    tuple: &VerifiedPrimaryNameTuple,
+) -> Result<()> {
+    if load_primary_name_current(
+        pool,
+        &tuple.normalized_address,
+        ENS_NAMESPACE,
+        &tuple.coin_type,
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "ENS verified-primary persistence requires primary_names_current anchor for address {} namespace {} coin_type {}",
+        tuple.normalized_address,
+        ENS_NAMESPACE,
+        tuple.coin_type
+    )
 }
 
 fn extract_requested_selectors(trace: &ExecutionTrace) -> Result<RequestedSelectorSet> {
@@ -439,9 +1034,11 @@ fn validate_trace(
         bail!("ENS direct-path verified resolution must keep gateway_digests empty");
     }
 
-    if !manifest_versions_include_source_family(
+    if !manifest_versions_include_source_family_for_context(
         Some(&trace.manifest_context),
         Some(&outcome.cache_key.manifest_versions),
+        ENS_EXECUTION_SOURCE_FAMILY,
+        "ENS direct-path verified resolution",
     )? {
         bail!(
             "ENS direct-path verified resolution must include source_family {} in manifest context or cache key",
@@ -449,7 +1046,11 @@ fn validate_trace(
         );
     }
 
-    ensure_contains_universal_resolver_call(&trace.contracts_called, trace.execution_trace_id)?;
+    ensure_contains_universal_resolver_call(
+        &trace.contracts_called,
+        trace.execution_trace_id,
+        "ENS direct-path verified resolution",
+    )?;
     ensure_steps_are_direct_path_only(&trace.steps, trace.execution_trace_id)?;
     validate_trace_terminal_payloads(trace, queries)?;
 
@@ -767,36 +1368,54 @@ fn normalized_request_key(surface: &str, ordered_record_keys: &[String]) -> Stri
     )
 }
 
-fn manifest_versions_include_source_family(
+fn normalized_verified_primary_name_request_key(
+    normalized_address: &str,
+    coin_type: &str,
+) -> String {
+    format!(
+        "{ENS_NAMESPACE}:{}:{coin_type}",
+        normalize_address(normalized_address)
+    )
+}
+
+fn normalize_address(address: &str) -> String {
+    address.to_ascii_lowercase()
+}
+
+fn manifest_versions_include_source_family_for_context(
     manifest_context: Option<&Value>,
     cache_manifest_versions: Option<&Value>,
+    expected_source_family: &str,
+    context: &str,
 ) -> Result<bool> {
-    if let Some(context) = manifest_context {
+    if let Some(manifest_context) = manifest_context {
         let object = required_object(
-            Some(context),
-            "ENS direct-path verified resolution trace.manifest_context",
+            Some(manifest_context),
+            &format!("{context} trace.manifest_context"),
         )?;
-        if contains_source_family(object.get("manifest_versions"), ENS_EXECUTION_SOURCE_FAMILY)? {
+        if contains_source_family(
+            object.get("manifest_versions"),
+            expected_source_family,
+            context,
+        )? {
             return Ok(true);
         }
     }
 
-    contains_source_family(cache_manifest_versions, ENS_EXECUTION_SOURCE_FAMILY)
+    contains_source_family(cache_manifest_versions, expected_source_family, context)
 }
 
-fn contains_source_family(value: Option<&Value>, expected_source_family: &str) -> Result<bool> {
+fn contains_source_family(
+    value: Option<&Value>,
+    expected_source_family: &str,
+    context: &str,
+) -> Result<bool> {
     let Some(value) = value else {
         return Ok(false);
     };
-    let items = required_array(
-        Some(value),
-        "ENS direct-path verified resolution manifest_versions",
-    )?;
+    let items = required_array(Some(value), &format!("{context} manifest_versions"))?;
     for (index, item) in items.iter().enumerate() {
-        let object = required_object(
-            Some(item),
-            &format!("ENS direct-path verified resolution manifest_versions[{index}]"),
-        )?;
+        let object = required_object(Some(item), &format!("{context} manifest_versions[{index}]"))?;
         if object
             .get("source_family")
             .and_then(Value::as_str)
@@ -811,30 +1430,31 @@ fn contains_source_family(value: Option<&Value>, expected_source_family: &str) -
 fn ensure_contains_universal_resolver_call(
     contracts_called: &Value,
     execution_trace_id: Uuid,
+    context: &str,
 ) -> Result<()> {
     let calls = required_array(
         Some(contracts_called),
-        "ENS direct-path verified resolution trace.contracts_called",
+        &format!("{context} trace.contracts_called"),
     )?;
     for (index, call) in calls.iter().enumerate() {
         let object = required_object(
             Some(call),
-            &format!("ENS direct-path verified resolution trace.contracts_called[{index}]"),
+            &format!("{context} trace.contracts_called[{index}]"),
         )?;
         let chain_id = required_string(
             object,
             "chain_id",
-            "ENS direct-path verified resolution trace.contracts_called entry",
+            &format!("{context} trace.contracts_called entry"),
         )?;
         let contract_address = required_string(
             object,
             "contract_address",
-            "ENS direct-path verified resolution trace.contracts_called entry",
+            &format!("{context} trace.contracts_called entry"),
         )?;
         let selector = required_string(
             object,
             "selector",
-            "ENS direct-path verified resolution trace.contracts_called entry",
+            &format!("{context} trace.contracts_called entry"),
         )?;
         if chain_id == ETHEREUM_MAINNET_CHAIN_ID
             && contract_address.eq_ignore_ascii_case(ENS_UNIVERSAL_RESOLVER_ADDRESS)
@@ -845,7 +1465,7 @@ fn ensure_contains_universal_resolver_call(
     }
 
     bail!(
-        "ENS direct-path verified resolution trace {} must include one {} contract call on {}",
+        "{context} trace {} must include one {} contract call on {}",
         execution_trace_id,
         ENS_UNIVERSAL_RESOLVER_ROLE,
         ETHEREUM_MAINNET_CHAIN_ID
@@ -856,6 +1476,25 @@ fn ensure_steps_are_direct_path_only(
     steps: &[bigname_storage::ExecutionTraceStep],
     execution_trace_id: Uuid,
 ) -> Result<()> {
+    if !ensure_steps_do_not_use_deferred_execution_paths(
+        steps,
+        execution_trace_id,
+        "ENS direct-path verified resolution",
+    )? {
+        bail!(
+            "ENS direct-path verified resolution trace {} must include step_kind call_universal_resolver",
+            execution_trace_id
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_steps_do_not_use_deferred_execution_paths(
+    steps: &[bigname_storage::ExecutionTraceStep],
+    execution_trace_id: Uuid,
+    context: &str,
+) -> Result<bool> {
     let mut saw_universal_resolver_call = false;
     for step in steps {
         let normalized = step.step_kind.to_ascii_lowercase();
@@ -864,7 +1503,7 @@ fn ensure_steps_are_direct_path_only(
             || normalized.contains("ccip")
         {
             bail!(
-                "ENS direct-path verified resolution trace {} must not persist non-direct step {}",
+                "{context} trace {} must not persist non-direct step {}",
                 execution_trace_id,
                 step.step_kind
             );
@@ -874,14 +1513,7 @@ fn ensure_steps_are_direct_path_only(
         }
     }
 
-    if !saw_universal_resolver_call {
-        bail!(
-            "ENS direct-path verified resolution trace {} must include step_kind call_universal_resolver",
-            execution_trace_id
-        );
-    }
-
-    Ok(())
+    Ok(saw_universal_resolver_call)
 }
 
 fn ensure_single_ethereum_mainnet_position(
@@ -940,6 +1572,23 @@ fn required_array<'a>(value: Option<&'a Value>, context: &str) -> Result<&'a Vec
     value
         .and_then(Value::as_array)
         .with_context(|| format!("{context} must be a JSON array"))
+}
+
+fn ensure_only_allowed_fields(
+    object: &Map<String, Value>,
+    allowed_fields: &[&str],
+    context: &str,
+) -> Result<()> {
+    for key in object.keys() {
+        if !allowed_fields
+            .iter()
+            .any(|allowed| allowed == &key.as_str())
+        {
+            bail!("{context} must not set field {key}");
+        }
+    }
+
+    Ok(())
 }
 
 fn required_string<'a>(
@@ -1752,6 +2401,598 @@ mod tests {
             .await?
             .is_empty(),
             "rejected request must not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    fn primary_name_anchor_row(
+        address: &str,
+        coin_type: &str,
+        claim_status: PrimaryNameClaimStatus,
+    ) -> PrimaryNameCurrentRow {
+        PrimaryNameCurrentRow {
+            address: address.to_ascii_lowercase(),
+            namespace: ENS_NAMESPACE.to_owned(),
+            coin_type: coin_type.to_owned(),
+            claim_status,
+            raw_claim_name: (claim_status == PrimaryNameClaimStatus::InvalidName)
+                .then(|| "bad name".to_owned()),
+            claim_provenance: json!({
+                "source_family": "ens_v1_reverse_l1",
+                "contract_role": "reverse_registrar",
+                "contract_instance_id": "00000000-0000-0000-0000-000000000123",
+                "emitting_address": "0x00000000000000000000000000000000000000ad"
+            }),
+        }
+    }
+
+    async fn insert_primary_name_anchor(
+        database: &TestDatabase,
+        address: &str,
+        coin_type: &str,
+        claim_status: PrimaryNameClaimStatus,
+    ) -> Result<()> {
+        upsert_primary_name_current_rows(
+            database.pool(),
+            &[primary_name_anchor_row(address, coin_type, claim_status)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn verified_primary_name_ref(name: &str) -> Value {
+        json!({
+            "logical_name_id": format!("{ENS_NAMESPACE}:{name}"),
+            "namespace": ENS_NAMESPACE,
+            "normalized_name": name,
+            "canonical_display_name": name,
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        })
+    }
+
+    fn verified_primary_request(
+        execution_trace_id: Uuid,
+        normalized_address: &str,
+        coin_type: &str,
+        verified_primary_name: Value,
+    ) -> PersistEnsVerifiedPrimaryNameRequest {
+        let request_key =
+            normalized_verified_primary_name_request_key(normalized_address, coin_type);
+        let finished_at = timestamp(1_717_172_100);
+        PersistEnsVerifiedPrimaryNameRequest {
+            trace: ExecutionTrace {
+                execution_trace_id,
+                request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+                request_key: request_key.clone(),
+                namespace: ENS_NAMESPACE.to_owned(),
+                chain_context: json!({
+                    "requested_positions": requested_chain_positions(),
+                    "topology_version_boundary": {
+                        ETHEREUM_MAINNET_CHAIN_ID: 21_000_000
+                    }
+                }),
+                manifest_context: json!({
+                    "manifest_versions": manifest_versions(),
+                    "rollout_boundary": "shadow"
+                }),
+                contracts_called: json!([
+                    {
+                        "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                        "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                        "selector": "0x9061b923"
+                    }
+                ]),
+                gateway_digests: json!([]),
+                final_payload: Some(json!({
+                    "verified_primary_name": verified_primary_name.clone()
+                })),
+                failure_payload: None,
+                request_metadata: json!({
+                    "normalized_address": normalized_address,
+                    "coin_type": coin_type,
+                    "namespace": ENS_NAMESPACE
+                }),
+                finished_at: Some(finished_at),
+                steps: vec![
+                    ExecutionTraceStep {
+                        step_index: 0,
+                        step_kind: "load_primary_name_claim".to_owned(),
+                        input_digest: Some("sha256:claim-input".to_owned()),
+                        output_digest: Some("sha256:claim-output".to_owned()),
+                        latency_ms: Some(2),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xabc123",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "address": normalized_address,
+                            "coin_type": coin_type
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 1,
+                        step_kind: "normalize_claimed_name".to_owned(),
+                        input_digest: Some("sha256:normalize-input".to_owned()),
+                        output_digest: Some("sha256:normalize-output".to_owned()),
+                        latency_ms: Some(1),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xabc123",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "normalizer_version": "uts46-v1"
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 2,
+                        step_kind: "call_universal_resolver".to_owned(),
+                        input_digest: Some("sha256:resolver-input".to_owned()),
+                        output_digest: Some("sha256:resolver-output".to_owned()),
+                        latency_ms: Some(14),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xabc123",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "name": "alice.eth",
+                            "coin_type": coin_type
+                        }),
+                    },
+                ],
+            },
+            outcome: ExecutionOutcome {
+                cache_key: ExecutionCacheKey {
+                    request_key,
+                    requested_chain_positions: requested_chain_positions(),
+                    manifest_versions: manifest_versions(),
+                    topology_version_boundary: version_boundary(Uuid::from_u128(
+                        0x0e7ec7ace0000000000000000000bbb1,
+                    )),
+                    record_version_boundary: version_boundary(Uuid::from_u128(
+                        0x0e7ec7ace0000000000000000000bbb2,
+                    )),
+                },
+                execution_trace_id,
+                request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+                namespace: ENS_NAMESPACE.to_owned(),
+                outcome_payload: Some(json!({
+                    "verified_primary_name": verified_primary_name
+                })),
+                failure_payload: None,
+                finished_at,
+            },
+        }
+    }
+
+    fn verified_primary_success_request() -> PersistEnsVerifiedPrimaryNameRequest {
+        verified_primary_request(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000000021),
+            "0x00000000000000000000000000000000000000aa",
+            "60",
+            json!({
+                "status": "success",
+                "name": verified_primary_name_ref("alice.eth")
+            }),
+        )
+    }
+
+    fn verified_primary_mismatch_request() -> PersistEnsVerifiedPrimaryNameRequest {
+        verified_primary_request(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000000022),
+            "0x00000000000000000000000000000000000000ab",
+            "60",
+            json!({
+                "status": "mismatch",
+                "name": verified_primary_name_ref("alice.eth"),
+                "failure_reason": "resolved_target_mismatch"
+            }),
+        )
+    }
+
+    fn verified_primary_not_found_request() -> PersistEnsVerifiedPrimaryNameRequest {
+        let mut request = verified_primary_request(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000000023),
+            "0x00000000000000000000000000000000000000ac",
+            "60",
+            json!({
+                "status": "not_found"
+            }),
+        );
+        request.trace.contracts_called = json!([]);
+        request.trace.steps = vec![ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_primary_name_claim".to_owned(),
+            input_digest: Some("sha256:claim-input".to_owned()),
+            output_digest: Some("sha256:claim-output".to_owned()),
+            latency_ms: Some(2),
+            canonicality_dependency: json!({
+                ETHEREUM_MAINNET_CHAIN_ID: {
+                    "block_hash": "0xabc123",
+                    "block_number": 21_000_000,
+                    "state": "canonical"
+                }
+            }),
+            step_payload: json!({
+                "address": "0x00000000000000000000000000000000000000ac",
+                "coin_type": "60"
+            }),
+        }];
+        request
+    }
+
+    fn verified_primary_invalid_name_request() -> PersistEnsVerifiedPrimaryNameRequest {
+        let mut request = verified_primary_request(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000000024),
+            "0x00000000000000000000000000000000000000ad",
+            "60",
+            json!({
+                "status": "invalid_name",
+                "failure_reason": "claim_name_not_normalizable"
+            }),
+        );
+        request.trace.contracts_called = json!([]);
+        request.trace.steps = vec![
+            ExecutionTraceStep {
+                step_index: 0,
+                step_kind: "load_primary_name_claim".to_owned(),
+                input_digest: Some("sha256:claim-input".to_owned()),
+                output_digest: Some("sha256:claim-output".to_owned()),
+                latency_ms: Some(2),
+                canonicality_dependency: json!({
+                    ETHEREUM_MAINNET_CHAIN_ID: {
+                        "block_hash": "0xabc123",
+                        "block_number": 21_000_000,
+                        "state": "canonical"
+                    }
+                }),
+                step_payload: json!({
+                    "address": "0x00000000000000000000000000000000000000ad",
+                    "coin_type": "60"
+                }),
+            },
+            ExecutionTraceStep {
+                step_index: 1,
+                step_kind: "normalize_claimed_name".to_owned(),
+                input_digest: Some("sha256:normalize-input".to_owned()),
+                output_digest: Some("sha256:normalize-output".to_owned()),
+                latency_ms: Some(1),
+                canonicality_dependency: json!({
+                    ETHEREUM_MAINNET_CHAIN_ID: {
+                        "block_hash": "0xabc123",
+                        "block_number": 21_000_000,
+                        "state": "canonical"
+                    }
+                }),
+                step_payload: json!({
+                    "normalizer_version": "uts46-v1",
+                    "error": "label_has_whitespace"
+                }),
+            },
+        ];
+        request
+    }
+
+    fn verified_primary_execution_failed_request() -> PersistEnsVerifiedPrimaryNameRequest {
+        let mut request = verified_primary_request(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000000025),
+            "0x00000000000000000000000000000000000000ae",
+            "60",
+            json!({
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_reverted"
+            }),
+        );
+        request.trace.final_payload = None;
+        request.trace.failure_payload = Some(json!({
+            "failure_reason": "resolver_call_reverted",
+            "stage": "call_universal_resolver"
+        }));
+        request.outcome.failure_payload = Some(json!({
+            "failure_reason": "resolver_call_reverted",
+            "reverted": true
+        }));
+        request
+    }
+
+    #[tokio::test]
+    async fn persists_verified_primary_success_and_reads_back() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_success_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000aa",
+            "60",
+            PrimaryNameClaimStatus::Success,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedPrimaryNameIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("verified-primary readback must exist");
+        assert_eq!(loaded.execution_trace_id, request.trace.execution_trace_id);
+        assert_eq!(
+            loaded.verified_primary_name,
+            json!({
+                "status": "success",
+                "name": verified_primary_name_ref("alice.eth")
+            })
+        );
+        assert_eq!(loaded.trace, request.trace);
+        assert_eq!(loaded.outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_verified_primary_mismatch_and_reads_back() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_mismatch_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000ab",
+            "60",
+            PrimaryNameClaimStatus::Success,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("mismatch readback must exist");
+        assert_eq!(
+            loaded.verified_primary_name,
+            json!({
+                "status": "mismatch",
+                "name": verified_primary_name_ref("alice.eth"),
+                "failure_reason": "resolved_target_mismatch"
+            })
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_verified_primary_not_found_without_resolver_call() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_not_found_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000ac",
+            "60",
+            PrimaryNameClaimStatus::NotFound,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("not_found readback must exist");
+        assert_eq!(
+            loaded.verified_primary_name,
+            json!({ "status": "not_found" })
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_verified_primary_invalid_name_without_resolver_call() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_invalid_name_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000ad",
+            "60",
+            PrimaryNameClaimStatus::InvalidName,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("invalid_name readback must exist");
+        assert_eq!(
+            loaded.verified_primary_name,
+            json!({
+                "status": "invalid_name",
+                "failure_reason": "claim_name_not_normalizable"
+            })
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_verified_primary_execution_failed_with_failure_payloads() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_execution_failed_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000ae",
+            "60",
+            PrimaryNameClaimStatus::Success,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("execution_failed readback must exist");
+        assert_eq!(
+            loaded.verified_primary_name,
+            json!({
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_reverted"
+            })
+        );
+        assert_eq!(loaded.trace.failure_payload, request.trace.failure_payload);
+        assert_eq!(
+            loaded.outcome.failure_payload,
+            request.outcome.failure_payload
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_verified_primary_without_primary_name_anchor() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_success_request();
+
+        let error = persist_ens_verified_primary_name(database.pool(), &request)
+            .await
+            .expect_err("missing tuple anchor must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("requires primary_names_current anchor"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected verified-primary request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected verified-primary request must not persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn verified_primary_readback_returns_none_when_anchor_is_missing() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_success_request();
+        upsert_execution_trace(database.pool(), &request.trace).await?;
+        upsert_execution_outcome(database.pool(), &request.outcome).await?;
+
+        assert!(
+            load_persisted_ens_verified_primary_name(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "readback must stay gated on primary_names_current tuple presence"
+        );
+
+        database.cleanup().await
+    }
+
+    #[test]
+    fn rejects_unnormalized_verified_primary_request_key() -> Result<()> {
+        let mut request = verified_primary_success_request();
+        request.trace.request_key = "ens:0x00000000000000000000000000000000000000AA:60".to_owned();
+        request.outcome.cache_key.request_key = request.trace.request_key.clone();
+
+        let error = validate_verified_primary_request(&request)
+            .expect_err("unnormalized verified-primary request_key must be rejected");
+        assert!(
+            error.to_string().contains(
+                "does not match expected ens:0x00000000000000000000000000000000000000aa:60"
+            ),
+            "unexpected error: {error:#}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rolls_back_verified_primary_trace_when_outcome_write_fails() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = verified_primary_success_request();
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000aa",
+            "60",
+            PrimaryNameClaimStatus::Success,
+        )
+        .await?;
+
+        let mut conflicting_trace = request.trace.clone();
+        conflicting_trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000026);
+        conflicting_trace.request_type = VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned();
+        conflicting_trace.request_key = "ens:alice.eth:addr:60".to_owned();
+        conflicting_trace.final_payload = Some(json!({
+            "verified_queries": [{
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            }]
+        }));
+        conflicting_trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "addr:60",
+            "normalizer_version": "uts46-v1"
+        });
+        upsert_execution_trace(database.pool(), &conflicting_trace).await?;
+
+        let mut conflicting_outcome = request.outcome.clone();
+        conflicting_outcome.execution_trace_id = conflicting_trace.execution_trace_id;
+        conflicting_outcome.request_type = conflicting_trace.request_type.clone();
+        conflicting_outcome.namespace = "basenames".to_owned();
+        conflicting_outcome.outcome_payload = Some(json!({
+            "verified_queries": [{
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            }]
+        }));
+        upsert_execution_outcome(database.pool(), &conflicting_outcome).await?;
+
+        let error = persist_ens_verified_primary_name(database.pool(), &request)
+            .await
+            .expect_err("conflicting cache identity must roll back verified-primary writes");
+        assert!(
+            error
+                .to_string()
+                .contains("execution outcome cache identity mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "failed verified-primary persistence must not leave a trace row behind"
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key).await?,
+            Some(conflicting_outcome),
+            "the pre-existing conflicting outcome must remain untouched"
         );
 
         database.cleanup().await
