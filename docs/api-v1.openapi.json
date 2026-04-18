@@ -1,0 +1,1844 @@
+{
+  "components": {
+    "schemas": {
+      "CapabilityFlag": {
+        "properties": {
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "unsupported",
+              "shadow",
+              "supported"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "ChainPositionResponse": {
+        "properties": {
+          "block_hash": {
+            "type": "string"
+          },
+          "block_number": {
+            "type": "integer"
+          },
+          "chain_id": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "block_number",
+          "block_hash",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "ChainPositions": {
+        "additionalProperties": {
+          "$ref": "#/components/schemas/ChainPositionResponse"
+        },
+        "type": "object"
+      },
+      "CollectionResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/JsonObject"
+            },
+            "type": "array"
+          },
+          "declared_state": {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPageResponse"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "$ref": "#/components/schemas/NullValue"
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated",
+          "page"
+        ],
+        "type": "object"
+      },
+      "Consistency": {
+        "enum": [
+          "head",
+          "safe",
+          "finalized"
+        ],
+        "type": "string"
+      },
+      "CoverageResponse": {
+        "properties": {
+          "enumeration_basis": {
+            "type": "string"
+          },
+          "exhaustiveness": {
+            "type": "string"
+          },
+          "source_classes_considered": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "unsupported_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "exhaustiveness",
+          "source_classes_considered",
+          "enumeration_basis",
+          "unsupported_reason"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ExactNameData": {
+        "properties": {
+          "binding_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "canonical_display_name": {
+            "type": "string"
+          },
+          "logical_name_id": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "normalized_name": {
+            "type": "string"
+          },
+          "resource_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_lineage_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "logical_name_id",
+          "namespace",
+          "normalized_name",
+          "canonical_display_name",
+          "namehash",
+          "resource_id",
+          "token_lineage_id",
+          "binding_kind"
+        ],
+        "type": "object"
+      },
+      "ExactNameResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ExactNameData"
+          },
+          "declared_state": {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "$ref": "#/components/schemas/NullValue"
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "phase": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "phase",
+          "status"
+        ],
+        "type": "object"
+      },
+      "HistoryPageResponse": {
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page_size": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sort": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "next_cursor",
+          "page_size",
+          "sort"
+        ],
+        "type": "object"
+      },
+      "JsonObject": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "NamespaceData": {
+        "properties": {
+          "namespace": {
+            "enum": [
+              "ens",
+              "basenames"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "NamespaceManifestEntry": {
+        "properties": {
+          "capability_flags": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CapabilityFlag"
+            },
+            "type": "object"
+          },
+          "chain": {
+            "type": "string"
+          },
+          "deployment_epoch": {
+            "type": "string"
+          },
+          "manifest_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "normalizer_version": {
+            "type": "string"
+          },
+          "source_family": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_version",
+          "source_family",
+          "chain",
+          "deployment_epoch",
+          "normalizer_version",
+          "capability_flags"
+        ],
+        "type": "object"
+      },
+      "NamespaceManifestsDeclaredState": {
+        "properties": {
+          "manifests": {
+            "items": {
+              "$ref": "#/components/schemas/NamespaceManifestEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "manifests"
+        ],
+        "type": "object"
+      },
+      "NamespaceManifestsResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/NamespaceData"
+          },
+          "declared_state": {
+            "$ref": "#/components/schemas/NamespaceManifestsDeclaredState"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "$ref": "#/components/schemas/NullValue"
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
+      "NamespaceMetadataDeclaredState": {
+        "properties": {
+          "active_manifest_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "active_source_families": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "chains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "normalizer_versions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "active_manifest_count",
+          "active_source_families",
+          "chains",
+          "normalizer_versions"
+        ],
+        "type": "object"
+      },
+      "NamespaceMetadataResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/NamespaceData"
+          },
+          "declared_state": {
+            "$ref": "#/components/schemas/NamespaceMetadataDeclaredState"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "$ref": "#/components/schemas/NullValue"
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
+      "NullValue": {
+        "type": "null"
+      },
+      "Provenance": {
+        "properties": {
+          "derivation_kind": {
+            "type": "string"
+          },
+          "execution_trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manifest_versions": {
+            "items": {},
+            "type": "array"
+          },
+          "normalized_event_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "raw_fact_refs": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "required": [
+          "normalized_event_ids",
+          "raw_fact_refs",
+          "manifest_versions",
+          "execution_trace_id",
+          "derivation_kind"
+        ],
+        "type": "object"
+      },
+      "ResolutionResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ExactNameData"
+          },
+          "declared_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
+      "ResolverData": {
+        "properties": {
+          "chain_id": {
+            "type": "string"
+          },
+          "resolver_address": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "resolver_address"
+        ],
+        "type": "object"
+      },
+      "ResolverResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ResolverData"
+          },
+          "declared_state": {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "$ref": "#/components/schemas/NullValue"
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Machine-readable publication of the shipped Phase 6 public API surface derived from apps/api/src/main.rs.",
+    "title": "bigname API v1",
+    "version": "phase-6"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/addresses/{address}/names": {
+      "get": {
+        "operationId": "address_names",
+        "parameters": [
+          {
+            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional relation facet filter.",
+            "in": "query",
+            "name": "relation",
+            "required": false,
+            "schema": {
+              "enum": [
+                "registrant",
+                "token_holder",
+                "effective_controller"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Current collection dedupe basis.",
+            "in": "query",
+            "name": "dedupe_by",
+            "required": false,
+            "schema": {
+              "default": "surface",
+              "enum": [
+                "surface",
+                "resource"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional collection expansions. `role_summary` is the only shipped expansion.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "enum": [
+                "role_summary"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Address-to-surface collection",
+        "tags": [
+          "Collections"
+        ]
+      }
+    },
+    "/v1/coverage/{namespace}/{name}": {
+      "get": {
+        "operationId": "coverage_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Single-name coverage and explain details",
+        "tags": [
+          "Coverage"
+        ]
+      }
+    },
+    "/v1/explain/names/{namespace}/{name}/authority-control": {
+      "get": {
+        "operationId": "explain_authority_control_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Current authority/control explain view for one exact name",
+        "tags": [
+          "Explain"
+        ]
+      }
+    },
+    "/v1/explain/names/{namespace}/{name}/surface-binding": {
+      "get": {
+        "operationId": "explain_surface_binding_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Current surface-binding explain view for one exact name",
+        "tags": [
+          "Explain"
+        ]
+      }
+    },
+    "/v1/history/addresses/{address}": {
+      "get": {
+        "operationId": "address_history",
+        "parameters": [
+          {
+            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional relation facet filter.",
+            "in": "query",
+            "name": "relation",
+            "required": false,
+            "schema": {
+              "enum": [
+                "registrant",
+                "token_holder",
+                "effective_controller"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "History scope selector.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "both",
+              "enum": [
+                "surface",
+                "resource",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Address activity across related surfaces and resources",
+        "tags": [
+          "History"
+        ]
+      }
+    },
+    "/v1/history/names/{namespace}/{name}": {
+      "get": {
+        "operationId": "name_history",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "History scope selector.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "both",
+              "enum": [
+                "surface",
+                "resource",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Surface or combined history",
+        "tags": [
+          "History"
+        ]
+      }
+    },
+    "/v1/history/resources/{resource_id}": {
+      "get": {
+        "operationId": "resource_history",
+        "parameters": [
+          {
+            "description": "Resource identifier anchor.",
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "History scope selector.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "both",
+              "enum": [
+                "surface",
+                "resource",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Resource history",
+        "tags": [
+          "History"
+        ]
+      }
+    },
+    "/v1/manifests/{namespace}": {
+      "get": {
+        "operationId": "namespace_manifests",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceManifestsResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Active manifest versions and capabilities",
+        "tags": [
+          "Namespaces"
+        ]
+      }
+    },
+    "/v1/names/{namespace}/{name}": {
+      "get": {
+        "operationId": "name_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Exact name lookup",
+        "tags": [
+          "Names"
+        ]
+      }
+    },
+    "/v1/names/{namespace}/{name}/children": {
+      "get": {
+        "operationId": "name_children",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested child surface classes. Only `declared` is currently supported.",
+            "explode": false,
+            "in": "query",
+            "name": "surface_classes",
+            "required": false,
+            "schema": {
+              "default": "declared",
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Optional collection expansions. `counts` includes `declared_state.subname_count`.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "enum": [
+                "counts"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Declared child collection by default",
+        "tags": [
+          "Collections"
+        ]
+      }
+    },
+    "/v1/namespaces/{namespace}": {
+      "get": {
+        "operationId": "namespace_metadata",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceMetadataResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Namespace metadata and support status",
+        "tags": [
+          "Namespaces"
+        ]
+      }
+    },
+    "/v1/resolutions/{namespace}/{name}": {
+      "get": {
+        "operationId": "resolution_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resolution read mode.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "declared",
+              "enum": [
+                "declared",
+                "verified",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
+            "explode": false,
+            "in": "query",
+            "name": "records",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Resolution topology, inventory, and verified reads",
+        "tags": [
+          "Resolution"
+        ]
+      }
+    },
+    "/v1/resolvers/{chain_id}/{resolver_address}": {
+      "get": {
+        "operationId": "resolver_current",
+        "parameters": [
+          {
+            "description": "Resolver chain identifier.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resolver address anchor. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "resolver_address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolverResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Resolver overview",
+        "tags": [
+          "Resolvers"
+        ]
+      }
+    },
+    "/v1/resources/{resource_id}/permissions": {
+      "get": {
+        "operationId": "resource_permissions",
+        "parameters": [
+          {
+            "description": "Resource identifier anchor.",
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional subject filter for the current effective permissions rows.",
+            "in": "query",
+            "name": "subject",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional scope filter. Accepts `root`, `registry`, `resource`, `resolver:{chain_id}:{resolver_address}`, `record_manager:{chain_id}:{manager_address}`, `migration_derived:{resource_id}`, or `transport_derived:{transport}`.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Resource-centric effective permissions",
+        "tags": [
+          "Collections"
+        ]
+      }
+    }
+  }
+}
