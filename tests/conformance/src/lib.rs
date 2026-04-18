@@ -2967,6 +2967,312 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn resolution_contract_reads_persisted_alias_only_answer_on_mixed_route()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000025);
+            let alias_target = json!({
+                "logical_name_id": "ens:profile.alice.eth",
+                "namespace": "ens",
+                "normalized_name": "profile.alice.eth",
+                "canonical_display_name": "Profile.alice.eth",
+                "namehash": "namehash:profile.alice.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "resolver_alias_path",
+            });
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("mixed alias resolution requires an exact-name current row")?;
+            name_row.binding_kind = Some(SurfaceBindingKind::ResolverAliasPath);
+            database.insert_name_current_row(name_row.clone()).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let alias_records =
+                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &alias_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = json!([
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice-via-alias",
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
+                }
+            ]);
+
+            let mut trace = resolution_execution_trace(
+                execution_trace_id,
+                &request_key,
+                &["text:com.twitter"],
+                persisted_verified_queries.clone(),
+            );
+            trace.request_metadata = json!({
+                "surface": "alice.eth",
+                "record_keys": ["text:com.twitter"],
+                "entrypoint": "universal_resolver",
+                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                "alias": {
+                    "final_target": alias_target.clone(),
+                    "hops": [alias_target.clone()],
+                }
+            });
+            upsert_execution_trace(&database.pool, &trace).await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed alias resolution request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .expect("declared_state must be present");
+
+            assert_eq!(
+                payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(
+                declared_state.get("topology"),
+                Some(&json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "declared resolution topology is not yet projected",
+                }))
+            );
+            assert!(
+                declared_state
+                    .get("record_inventory")
+                    .and_then(|value| value.get("record_version_boundary"))
+                    .is_some(),
+                "record inventory should still load through the alias-only readback lane"
+            );
+            assert_eq!(
+                payload.verified_state,
+                Some(json!({
+                    "verified_queries": [
+                        {
+                            "record_key": "text:com.twitter",
+                            "status": "success",
+                            "value": {
+                                "value": "@alice-via-alias",
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }
+                    ]
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_explain_contract_reads_persisted_alias_only_answer_and_reuses_resolution_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000026);
+            let alias_target = json!({
+                "logical_name_id": "ens:profile.alice.eth",
+                "namespace": "ens",
+                "normalized_name": "profile.alice.eth",
+                "canonical_display_name": "Profile.alice.eth",
+                "namehash": "namehash:profile.alice.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "resolver_alias_path",
+            });
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("alias execution explain requires an exact-name current row")?;
+            name_row.binding_kind = Some(SurfaceBindingKind::ResolverAliasPath);
+            database.insert_name_current_row(name_row.clone()).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let alias_records =
+                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &alias_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = json!([
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice-via-alias",
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
+                }
+            ]);
+
+            let mut trace = resolution_execution_trace(
+                execution_trace_id,
+                &request_key,
+                &["text:com.twitter"],
+                persisted_verified_queries.clone(),
+            );
+            trace.request_metadata = json!({
+                "surface": "alice.eth",
+                "record_keys": ["text:com.twitter"],
+                "entrypoint": "universal_resolver",
+                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                "alias": {
+                    "final_target": alias_target.clone(),
+                    "hops": [alias_target.clone()],
+                }
+            });
+            upsert_execution_trace(&database.pool, &trace).await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("alias execution explain request failed")?;
+            let resolution_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("alias verified resolution request failed")?;
+
+            assert_eq!(explain_response.status(), StatusCode::OK);
+            assert_eq!(resolution_response.status(), StatusCode::OK);
+
+            let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+            let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+            let mut expected_execution = resolution_execution_summary(execution_trace_id, resource_id);
+            expected_execution["alias"] = json!({
+                "final_target": alias_target.clone(),
+                "hops": [alias_target.clone()],
+            });
+
+            assert_eq!(explain_payload.data, resolution_payload.data);
+            assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+            assert_eq!(
+                explain_payload.provenance,
+                resolution_payload.provenance
+            );
+            assert_eq!(
+                explain_payload.chain_positions,
+                resolution_payload.chain_positions
+            );
+            assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+            assert_eq!(
+                explain_payload.last_updated,
+                resolution_payload.last_updated
+            );
+            assert_eq!(explain_payload.declared_state, None);
+            assert_eq!(
+                resolution_payload.verified_state,
+                Some(json!({
+                    "verified_queries": persisted_verified_queries.clone(),
+                }))
+            );
+            assert_eq!(
+                explain_payload.verified_state,
+                Some(json!({
+                    "execution": expected_execution,
+                    "verified_queries": persisted_verified_queries,
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resolution_execution_explain_contract_returns_not_found_for_selector_set_cache_miss()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;

@@ -132,7 +132,8 @@ Execution notes:
   invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
   `verified_queries`, presence of the persisted execution summary, explain-route readback of the
   same persisted ENS exact-surface direct-path `contenthash` answer for the requested selector
-  set, and `404 not_found` when the current exact surface has no persisted answer for the
+  set, alias-only explain and mixed-route readback for the shipped `resolver_alias_path` support
+  class, and `404 not_found` when the current exact surface has no persisted answer for the
   requested selector set; it also reuses the shipped execution-outcome invalidation APIs to assert
   that exact manifest, topology-boundary, and record-boundary invalidation evicts the persisted
   ENS verified-resolution answer from the mixed
