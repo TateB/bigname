@@ -588,7 +588,7 @@ Rules:
 - declared proxy implementations resolve to separate implementation `contract_instance_id` nodes; a proxy implementation change updates the proxy / implementation edge, not the proxy identity
 - manifest versions are carried forward into normalized events and projections
 - capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
-- ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`; that ownership freeze does not by itself widen public verified support beyond the exact-surface direct-path ENS slice
+- ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`; that ownership freeze does not by itself widen public verified support beyond the separately frozen exact-surface ENS direct-path class and first additive alias-only non-direct class
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
@@ -966,9 +966,10 @@ Rules:
 - verified queries return one result object per requested record selector and reuse the shared `ResultStatus` vocabulary
 - explicit record reads may succeed even when inventory is partial
 - verified queries do not backfill `record_inventory` or `record_cache` inside the same response; they are the execution-derived counterpart to those declared sections
-- public verified support is narrower than the full resolution model: the shipped Phase 7 slice supports only `ens` exact-surface direct-path requests
-- for that support check, use the same declared topology snapshot that would populate the mixed route's declared `topology`; a request is direct-path only when resolver selection is anchored to the requested surface, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, and all `transport` fields are `null`
-- ENS non-direct verified paths, including ancestor-selected resolver paths, wildcard-derived paths, alias-rewritten paths, and transport-assisted paths, remain deferred and return explicit selector-local `unsupported` results rather than silently widening support
+- public verified support is narrower than the full resolution model: the shipped Phase 7 slice supports `ens` exact-surface direct-path requests first, and the first additive non-direct support class is exact-surface alias-only paths
+- for that support check, use the same declared topology snapshot that would populate the mixed route's declared `topology`; a request is direct-path only when `resolver_path[0].logical_name_id` equals the route surface `logical_name_id`, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, and all `transport` fields are `null`
+- the first additive ENS alias-only non-direct support class is the exact-surface class where that same declared topology snapshot keeps `resolver_path[0].logical_name_id` equal to the route surface `logical_name_id`, `alias.final_target` non-`null` with `hops` non-empty, `wildcard.source=null` with `matched_labels=[]`, and all `transport` fields are `null`
+- ENS non-direct verified paths outside that alias-only class, including ancestor-selected resolver paths without alias rewriting, wildcard-derived paths, and any transport-assisted path, remain deferred and return explicit selector-local `unsupported` results rather than silently widening support
 - Basenames verified reads remain bootstrap-scaffolded and selector-local `unsupported` until Base-side authority plus L1 compatibility transport are both wired into the verified plane
 - verified answers must persist an execution trace
 - wildcard traversal, alias rewriting, and CCIP flows must be explainable end-to-end
@@ -987,6 +988,7 @@ Rules:
 Rules:
 
 - the shipped explain route stays coupled to the same public verified-support boundary and explains persisted supported answers only; it does not fabricate trace-shaped public responses for deferred ENS non-direct paths or Basenames scaffolding
+- for the supported ENS alias-only class, explainability must stay trace-backed and exact-surface-scoped: the persisted explain payload makes the alias rewrite explicit while wildcard-derived, transport-assisted, non-alias ancestor-selected, and Basenames paths remain outside the shipped public explain surface
 
 For Basenames, resolution must expose both:
 
@@ -1301,7 +1303,7 @@ Verified execution is a required subsystem.
 
 Default verified resolution paths:
 
-- ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice is exact-surface direct-path only, using the same route-level support check over declared topology
+- ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests plus the first additive exact-surface alias-only non-direct class, using the same route-level support check over declared topology
 - Basenames' eventual verified path uses the L1 compatibility path plus Base-native state, with provenance showing both transport and Base authority surfaces; until both pieces are wired, public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported
 
 The execution engine must support:

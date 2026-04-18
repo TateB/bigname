@@ -164,11 +164,13 @@ Rules:
 
 ## 7. Initial Support Boundary
 
-For the first implementation slice:
+For the shipped Phase 7 slice:
 
-- ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; the shipped public verified slice is exact-surface direct-path only
-- for that support check, use the same declared topology snapshot as the mixed route: resolver selection must stay anchored to the requested surface, `wildcard.source` must be `null` with `matched_labels=[]`, `alias.final_target` must be `null` with `hops=[]`, and all `transport` fields must be `null`
-- ENS non-direct verified requests, including ancestor-selected resolver paths, wildcard-derived paths, alias-rewritten paths, and transport-assisted paths, remain deferred and return explicit selector-local `status=unsupported` on the mixed route; the shipped explain route does not synthesize public traces for them
+- ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; the shipped public verified slice covers exact-surface direct-path requests first, and one additive exact-surface alias-only non-direct class
+- for that support check, use the same declared topology snapshot as the mixed route: a request is direct-path only when `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`, `wildcard.source` is `null` with `matched_labels=[]`, `alias.final_target` is `null` with `hops=[]`, and all `transport` fields are `null`
+- the first additive ENS alias-only non-direct support class is the exact-surface class where that same declared topology snapshot keeps `resolver_path[0].logical_name_id` equal to top-level `data.logical_name_id`, `alias.final_target` is non-`null` with `hops` non-empty, `wildcard.source` is `null` with `matched_labels=[]`, and all `transport` fields are `null`
+- supported alias-only answers remain attributable through the same persisted execution trace and explain contract as direct-path answers: the public explain route must surface the selected entrypoint, resolver discovery path, ordered persisted steps, and alias rewrite detail for that persisted answer without inventing a second trace family
+- ENS non-direct verified requests outside that alias-only class, including ancestor-selected resolver paths without alias rewriting, wildcard-derived paths, and transport-assisted paths, remain deferred and return explicit selector-local `status=unsupported` on the mixed route; the shipped explain route does not synthesize public traces for them
 - Basenames verified execution is scaffolded but the public verified route remains bootstrap-scaffolded and explicit unsupported until Base-side authority and L1 transport are both wired
 - ENS primary-name support remains bootstrap-only: the public route may be present, the owning source families may be admitted, and later persisted ENS `verified_primary_name` readback may land, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all
