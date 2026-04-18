@@ -1,5 +1,7 @@
+use std::{collections::BTreeSet, fmt::Write as _};
+
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -32,6 +34,28 @@ pub struct ExecutionTraceStep {
     pub latency_ms: Option<i64>,
     pub canonicality_dependency: Value,
     pub step_payload: Value,
+}
+
+/// Deterministic cache identity for one verified execution outcome snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionCacheKey {
+    pub request_key: String,
+    pub requested_chain_positions: Value,
+    pub manifest_versions: Value,
+    pub topology_version_boundary: Value,
+    pub record_version_boundary: Value,
+}
+
+/// Persisted verified execution outcome keyed by the frozen cache boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionOutcome {
+    pub cache_key: ExecutionCacheKey,
+    pub execution_trace_id: Uuid,
+    pub request_type: String,
+    pub namespace: String,
+    pub outcome_payload: Option<Value>,
+    pub failure_payload: Option<Value>,
+    pub finished_at: OffsetDateTime,
 }
 
 /// Load one stored execution trace and its ordered steps.
@@ -83,6 +107,54 @@ pub async fn upsert_execution_trace(
         .commit()
         .await
         .context("failed to commit execution trace upsert")?;
+
+    Ok(snapshot)
+}
+
+/// Load one cached verified execution outcome by the frozen execution cache key.
+pub async fn load_execution_outcome(
+    pool: &PgPool,
+    cache_key: &ExecutionCacheKey,
+) -> Result<Option<ExecutionOutcome>> {
+    let execution_cache_key = execution_cache_key_storage_key(cache_key)
+        .context("failed to derive execution cache key")?;
+    load_execution_outcome_row_internal(pool, &execution_cache_key).await
+}
+
+/// Insert or replace one verified execution outcome keyed by the frozen execution cache key.
+pub async fn upsert_execution_outcome(
+    pool: &PgPool,
+    outcome: &ExecutionOutcome,
+) -> Result<ExecutionOutcome> {
+    let normalized = normalize_execution_outcome(outcome)?;
+    let execution_cache_key = execution_cache_key_storage_key(&normalized.cache_key)
+        .context("failed to derive execution cache key for execution outcome upsert")?;
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for execution outcome upsert")?;
+
+    if let Some(existing) =
+        load_execution_outcome_row_internal(&mut *transaction, &execution_cache_key).await?
+    {
+        ensure_execution_outcome_identity_matches(&existing, &normalized, &execution_cache_key)?;
+    }
+
+    upsert_execution_outcome_row(&mut transaction, &normalized, &execution_cache_key).await?;
+
+    let snapshot = load_execution_outcome_row_internal(&mut *transaction, &execution_cache_key)
+        .await?
+        .with_context(|| {
+            format!(
+                "failed to reload execution outcome for cache key {execution_cache_key} after upsert"
+            )
+        })?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit execution outcome upsert")?;
 
     Ok(snapshot)
 }
@@ -294,6 +366,137 @@ where
     rows.into_iter().map(decode_execution_step).collect()
 }
 
+async fn upsert_execution_outcome_row(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    outcome: &ExecutionOutcome,
+    execution_cache_key: &str,
+) -> Result<()> {
+    let requested_chain_positions =
+        serde_json::to_string(&outcome.cache_key.requested_chain_positions)
+            .context("failed to serialize execution outcome requested_chain_positions")?;
+    let manifest_versions = serde_json::to_string(&outcome.cache_key.manifest_versions)
+        .context("failed to serialize execution outcome manifest_versions")?;
+    let topology_version_boundary =
+        serde_json::to_string(&outcome.cache_key.topology_version_boundary)
+            .context("failed to serialize execution outcome topology_version_boundary")?;
+    let record_version_boundary = serde_json::to_string(&outcome.cache_key.record_version_boundary)
+        .context("failed to serialize execution outcome record_version_boundary")?;
+    let outcome_payload = outcome
+        .outcome_payload
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize execution outcome payload")?;
+    let failure_payload = outcome
+        .failure_payload
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize execution outcome failure_payload")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3::jsonb,
+            $4::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7,
+            $8,
+            $9,
+            $10::jsonb,
+            $11::jsonb,
+            $12
+        )
+        ON CONFLICT (execution_cache_key) DO UPDATE
+        SET
+            request_key = EXCLUDED.request_key,
+            requested_chain_positions = EXCLUDED.requested_chain_positions,
+            manifest_versions = EXCLUDED.manifest_versions,
+            topology_version_boundary = EXCLUDED.topology_version_boundary,
+            record_version_boundary = EXCLUDED.record_version_boundary,
+            execution_trace_id = EXCLUDED.execution_trace_id,
+            request_type = EXCLUDED.request_type,
+            namespace = EXCLUDED.namespace,
+            outcome_payload = EXCLUDED.outcome_payload,
+            failure_payload = EXCLUDED.failure_payload,
+            finished_at = EXCLUDED.finished_at,
+            updated_at = now()
+        "#,
+    )
+    .bind(execution_cache_key)
+    .bind(&outcome.cache_key.request_key)
+    .bind(requested_chain_positions)
+    .bind(manifest_versions)
+    .bind(topology_version_boundary)
+    .bind(record_version_boundary)
+    .bind(outcome.execution_trace_id)
+    .bind(&outcome.request_type)
+    .bind(&outcome.namespace)
+    .bind(outcome_payload)
+    .bind(failure_payload)
+    .bind(outcome.finished_at)
+    .execute(&mut **executor)
+    .await
+    .with_context(|| {
+        format!("failed to upsert execution outcome for cache key {execution_cache_key}")
+    })?;
+
+    Ok(())
+}
+
+async fn load_execution_outcome_row_internal<'e, E>(
+    executor: E,
+    execution_cache_key: &str,
+) -> Result<Option<ExecutionOutcome>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        SELECT
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        WHERE execution_cache_key = $1
+        "#,
+    )
+    .bind(execution_cache_key)
+    .fetch_optional(executor)
+    .await
+    .with_context(|| {
+        format!("failed to load execution outcome for cache key {execution_cache_key}")
+    })?;
+
+    row.map(decode_execution_outcome_row).transpose()
+}
+
 fn validate_execution_trace(trace: &ExecutionTrace) -> Result<()> {
     if trace.request_type.is_empty() {
         bail!(
@@ -374,6 +577,131 @@ fn validate_execution_trace(trace: &ExecutionTrace) -> Result<()> {
     Ok(())
 }
 
+fn normalize_execution_outcome(outcome: &ExecutionOutcome) -> Result<ExecutionOutcome> {
+    let normalized_cache_key = normalize_execution_cache_key(&outcome.cache_key)
+        .context("execution outcome has invalid cache key")?;
+
+    if outcome.request_type.trim().is_empty() {
+        bail!(
+            "execution outcome for request_key {} has empty request_type",
+            normalized_cache_key.request_key
+        );
+    }
+    if outcome.namespace.trim().is_empty() {
+        bail!(
+            "execution outcome for request_key {} has empty namespace",
+            normalized_cache_key.request_key
+        );
+    }
+    validate_optional_nonnull_json_value(
+        &outcome.outcome_payload,
+        "outcome_payload",
+        &normalized_cache_key.request_key,
+    )?;
+    validate_optional_nonnull_json_value(
+        &outcome.failure_payload,
+        "failure_payload",
+        &normalized_cache_key.request_key,
+    )?;
+    if outcome.outcome_payload.is_none() && outcome.failure_payload.is_none() {
+        bail!(
+            "execution outcome for request_key {} must set outcome_payload or failure_payload",
+            normalized_cache_key.request_key
+        );
+    }
+
+    Ok(ExecutionOutcome {
+        cache_key: normalized_cache_key,
+        execution_trace_id: outcome.execution_trace_id,
+        request_type: outcome.request_type.trim().to_owned(),
+        namespace: outcome.namespace.trim().to_owned(),
+        outcome_payload: outcome.outcome_payload.clone(),
+        failure_payload: outcome.failure_payload.clone(),
+        finished_at: outcome.finished_at,
+    })
+}
+
+fn normalize_execution_cache_key(cache_key: &ExecutionCacheKey) -> Result<ExecutionCacheKey> {
+    let request_key = cache_key.request_key.trim();
+    if request_key.is_empty() {
+        bail!("execution cache key has empty request_key");
+    }
+
+    let requested_chain_positions =
+        normalize_requested_chain_positions(&cache_key.requested_chain_positions, request_key)?;
+    let manifest_versions = normalize_manifest_versions(&cache_key.manifest_versions, request_key)?;
+    validate_version_boundary(
+        &cache_key.topology_version_boundary,
+        "topology_version_boundary",
+        request_key,
+    )?;
+    validate_version_boundary(
+        &cache_key.record_version_boundary,
+        "record_version_boundary",
+        request_key,
+    )?;
+
+    Ok(ExecutionCacheKey {
+        request_key: request_key.to_owned(),
+        requested_chain_positions,
+        manifest_versions,
+        topology_version_boundary: cache_key.topology_version_boundary.clone(),
+        record_version_boundary: cache_key.record_version_boundary.clone(),
+    })
+}
+
+fn execution_cache_key_storage_key(cache_key: &ExecutionCacheKey) -> Result<String> {
+    let normalized = normalize_execution_cache_key(cache_key)?;
+    let requested_positions = decode_requested_chain_positions(
+        &normalized.requested_chain_positions,
+        &normalized.request_key,
+    )?;
+    let manifest_versions =
+        decode_manifest_versions(&normalized.manifest_versions, &normalized.request_key)?;
+    let topology_version_boundary = decode_version_boundary(
+        &normalized.topology_version_boundary,
+        "topology_version_boundary",
+        &normalized.request_key,
+    )?;
+    let record_version_boundary = decode_version_boundary(
+        &normalized.record_version_boundary,
+        "record_version_boundary",
+        &normalized.request_key,
+    )?;
+
+    let mut key = String::new();
+    append_key_part(&mut key, &normalized.request_key);
+
+    for position in requested_positions {
+        append_key_part(&mut key, &position.chain_id);
+        append_key_part(&mut key, &position.block_number.to_string());
+        append_key_part(&mut key, &position.block_hash);
+    }
+
+    for manifest_version in manifest_versions {
+        append_key_part(
+            &mut key,
+            &manifest_version
+                .source_manifest_id
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        append_key_part(
+            &mut key,
+            manifest_version
+                .source_family
+                .as_deref()
+                .unwrap_or_default(),
+        );
+        append_key_part(&mut key, &manifest_version.manifest_version.to_string());
+    }
+
+    append_version_boundary_key_parts(&mut key, &topology_version_boundary);
+    append_version_boundary_key_parts(&mut key, &record_version_boundary);
+
+    Ok(key)
+}
+
 fn validate_execution_step(execution_trace_id: Uuid, step: &ExecutionTraceStep) -> Result<()> {
     if step.step_kind.is_empty() {
         bail!(
@@ -409,6 +737,211 @@ fn validate_execution_step(execution_trace_id: Uuid, step: &ExecutionTraceStep) 
     Ok(())
 }
 
+fn normalize_requested_chain_positions(value: &Value, request_key: &str) -> Result<Value> {
+    let positions = decode_requested_chain_positions(value, request_key)?;
+    let normalized = positions
+        .iter()
+        .map(RequestedChainPositionParts::to_value)
+        .collect::<Vec<_>>();
+    Ok(Value::Array(normalized))
+}
+
+fn decode_requested_chain_positions(
+    value: &Value,
+    request_key: &str,
+) -> Result<Vec<RequestedChainPositionParts>> {
+    let items = value.as_array().with_context(|| {
+        format!(
+            "execution outcome cache key for request_key {request_key} requested_chain_positions must be a JSON array"
+        )
+    })?;
+    if items.is_empty() {
+        bail!(
+            "execution outcome cache key for request_key {request_key} requested_chain_positions must not be empty"
+        );
+    }
+
+    let mut positions = Vec::with_capacity(items.len());
+    let mut seen_chain_ids = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} requested_chain_positions[{index}] must be a JSON object"
+            )
+        })?;
+        let position = RequestedChainPositionParts::from_object(object, request_key, index)?;
+        if !seen_chain_ids.insert(position.chain_id.clone()) {
+            bail!(
+                "execution outcome cache key for request_key {request_key} requested_chain_positions must not repeat chain_id {}",
+                position.chain_id
+            );
+        }
+        positions.push(position);
+    }
+
+    positions.sort_by(|left, right| {
+        left.chain_id
+            .cmp(&right.chain_id)
+            .then(left.block_number.cmp(&right.block_number))
+            .then(left.block_hash.cmp(&right.block_hash))
+    });
+    Ok(positions)
+}
+
+fn normalize_manifest_versions(value: &Value, request_key: &str) -> Result<Value> {
+    let manifest_versions = decode_manifest_versions(value, request_key)?;
+    let normalized = manifest_versions
+        .iter()
+        .map(ManifestVersionParts::to_value)
+        .collect::<Vec<_>>();
+    Ok(Value::Array(normalized))
+}
+
+fn decode_manifest_versions(value: &Value, request_key: &str) -> Result<Vec<ManifestVersionParts>> {
+    let items = value.as_array().with_context(|| {
+        format!(
+            "execution outcome cache key for request_key {request_key} manifest_versions must be a JSON array"
+        )
+    })?;
+    if items.is_empty() {
+        bail!(
+            "execution outcome cache key for request_key {request_key} manifest_versions must not be empty"
+        );
+    }
+
+    let mut manifest_versions = Vec::with_capacity(items.len());
+    let mut seen = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} manifest_versions[{index}] must be a JSON object"
+            )
+        })?;
+        let manifest_version = ManifestVersionParts::from_object(object, request_key, index)?;
+        if !seen.insert(manifest_version.identity_key()) {
+            bail!(
+                "execution outcome cache key for request_key {request_key} manifest_versions must not repeat the same manifest identity"
+            );
+        }
+        manifest_versions.push(manifest_version);
+    }
+
+    manifest_versions.sort_by(|left, right| left.identity_key().cmp(&right.identity_key()));
+    Ok(manifest_versions)
+}
+
+fn validate_version_boundary(value: &Value, field_name: &str, request_key: &str) -> Result<()> {
+    decode_version_boundary(value, field_name, request_key).map(|_| ())
+}
+
+fn decode_version_boundary(
+    value: &Value,
+    field_name: &str,
+    request_key: &str,
+) -> Result<VersionBoundaryParts> {
+    let object = value.as_object().with_context(|| {
+        format!(
+            "execution outcome cache key for request_key {request_key} {field_name} must be a JSON object"
+        )
+    })?;
+    let logical_name_id =
+        required_string_field(object, "logical_name_id", field_name, request_key)?.to_owned();
+    let resource_id = Uuid::parse_str(required_string_field(
+        object,
+        "resource_id",
+        field_name,
+        request_key,
+    )?)
+    .with_context(|| {
+        format!(
+            "execution outcome cache key for request_key {request_key} {field_name}.resource_id must be a UUID"
+        )
+    })?;
+    let normalized_event_id = match object.get("normalized_event_id") {
+        Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64().filter(|value| *value > 0).with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} {field_name}.normalized_event_id must be null or positive integer"
+            )
+        })?),
+        None => bail!(
+            "execution outcome cache key for request_key {request_key} {field_name} must include normalized_event_id"
+        ),
+    };
+    let event_kind = match object.get("event_kind") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(_) => bail!(
+            "execution outcome cache key for request_key {request_key} {field_name}.event_kind must be null or non-empty string"
+        ),
+        None => bail!(
+            "execution outcome cache key for request_key {request_key} {field_name} must include event_kind"
+        ),
+    };
+    if normalized_event_id.is_some() != event_kind.is_some() {
+        bail!(
+            "execution outcome cache key for request_key {request_key} {field_name} normalized_event_id and event_kind must both be present or both be null"
+        );
+    }
+    let chain_position = decode_chain_position(
+        object.get("chain_position").with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} {field_name} must include chain_position"
+            )
+        })?,
+        &format!("{field_name}.chain_position"),
+        request_key,
+    )?;
+
+    Ok(VersionBoundaryParts {
+        logical_name_id,
+        resource_id,
+        normalized_event_id,
+        event_kind,
+        chain_position,
+    })
+}
+
+fn append_version_boundary_key_parts(buffer: &mut String, boundary: &VersionBoundaryParts) {
+    append_key_part(buffer, &boundary.logical_name_id);
+    append_key_part(buffer, &boundary.resource_id.to_string());
+    append_key_part(
+        buffer,
+        &boundary
+            .normalized_event_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    );
+    append_key_part(buffer, boundary.event_kind.as_deref().unwrap_or_default());
+    append_key_part(buffer, &boundary.chain_position.chain_id);
+    append_key_part(buffer, &boundary.chain_position.block_number.to_string());
+    append_key_part(buffer, &boundary.chain_position.block_hash);
+    append_key_part(buffer, &boundary.chain_position.timestamp);
+}
+
+fn validate_optional_nonnull_json_value(
+    value: &Option<Value>,
+    field_name: &str,
+    request_key: &str,
+) -> Result<()> {
+    if value.as_ref().is_some_and(Value::is_null) {
+        bail!("execution outcome for request_key {request_key} {field_name} must not be JSON null");
+    }
+    Ok(())
+}
+
+fn ensure_execution_outcome_identity_matches(
+    existing: &ExecutionOutcome,
+    incoming: &ExecutionOutcome,
+    execution_cache_key: &str,
+) -> Result<()> {
+    if existing.request_type != incoming.request_type || existing.namespace != incoming.namespace {
+        bail!("execution outcome cache identity mismatch for cache key {execution_cache_key}");
+    }
+
+    Ok(())
+}
+
 fn ensure_json_object(value: &Value, field_name: &str, execution_trace_id: Uuid) -> Result<()> {
     if !value.is_object() {
         bail!(
@@ -419,6 +952,258 @@ fn ensure_json_object(value: &Value, field_name: &str, execution_trace_id: Uuid)
     }
 
     Ok(())
+}
+
+fn decode_execution_outcome_row(row: PgRow) -> Result<ExecutionOutcome> {
+    let cache_key = ExecutionCacheKey {
+        request_key: row
+            .try_get("request_key")
+            .context("execution outcome row missing request_key")?,
+        requested_chain_positions: row
+            .try_get("requested_chain_positions")
+            .context("execution outcome row missing requested_chain_positions")?,
+        manifest_versions: row
+            .try_get("manifest_versions")
+            .context("execution outcome row missing manifest_versions")?,
+        topology_version_boundary: row
+            .try_get("topology_version_boundary")
+            .context("execution outcome row missing topology_version_boundary")?,
+        record_version_boundary: row
+            .try_get("record_version_boundary")
+            .context("execution outcome row missing record_version_boundary")?,
+    };
+    let decoded_execution_cache_key = execution_cache_key_storage_key(&cache_key)?;
+    let stored_execution_cache_key: String = row
+        .try_get("execution_cache_key")
+        .context("execution outcome row missing execution_cache_key")?;
+    if stored_execution_cache_key != decoded_execution_cache_key {
+        bail!(
+            "execution outcome cache key mismatch: stored {}, decoded {}",
+            stored_execution_cache_key,
+            decoded_execution_cache_key
+        );
+    }
+
+    normalize_execution_outcome(&ExecutionOutcome {
+        cache_key,
+        execution_trace_id: row
+            .try_get("execution_trace_id")
+            .context("execution outcome row missing execution_trace_id")?,
+        request_type: row
+            .try_get("request_type")
+            .context("execution outcome row missing request_type")?,
+        namespace: row
+            .try_get("namespace")
+            .context("execution outcome row missing namespace")?,
+        outcome_payload: row
+            .try_get("outcome_payload")
+            .context("execution outcome row missing outcome_payload")?,
+        failure_payload: row
+            .try_get("failure_payload")
+            .context("execution outcome row missing failure_payload")?,
+        finished_at: row
+            .try_get("finished_at")
+            .context("execution outcome row missing finished_at")?,
+    })
+}
+
+fn append_key_part(buffer: &mut String, value: &str) {
+    write!(buffer, "{}:{value};", value.len()).expect("string write to key buffer must succeed");
+}
+
+fn required_string_field<'a>(
+    object: &'a Map<String, Value>,
+    field_name: &str,
+    context: &str,
+    request_key: &str,
+) -> Result<&'a str> {
+    object
+        .get(field_name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} {context} must include non-empty string field {field_name}"
+            )
+        })
+}
+
+fn optional_string_field<'a>(
+    object: &'a Map<String, Value>,
+    field_name: &str,
+    context: &str,
+    request_key: &str,
+) -> Result<Option<&'a str>> {
+    match object.get(field_name) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(_) => bail!(
+            "execution outcome cache key for request_key {request_key} {context}.{field_name} must be null or non-empty string"
+        ),
+    }
+}
+
+fn decode_chain_position(
+    value: &Value,
+    context: &str,
+    request_key: &str,
+) -> Result<ChainPositionParts> {
+    let object = value.as_object().with_context(|| {
+        format!("execution outcome cache key for request_key {request_key} {context} must be a JSON object")
+    })?;
+    let chain_id = required_string_field(object, "chain_id", context, request_key)?.to_owned();
+    let block_number = object
+        .get("block_number")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} {context} must include non-negative integer block_number"
+            )
+        })?;
+    let block_hash = required_string_field(object, "block_hash", context, request_key)?.to_owned();
+    let timestamp = required_string_field(object, "timestamp", context, request_key)?.to_owned();
+
+    Ok(ChainPositionParts {
+        chain_id,
+        block_number,
+        block_hash,
+        timestamp,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct RequestedChainPositionParts {
+    chain_id: String,
+    block_number: i64,
+    block_hash: String,
+}
+
+impl RequestedChainPositionParts {
+    fn from_object(object: &Map<String, Value>, request_key: &str, index: usize) -> Result<Self> {
+        let context = format!("requested_chain_positions[{index}]");
+        let chain_id = required_string_field(object, "chain_id", &context, request_key)?.to_owned();
+        let block_number = object
+            .get("block_number")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .with_context(|| {
+                format!(
+                    "execution outcome cache key for request_key {request_key} {context} must include non-negative integer block_number"
+                )
+            })?;
+        let block_hash =
+            required_string_field(object, "block_hash", &context, request_key)?.to_owned();
+
+        Ok(Self {
+            chain_id,
+            block_number,
+            block_hash,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "chain_id": self.chain_id,
+            "block_number": self.block_number,
+            "block_hash": self.block_hash,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ManifestVersionParts {
+    source_manifest_id: Option<i64>,
+    source_family: Option<String>,
+    manifest_version: i64,
+}
+
+impl ManifestVersionParts {
+    fn from_object(object: &Map<String, Value>, request_key: &str, index: usize) -> Result<Self> {
+        let context = format!("manifest_versions[{index}]");
+        let source_manifest_id = match object.get("source_manifest_id") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(value.as_i64().filter(|value| *value > 0).with_context(|| {
+                format!(
+                    "execution outcome cache key for request_key {request_key} {context}.source_manifest_id must be null or positive integer"
+                )
+            })?),
+        };
+        let source_family = optional_string_field(object, "source_family", &context, request_key)?
+            .map(str::to_owned);
+        if source_manifest_id.is_none() && source_family.is_none() {
+            bail!(
+                "execution outcome cache key for request_key {request_key} {context} must include source_manifest_id or source_family"
+            );
+        }
+        let manifest_version = object
+            .get("manifest_version")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .with_context(|| {
+                format!(
+                    "execution outcome cache key for request_key {request_key} {context} must include positive integer manifest_version"
+                )
+            })?;
+
+        Ok(Self {
+            source_manifest_id,
+            source_family,
+            manifest_version,
+        })
+    }
+
+    fn identity_key(&self) -> String {
+        let mut key = String::new();
+        append_key_part(
+            &mut key,
+            &self
+                .source_manifest_id
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        append_key_part(&mut key, self.source_family.as_deref().unwrap_or_default());
+        append_key_part(&mut key, &self.manifest_version.to_string());
+        key
+    }
+
+    fn to_value(&self) -> Value {
+        let mut object = Map::new();
+        if let Some(source_manifest_id) = self.source_manifest_id {
+            object.insert(
+                "source_manifest_id".to_owned(),
+                Value::Number(source_manifest_id.into()),
+            );
+        }
+        if let Some(source_family) = &self.source_family {
+            object.insert(
+                "source_family".to_owned(),
+                Value::String(source_family.clone()),
+            );
+        }
+        object.insert(
+            "manifest_version".to_owned(),
+            Value::Number(self.manifest_version.into()),
+        );
+        Value::Object(object)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct VersionBoundaryParts {
+    logical_name_id: String,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<String>,
+    chain_position: ChainPositionParts,
+}
+
+#[derive(Clone, Debug)]
+struct ChainPositionParts {
+    chain_id: String,
+    block_number: i64,
+    block_hash: String,
+    timestamp: String,
 }
 
 fn ensure_nonempty_json_object(

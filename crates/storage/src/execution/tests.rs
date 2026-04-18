@@ -209,6 +209,103 @@ async fn expect_trace_validation_error(
     Ok(())
 }
 
+fn version_boundary(resource_id: Uuid) -> serde_json::Value {
+    json!({
+        "logical_name_id": "ens:alice.eth",
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": 1_200,
+        "event_kind": "RecordsChanged",
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123",
+            "timestamp": "2024-06-01T00:00:17Z",
+        }
+    })
+}
+
+fn execution_outcome(trace: &ExecutionTrace) -> ExecutionOutcome {
+    ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key: trace.request_key.clone(),
+            requested_chain_positions: json!([
+                {
+                    "chain_id": "base-mainnet",
+                    "block_number": 17_500_000,
+                    "block_hash": "0xbase999"
+                },
+                {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_000,
+                    "block_hash": "0xabc123"
+                }
+            ]),
+            manifest_versions: json!([
+                {
+                    "source_family": "ens_v1_registry_l1",
+                    "manifest_version": 3
+                },
+                {
+                    "source_manifest_id": 7,
+                    "manifest_version": 3
+                }
+            ]),
+            topology_version_boundary: version_boundary(Uuid::from_u128(
+                0x0e7ec7ace0000000000000000000aaa1,
+            )),
+            record_version_boundary: version_boundary(Uuid::from_u128(
+                0x0e7ec7ace0000000000000000000aaa2,
+            )),
+        },
+        execution_trace_id: trace.execution_trace_id,
+        request_type: trace.request_type.clone(),
+        namespace: trace.namespace.clone(),
+        outcome_payload: Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    }
+                }
+            ]
+        })),
+        failure_payload: None,
+        finished_at: trace
+            .finished_at
+            .expect("execution trace test fixture must finish"),
+    }
+}
+
+async fn expect_outcome_validation_error(
+    database: &TestDatabase,
+    outcome: &ExecutionOutcome,
+    expected_message: &str,
+) -> Result<()> {
+    let error = upsert_execution_outcome(database.pool(), outcome)
+        .await
+        .expect_err("execution outcome validation must fail");
+    let rendered = format!("{error:#}");
+
+    assert!(
+        rendered.contains(expected_message),
+        "unexpected error: {error:#}"
+    );
+
+    let persisted_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+        .fetch_one(database.pool())
+        .await
+        .context("failed to count execution_cache_outcomes rows after validation error")?;
+    assert!(
+        persisted_count == 0,
+        "invalid execution outcomes must not be written"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn upserts_and_loads_execution_trace_with_ordered_steps() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -331,6 +428,190 @@ async fn partial_trace_cannot_get_stuck_before_complete_insert() -> Result<()> {
     assert_eq!(
         load_execution_trace(database.pool(), complete_trace.execution_trace_id).await?,
         Some(complete_trace)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn upserts_and_loads_execution_outcome_by_cache_key() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    upsert_execution_trace(database.pool(), &trace).await?;
+
+    let outcome = execution_outcome(&trace);
+    let inserted = upsert_execution_outcome(database.pool(), &outcome).await?;
+    assert_eq!(inserted, outcome);
+
+    let loaded = load_execution_outcome(database.pool(), &outcome.cache_key)
+        .await?
+        .expect("execution outcome must exist after upsert");
+    assert_eq!(loaded, outcome);
+
+    let mut replacement_trace = trace.clone();
+    replacement_trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000008);
+    replacement_trace.final_payload = Some(json!({
+        "record_kind": "addr",
+        "coin_type": 60,
+        "value": "0x00000000000000000000000000000000000000bb"
+    }));
+    replacement_trace.finished_at = Some(timestamp(1_717_171_800));
+    upsert_execution_trace(database.pool(), &replacement_trace).await?;
+
+    let mut replacement_outcome = outcome.clone();
+    replacement_outcome.execution_trace_id = replacement_trace.execution_trace_id;
+    replacement_outcome.outcome_payload = Some(json!({
+        "verified_queries": [
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000bb"
+                }
+            }
+        ]
+    }));
+    replacement_outcome.finished_at = replacement_trace
+        .finished_at
+        .expect("replacement trace must finish");
+
+    let updated = upsert_execution_outcome(database.pool(), &replacement_outcome).await?;
+    assert_eq!(updated, replacement_outcome);
+    assert_eq!(
+        load_execution_outcome(database.pool(), &replacement_outcome.cache_key).await?,
+        Some(replacement_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn execution_outcome_cache_key_is_order_insensitive_for_positions_and_manifests() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    upsert_execution_trace(database.pool(), &trace).await?;
+
+    let outcome = execution_outcome(&trace);
+    upsert_execution_outcome(database.pool(), &outcome).await?;
+
+    let mut reordered_key = outcome.cache_key.clone();
+    reordered_key.requested_chain_positions = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123"
+        },
+        {
+            "chain_id": "base-mainnet",
+            "block_number": 17_500_000,
+            "block_hash": "0xbase999"
+        }
+    ]);
+    reordered_key.manifest_versions = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        },
+        {
+            "source_family": "ens_v1_registry_l1",
+            "manifest_version": 3
+        }
+    ]);
+
+    assert_eq!(
+        load_execution_outcome(database.pool(), &reordered_key).await?,
+        Some(outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_execution_outcome_with_duplicate_chain_position_or_manifest_identity() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    upsert_execution_trace(database.pool(), &trace).await?;
+
+    let mut duplicate_chain = execution_outcome(&trace);
+    duplicate_chain.cache_key.requested_chain_positions = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123"
+        },
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_001,
+            "block_hash": "0xabc124"
+        }
+    ]);
+    expect_outcome_validation_error(
+        &database,
+        &duplicate_chain,
+        "requested_chain_positions must not repeat chain_id ethereum-mainnet",
+    )
+    .await?;
+
+    let mut duplicate_manifest = execution_outcome(&trace);
+    duplicate_manifest.cache_key.manifest_versions = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        },
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        }
+    ]);
+    expect_outcome_validation_error(
+        &database,
+        &duplicate_manifest,
+        "manifest_versions must not repeat the same manifest identity",
+    )
+    .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_execution_outcome_when_same_cache_key_changes_route_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    upsert_execution_trace(database.pool(), &trace).await?;
+
+    let outcome = execution_outcome(&trace);
+    upsert_execution_outcome(database.pool(), &outcome).await?;
+
+    let mut conflicting_trace = trace.clone();
+    conflicting_trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000009);
+    conflicting_trace.request_type = "verified_primary_name".to_owned();
+    conflicting_trace.final_payload = Some(json!({
+        "verified_primary_name": {
+            "status": "success",
+            "name": "alice.eth"
+        }
+    }));
+    upsert_execution_trace(database.pool(), &conflicting_trace).await?;
+
+    let mut conflicting_outcome = execution_outcome(&conflicting_trace);
+    conflicting_outcome.cache_key = outcome.cache_key.clone();
+    conflicting_outcome.namespace = "basenames".to_owned();
+
+    let error = upsert_execution_outcome(database.pool(), &conflicting_outcome)
+        .await
+        .expect_err("route identity drift on the same cache key must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("execution outcome cache identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &outcome.cache_key).await?,
+        Some(outcome)
     );
 
     database.cleanup().await

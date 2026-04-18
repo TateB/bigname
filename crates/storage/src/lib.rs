@@ -38,7 +38,8 @@ pub use children::{
     load_children_current_including_noncanonical, upsert_children_current_rows,
 };
 pub use execution::{
-    ExecutionTrace, ExecutionTraceStep, load_execution_trace, upsert_execution_trace,
+    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
+    load_execution_outcome, load_execution_trace, upsert_execution_outcome, upsert_execution_trace,
 };
 pub use history::{
     HistoryEvent, HistoryScope, load_address_history, load_name_history, load_name_history_head,
