@@ -591,6 +591,7 @@ Rules:
 - ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
+- for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -1050,6 +1051,7 @@ Rules:
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1` and its `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
+- in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; richer ENS tuple-present claimed payloads remain blocked until a later doc-first contract update freezes an honest declared source for them
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
@@ -1269,6 +1271,7 @@ Rules:
 - record inventory is `best_effort` unless a resolver family exposes explicit enumeration or the platform has a source-specific index
 - child enumeration is authoritative only for declared direct children unless the caller explicitly opts into other surface classes
 - the shipped primary-name route remains bootstrap-only for coverage: route presence or tuple lookup does not by itself graduate primary-name coverage beyond `status=unsupported` and `exhaustiveness=not_applicable`
+- reverse tuple presence and resolver-backed verification detail do not by themselves unlock richer ENS claimed-payload fields or change that bootstrap primary-name coverage state
 - deferred primary-claim fallback sources are outside the current primary-name coverage basis until a later doc-first contract change admits them explicitly
 
 Every response includes:

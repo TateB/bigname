@@ -76,9 +76,10 @@ Rules:
 - claim-local provenance and verification-local provenance may both contribute to the route, but only the verification-local side is anchored to the persisted `execution_trace_id`
 - for ENS on Ethereum Mainnet in the current contract, the admitted declared claim surface is reverse-only: `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
 - for ENS on Ethereum Mainnet, the verification step for that claimed name reuses the `ens_execution` source family and its manifest-declared `universal_resolver` entrypoint at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; declared claim ownership and verified execution ownership stay separate
+- that declared-vs-verified split means Phase 7 does not synthesize richer ENS `claimed_primary_name` payloads by combining reverse tuple intake with resolver-backed or execution-derived name identity; those richer claimed payloads remain blocked
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - manifest rollout and capability state remain source-family-local inputs only: they may admit reverse claim intake or shadow execution traces and cache ownership, but they do not by themselves widen ENS claim precedence, graduate route-level primary-name coverage, or ship richer tuple-present `claimed_primary_name` or `verified_primary_name` payloads
-- the shipped bootstrap route may still return explicit verified `status=unsupported` without surfacing the richer tuple-present execution payload above
+- the shipped bootstrap route may still return explicit verified `status=unsupported` without surfacing the richer tuple-present claimed or verified payloads above
 
 ## 4. Trace Schema
 
@@ -157,5 +158,5 @@ For the first implementation slice:
 
 - ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; freezing this entrypoint does not by itself ship public verified-resolution reads
 - Basenames verified execution is scaffolded but may initially expose partial coverage until Base-side authority and L1 transport are both wired
-- ENS primary-name support remains bootstrap-only: the public route may be present and the owning source families may be admitted, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, and tuple lookup do not by themselves graduate that public contract, and any fallback beyond the reverse-only claim surface remains deferred
+- ENS primary-name support remains bootstrap-only: the public route may be present and the owning source families may be admitted, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all

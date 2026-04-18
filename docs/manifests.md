@@ -118,7 +118,7 @@ address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
 
 That freeze fixes the authoritative reverse entrypoint, source-family owner, and reverse-only intake precedence for later ENS primary-claim support. It does not define a new capability flag, does not add manifest schema, does not authorize fallback to registry-, resolver-, or other claim-setting surfaces, and does not by itself ship graduated public primary-name reads.
 
-Within the claimed-vs-verified primary-name contract, that reverse family owns only the declared claim intake. The truth split stays explicit: `ens_v1_reverse_l1` admits the authoritative reverse claim source, while any verified primary-name result remains execution-derived through the execution owner already frozen above. The current reverse manifest may therefore be `rollout_status = "active"` with no dedicated primary-name capability flag at all. That combination means the reverse claim surface is admitted for declared intake only; it does not imply shipped public primary-name read support, verified-primary support, richer tuple-present route payloads, or graduated public coverage.
+Within the claimed-vs-verified primary-name contract, that reverse family owns only the declared claim intake. The truth split stays explicit: `ens_v1_reverse_l1` admits the authoritative reverse claim source, while any verified primary-name result remains execution-derived through the execution owner already frozen above. The current reverse manifest may therefore be `rollout_status = "active"` with no dedicated primary-name capability flag at all. That combination means the reverse claim surface is admitted for declared intake only; it does not imply shipped public primary-name read support, verified-primary support, richer tuple-present route payloads, or graduated public coverage. In Phase 7 it also does not authorize combining the admitted reverse tuple with resolver-backed or execution-derived name identity to fill richer ENS `claimed_primary_name` payloads.
 
 ## 5. Contract Instance Admission And Continuity
 
@@ -198,7 +198,7 @@ Rules:
 - ENS reverse-claim intake on Ethereum Mainnet is anchored to `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`, not by `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - ENS primary-name truth on Ethereum Mainnet is intentionally split across those owners: `ens_v1_reverse_l1` owns declared reverse-claim intake, while verification stays execution-derived rather than becoming a second manifest-owned claim surface
 - that reverse-family ownership freezes only the current reverse-only ENS claim surface; any later fallback claim-setting surface would need its own manifest-owned source family and a later doc-first contract update
-- `rollout_status` and `capability_flags` are source-family-local readiness inputs; they do not by themselves widen ENS claim precedence, collapse claimed and verified primary-name truth into one manifest capability, or graduate the bootstrap public coverage contract
+- `rollout_status` and `capability_flags` are source-family-local readiness inputs; they do not by themselves widen ENS claim precedence, combine reverse tuple intake with resolver-backed name payloads, collapse claimed and verified primary-name truth into one manifest capability, or graduate the bootstrap public coverage contract
 - adding a new capability is additive if it does not change prior semantics
 
 ## 10. Ownership And Workflow

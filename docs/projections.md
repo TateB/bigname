@@ -117,9 +117,10 @@ History reads use normalized events plus thin cursor support rather than a separ
 - serves declared `claimed_primary_name` plus the invalidation and provenance hooks needed to locate request-matching verified execution output
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1`; missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
-- projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name` plus declared-only payload fields such as optional normalized claim identity, optional `raw_claim_name`, and claim-local provenance
-- the shipped bootstrap projection may still be tuple-presence only; richer claimed payload fields stay additive until the route stops returning tuple-present `status=unsupported`
-- tuple presence is a bootstrap lookup and invalidation hook only; it does not by itself widen claim precedence, graduate route-level coverage, or imply richer tuple-present payload support
+- projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name`; richer claimed payload fields remain additive-only
+- for ENS on Ethereum Mainnet in Phase 7, the shipped projection is tuple-presence only: reverse tuple admission supplies lookup and invalidation state only, and it does not join resolver-backed or execution-derived name identity into richer `claimed_primary_name` fields
+- the richer claimed field boundary `{name?, raw_claim_name?, provenance?}` remains blocked until a later doc-first contract update freezes an honest declared source for those fields
+- tuple presence is a bootstrap lookup and invalidation hook only; it does not by itself widen claim precedence, graduate route-level coverage, or imply richer tuple-present claimed payload support
 - `raw_claim_name` is projection-owned claim state only; it exists to preserve the declared raw input when normalization fails and must not be copied into `verified_primary_name`
 - projection rows do not own verified-only states or failure payloads: `mismatch`, `execution_failed`, and verification-local `failure_reason` stay execution-derived even when the tuple row exists
 - projection-local provenance may explain the claimed tuple and its invalidation inputs, but it must not mint an execution trace or a second verified truth system

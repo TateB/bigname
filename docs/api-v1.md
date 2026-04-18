@@ -979,14 +979,15 @@ Rules:
 - for ENS on Ethereum Mainnet, `claimed_primary_name` currently consults only the reverse-claim surface owned by `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in the current contract
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen the shipped precedence rule
+- in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed name data or verification-derived identity to populate richer `claimed_primary_name` fields
 - `claimed_primary_name` is the declared claim candidate only; it never implies that the requested address actually verifies to that name
 - `claimed_primary_name.status` uses the shared `ResultStatus` vocabulary; the initial declared contract uses `success`, `not_found`, `unsupported`, and `invalid_name`
 - `verified_primary_name.status` uses the same `ResultStatus` vocabulary; the initial verified contract uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
 - `claimed_primary_name` and `verified_primary_name` always include `status` when their containing section is populated
-- the additive tuple-present follow-on freezes `claimed_primary_name` to the field boundary `{status, name?, raw_claim_name?, unsupported_reason?, provenance?}`; `name`, when later shipped, carries the normalized claim identity using the shared `NameRef` shape, `raw_claim_name` appears only for `status=invalid_name`, and `failure_reason` is not used on this declared object
-- the additive tuple-present follow-on freezes `verified_primary_name` to the field boundary `{status, name?, unsupported_reason?, failure_reason?, provenance?}`; its `name`, when later shipped, uses that same `NameRef` shape, and `raw_claim_name` never appears on this execution-derived object
-- `claimed_primary_name.name` appears only for `status=success`; `verified_primary_name.name` appears only for `status=success` or `status=mismatch`, where the route established a concrete normalized name target for verification
-- in the shipped bootstrap slice, tuple-present reads may still return explicit `status=unsupported` result objects for `claimed_primary_name`, `verified_primary_name`, or both; richer tuple-present payloads remain pending additive support
+- if a later additive slice ships richer tuple-present claimed payloads, `claimed_primary_name` is frozen to the field boundary `{status, name?, raw_claim_name?, unsupported_reason?, provenance?}`; `name`, when later shipped, carries the normalized claim identity using the shared `NameRef` shape, `raw_claim_name` appears only for `status=invalid_name`, and `failure_reason` is not used on this declared object
+- if a later additive slice ships richer tuple-present verified payloads, `verified_primary_name` is frozen to the field boundary `{status, name?, unsupported_reason?, failure_reason?, provenance?}`; its `name`, when later shipped, uses that same `NameRef` shape, and `raw_claim_name` never appears on this execution-derived object
+- in the shipped Phase 7 bootstrap slice, richer ENS tuple-present payloads remain blocked: reverse tuple presence, reverse-only claim precedence, or verification establishing a concrete normalized name target do not by themselves populate `claimed_primary_name.name`, `claimed_primary_name.raw_claim_name`, or claim-local section provenance
+- when those additive fields later ship, `claimed_primary_name.name` appears only for `status=success`; `verified_primary_name.name` appears only for `status=success` or `status=mismatch`, where the route established a concrete normalized name target for verification
 - the richer tuple-present fields above are prose-frozen only until additive handler support ships; the current bootstrap handler and current `docs/api-v1.openapi.json` publication remain limited to the already shipped bootstrap envelope
 - `verified_primary_name` is authoritative only when `status=success`
 - `status=mismatch` applies only to `verified_primary_name` and remains reserved for the additive verified result shape where the claim normalizes and resolves for the requested `coin_type`, but the verified target address does not equal the requested `{address}`
@@ -1000,7 +1001,7 @@ Rules:
 - `claimed_primary_name.provenance`, when later shipped, is claim-local declared provenance and must not introduce a second `execution_trace_id`
 - `verified_primary_name.provenance`, when later shipped, is verification-local provenance and must stay within top-level `provenance.execution_trace_id`
 - in the shipped bootstrap handler, route-level `coverage` remains bootstrap-only for primary-name lookup: `status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason="primary-name coverage is not yet supported"`
-- tuple presence, tuple absence, or a verified mismatch does not by itself graduate that bootstrap primary-name coverage summary
+- tuple presence, tuple absence, a verified mismatch, or resolver-backed verification detail does not by itself graduate that bootstrap primary-name coverage summary
 
 ## 6. Sorting And Pagination Defaults
 
