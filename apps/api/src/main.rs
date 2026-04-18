@@ -19,12 +19,12 @@ use bigname_manifests::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
-    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameCurrentRow,
     RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
-    VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
-    collapse_address_name_current_rows, load_address_history, load_address_names_current,
-    load_children_current, load_execution_outcome, load_execution_trace, load_name_current,
-    load_name_history, load_name_surface, load_permissions_current, load_record_inventory_current,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, collapse_address_name_current_rows, load_address_history,
+    load_address_names_current, load_children_current, load_execution_outcome,
+    load_execution_trace, load_name_current, load_name_history, load_name_surface,
+    load_permissions_current, load_primary_name_current, load_record_inventory_current,
     load_resolver_current, load_resource, load_resource_history,
     load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
@@ -401,11 +401,11 @@ struct ResolutionRecordKey {
     selector_key: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PrimaryNameTupleState {
     ProjectionUnavailable,
     TupleMissing,
-    TuplePresent,
+    TuplePresent(PrimaryNameCurrentRow),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2160,28 +2160,30 @@ async fn resolution_current(
         None
     };
 
-    Ok(Json(build_resolution_response(
-        row,
-        mode,
-        &records,
-        record_inventory_current.as_ref(),
-        persisted_verified_outcome.as_ref(),
-    )
-    .map_err(|build_error| {
-        error!(
-            service = "api",
-            namespace = %namespace,
-            name = %name,
-            logical_name_id = %logical_name_id,
-            mode = ?mode,
-            records = ?records,
-            error = ?build_error,
-            "failed to build resolution response"
-        );
-        ApiError::internal_error(format!(
-            "failed to load resolution projection for name {namespace}/{name}"
-        ))
-    })?))
+    Ok(Json(
+        build_resolution_response(
+            row,
+            mode,
+            &records,
+            record_inventory_current.as_ref(),
+            persisted_verified_outcome.as_ref(),
+        )
+        .map_err(|build_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                mode = ?mode,
+                records = ?records,
+                error = ?build_error,
+                "failed to build resolution response"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution projection for name {namespace}/{name}"
+            ))
+        })?,
+    ))
 }
 
 async fn primary_names(
@@ -2194,8 +2196,7 @@ async fn primary_names(
     let coin_type = parse_primary_name_coin_type(query.coin_type.as_deref())?;
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let lookup_state =
-        load_primary_name_lookup_state(&state.pool, &address, &namespace, &coin_type, mode)
-            .await?;
+        load_primary_name_lookup_state(&state.pool, &address, &namespace, &coin_type, mode).await?;
 
     Ok(Json(build_primary_name_response(
         address,
@@ -2959,16 +2960,12 @@ fn build_primary_name_response(
         "namespace": namespace,
         "coin_type": coin_type,
     });
-    let declared_state = mode
-        .includes_declared()
-        .then(|| {
-            json!({ "claimed_primary_name": primary_name_claim_result(lookup_state.tuple_state) })
-        });
+    let declared_state = mode.includes_declared().then(
+        || json!({ "claimed_primary_name": primary_name_claim_result(&lookup_state.tuple_state) }),
+    );
     let verified_state = mode
         .includes_verified()
-        .then(|| {
-            json!({ "verified_primary_name": primary_name_verified_result(lookup_state) })
-        });
+        .then(|| json!({ "verified_primary_name": primary_name_verified_result(lookup_state) }));
 
     PrimaryNameResponse {
         data,
@@ -3028,14 +3025,15 @@ fn build_children_response(
     }
 }
 
-fn primary_name_claim_result(tuple_state: PrimaryNameTupleState) -> JsonValue {
+fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
     match tuple_state {
-        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent => {
-            primary_name_unsupported_result(
-                "declared primary-name claim surface is not yet supported",
-            )
-        }
+        PrimaryNameTupleState::ProjectionUnavailable => primary_name_unsupported_result(
+            "declared primary-name claim surface is not yet supported",
+        ),
         PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::TuplePresent(row) => json!({
+            "status": row.claim_status.as_str(),
+        }),
     }
 }
 
@@ -3046,7 +3044,7 @@ fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonVa
 
     match lookup_state.tuple_state {
         PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
-        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent => {
+        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
     }
@@ -3151,10 +3149,11 @@ fn build_resolution_verified_state(
     let persisted_queries_by_record_key = persisted_outcome
         .map(|outcome| {
             let supported_records = supported_resolution_verified_records(records);
-            let persisted_queries = reordered_persisted_verified_queries(outcome, &supported_records)?
-                .as_array()
-                .cloned()
-                .context("persisted verified queries must serialize as an array")?;
+            let persisted_queries =
+                reordered_persisted_verified_queries(outcome, &supported_records)?
+                    .as_array()
+                    .cloned()
+                    .context("persisted verified queries must serialize as an array")?;
             persisted_queries
                 .into_iter()
                 .map(|query| {
@@ -5929,25 +5928,9 @@ async fn load_primary_name_lookup_state(
     coin_type: &str,
     mode: ResolutionMode,
 ) -> ApiResult<PrimaryNameLookupState> {
-    let query = sqlx::query(
-        r#"
-        SELECT 1
-        FROM primary_names_current
-        WHERE address = $1
-          AND namespace = $2
-          AND coin_type = $3
-        LIMIT 1
-        "#,
-    )
-    .bind(address)
-    .bind(namespace)
-    .bind(coin_type)
-    .fetch_optional(pool)
-    .await;
-
-    match query {
-        Ok(Some(_)) => Ok(PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TuplePresent,
+    match load_primary_name_current(pool, address, namespace, coin_type).await {
+        Ok(Some(row)) => Ok(PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TuplePresent(row),
             persisted_verified: if mode.includes_verified() {
                 load_persisted_primary_name_verified_readback(pool, address, namespace, coin_type)
                     .await?
@@ -5959,7 +5942,7 @@ async fn load_primary_name_lookup_state(
             tuple_state: PrimaryNameTupleState::TupleMissing,
             persisted_verified: None,
         }),
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => {
+        Err(load_error) if primary_name_projection_unavailable(&load_error) => {
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
                 persisted_verified: None,
@@ -5979,6 +5962,19 @@ async fn load_primary_name_lookup_state(
             )))
         }
     }
+}
+
+fn primary_name_projection_unavailable(load_error: &anyhow::Error) -> bool {
+    load_error.chain().any(|cause| {
+        cause
+            .downcast_ref::<sqlx::Error>()
+            .is_some_and(|sqlx_error| {
+                matches!(
+                    sqlx_error,
+                    sqlx::Error::Database(error) if error.code().as_deref() == Some("42P01")
+                )
+            })
+    })
 }
 
 async fn load_persisted_primary_name_verified_readback(
@@ -6245,13 +6241,8 @@ async fn load_persisted_primary_name_verified_readback(
             ))
         })?;
 
-    let verified_primary_name = persisted_verified_primary_name_section(
-        &trace,
-        &outcome,
-        address,
-        namespace,
-        coin_type,
-    )?;
+    let verified_primary_name =
+        persisted_verified_primary_name_section(&trace, &outcome, address, namespace, coin_type)?;
 
     Ok(Some(PersistedPrimaryNameVerifiedReadback {
         execution_trace_id: outcome.execution_trace_id,
@@ -6374,7 +6365,10 @@ fn persisted_verified_primary_name_section(
                 .failure_payload
                 .as_ref()
                 .is_some_and(JsonValue::is_object)
-            || !trace.failure_payload.as_ref().is_some_and(JsonValue::is_object)
+            || !trace
+                .failure_payload
+                .as_ref()
+                .is_some_and(JsonValue::is_object)
         {
             error!(
                 service = "api",

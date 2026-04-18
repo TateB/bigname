@@ -12,9 +12,10 @@ use axum::{
 };
 use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
-    NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, RawBlock,
-    ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    default_database_url, upsert_execution_outcome, upsert_execution_trace,
+    NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
+    PrimaryNameCurrentRow, RawBlock, ResolverCurrentRow, Resource, SurfaceBinding,
+    SurfaceBindingKind, TokenLineage, default_database_url, upsert_execution_outcome,
+    upsert_execution_trace, upsert_primary_name_current_rows,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -540,6 +541,9 @@ impl TestDatabase {
                     address TEXT NOT NULL,
                     namespace TEXT NOT NULL,
                     coin_type TEXT NOT NULL,
+                    claim_status TEXT NOT NULL,
+                    raw_claim_name TEXT,
+                    claim_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
                     PRIMARY KEY (address, namespace, coin_type)
                 )
                 "#,
@@ -556,18 +560,37 @@ impl TestDatabase {
         namespace: &str,
         coin_type: &str,
     ) -> Result<()> {
-        sqlx::query(
-            r#"
-                INSERT INTO primary_names_current (address, namespace, coin_type)
-                VALUES ($1, $2, $3)
-                "#,
+        self.insert_primary_name_current_claim_row(
+            address,
+            namespace,
+            coin_type,
+            PrimaryNameClaimStatus::Unsupported,
+            None,
         )
-        .bind(address)
-        .bind(namespace)
-        .bind(coin_type)
-        .execute(&self.pool)
         .await
-        .context("failed to insert primary_names_current row for API tests")?;
+    }
+
+    async fn insert_primary_name_current_claim_row(
+        &self,
+        address: &str,
+        namespace: &str,
+        coin_type: &str,
+        claim_status: PrimaryNameClaimStatus,
+        raw_claim_name: Option<&str>,
+    ) -> Result<()> {
+        upsert_primary_name_current_rows(
+            &self.pool,
+            &[PrimaryNameCurrentRow {
+                address: address.to_ascii_lowercase(),
+                namespace: namespace.to_owned(),
+                coin_type: coin_type.to_owned(),
+                claim_status,
+                raw_claim_name: raw_claim_name.map(str::to_owned),
+                claim_provenance: json!({}),
+            }],
+        )
+        .await
+        .context("failed to upsert primary_names_current row for API tests")?;
         Ok(())
     }
 
@@ -1547,7 +1570,11 @@ fn primary_name_execution_outcome(
     let normalized_address = address.to_ascii_lowercase();
     ExecutionOutcome {
         cache_key: ExecutionCacheKey {
-            request_key: primary_name_execution_request_key(namespace, &normalized_address, coin_type),
+            request_key: primary_name_execution_request_key(
+                namespace,
+                &normalized_address,
+                coin_type,
+            ),
             requested_chain_positions: primary_name_execution_requested_chain_positions(),
             manifest_versions: primary_name_execution_manifest_versions(),
             topology_version_boundary: record_inventory_boundary(
@@ -2644,7 +2671,10 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
         resolution_payload.chain_positions
     );
     assert_eq!(explain_payload.consistency, resolution_payload.consistency);
-    assert_eq!(explain_payload.last_updated, resolution_payload.last_updated);
+    assert_eq!(
+        explain_payload.last_updated,
+        resolution_payload.last_updated
+    );
     assert_eq!(explain_payload.declared_state, None);
     assert_eq!(
         resolution_payload.verified_state,
@@ -6576,7 +6606,10 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
             .and_then(Value::as_str),
         Some("normalized_event_history")
     );
-    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
     assert_eq!(
         payload.provenance.get("manifest_versions"),
         Some(&json!([
@@ -9168,6 +9201,125 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
 }
 
 #[tokio::test]
+async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+    database
+        .insert_primary_name_current_claim_row(
+            "0x0000000000000000000000000000000000000abc",
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared primary-name status request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed primary-name status request failed")?;
+
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+    assert_eq!(
+        declared_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+            }
+        }))
+    );
+    assert_eq!(declared_payload.verified_state, None);
+    assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+    assert_eq!(
+        both_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_keeps_invalid_name_declared_status_shaped() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+    database
+        .insert_primary_name_current_claim_row(
+            "0x0000000000000000000000000000000000000abc",
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::InvalidName,
+            Some("alice..eth"),
+        )
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed invalid-name primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    let claimed_primary_name = payload
+        .declared_state
+        .as_ref()
+        .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+        .and_then(Value::as_object)
+        .expect("declared claimed_primary_name must be present");
+
+    assert_eq!(
+        claimed_primary_name.get("status"),
+        Some(&json!("invalid_name"))
+    );
+    assert!(
+        !claimed_primary_name.contains_key("raw_claim_name"),
+        "status-only declared readback must not surface raw_claim_name yet"
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -9292,7 +9444,6 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
         Some(json!({
             "claimed_primary_name": {
                 "status": "unsupported",
-                "unsupported_reason": "declared primary-name claim surface is not yet supported",
             }
         }))
     );
@@ -9352,7 +9503,6 @@ async fn get_primary_names_freezes_bootstrap_behavior_for_tuple_present() -> Res
         Some(json!({
             "claimed_primary_name": {
                 "status": "unsupported",
-                "unsupported_reason": "declared primary-name claim surface is not yet supported",
             }
         }))
     );

@@ -71,17 +71,20 @@ Execution notes:
   `declared_state.claimed_primary_name`, `verified` returns only
   `verified_state.verified_primary_name`, and `both` combines those sections. The tuple-miss case
   leaves the migrated `primary_names_current` table without that tuple and asserts per-mode
-  `status=not_found`; the tuple-present rebuild path still returns the explicit declared
-  `claimed_primary_name` / verified `verified_primary_name` unsupported sections rather than any
-  richer claimed or verified payload. The harness also seeds persisted verified execution outcomes
+  `status=not_found`; the tuple-present rebuild path now reads back the status-shaped declared
+  `claimed_primary_name` from the rebuilt tuple while keeping the verified
+  `verified_primary_name` section bootstrap `unsupported` until a persisted exact-tuple verified
+  answer exists, rather than implying any richer claimed or verified payload. The harness also
+  seeds persisted verified execution outcomes
   and asserts exact-tuple readback for `verified_state.verified_primary_name` on
   `mode=verified` / `mode=both` only when that exact `(address, namespace, coin_type)` tuple has
   a cached answer; the route still keeps public coverage bootstrap `unsupported`, and `mode=both`
-  still pairs that readback with the explicit declared `claimed_primary_name` unsupported section
-  instead of implying a broader claimed or verified contract. Exact-tuple invalidation coverage
+  still pairs that readback with the tuple-backed status-shaped declared `claimed_primary_name`
+  section instead of implying a broader claimed or verified contract. Exact-tuple invalidation coverage
   then evicts only the targeted persisted verified answer across manifest, topology-boundary, and
   record-boundary cases, confirms sibling tuple outcomes remain readable, and confirms the evicted
-  tuple falls back to the same explicit bootstrap unsupported sections. It also requires both
+  tuple falls back to the same tuple-backed declared status plus bootstrap verified unsupported
+  section. It also requires both
   `namespace` and `coin_type`, asserts `400 invalid_input` for missing `namespace` / `coin_type`,
   malformed addresses, and malformed non-decimal `coin_type` values, `404 not_found` for
   unsupported namespaces, and the shared bootstrap provenance invariant

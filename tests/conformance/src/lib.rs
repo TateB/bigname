@@ -3523,7 +3523,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn primary_names_contract_returns_bootstrap_sections_by_mode_with_shared_invariants()
+        async fn primary_names_contract_reads_status_shaped_declared_results_by_mode_for_tuple_present()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000abc";
@@ -3590,8 +3590,7 @@ mod shipped_api {
                 declared_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -3842,8 +3841,7 @@ mod shipped_api {
                 declared_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -3892,7 +3890,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn primary_names_contract_returns_explicit_unsupported_sections_by_mode_for_tuple_present()
+        async fn primary_names_contract_keeps_verified_bootstrap_fallback_for_tuple_present()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000abc";
@@ -3959,8 +3957,7 @@ mod shipped_api {
                 declared_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -7358,8 +7355,7 @@ mod shipped_api {
                 both_before_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -7479,8 +7475,7 @@ mod shipped_api {
                 both_after_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
