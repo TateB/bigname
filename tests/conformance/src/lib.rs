@@ -24,11 +24,15 @@ mod shipped_api {
             response::Response,
         };
         use bigname_storage::{
-            CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace,
-            ExecutionTraceStep, NameSurface, NormalizedEvent, PermissionScope,
-            PermissionsCurrentRow, RawBlock, RecordInventoryCurrentRow, ResolverCurrentRow,
-            Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-            upsert_execution_outcome, upsert_execution_trace,
+            CanonicalityState, ExecutionBoundaryInvalidation, ExecutionCacheKey,
+            ExecutionManifestInvalidation, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
+            NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, RawBlock,
+            RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
+            SurfaceBindingKind, TokenLineage, default_database_url,
+            invalidate_execution_outcomes_for_manifest_version,
+            invalidate_execution_outcomes_for_record_boundary,
+            invalidate_execution_outcomes_for_topology_boundary, load_execution_outcome,
+            load_execution_trace, upsert_execution_outcome, upsert_execution_trace,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -2773,6 +2777,27 @@ mod shipped_api {
             assert!(payload.error.details.is_empty());
 
             database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_invalidation_contract_evicts_persisted_answers_from_mixed_and_explain_routes()
+        -> Result<()> {
+            for invalidation in [
+                PersistedResolutionInvalidation::Manifest,
+                PersistedResolutionInvalidation::Topology,
+                PersistedResolutionInvalidation::Record,
+            ] {
+                run_resolution_execution_invalidation_case(invalidation)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "persisted verified resolution invalidation failed for {}",
+                            invalidation.label()
+                        )
+                    })?;
+            }
+
             Ok(())
         }
 
@@ -6172,6 +6197,343 @@ mod shipped_api {
                 ],
                 "finished_at": format_timestamp(timestamp(1_717_171_900)),
             })
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum PersistedResolutionInvalidation {
+            Manifest,
+            Topology,
+            Record,
+        }
+
+        impl PersistedResolutionInvalidation {
+            fn execution_trace_id(self) -> Uuid {
+                match self {
+                    Self::Manifest => Uuid::from_u128(0x0e7ec7ace00000000000000000000031),
+                    Self::Topology => Uuid::from_u128(0x0e7ec7ace00000000000000000000032),
+                    Self::Record => Uuid::from_u128(0x0e7ec7ace00000000000000000000033),
+                }
+            }
+
+            fn label(self) -> &'static str {
+                match self {
+                    Self::Manifest => "manifest invalidation",
+                    Self::Topology => "topology boundary invalidation",
+                    Self::Record => "record boundary invalidation",
+                }
+            }
+        }
+
+        struct PersistedResolutionExecutionFixture {
+            logical_name_id: &'static str,
+            resource_id: Uuid,
+            execution_trace_id: Uuid,
+            cache_key: ExecutionCacheKey,
+        }
+
+        async fn run_resolution_execution_invalidation_case(
+            invalidation: PersistedResolutionInvalidation,
+        ) -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture = seed_persisted_resolution_execution_fixture(
+                &database,
+                invalidation.execution_trace_id(),
+            )
+            .await?;
+
+            let mixed_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed resolution request failed before invalidation")?;
+            let explain_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolution execution explain request failed before invalidation")?;
+
+            assert_eq!(mixed_before_response.status(), StatusCode::OK);
+            assert_eq!(explain_before_response.status(), StatusCode::OK);
+
+            let mixed_before_payload: ResolutionResponse = read_json(mixed_before_response).await?;
+            let explain_before_payload: ResolutionResponse =
+                read_json(explain_before_response).await?;
+            let expected_declared_state = resolution_supported_declared_state(
+                fixture.logical_name_id,
+                fixture.resource_id,
+                &["text:com.twitter", "addr:60"],
+            );
+            let expected_verified_queries = resolution_execution_verified_queries(
+                fixture.execution_trace_id,
+                &["text:com.twitter", "addr:60"],
+            );
+
+            assert_eq!(
+                mixed_before_payload.declared_state.as_ref(),
+                Some(&expected_declared_state)
+            );
+            assert_eq!(
+                mixed_before_payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(fixture.execution_trace_id.to_string()))
+            );
+            assert_eq!(
+                mixed_before_payload.verified_state,
+                Some(json!({
+                    "verified_queries": expected_verified_queries.clone(),
+                }))
+            );
+            assert_eq!(
+                explain_before_payload.verified_state,
+                Some(json!({
+                    "execution": resolution_execution_summary(
+                        fixture.execution_trace_id,
+                        fixture.resource_id,
+                    ),
+                    "verified_queries": expected_verified_queries,
+                }))
+            );
+
+            invalidate_persisted_resolution_execution(&database, &fixture.cache_key, invalidation)
+                .await?;
+
+            assert_eq!(
+                load_execution_outcome(&database.pool, &fixture.cache_key).await?,
+                None
+            );
+            assert!(
+                load_execution_trace(&database.pool, fixture.execution_trace_id)
+                    .await?
+                    .is_some(),
+                "execution traces stay durable after cache invalidation",
+            );
+
+            let mixed_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed resolution request failed after invalidation")?;
+            let explain_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolution execution explain request failed after invalidation")?;
+
+            assert_eq!(mixed_after_response.status(), StatusCode::OK);
+            assert_eq!(explain_after_response.status(), StatusCode::NOT_FOUND);
+
+            let mixed_after_payload: ResolutionResponse = read_json(mixed_after_response).await?;
+            let explain_after_payload: ErrorResponse = read_json(explain_after_response).await?;
+
+            assert_eq!(mixed_after_payload.data, mixed_before_payload.data);
+            assert_eq!(mixed_after_payload.coverage, mixed_before_payload.coverage);
+            assert_eq!(
+                mixed_after_payload.chain_positions,
+                mixed_before_payload.chain_positions
+            );
+            assert_eq!(
+                mixed_after_payload.consistency,
+                mixed_before_payload.consistency
+            );
+            assert_eq!(
+                mixed_after_payload.last_updated,
+                mixed_before_payload.last_updated
+            );
+            assert_eq!(
+                mixed_after_payload.declared_state,
+                mixed_before_payload.declared_state
+            );
+            assert_eq!(
+                mixed_after_payload.provenance.get("execution_trace_id"),
+                Some(&Value::Null)
+            );
+            assert_eq!(
+                mixed_after_payload.verified_state,
+                Some(resolution_unsupported_verified_state(&[
+                    "text:com.twitter",
+                    "addr:60",
+                ]))
+            );
+            assert_eq!(explain_after_payload.error.code, "not_found");
+            assert_eq!(
+                explain_after_payload.error.message,
+                "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+            );
+            assert!(explain_after_payload.error.details.is_empty());
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        async fn seed_persisted_resolution_execution_fixture(
+            database: &HarnessDatabase,
+            execution_trace_id: Uuid,
+        ) -> Result<PersistedResolutionExecutionFixture> {
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution execution invalidation requires an exact-name current row")?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let records = parse_resolution_record_keys(
+                Some("text:com.twitter,addr:60"),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["addr:60", "text:com.twitter"],
+            );
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["addr:60", "text:com.twitter"],
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key.clone(),
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            Ok(PersistedResolutionExecutionFixture {
+                logical_name_id,
+                resource_id,
+                execution_trace_id,
+                cache_key,
+            })
+        }
+
+        async fn invalidate_persisted_resolution_execution(
+            database: &HarnessDatabase,
+            cache_key: &ExecutionCacheKey,
+            invalidation: PersistedResolutionInvalidation,
+        ) -> Result<()> {
+            let summary = match invalidation {
+                PersistedResolutionInvalidation::Manifest => {
+                    let manifest_entry = cache_key
+                        .manifest_versions
+                        .as_array()
+                        .and_then(|entries| entries.first())
+                        .context(
+                            "persisted verified resolution cache key must expose manifest_versions",
+                        )?;
+                    let manifest_version = manifest_entry
+                        .get("manifest_version")
+                        .and_then(Value::as_i64)
+                        .context(
+                            "persisted verified resolution manifest invalidation requires manifest_version",
+                        )?;
+                    let source_manifest_id = manifest_entry
+                        .get("source_manifest_id")
+                        .and_then(Value::as_i64);
+                    let source_family = manifest_entry
+                        .get("source_family")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+
+                    if source_manifest_id.is_none() && source_family.is_none() {
+                        return Err(anyhow::anyhow!(
+                            "persisted verified resolution manifest invalidation requires a manifest identity"
+                        ));
+                    }
+
+                    invalidate_execution_outcomes_for_manifest_version(
+                        &database.pool,
+                        &ExecutionManifestInvalidation {
+                            request_type: "verified_resolution".to_owned(),
+                            namespace: "ens".to_owned(),
+                            source_manifest_id,
+                            source_family,
+                            manifest_version,
+                        },
+                    )
+                    .await?
+                }
+                PersistedResolutionInvalidation::Topology => {
+                    invalidate_execution_outcomes_for_topology_boundary(
+                        &database.pool,
+                        &ExecutionBoundaryInvalidation {
+                            request_type: "verified_resolution".to_owned(),
+                            namespace: "ens".to_owned(),
+                            boundary: cache_key.topology_version_boundary.clone(),
+                        },
+                    )
+                    .await?
+                }
+                PersistedResolutionInvalidation::Record => {
+                    invalidate_execution_outcomes_for_record_boundary(
+                        &database.pool,
+                        &ExecutionBoundaryInvalidation {
+                            request_type: "verified_resolution".to_owned(),
+                            namespace: "ens".to_owned(),
+                            boundary: cache_key.record_version_boundary.clone(),
+                        },
+                    )
+                    .await?
+                }
+            };
+
+            assert_eq!(summary.deleted_outcome_count, 1);
+            Ok(())
         }
 
         async fn assert_exact_name_history_summary_matches_history_route(

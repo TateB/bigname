@@ -115,4 +115,7 @@ Execution notes:
   `GET /v1/explain/resolutions/{namespace}/{name}/execution`, asserting shared top-level envelope
   invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
   `verified_queries`, presence of the persisted execution summary, and `404 not_found` when the
-  current exact surface has no persisted answer for the requested selector set
+  current exact surface has no persisted answer for the requested selector set; it also reuses the
+  shipped execution-outcome invalidation APIs to assert that exact manifest, topology-boundary,
+  and record-boundary invalidation evicts the persisted ENS verified-resolution answer from the
+  mixed `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
