@@ -1,0 +1,1616 @@
+use std::{collections::BTreeSet, fmt::Write as _};
+
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value};
+use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgPool, Row, postgres::PgRow};
+use uuid::Uuid;
+
+/// Persisted record-inventory and cache projection row keyed by resource and version boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordInventoryCurrentRow {
+    pub resource_id: Uuid,
+    pub record_version_boundary: Value,
+    pub enumeration_basis: Value,
+    pub selectors: Value,
+    pub explicit_gaps: Value,
+    pub unsupported_families: Value,
+    pub last_change: Option<Value>,
+    pub entries: Value,
+    pub provenance: Value,
+    pub coverage: Value,
+    pub chain_positions: Value,
+    pub canonicality_summary: Value,
+    pub manifest_version: i64,
+    pub last_recomputed_at: OffsetDateTime,
+}
+
+/// Load one record-inventory projection row by resource and exact version boundary.
+pub async fn load_record_inventory_current(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    let record_version_boundary_key = record_version_boundary_storage_key(
+        record_version_boundary,
+        resource_id,
+    )
+    .with_context(|| {
+        format!(
+            "failed to derive record_inventory_current boundary key for resource_id {resource_id}"
+        )
+    })?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            resource_id,
+            record_version_boundary,
+            enumeration_basis,
+            selectors,
+            explicit_gaps,
+            unsupported_families,
+            last_change,
+            entries,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM record_inventory_current
+        WHERE resource_id = $1
+          AND record_version_boundary_key = $2
+        "#,
+    )
+    .bind(resource_id)
+    .bind(&record_version_boundary_key)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load record_inventory_current row for resource_id {resource_id}")
+    })?;
+
+    row.map(decode_record_inventory_current_row).transpose()
+}
+
+/// Insert or replace record-inventory projection rows for one or more resource and boundary keys.
+pub async fn upsert_record_inventory_current_rows(
+    pool: &PgPool,
+    rows: &[RecordInventoryCurrentRow],
+) -> Result<Vec<RecordInventoryCurrentRow>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for record_inventory_current upsert")?;
+
+    let mut snapshots = Vec::with_capacity(rows.len());
+    for row in rows {
+        validate_record_inventory_current_row(row)?;
+        snapshots.push(upsert_record_inventory_current_row(&mut transaction, row).await?);
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit record_inventory_current upsert")?;
+
+    Ok(snapshots)
+}
+
+/// Delete one record-inventory projection row so a worker can rebuild that exact key.
+pub async fn delete_record_inventory_current(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<u64> {
+    let record_version_boundary_key = record_version_boundary_storage_key(
+        record_version_boundary,
+        resource_id,
+    )
+    .with_context(|| {
+        format!(
+            "failed to derive record_inventory_current delete key for resource_id {resource_id}"
+        )
+    })?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM record_inventory_current
+        WHERE resource_id = $1
+          AND record_version_boundary_key = $2
+        "#,
+    )
+    .bind(resource_id)
+    .bind(&record_version_boundary_key)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to delete record_inventory_current row for resource_id {resource_id}")
+    })
+    .map(|result| result.rows_affected())
+}
+
+/// Clear the record-inventory projection so a worker can perform a one-shot rebuild.
+pub async fn clear_record_inventory_current(pool: &PgPool) -> Result<u64> {
+    sqlx::query("DELETE FROM record_inventory_current")
+        .execute(pool)
+        .await
+        .context("failed to clear record_inventory_current rows")
+        .map(|result| result.rows_affected())
+}
+
+async fn upsert_record_inventory_current_row(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: &RecordInventoryCurrentRow,
+) -> Result<RecordInventoryCurrentRow> {
+    let record_version_boundary_key =
+        record_version_boundary_storage_key(&row.record_version_boundary, row.resource_id)?;
+    let record_version_boundary = serde_json::to_string(&row.record_version_boundary)
+        .context("failed to serialize record_inventory_current record_version_boundary")?;
+    let enumeration_basis = serde_json::to_string(&row.enumeration_basis)
+        .context("failed to serialize record_inventory_current enumeration_basis")?;
+    let selectors = serde_json::to_string(&row.selectors)
+        .context("failed to serialize record_inventory_current selectors")?;
+    let explicit_gaps = serde_json::to_string(&row.explicit_gaps)
+        .context("failed to serialize record_inventory_current explicit_gaps")?;
+    let unsupported_families = serde_json::to_string(&row.unsupported_families)
+        .context("failed to serialize record_inventory_current unsupported_families")?;
+    let last_change = row
+        .last_change
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize record_inventory_current last_change")?;
+    let entries = serde_json::to_string(&row.entries)
+        .context("failed to serialize record_inventory_current entries")?;
+    let provenance = serde_json::to_string(&row.provenance)
+        .context("failed to serialize record_inventory_current provenance")?;
+    let coverage = serde_json::to_string(&row.coverage)
+        .context("failed to serialize record_inventory_current coverage")?;
+    let chain_positions = serde_json::to_string(&row.chain_positions)
+        .context("failed to serialize record_inventory_current chain_positions")?;
+    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
+        .context("failed to serialize record_inventory_current canonicality_summary")?;
+
+    let snapshot = sqlx::query(
+        r#"
+        INSERT INTO record_inventory_current (
+            resource_id,
+            record_version_boundary_key,
+            record_version_boundary,
+            enumeration_basis,
+            selectors,
+            explicit_gaps,
+            unsupported_families,
+            last_change,
+            entries,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3::jsonb,
+            $4::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7::jsonb,
+            $8::jsonb,
+            $9::jsonb,
+            $10::jsonb,
+            $11::jsonb,
+            $12::jsonb,
+            $13::jsonb,
+            $14,
+            $15
+        )
+        ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE
+        SET
+            record_version_boundary = EXCLUDED.record_version_boundary,
+            enumeration_basis = EXCLUDED.enumeration_basis,
+            selectors = EXCLUDED.selectors,
+            explicit_gaps = EXCLUDED.explicit_gaps,
+            unsupported_families = EXCLUDED.unsupported_families,
+            last_change = EXCLUDED.last_change,
+            entries = EXCLUDED.entries,
+            provenance = EXCLUDED.provenance,
+            coverage = EXCLUDED.coverage,
+            chain_positions = EXCLUDED.chain_positions,
+            canonicality_summary = EXCLUDED.canonicality_summary,
+            manifest_version = EXCLUDED.manifest_version,
+            last_recomputed_at = EXCLUDED.last_recomputed_at
+        RETURNING
+            resource_id,
+            record_version_boundary,
+            enumeration_basis,
+            selectors,
+            explicit_gaps,
+            unsupported_families,
+            last_change,
+            entries,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        "#,
+    )
+    .bind(row.resource_id)
+    .bind(record_version_boundary_key)
+    .bind(record_version_boundary)
+    .bind(enumeration_basis)
+    .bind(selectors)
+    .bind(explicit_gaps)
+    .bind(unsupported_families)
+    .bind(last_change)
+    .bind(entries)
+    .bind(provenance)
+    .bind(coverage)
+    .bind(chain_positions)
+    .bind(canonicality_summary)
+    .bind(row.manifest_version)
+    .bind(row.last_recomputed_at)
+    .fetch_one(&mut **executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to upsert record_inventory_current row for resource_id {}",
+            row.resource_id
+        )
+    })?;
+
+    decode_record_inventory_current_row(snapshot)
+}
+
+fn validate_record_inventory_current_row(row: &RecordInventoryCurrentRow) -> Result<()> {
+    decode_record_version_boundary(&row.record_version_boundary, Some(row.resource_id))
+        .context("record_inventory_current row has invalid record_version_boundary")?;
+
+    if row.manifest_version <= 0 {
+        bail!(
+            "record_inventory_current row for resource_id {} has non-positive manifest_version {}",
+            row.resource_id,
+            row.manifest_version
+        );
+    }
+
+    validate_enumeration_basis(&row.enumeration_basis, row.resource_id)?;
+    let cacheable_selector_keys = validate_selector_array(&row.selectors, row.resource_id)?;
+    validate_explicit_gap_array(&row.explicit_gaps, row.resource_id)?;
+    validate_unsupported_families(&row.unsupported_families, row.resource_id)?;
+    validate_last_change(&row.last_change, row.resource_id)?;
+    validate_entries(&row.entries, row.resource_id, &cacheable_selector_keys)?;
+    ensure_json_object(
+        &row.provenance,
+        "provenance",
+        "record_inventory_current",
+        row.resource_id,
+    )?;
+    ensure_json_object(
+        &row.coverage,
+        "coverage",
+        "record_inventory_current",
+        row.resource_id,
+    )?;
+    ensure_json_object(
+        &row.chain_positions,
+        "chain_positions",
+        "record_inventory_current",
+        row.resource_id,
+    )?;
+    ensure_json_object(
+        &row.canonicality_summary,
+        "canonicality_summary",
+        "record_inventory_current",
+        row.resource_id,
+    )?;
+
+    Ok(())
+}
+
+fn decode_record_inventory_current_row(row: PgRow) -> Result<RecordInventoryCurrentRow> {
+    let resource_id: Uuid = row
+        .try_get("resource_id")
+        .context("record_inventory_current row missing resource_id")?;
+    let record_version_boundary: Value = row
+        .try_get("record_version_boundary")
+        .context("record_inventory_current row missing record_version_boundary")?;
+    let boundary_key = record_version_boundary_storage_key(&record_version_boundary, resource_id)?;
+    let stored_boundary_key: String = row
+        .try_get("record_version_boundary_key")
+        .unwrap_or_else(|_| boundary_key.clone());
+    if stored_boundary_key != boundary_key {
+        bail!(
+            "record_inventory_current boundary mismatch for resource_id {}: stored {}, decoded {}",
+            resource_id,
+            stored_boundary_key,
+            boundary_key
+        );
+    }
+
+    let snapshot = RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary,
+        enumeration_basis: row
+            .try_get("enumeration_basis")
+            .context("record_inventory_current row missing enumeration_basis")?,
+        selectors: row
+            .try_get("selectors")
+            .context("record_inventory_current row missing selectors")?,
+        explicit_gaps: row
+            .try_get("explicit_gaps")
+            .context("record_inventory_current row missing explicit_gaps")?,
+        unsupported_families: row
+            .try_get("unsupported_families")
+            .context("record_inventory_current row missing unsupported_families")?,
+        last_change: row
+            .try_get("last_change")
+            .context("record_inventory_current row missing last_change")?,
+        entries: row
+            .try_get("entries")
+            .context("record_inventory_current row missing entries")?,
+        provenance: row
+            .try_get("provenance")
+            .context("record_inventory_current row missing provenance")?,
+        coverage: row
+            .try_get("coverage")
+            .context("record_inventory_current row missing coverage")?,
+        chain_positions: row
+            .try_get("chain_positions")
+            .context("record_inventory_current row missing chain_positions")?,
+        canonicality_summary: row
+            .try_get("canonicality_summary")
+            .context("record_inventory_current row missing canonicality_summary")?,
+        manifest_version: row
+            .try_get("manifest_version")
+            .context("record_inventory_current row missing manifest_version")?,
+        last_recomputed_at: row
+            .try_get("last_recomputed_at")
+            .context("record_inventory_current row missing last_recomputed_at")?,
+    };
+
+    validate_record_inventory_current_row(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn record_version_boundary_storage_key(
+    record_version_boundary: &Value,
+    expected_resource_id: Uuid,
+) -> Result<String> {
+    let boundary =
+        decode_record_version_boundary(record_version_boundary, Some(expected_resource_id))
+            .context("record_inventory_current record_version_boundary key derivation failed")?;
+
+    let mut key = String::new();
+    append_key_part(&mut key, &boundary.logical_name_id);
+    append_key_part(&mut key, &boundary.resource_id.to_string());
+    append_key_part(
+        &mut key,
+        &boundary
+            .normalized_event_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    );
+    append_key_part(&mut key, boundary.event_kind.as_deref().unwrap_or_default());
+    append_key_part(&mut key, &boundary.chain_position.chain_id);
+    append_key_part(&mut key, &boundary.chain_position.block_number.to_string());
+    append_key_part(&mut key, &boundary.chain_position.block_hash);
+    append_key_part(&mut key, &boundary.chain_position.timestamp);
+    Ok(key)
+}
+
+fn append_key_part(buffer: &mut String, value: &str) {
+    write!(buffer, "{}:{value};", value.len()).expect("string write to key buffer must succeed");
+}
+
+fn validate_enumeration_basis(value: &Value, resource_id: Uuid) -> Result<()> {
+    let object = ensure_json_object(
+        value,
+        "enumeration_basis",
+        "record_inventory_current",
+        resource_id,
+    )?;
+    required_bool_field(object, "observed_selectors", "enumeration_basis")?;
+    required_bool_field(object, "capability_declared_families", "enumeration_basis")?;
+    required_bool_field(object, "globally_enumerable", "enumeration_basis")?;
+    Ok(())
+}
+
+fn validate_selector_array(value: &Value, resource_id: Uuid) -> Result<BTreeSet<String>> {
+    let items = ensure_json_array(value, "selectors", "record_inventory_current", resource_id)?;
+    let mut previous_record_key: Option<&str> = None;
+    let mut cacheable_record_keys = BTreeSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "record_inventory_current row for resource_id {} selectors[{index}] must be a JSON object",
+                resource_id
+            )
+        })?;
+        let record_key = validate_selector_identity(
+            object,
+            "selectors",
+            index,
+            resource_id,
+            SelectorFieldExpectation::CacheableOnly,
+        )?;
+        if let Some(previous_record_key) = previous_record_key {
+            if record_key <= previous_record_key {
+                bail!(
+                    "record_inventory_current row for resource_id {} selectors must be sorted by record_key ascending",
+                    resource_id
+                );
+            }
+        }
+        if required_bool_field(object, "cacheable", "selector entry")? {
+            cacheable_record_keys.insert(record_key.to_owned());
+        }
+        previous_record_key = Some(record_key);
+    }
+
+    Ok(cacheable_record_keys)
+}
+
+fn validate_explicit_gap_array(value: &Value, resource_id: Uuid) -> Result<()> {
+    let items = ensure_json_array(
+        value,
+        "explicit_gaps",
+        "record_inventory_current",
+        resource_id,
+    )?;
+    let mut previous_record_key: Option<&str> = None;
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "record_inventory_current row for resource_id {} explicit_gaps[{index}] must be a JSON object",
+                resource_id
+            )
+        })?;
+        let record_key = validate_selector_identity(
+            object,
+            "explicit_gaps",
+            index,
+            resource_id,
+            SelectorFieldExpectation::GapReasonOnly,
+        )?;
+        if let Some(previous_record_key) = previous_record_key {
+            if record_key <= previous_record_key {
+                bail!(
+                    "record_inventory_current row for resource_id {} explicit_gaps must be sorted by record_key ascending",
+                    resource_id
+                );
+            }
+        }
+        previous_record_key = Some(record_key);
+    }
+
+    Ok(())
+}
+
+fn validate_unsupported_families(value: &Value, resource_id: Uuid) -> Result<()> {
+    let items = ensure_json_array(
+        value,
+        "unsupported_families",
+        "record_inventory_current",
+        resource_id,
+    )?;
+    let mut previous_record_family: Option<&str> = None;
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "record_inventory_current row for resource_id {} unsupported_families[{index}] must be a JSON object",
+                resource_id
+            )
+        })?;
+        let record_family = required_string_field(
+            object,
+            "record_family",
+            "record_inventory_current unsupported_families entry",
+        )?;
+        required_string_field(
+            object,
+            "unsupported_reason",
+            "record_inventory_current unsupported_families entry",
+        )?;
+        if let Some(previous_record_family) = previous_record_family {
+            if record_family <= previous_record_family {
+                bail!(
+                    "record_inventory_current row for resource_id {} unsupported_families must be sorted by record_family ascending",
+                    resource_id
+                );
+            }
+        }
+        previous_record_family = Some(record_family);
+    }
+
+    Ok(())
+}
+
+fn validate_last_change(value: &Option<Value>, resource_id: Uuid) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    let object = ensure_json_object(
+        value,
+        "last_change",
+        "record_inventory_current",
+        resource_id,
+    )?;
+    required_positive_i64_field(object, "normalized_event_id", "last_change")?;
+    required_string_field(object, "event_kind", "last_change")?;
+    decode_chain_position(
+        object
+            .get("chain_position")
+            .with_context(|| "last_change must include chain_position".to_owned())?,
+        "last_change.chain_position",
+    )?;
+    Ok(())
+}
+
+fn validate_entries(
+    value: &Value,
+    resource_id: Uuid,
+    expected_record_keys: &BTreeSet<String>,
+) -> Result<()> {
+    let items = ensure_json_array(value, "entries", "record_inventory_current", resource_id)?;
+    let mut seen_record_keys = BTreeSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().with_context(|| {
+            format!(
+                "record_inventory_current row for resource_id {} entries[{index}] must be a JSON object",
+                resource_id
+            )
+        })?;
+        let record_key = validate_selector_identity(
+            object,
+            "entries",
+            index,
+            resource_id,
+            SelectorFieldExpectation::StatusDriven,
+        )?;
+        if !seen_record_keys.insert(record_key.to_owned()) {
+            bail!(
+                "record_inventory_current row for resource_id {} entries must not duplicate record_key {}",
+                resource_id,
+                record_key
+            );
+        }
+    }
+
+    let missing_record_keys = expected_record_keys
+        .difference(&seen_record_keys)
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra_record_keys = seen_record_keys
+        .difference(expected_record_keys)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_record_keys.is_empty() || !extra_record_keys.is_empty() {
+        let mut drift = Vec::new();
+        if !missing_record_keys.is_empty() {
+            drift.push(format!(
+                "missing cacheable selectors [{}]",
+                missing_record_keys.join(", ")
+            ));
+        }
+        if !extra_record_keys.is_empty() {
+            drift.push(format!(
+                "extra selectors outside cacheable selector space [{}]",
+                extra_record_keys.join(", ")
+            ));
+        }
+        bail!(
+            "record_inventory_current row for resource_id {} entries must match the cacheable selectors surfaced by selectors ({})",
+            resource_id,
+            drift.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_selector_identity<'a>(
+    object: &'a Map<String, Value>,
+    field_name: &str,
+    index: usize,
+    resource_id: Uuid,
+    expectation: SelectorFieldExpectation,
+) -> Result<&'a str> {
+    let record_key = required_string_field(
+        object,
+        "record_key",
+        "record_inventory_current selector entry",
+    )?;
+    let record_family = required_string_field(
+        object,
+        "record_family",
+        "record_inventory_current selector entry",
+    )?;
+    let selector_key = optional_string_field(
+        object,
+        "selector_key",
+        "record_inventory_current selector entry",
+    )?;
+    let expected_record_key = match selector_key {
+        Some(selector_key) => format!("{record_family}:{selector_key}"),
+        None => record_family.to_owned(),
+    };
+    if record_key != expected_record_key {
+        bail!(
+            "record_inventory_current row for resource_id {} {}[{index}] record_key {} must match selector identity {}",
+            resource_id,
+            field_name,
+            record_key,
+            expected_record_key
+        );
+    }
+
+    match expectation {
+        SelectorFieldExpectation::CacheableOnly => {
+            required_bool_field(object, "cacheable", "selector entry")?;
+        }
+        SelectorFieldExpectation::GapReasonOnly => {
+            required_string_field(object, "gap_reason", "explicit_gap entry")?;
+        }
+        SelectorFieldExpectation::StatusDriven => {
+            let status = required_string_field(object, "status", "record_cache entry")?.to_owned();
+            match status.as_str() {
+                "success" => {
+                    if !object.contains_key("value") {
+                        bail!(
+                            "record_inventory_current row for resource_id {} entries[{index}] with status success must include value",
+                            resource_id
+                        );
+                    }
+                    if object.contains_key("unsupported_reason") {
+                        bail!(
+                            "record_inventory_current row for resource_id {} entries[{index}] with status success must not include unsupported_reason",
+                            resource_id
+                        );
+                    }
+                }
+                "not_found" => {
+                    if object.contains_key("value") {
+                        bail!(
+                            "record_inventory_current row for resource_id {} entries[{index}] with status not_found must not include value",
+                            resource_id
+                        );
+                    }
+                    if object.contains_key("unsupported_reason") {
+                        bail!(
+                            "record_inventory_current row for resource_id {} entries[{index}] with status not_found must not include unsupported_reason",
+                            resource_id
+                        );
+                    }
+                }
+                "unsupported" => {
+                    if object.contains_key("value") {
+                        bail!(
+                            "record_inventory_current row for resource_id {} entries[{index}] with status unsupported must not include value",
+                            resource_id
+                        );
+                    }
+                    required_string_field(
+                        object,
+                        "unsupported_reason",
+                        "record_cache entry unsupported_reason",
+                    )?;
+                }
+                _ => {
+                    bail!(
+                        "record_inventory_current row for resource_id {} entries[{index}] has unsupported status {}",
+                        resource_id,
+                        status
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(record_key)
+}
+
+fn ensure_json_object<'a>(
+    value: &'a Value,
+    field_name: &str,
+    table_name: &str,
+    resource_id: Uuid,
+) -> Result<&'a Map<String, Value>> {
+    value.as_object().with_context(|| {
+        format!(
+            "{table_name} row for resource_id {resource_id} field {field_name} must be a JSON object"
+        )
+    })
+}
+
+fn ensure_json_array<'a>(
+    value: &'a Value,
+    field_name: &str,
+    table_name: &str,
+    resource_id: Uuid,
+) -> Result<&'a Vec<Value>> {
+    value.as_array().with_context(|| {
+        format!(
+            "{table_name} row for resource_id {resource_id} field {field_name} must be a JSON array"
+        )
+    })
+}
+
+fn required_string_field<'a>(
+    object: &'a Map<String, Value>,
+    field_name: &str,
+    context: &str,
+) -> Result<&'a str> {
+    object
+        .get(field_name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("{context} must include non-empty string field {field_name}"))
+}
+
+fn optional_string_field<'a>(
+    object: &'a Map<String, Value>,
+    field_name: &str,
+    context: &str,
+) -> Result<Option<&'a str>> {
+    match object.get(field_name) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(_) => bail!("{context} field {field_name} must be null or non-empty string"),
+    }
+}
+
+fn required_bool_field(
+    object: &Map<String, Value>,
+    field_name: &str,
+    context: &str,
+) -> Result<bool> {
+    object
+        .get(field_name)
+        .and_then(Value::as_bool)
+        .with_context(|| format!("{context} must include boolean field {field_name}"))
+}
+
+fn required_positive_i64_field(
+    object: &Map<String, Value>,
+    field_name: &str,
+    context: &str,
+) -> Result<i64> {
+    object
+        .get(field_name)
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .with_context(|| format!("{context} must include positive integer field {field_name}"))
+}
+
+fn decode_record_version_boundary(
+    value: &Value,
+    expected_resource_id: Option<Uuid>,
+) -> Result<RecordVersionBoundaryParts> {
+    let object = value
+        .as_object()
+        .with_context(|| "record_version_boundary must be a JSON object".to_owned())?;
+    let logical_name_id =
+        required_string_field(object, "logical_name_id", "record_version_boundary")?.to_owned();
+    let resource_id = Uuid::parse_str(required_string_field(
+        object,
+        "resource_id",
+        "record_version_boundary",
+    )?)
+    .context("record_version_boundary resource_id must be a UUID")?;
+    if let Some(expected_resource_id) = expected_resource_id {
+        if resource_id != expected_resource_id {
+            bail!(
+                "record_version_boundary resource_id {} does not match storage key resource_id {}",
+                resource_id,
+                expected_resource_id
+            );
+        }
+    }
+
+    let normalized_event_id = match object.get("normalized_event_id") {
+        Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64().filter(|value| *value > 0).with_context(|| {
+            "record_version_boundary normalized_event_id must be null or positive integer"
+                .to_owned()
+        })?),
+        None => bail!("record_version_boundary must include normalized_event_id"),
+    };
+    let event_kind = match object.get("event_kind") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(_) => {
+            bail!("record_version_boundary event_kind must be null or non-empty string");
+        }
+        None => bail!("record_version_boundary must include event_kind"),
+    };
+    if normalized_event_id.is_some() != event_kind.is_some() {
+        bail!(
+            "record_version_boundary normalized_event_id and event_kind must both be present or both be null"
+        );
+    }
+
+    let chain_position = decode_chain_position(
+        object
+            .get("chain_position")
+            .with_context(|| "record_version_boundary must include chain_position".to_owned())?,
+        "record_version_boundary.chain_position",
+    )?;
+
+    Ok(RecordVersionBoundaryParts {
+        logical_name_id,
+        resource_id,
+        normalized_event_id,
+        event_kind,
+        chain_position,
+    })
+}
+
+fn decode_chain_position(value: &Value, context: &str) -> Result<ChainPositionParts> {
+    let object = value
+        .as_object()
+        .with_context(|| format!("{context} must be a JSON object"))?;
+    let chain_id = required_string_field(object, "chain_id", context)?.to_owned();
+    let block_number = object
+        .get("block_number")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .with_context(|| format!("{context} must include non-negative integer block_number"))?;
+    let block_hash = required_string_field(object, "block_hash", context)?.to_owned();
+    let timestamp = required_string_field(object, "timestamp", context)?.to_owned();
+    Ok(ChainPositionParts {
+        chain_id,
+        block_number,
+        block_hash,
+        timestamp,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct RecordVersionBoundaryParts {
+    logical_name_id: String,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<String>,
+    chain_position: ChainPositionParts,
+}
+
+#[derive(Clone, Debug)]
+struct ChainPositionParts {
+    chain_id: String,
+    block_number: i64,
+    block_hash: String,
+    timestamp: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectorFieldExpectation {
+    CacheableOnly,
+    GapReasonOnly,
+    StatusDriven,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        str::FromStr,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use anyhow::Result;
+    use serde_json::json;
+    use sqlx::{
+        PgPool,
+        postgres::{PgConnectOptions, PgPoolOptions},
+    };
+
+    use super::*;
+    use crate::{CanonicalityState, Resource, default_database_url, upsert_resources};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDatabase {
+        admin_pool: PgPool,
+        pool: PgPool,
+        database_name: String,
+    }
+
+    impl TestDatabase {
+        async fn new() -> Result<Self> {
+            let database_url = std::env::var("BIGNAME_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| default_database_url().to_owned());
+            let base_options = PgConnectOptions::from_str(&database_url)
+                .context("failed to parse database URL for record_inventory_current tests")?;
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before unix epoch")?
+                .as_nanos();
+            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let database_name =
+                format!("bg_rec_inv_{}_{unique:x}_{sequence:x}", std::process::id());
+
+            let admin_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(base_options.clone().database("postgres"))
+                .await
+                .context("failed to connect admin pool for record_inventory_current tests")?;
+
+            sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
+                .execute(&admin_pool)
+                .await
+                .with_context(|| format!("failed to create test database {database_name}"))?;
+
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect_with(base_options.database(&database_name))
+                .await
+                .context("failed to connect record_inventory_current test pool")?;
+
+            crate::MIGRATOR
+                .run(&pool)
+                .await
+                .context("failed to apply migrations for record_inventory_current tests")?;
+
+            Ok(Self {
+                admin_pool,
+                pool,
+                database_name,
+            })
+        }
+
+        fn pool(&self) -> &PgPool {
+            &self.pool
+        }
+
+        async fn cleanup(self) -> Result<()> {
+            self.pool.close().await;
+            sqlx::query(&format!(
+                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                self.database_name
+            ))
+            .execute(&self.admin_pool)
+            .await
+            .with_context(|| format!("failed to drop test database {}", self.database_name))?;
+            self.admin_pool.close().await;
+            Ok(())
+        }
+    }
+
+    fn timestamp(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+    }
+
+    fn resource(resource_id: Uuid, block_hash: &str, block_number: i64) -> Resource {
+        Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({
+                "source": "record_inventory_current_test",
+                "anchor": "resource"
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    async fn seed_resources(database: &TestDatabase, resource_ids: &[Uuid]) -> Result<()> {
+        let resources = resource_ids
+            .iter()
+            .enumerate()
+            .map(|(index, resource_id)| {
+                resource(
+                    *resource_id,
+                    &format!("0xrecordinventory{:02x}", index),
+                    21_000_300 + index as i64,
+                )
+            })
+            .collect::<Vec<_>>();
+        upsert_resources(database.pool(), &resources).await?;
+        Ok(())
+    }
+
+    fn record_version_boundary(
+        resource_id: Uuid,
+        logical_name_id: &str,
+        normalized_event_id: Option<i64>,
+        event_kind: Option<&str>,
+        block_number: i64,
+        block_hash: &str,
+    ) -> Value {
+        json!({
+            "logical_name_id": logical_name_id,
+            "resource_id": resource_id.to_string(),
+            "normalized_event_id": normalized_event_id,
+            "event_kind": event_kind,
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": block_hash,
+                "timestamp": "2026-04-18T00:15:00Z"
+            }
+        })
+    }
+
+    fn last_change(normalized_event_id: i64, event_kind: &str, block_number: i64) -> Value {
+        json!({
+            "normalized_event_id": normalized_event_id,
+            "event_kind": event_kind,
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": format!("0xlastchange{block_number:x}"),
+                "timestamp": "2026-04-18T00:20:00Z"
+            }
+        })
+    }
+
+    fn record_inventory_current_row(
+        resource_id: Uuid,
+        logical_name_id: &str,
+        normalized_event_id: Option<i64>,
+        event_kind: Option<&str>,
+        block_number: i64,
+        block_hash: &str,
+        manifest_version: i64,
+    ) -> RecordInventoryCurrentRow {
+        RecordInventoryCurrentRow {
+            resource_id,
+            record_version_boundary: record_version_boundary(
+                resource_id,
+                logical_name_id,
+                normalized_event_id,
+                event_kind,
+                block_number,
+                block_hash,
+            ),
+            enumeration_basis: json!({
+                "observed_selectors": true,
+                "capability_declared_families": true,
+                "globally_enumerable": false
+            }),
+            selectors: json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "cacheable": false
+                }
+            ]),
+            explicit_gaps: json!([
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver"
+                }
+            ]),
+            unsupported_families: json!([
+                {
+                    "record_family": "abi",
+                    "unsupported_reason": "resolver_family_pending"
+                },
+                {
+                    "record_family": "pubkey",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]),
+            last_change: Some(last_change(
+                normalized_event_id.unwrap_or(1_200),
+                event_kind.unwrap_or("RecordsChanged"),
+                block_number,
+            )),
+            entries: json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000abc"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]),
+            provenance: json!({
+                "normalized_event_ids": [normalized_event_id.unwrap_or(1200)],
+                "derivation_kind": "record_inventory_current_rebuild"
+            }),
+            coverage: json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "enumeration_basis": "declared_record_inventory"
+            }),
+            chain_positions: json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": block_number,
+                    "block_hash": block_hash,
+                    "timestamp": "2026-04-18T00:15:00Z"
+                }
+            }),
+            canonicality_summary: json!({
+                "status": "finalized",
+                "chains": {
+                    "ethereum-mainnet": "finalized"
+                }
+            }),
+            manifest_version,
+            last_recomputed_at: timestamp(1_776_100_500),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_migration_creates_projection_table() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let table_name: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT to_regclass('public.record_inventory_current')::TEXT
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(table_name.as_deref(), Some("record_inventory_current"));
+
+        let columns = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'record_inventory_current'
+            ORDER BY ordinal_position
+            "#,
+        )
+        .fetch_all(database.pool())
+        .await?;
+        assert!(columns.contains(&"record_version_boundary_key".to_owned()));
+        assert!(columns.contains(&"record_version_boundary".to_owned()));
+        assert!(columns.contains(&"entries".to_owned()));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_upserts_and_loads_by_exact_key() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7100);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let expected = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(901),
+            Some("RecordsChanged"),
+            21_500_001,
+            "0xrecordinventorya",
+            4,
+        );
+
+        let inserted =
+            upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected))
+                .await?;
+        assert_eq!(inserted, vec![expected.clone()]);
+
+        let loaded = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+        )
+        .await?;
+        assert_eq!(loaded, Some(expected));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_upsert_replaces_existing_projection_row() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7101);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let first = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(902),
+            Some("RecordsChanged"),
+            21_500_002,
+            "0xrecordinventoryb",
+            4,
+        );
+        upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&first)).await?;
+
+        let mut replacement = first.clone();
+        replacement.enumeration_basis = json!({
+            "observed_selectors": true,
+            "capability_declared_families": false,
+            "globally_enumerable": true
+        });
+        replacement.entries = json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000def"
+                }
+            },
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending"
+            }
+        ]);
+        replacement.coverage = json!({
+            "status": "partial",
+            "unsupported_reason": "inventory_rebuild_in_progress"
+        });
+        replacement.manifest_version = 5;
+
+        let updated = upsert_record_inventory_current_rows(
+            database.pool(),
+            std::slice::from_ref(&replacement),
+        )
+        .await?;
+        assert_eq!(updated, vec![replacement.clone()]);
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &replacement.record_version_boundary,
+            )
+            .await?,
+            Some(replacement)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_delete_and_clear_support_rebuild_workflows() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7102);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let first = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(903),
+            Some("RecordsChanged"),
+            21_500_003,
+            "0xrecordinventoryc",
+            4,
+        );
+        let second = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(904),
+            Some("RecordsChanged"),
+            21_500_004,
+            "0xrecordinventoryd",
+            4,
+        );
+
+        upsert_record_inventory_current_rows(database.pool(), &[first.clone(), second.clone()])
+            .await?;
+
+        assert_eq!(
+            delete_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &first.record_version_boundary
+            )
+            .await?,
+            1
+        );
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &first.record_version_boundary
+            )
+            .await?,
+            None
+        );
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &second.record_version_boundary
+            )
+            .await?,
+            Some(second.clone())
+        );
+
+        assert_eq!(clear_record_inventory_current(database.pool()).await?, 1);
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &second.record_version_boundary
+            )
+            .await?,
+            None
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_rejects_invalid_json_shapes() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7103);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let mut invalid_boundary = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(905),
+            Some("RecordsChanged"),
+            21_500_005,
+            "0xrecordinventorye",
+            4,
+        );
+        invalid_boundary.record_version_boundary = json!({
+            "logical_name_id": "ens:alice.eth",
+            "resource_id": Uuid::from_u128(0x9999).to_string(),
+            "normalized_event_id": 905,
+            "event_kind": "RecordsChanged",
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_500_005,
+                "block_hash": "0xrecordinventorye",
+                "timestamp": "2026-04-18T00:15:00Z"
+            }
+        });
+        let error = upsert_record_inventory_current_rows(
+            database.pool(),
+            std::slice::from_ref(&invalid_boundary),
+        )
+        .await
+        .expect_err("boundary resource mismatch must fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("does not match storage key resource_id"));
+
+        let mut invalid_entry = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(906),
+            Some("RecordsChanged"),
+            21_500_006,
+            "0xrecordinventoryf",
+            4,
+        );
+        invalid_entry.entries = json!([
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "status": "unsupported"
+            }
+        ]);
+        let error = upsert_record_inventory_current_rows(
+            database.pool(),
+            std::slice::from_ref(&invalid_entry),
+        )
+        .await
+        .expect_err("unsupported cache entry without reason must fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("record_cache entry unsupported_reason"));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_preserves_selector_and_cache_ordering() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7104);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let expected = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            None,
+            None,
+            21_500_007,
+            "0xrecordinventoryg",
+            4,
+        );
+        upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected))
+            .await?;
+
+        let loaded = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+        )
+        .await?
+        .expect("row must exist");
+
+        assert_eq!(loaded.selectors, expected.selectors);
+        assert_eq!(loaded.explicit_gaps, expected.explicit_gaps);
+        assert_eq!(loaded.entries, expected.entries);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_rejects_missing_cacheable_entry_drift() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7105);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let mut invalid = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(907),
+            Some("RecordsChanged"),
+            21_500_008,
+            "0xrecordinventoryh",
+            4,
+        );
+        invalid.entries = json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000abc"
+                }
+            }
+        ]);
+
+        let error =
+            upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&invalid))
+                .await
+                .expect_err("missing cacheable selector entry must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("missing cacheable selectors [avatar]")
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_rejects_extra_entry_drift() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7106);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let mut invalid = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(908),
+            Some("RecordsChanged"),
+            21_500_009,
+            "0xrecordinventoryi",
+            4,
+        );
+        invalid.entries = json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000abc"
+                }
+            },
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending"
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "not_observed_on_current_resolver"
+            }
+        ]);
+
+        let error =
+            upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&invalid))
+                .await
+                .expect_err("extra selector outside cacheable selector space must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("extra selectors outside cacheable selector space [contenthash]")
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_rejects_unsorted_selector_arrays() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7107);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let mut invalid = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(909),
+            Some("RecordsChanged"),
+            21_500_010,
+            "0xrecordinventoryj",
+            4,
+        );
+        invalid.selectors = json!([
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "cacheable": false
+            },
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            }
+        ]);
+
+        let error =
+            upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&invalid))
+                .await
+                .expect_err("unsorted selectors must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("selectors must be sorted by record_key ascending")
+        );
+
+        database.cleanup().await
+    }
+}

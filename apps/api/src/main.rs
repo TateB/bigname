@@ -19,17 +19,18 @@ use bigname_manifests::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
-    PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    PermissionsCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
     collapse_address_name_current_rows, load_address_history, load_address_names_current,
     load_children_current, load_name_current, load_name_history, load_name_surface,
-    load_permissions_current, load_resolver_current, load_resource, load_resource_history,
-    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+    load_permissions_current, load_record_inventory_current, load_resolver_current, load_resource,
+    load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, json};
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     types::{
         JsonValue, Uuid,
         time::{OffsetDateTime, UtcOffset},
@@ -358,6 +359,8 @@ impl ResolutionMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolutionRecordKey {
     record_key: String,
+    record_family: String,
+    selector_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1629,7 +1632,27 @@ async fn name_current(
         });
     };
 
-    Ok(Json(build_name_response(row)))
+    let record_inventory_current = load_supported_record_inventory_current(&state.pool, &row)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                resource_id = ?row.resource_id,
+                error = ?load_error,
+                "failed to load record_inventory_current projection for exact-name route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load declared record inventory for name {namespace}/{name}"
+            ))
+        })?;
+
+    Ok(Json(build_name_response(
+        row,
+        record_inventory_current.as_ref(),
+    )))
 }
 
 async fn coverage_current(
@@ -1770,7 +1793,35 @@ async fn resolution_current(
         });
     };
 
-    Ok(Json(build_resolution_response(row, mode, &records)))
+    let record_inventory_current = if mode.includes_declared() {
+        load_supported_record_inventory_current(&state.pool, &row)
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    namespace = %namespace,
+                    name = %name,
+                    logical_name_id = %logical_name_id,
+                    resource_id = ?row.resource_id,
+                    mode = ?mode,
+                    records = ?records,
+                    error = ?load_error,
+                    "failed to load record_inventory_current projection for resolution route"
+                );
+                ApiError::internal_error(format!(
+                    "failed to load declared resolution inventory for name {namespace}/{name}"
+                ))
+            })?
+    } else {
+        None
+    };
+
+    Ok(Json(build_resolution_response(
+        row,
+        mode,
+        &records,
+        record_inventory_current.as_ref(),
+    )))
 }
 
 async fn resolver_current(
@@ -2410,8 +2461,11 @@ fn build_namespace_manifests_response(
     }
 }
 
-fn build_name_response(row: NameCurrentRow) -> NameResponse {
-    let declared_state = build_name_declared_state(&row);
+fn build_name_response(
+    row: NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> NameResponse {
+    let declared_state = build_name_declared_state(&row, record_inventory_row);
 
     build_name_declared_response(row, declared_state)
 }
@@ -2451,11 +2505,12 @@ fn build_resolution_response(
     row: NameCurrentRow,
     mode: ResolutionMode,
     records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> ResolutionResponse {
     let data = build_name_data(&row);
     let declared_state = mode
         .includes_declared()
-        .then(|| build_resolution_declared_state(&row));
+        .then(|| build_resolution_declared_state(&row, record_inventory_row, records));
     let verified_state = mode
         .includes_verified()
         .then(|| build_resolution_verified_state(records));
@@ -2523,22 +2578,33 @@ fn build_children_response(
     }
 }
 
-fn build_resolution_declared_state(row: &NameCurrentRow) -> JsonValue {
+fn build_resolution_declared_state(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
     let mut declared_state = empty_object();
     insert_value_field(
         &mut declared_state,
         "topology",
-        build_resolution_topology(row),
+        build_resolution_topology(row, record_inventory_row),
     );
     insert_value_field(
         &mut declared_state,
         "record_inventory",
-        unsupported_section("declared resolution record inventory is not yet projected"),
+        build_record_inventory_section(
+            record_inventory_row,
+            "declared resolution record inventory is not yet projected",
+        ),
     );
     insert_value_field(
         &mut declared_state,
         "record_cache",
-        unsupported_section("declared resolution record cache is not yet projected"),
+        build_record_cache_section(
+            record_inventory_row,
+            records,
+            "declared resolution record cache is not yet projected",
+        ),
     );
     declared_state
 }
@@ -2570,7 +2636,10 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
     query
 }
 
-fn build_resolution_topology(row: &NameCurrentRow) -> JsonValue {
+fn build_resolution_topology(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> JsonValue {
     if row.namespace != "ens"
         || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
         || row.resource_id.is_none()
@@ -2591,12 +2660,9 @@ fn build_resolution_topology(row: &NameCurrentRow) -> JsonValue {
         return unsupported_section("declared resolution topology is not yet projected");
     }
 
-    let Some(chain_position) = build_resolution_boundary_chain_position(row) else {
+    let Some(boundary) = resolution_record_version_boundary(row, record_inventory_row) else {
         return unsupported_section("declared resolution topology is not yet projected");
     };
-    if !chain_position.chain_id.starts_with("ethereum") {
-        return unsupported_section("declared resolution topology is not yet projected");
-    }
 
     let registry_ref = build_resolution_name_ref(row);
     let resolver_hop = build_resolution_resolver_hop(
@@ -2605,7 +2671,6 @@ fn build_resolution_topology(row: &NameCurrentRow) -> JsonValue {
         resolver_address,
         string_field(provenance_field(resolver_summary, "latest_event_kind")),
     );
-    let boundary = build_resolution_version_boundary(row, &chain_position);
 
     let mut wildcard = empty_object();
     insert_value_field(&mut wildcard, "source", JsonValue::Null);
@@ -2739,6 +2804,15 @@ fn build_resolution_version_boundary(
     boundary
 }
 
+fn resolution_record_version_boundary(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Option<JsonValue> {
+    record_inventory_row
+        .map(|record_inventory_row| record_inventory_row.record_version_boundary.clone())
+        .or_else(|| build_supported_record_version_boundary(row))
+}
+
 fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
     let chain_positions = row.chain_positions.as_object()?;
     chain_positions
@@ -2751,6 +2825,169 @@ fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<Chai
             let first = parsed.next()?;
             parsed.next().is_none().then_some(first)
         })
+}
+
+async fn load_supported_record_inventory_current(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    let Some((resource_id, record_version_boundary)) = record_inventory_lookup_key(row) else {
+        return Ok(None);
+    };
+
+    if let Some(record_inventory_row) =
+        load_record_inventory_current(pool, resource_id, &record_version_boundary).await?
+    {
+        return Ok(Some(record_inventory_row));
+    }
+
+    if record_version_boundary_has_pointer(&record_version_boundary) {
+        return Ok(None);
+    }
+
+    let Some(persisted_boundary) =
+        find_supported_record_inventory_boundary(pool, resource_id, &record_version_boundary)
+            .await?
+    else {
+        return Ok(None);
+    };
+
+    load_record_inventory_current(pool, resource_id, &persisted_boundary)
+        .await?
+        .with_context(|| {
+            format!(
+                "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+            )
+        })
+        .map(Some)
+}
+
+fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
+    Some((
+        row.resource_id?,
+        build_supported_record_version_boundary(row)?,
+    ))
+}
+
+fn build_supported_record_version_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
+    if row.namespace != "ens"
+        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+        || row.resource_id.is_none()
+    {
+        return None;
+    }
+
+    let chain_position = build_resolution_boundary_chain_position(row)?;
+    if !chain_position.chain_id.starts_with("ethereum") {
+        return None;
+    }
+
+    Some(build_resolution_version_boundary(row, &chain_position))
+}
+
+fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {
+    provenance_field(record_version_boundary, "normalized_event_id")
+        .is_some_and(|value| !value.is_null())
+        && provenance_field(record_version_boundary, "event_kind")
+            .is_some_and(|value| !value.is_null())
+}
+
+async fn find_supported_record_inventory_boundary(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &JsonValue,
+) -> Result<Option<JsonValue>> {
+    let logical_name_id = string_field(provenance_field(record_version_boundary, "logical_name_id"))
+        .with_context(|| {
+            format!(
+                "supported record version boundary for resource_id {resource_id} must include logical_name_id"
+            )
+        })?;
+    let chain_position = provenance_field(record_version_boundary, "chain_position").with_context(
+        || {
+            format!(
+                "supported record version boundary for resource_id {resource_id} must include chain_position"
+            )
+        },
+    )?;
+    let chain_id = string_field(provenance_field(chain_position, "chain_id")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.chain_id"
+        )
+    })?;
+    let block_number = provenance_field(chain_position, "block_number")
+        .and_then(JsonValue::as_i64)
+        .with_context(|| {
+            format!(
+                "supported record version boundary for resource_id {resource_id} must include chain_position.block_number"
+            )
+        })?;
+    let block_hash = string_field(provenance_field(chain_position, "block_hash")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.block_hash"
+        )
+    })?;
+    let timestamp = string_field(provenance_field(chain_position, "timestamp")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.timestamp"
+        )
+    })?;
+
+    let boundaries = sqlx::query(
+        r#"
+        SELECT record_version_boundary
+        FROM record_inventory_current
+        WHERE resource_id = $1
+          AND record_version_boundary ->> 'logical_name_id' = $2
+          AND record_version_boundary -> 'chain_position' ->> 'chain_id' = $3
+          AND (record_version_boundary -> 'chain_position' ->> 'block_number')::bigint = $4
+          AND record_version_boundary -> 'chain_position' ->> 'block_hash' = $5
+          AND record_version_boundary -> 'chain_position' ->> 'timestamp' = $6
+        ORDER BY
+          (record_version_boundary ->> 'normalized_event_id') IS NULL ASC,
+          (record_version_boundary ->> 'normalized_event_id')::bigint DESC NULLS LAST
+        LIMIT 2
+        "#,
+    )
+    .bind(resource_id)
+    .bind(logical_name_id)
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(block_hash)
+    .bind(timestamp)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to locate supported record_inventory_current boundary for resource_id {resource_id}"
+        )
+    })?
+    .into_iter()
+    .map(|row| {
+        row.try_get("record_version_boundary").with_context(|| {
+            format!(
+                "supported record_inventory_current lookup for resource_id {resource_id} returned a row without record_version_boundary"
+            )
+        })
+    })
+    .collect::<Result<Vec<JsonValue>>>()?;
+
+    let Some(first_boundary) = boundaries.first().cloned() else {
+        return Ok(None);
+    };
+    let second_boundary = boundaries.get(1);
+    if let Some(second_boundary) = second_boundary {
+        if !(record_version_boundary_has_pointer(&first_boundary)
+            && !record_version_boundary_has_pointer(second_boundary))
+        {
+            anyhow::bail!(
+                "supported record_inventory_current lookup for resource_id {} found multiple projection rows for the same boundary anchor",
+                resource_id
+            );
+        }
+    }
+
+    Ok(Some(first_boundary))
 }
 
 impl AddressNamesResponseSupplement {
@@ -3356,7 +3593,10 @@ fn build_resolver_data(row: &ResolverCurrentRow) -> JsonValue {
     data
 }
 
-fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
+fn build_name_declared_state(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> JsonValue {
     let mut declared_state = empty_object();
     insert_value_field(
         &mut declared_state,
@@ -3389,9 +3629,8 @@ fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
     insert_value_field(
         &mut declared_state,
         "record_inventory",
-        declared_summary_section(
-            &row.declared_summary,
-            "record_inventory",
+        build_record_inventory_section(
+            record_inventory_row,
             "declared record inventory summary is not yet projected",
         ),
     );
@@ -3680,6 +3919,167 @@ fn declared_summary_section(summary: &JsonValue, key: &str, unsupported_reason: 
         .filter(|value| value.is_object())
         .cloned()
         .unwrap_or_else(|| unsupported_section(unsupported_reason))
+}
+
+fn build_record_inventory_section(
+    row: Option<&RecordInventoryCurrentRow>,
+    unsupported_reason: &str,
+) -> JsonValue {
+    row.map(build_record_inventory_state)
+        .unwrap_or_else(|| unsupported_section(unsupported_reason))
+}
+
+fn build_record_cache_section(
+    row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+    unsupported_reason: &str,
+) -> JsonValue {
+    row.map(|row| build_record_cache_state(row, records))
+        .unwrap_or_else(|| unsupported_section(unsupported_reason))
+}
+
+fn build_record_inventory_state(row: &RecordInventoryCurrentRow) -> JsonValue {
+    let mut record_inventory = empty_object();
+    insert_value_field(
+        &mut record_inventory,
+        "record_version_boundary",
+        row.record_version_boundary.clone(),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "enumeration_basis",
+        ensure_object(&row.enumeration_basis),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "selectors",
+        array_or_empty(Some(&row.selectors)),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "explicit_gaps",
+        array_or_empty(Some(&row.explicit_gaps)),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "unsupported_families",
+        array_or_empty(Some(&row.unsupported_families)),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "last_change",
+        row.last_change.clone().unwrap_or(JsonValue::Null),
+    );
+    record_inventory
+}
+
+fn build_record_cache_state(
+    row: &RecordInventoryCurrentRow,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
+    let mut record_cache = empty_object();
+    insert_value_field(
+        &mut record_cache,
+        "record_version_boundary",
+        row.record_version_boundary.clone(),
+    );
+    insert_value_field(
+        &mut record_cache,
+        "entries",
+        build_record_cache_entries(row, records),
+    );
+    record_cache
+}
+
+fn build_record_cache_entries(
+    row: &RecordInventoryCurrentRow,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
+    let entry_lookup = row
+        .entries
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            string_field(provenance_field(entry, "record_key"))
+                .map(|record_key| (record_key, entry))
+        })
+        .map(|(record_key, entry)| (record_key, entry.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let unsupported_family_lookup = row
+        .unsupported_families
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|family| {
+            Some((
+                string_field(provenance_field(family, "record_family"))?,
+                string_field(provenance_field(family, "unsupported_reason"))?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    if records.is_empty() {
+        return JsonValue::Array(
+            row.selectors
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|selector| {
+                    provenance_field(selector, "cacheable").and_then(JsonValue::as_bool)
+                        == Some(true)
+                })
+                .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
+                .filter_map(|record_key| entry_lookup.get(&record_key).cloned())
+                .collect(),
+        );
+    }
+
+    JsonValue::Array(
+        records
+            .iter()
+            .map(|record| {
+                entry_lookup
+                    .get(&record.record_key)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        build_missing_record_cache_entry(record, &unsupported_family_lookup)
+                    })
+            })
+            .collect(),
+    )
+}
+
+fn phase_unsupported_record_family_reason(record_family: &str) -> Option<&'static str> {
+    match record_family {
+        "abi" | "pubkey" => Some("record_family_not_supported_in_phase6_projection"),
+        _ => None,
+    }
+}
+
+fn build_missing_record_cache_entry(
+    record: &ResolutionRecordKey,
+    unsupported_family_lookup: &BTreeMap<String, String>,
+) -> JsonValue {
+    let mut entry = empty_object();
+    insert_string_field(&mut entry, "record_key", record.record_key.clone());
+    insert_string_field(&mut entry, "record_family", record.record_family.clone());
+    insert_nullable_string_field(&mut entry, "selector_key", record.selector_key.clone());
+
+    if let Some(unsupported_reason) = unsupported_family_lookup
+        .get(&record.record_family)
+        .cloned()
+        .or_else(|| {
+            phase_unsupported_record_family_reason(&record.record_family).map(str::to_owned)
+        })
+    {
+        insert_string_field(&mut entry, "status", "unsupported".to_owned());
+        insert_string_field(&mut entry, "unsupported_reason", unsupported_reason);
+    } else {
+        insert_string_field(&mut entry, "status", "not_found".to_owned());
+    }
+
+    entry
 }
 
 fn canonicality_consistency(canonicality_summary: &JsonValue) -> &'static str {
@@ -4075,10 +4475,14 @@ fn parse_resolution_record_key(record_key: &str) -> Option<ResolutionRecordKey> 
     match record_key.split_once(':') {
         None if is_valid_family(record_key) => Some(ResolutionRecordKey {
             record_key: record_key.to_owned(),
+            record_family: record_key.to_owned(),
+            selector_key: None,
         }),
         Some((family, selector)) if is_valid_family(family) && !selector.is_empty() => {
             Some(ResolutionRecordKey {
                 record_key: record_key.to_owned(),
+                record_family: family.to_owned(),
+                selector_key: Some(selector.to_owned()),
             })
         }
         _ => None,

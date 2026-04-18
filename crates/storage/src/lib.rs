@@ -14,6 +14,7 @@ mod raw;
 mod raw_calls;
 mod raw_children;
 mod raw_code;
+mod record_inventory;
 mod resolver;
 
 use anyhow::{Context, Result};
@@ -85,6 +86,10 @@ pub use raw_children::{
 };
 pub use raw_code::{
     RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
+};
+pub use record_inventory::{
+    RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
+    load_record_inventory_current, upsert_record_inventory_current_rows,
 };
 pub use resolver::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,

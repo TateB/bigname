@@ -244,6 +244,33 @@ impl TestDatabase {
             .execute(&pool)
             .await
             .context("failed to create name_current for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE record_inventory_current (
+                        resource_id UUID NOT NULL REFERENCES resources (resource_id),
+                        record_version_boundary_key TEXT NOT NULL,
+                        record_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        enumeration_basis JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        selectors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        explicit_gaps JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        unsupported_families JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        last_change JSONB,
+                        entries JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        coverage JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        chain_positions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        canonicality_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        manifest_version BIGINT NOT NULL CHECK (manifest_version > 0),
+                        last_recomputed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (resource_id, record_version_boundary_key),
+                        CHECK (record_version_boundary_key <> '')
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create record_inventory_current for API tests")?;
         }
 
         Ok(Self {
@@ -442,6 +469,16 @@ impl TestDatabase {
         bigname_storage::upsert_name_current_rows(&self.pool, &[row])
             .await
             .context("failed to upsert name_current row for API test")?;
+        Ok(())
+    }
+
+    async fn insert_record_inventory_current_row(
+        &self,
+        row: bigname_storage::RecordInventoryCurrentRow,
+    ) -> Result<()> {
+        bigname_storage::upsert_record_inventory_current_rows(&self.pool, &[row])
+            .await
+            .context("failed to upsert record_inventory_current row for API test")?;
         Ok(())
     }
 
@@ -986,6 +1023,224 @@ fn exact_name_row(
     }
 }
 
+fn record_inventory_boundary_with_pointer(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<&str>,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": normalized_event_id,
+        "event_kind": event_kind,
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    })
+}
+
+fn record_inventory_boundary(logical_name_id: &str, resource_id: Uuid) -> Value {
+    record_inventory_boundary_with_pointer(logical_name_id, resource_id, None, None)
+}
+
+fn record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
+        enumeration_basis: json!({
+            "observed_selectors": true,
+            "capability_declared_families": true,
+            "globally_enumerable": false
+        }),
+        selectors: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            },
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "cacheable": true
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "cacheable": false
+            }
+        ]),
+        explicit_gaps: json!([
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": "not_observed_on_current_resolver"
+            }
+        ]),
+        unsupported_families: json!([
+            {
+                "record_family": "abi",
+                "unsupported_reason": "resolver_family_pending"
+            },
+            {
+                "record_family": "pubkey",
+                "unsupported_reason": "resolver_family_pending"
+            }
+        ]),
+        last_change: Some(json!({
+            "normalized_event_id": 1200,
+            "event_kind": "RecordsChanged",
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xlastchange",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        })),
+        entries: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000abc"
+                }
+            },
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending"
+            }
+        ]),
+        provenance: json!({
+            "normalized_event_ids": [1200],
+            "derivation_kind": "record_inventory_current_rebuild"
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "enumeration_basis": "declared_record_inventory"
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 3,
+        last_recomputed_at: timestamp(1_717_171_718),
+    }
+}
+
+fn worker_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: record_inventory_boundary_with_pointer(
+            logical_name_id,
+            resource_id,
+            Some(1201),
+            Some("RecordVersionChanged"),
+        ),
+        enumeration_basis: json!({
+            "observed_selectors": true,
+            "capability_declared_families": true,
+            "globally_enumerable": false
+        }),
+        selectors: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            },
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "cacheable": true
+            }
+        ]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: Some(json!({
+            "normalized_event_id": 1202,
+            "event_kind": "RecordChanged",
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xlastchange",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        })),
+        entries: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "unsupported",
+                "unsupported_reason": "value_not_retained_in_normalized_events"
+            },
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "value_not_retained_in_normalized_events"
+            }
+        ]),
+        provenance: json!({
+            "normalized_event_ids": [1201, 1202],
+            "derivation_kind": "record_inventory_current_rebuild"
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "enumeration_basis": "declared_record_inventory"
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xlastchange",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 3,
+        last_recomputed_at: timestamp(1_717_171_719),
+    }
+}
+
 fn address_name_name_current_row(
     logical_name_id: &str,
     canonical_display_name: &str,
@@ -1285,6 +1540,12 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
             token_lineage_id,
         ))
         .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -1373,12 +1634,63 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
         Some("unsupported")
     );
     assert_eq!(
-        declared_state
-            .get("record_inventory")
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("status"))
-            .and_then(Value::as_str),
-        Some("unsupported")
+        declared_state.get("record_inventory").cloned(),
+        Some(json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "enumeration_basis": {
+                "observed_selectors": true,
+                "capability_declared_families": true,
+                "globally_enumerable": false
+            },
+            "selectors": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "cacheable": false
+                }
+            ],
+            "explicit_gaps": [
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver"
+                }
+            ],
+            "unsupported_families": [
+                {
+                    "record_family": "abi",
+                    "unsupported_reason": "resolver_family_pending"
+                },
+                {
+                    "record_family": "pubkey",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ],
+            "last_change": {
+                "normalized_event_id": 1200,
+                "event_kind": "RecordsChanged",
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": "0xlastchange",
+                    "timestamp": "2026-04-17T00:00:04Z"
+                }
+            }
+        }))
     );
     assert_eq!(
         declared_state
@@ -1443,6 +1755,138 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
                 "timestamp": "2026-04-17T00:00:03Z"
             }
         })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_preserves_worker_record_inventory_boundary_pointer() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let worker_boundary = record_inventory_boundary_with_pointer(
+        logical_name_id,
+        resource_id,
+        Some(1201),
+        Some("RecordVersionChanged"),
+    );
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(worker_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request with worker-shaped record inventory projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: NameResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .get("record_inventory")
+            .and_then(|value| value.get("record_version_boundary")),
+        Some(&worker_boundary)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_returns_unsupported_record_inventory_when_projection_row_is_missing() -> Result<()>
+{
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request without record inventory projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: NameResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .get("record_inventory")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert_eq!(
+        payload
+            .declared_state
+            .get("record_inventory")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("unsupported_reason"))
+            .and_then(Value::as_str),
+        Some("declared record inventory summary is not yet projected")
     );
 
     database.cleanup().await?;
@@ -1980,6 +2424,12 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
             token_lineage_id,
         ))
         .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -2065,13 +2515,519 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
                 },
             },
             "record_inventory": {
-                "status": "unsupported",
-                "unsupported_reason": "declared resolution record inventory is not yet projected",
+                "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+                "enumeration_basis": {
+                    "observed_selectors": true,
+                    "capability_declared_families": true,
+                    "globally_enumerable": false,
+                },
+                "selectors": [
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "cacheable": true,
+                    },
+                    {
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "cacheable": true,
+                    },
+                    {
+                        "record_key": "text:com.twitter",
+                        "record_family": "text",
+                        "selector_key": "com.twitter",
+                        "cacheable": false,
+                    }
+                ],
+                "explicit_gaps": [
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "gap_reason": "not_observed_on_current_resolver",
+                    }
+                ],
+                "unsupported_families": [
+                    {
+                        "record_family": "abi",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_family": "pubkey",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ],
+                "last_change": {
+                    "normalized_event_id": 1200,
+                    "event_kind": "RecordsChanged",
+                    "chain_position": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": "0xlastchange",
+                        "timestamp": "2026-04-17T00:00:04Z",
+                    }
+                }
             },
             "record_cache": {
-                "status": "unsupported",
-                "unsupported_reason": "declared resolution record cache is not yet projected",
+                "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+                "entries": [
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "success",
+                        "value": {
+                            "coin_type": "60",
+                            "value": "0x0000000000000000000000000000000000000abc",
+                        }
+                    },
+                    {
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ]
             }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_preserves_worker_record_inventory_boundary_pointer() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let worker_boundary = record_inventory_boundary_with_pointer(
+        logical_name_id,
+        resource_id,
+        Some(1201),
+        Some("RecordVersionChanged"),
+    );
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(worker_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request with worker-shaped record inventory projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    let topology = declared_state
+        .get("topology")
+        .and_then(Value::as_object)
+        .expect("topology must be supported");
+    let version_boundaries = topology
+        .get("version_boundaries")
+        .and_then(Value::as_object)
+        .expect("version_boundaries must be present");
+
+    assert_eq!(
+        version_boundaries.get("topology_version_boundary"),
+        Some(&worker_boundary)
+    );
+    assert_eq!(
+        version_boundaries.get("record_version_boundary"),
+        Some(&worker_boundary)
+    );
+    assert_eq!(
+        declared_state
+            .get("record_inventory")
+            .and_then(|value| value.get("record_version_boundary")),
+        Some(&worker_boundary)
+    );
+    assert_eq!(
+        declared_state
+            .get("record_cache")
+            .and_then(|value| value.get("record_version_boundary")),
+        Some(&worker_boundary)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_returns_unsupported_record_inventory_sections_when_projection_row_is_missing()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request without record inventory projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.get("record_inventory"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record inventory is not yet projected",
+        }))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record cache is not yet projected",
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_declared_records_narrow_record_cache_in_request_order() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter,addr:60,avatar")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution request with narrowed records failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("record_cache")),
+        Some(&json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "entries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "not_found",
+                },
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000abc",
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_declared_records_return_not_found_cache_entry_for_explicit_gap()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=contenthash")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution request with explicit-gap selector failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state
+            .get("record_inventory")
+            .and_then(|value| value.get("explicit_gaps")),
+        Some(&json!([
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": "not_observed_on_current_resolver",
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "entries": [
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "not_found",
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_declared_records_synthesize_unsupported_family_entries() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let worker_boundary = record_inventory_boundary_with_pointer(
+        logical_name_id,
+        resource_id,
+        Some(1201),
+        Some("RecordVersionChanged"),
+    );
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(worker_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=abi:json,addr:60,pubkey,text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution request with unsupported-family selectors failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("record_inventory"))
+            .and_then(|inventory| inventory.get("unsupported_families")),
+        Some(&json!([]))
+    );
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("record_cache")),
+        Some(&json!({
+            "record_version_boundary": worker_boundary,
+            "entries": [
+                {
+                    "record_key": "abi:json",
+                    "record_family": "abi",
+                    "selector_key": "json",
+                    "status": "unsupported",
+                    "unsupported_reason": "record_family_not_supported_in_phase6_projection",
+                },
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+                {
+                    "record_key": "pubkey",
+                    "record_family": "pubkey",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "record_family_not_supported_in_phase6_projection",
+                },
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                }
+            ]
         }))
     );
 
