@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -417,9 +419,8 @@ struct PrimaryNameLookupState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PersistedPrimaryNameVerifiedReadback {
-    execution_trace_id: Uuid,
-    manifest_versions: JsonValue,
     verified_primary_name: JsonValue,
+    provenance: JsonValue,
     finished_at: OffsetDateTime,
 }
 
@@ -1200,10 +1201,12 @@ fn openapi_components() -> JsonValue {
                 "type": "object",
                 "required": ["verified_primary_name"],
                 "properties": {
-                    "verified_primary_name": schema_ref("JsonObject"),
+                    "verified_primary_name": schema_ref("PrimaryNameVerifiedResult"),
                 },
                 "additionalProperties": false,
             }),
+            "PrimaryNameVerifiedResult": primary_name_verified_result_schema(),
+            "PrimaryNameVerifiedResultProvenance": primary_name_verified_result_provenance_schema(),
             "ExactNameResponse": declared_response_schema(
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),
@@ -1519,6 +1522,37 @@ fn primary_name_claimed_result_schema() -> JsonValue {
                 "additionalProperties": false,
             }),
         ],
+    })
+}
+
+fn primary_name_verified_result_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+            "status": {
+                "type": "string",
+            },
+            "provenance": schema_ref("PrimaryNameVerifiedResultProvenance"),
+        },
+        "additionalProperties": true,
+    })
+}
+
+fn primary_name_verified_result_provenance_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["manifest_versions", "execution_trace_id"],
+        "properties": {
+            "manifest_versions": {
+                "type": "array",
+                "items": {},
+            },
+            "execution_trace_id": {
+                "type": "string",
+            },
+        },
+        "additionalProperties": false,
     })
 }
 
@@ -3204,7 +3238,13 @@ fn primary_name_claim_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
 
 fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
     if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
-        return persisted_verified.verified_primary_name.clone();
+        let mut verified_primary_name = persisted_verified.verified_primary_name.clone();
+        insert_value_field(
+            &mut verified_primary_name,
+            "provenance",
+            ensure_object(&persisted_verified.provenance),
+        );
+        return verified_primary_name;
     }
 
     match lookup_state.tuple_state {
@@ -3245,16 +3285,94 @@ fn primary_name_route_provenance(
         insert_value_field(
             &mut provenance,
             "manifest_versions",
-            array_or_empty(Some(&persisted_verified.manifest_versions)),
+            array_or_empty(provenance_field(
+                &persisted_verified.provenance,
+                "manifest_versions",
+            )),
         );
         insert_nullable_string_field(
             &mut provenance,
             "execution_trace_id",
-            Some(persisted_verified.execution_trace_id.to_string()),
+            string_field(provenance_field(
+                &persisted_verified.provenance,
+                "execution_trace_id",
+            )),
         );
     }
 
     provenance
+}
+
+fn primary_name_verified_readback_provenance(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<JsonValue> {
+    if let Some(trace_manifest_versions) = trace.manifest_context.get("manifest_versions") {
+        let cache_manifest_versions =
+            outcome
+                .cache_key
+                .manifest_versions
+                .as_array()
+                .ok_or_else(|| {
+                    error!(
+                        service = "api",
+                        address = %address,
+                        namespace = %namespace,
+                        coin_type = %coin_type,
+                        execution_trace_id = %trace.execution_trace_id,
+                        manifest_versions = ?outcome.cache_key.manifest_versions,
+                        "persisted verified primary-name outcome manifest_versions malformed"
+                    );
+                    ApiError::internal_error(format!(
+                        "persisted verified primary-name provenance mismatch for address {address}"
+                    ))
+                })?;
+        let trace_manifest_versions = trace_manifest_versions.as_array().ok_or_else(|| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                manifest_context = ?trace.manifest_context,
+                "persisted verified primary-name trace manifest_versions malformed"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name provenance mismatch for address {address}"
+            ))
+        })?;
+        if trace_manifest_versions != cache_manifest_versions {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                trace_manifest_versions = ?trace_manifest_versions,
+                outcome_manifest_versions = ?cache_manifest_versions,
+                "persisted verified primary-name manifest_versions mismatch"
+            );
+            return Err(ApiError::internal_error(format!(
+                "persisted verified primary-name provenance mismatch for address {address}"
+            )));
+        }
+    }
+
+    let mut provenance = empty_object();
+    insert_value_field(
+        &mut provenance,
+        "manifest_versions",
+        array_or_empty(Some(&outcome.cache_key.manifest_versions)),
+    );
+    insert_string_field(
+        &mut provenance,
+        "execution_trace_id",
+        trace.execution_trace_id.to_string(),
+    );
+    Ok(provenance)
 }
 
 fn primary_name_bootstrap_coverage() -> JsonValue {
@@ -5548,6 +5666,59 @@ fn value_to_string(value: &JsonValue) -> Option<String> {
     }
 }
 
+fn ensure_allowed_json_fields(
+    object: &JsonMap<String, JsonValue>,
+    allowed_fields: &[&str],
+    context: &str,
+) -> Result<()> {
+    for key in object.keys() {
+        if !allowed_fields
+            .iter()
+            .any(|allowed| allowed == &key.as_str())
+        {
+            bail!("{context} must not set field {key}");
+        }
+    }
+
+    Ok(())
+}
+
+fn required_json_string_field<'a>(
+    object: &'a JsonMap<String, JsonValue>,
+    field_name: &str,
+    context: &str,
+) -> Result<&'a str> {
+    object
+        .get(field_name)
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("{context} must include non-empty string field {field_name}"))
+}
+
+fn optional_nonempty_json_string_field(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    context: &str,
+) -> Result<Option<String>> {
+    match object.get(field_name) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::String(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
+        Some(_) => bail!("{context} field {field_name} must be null or a non-empty string"),
+    }
+}
+
+fn ensure_json_field_absent(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    context: &str,
+) -> Result<()> {
+    if object.contains_key(field_name) {
+        bail!("{context} must not set field {field_name}");
+    }
+
+    Ok(())
+}
+
 fn ensure_object(value: &JsonValue) -> JsonValue {
     value
         .as_object()
@@ -6477,11 +6648,12 @@ async fn load_persisted_primary_name_verified_readback(
 
     let verified_primary_name =
         persisted_verified_primary_name_section(&trace, &outcome, address, namespace, coin_type)?;
+    let provenance =
+        primary_name_verified_readback_provenance(&trace, &outcome, address, namespace, coin_type)?;
 
     Ok(Some(PersistedPrimaryNameVerifiedReadback {
-        execution_trace_id: outcome.execution_trace_id,
-        manifest_versions: outcome.cache_key.manifest_versions.clone(),
         verified_primary_name,
+        provenance,
         finished_at: outcome.finished_at,
     }))
 }
@@ -6554,30 +6726,40 @@ fn persisted_verified_primary_name_section(
         )));
     }
 
-    let verified_primary_name = outcome
-        .outcome_payload
-        .as_ref()
-        .and_then(JsonValue::as_object)
-        .and_then(|payload| payload.get("verified_primary_name"))
-        .and_then(JsonValue::as_object)
-        .map(|section| JsonValue::Object(section.clone()))
-        .ok_or_else(|| {
-            error!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                execution_trace_id = %trace.execution_trace_id,
-                "persisted verified primary-name outcome section missing"
-            );
-            ApiError::internal_error(format!(
-                "persisted verified primary-name outcome missing for address {address}"
-            ))
-        })?;
+    let verified_primary_name = extract_persisted_verified_primary_name_section(
+        outcome.outcome_payload.as_ref(),
+        "persisted verified primary-name outcome_payload",
+    )
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %trace.execution_trace_id,
+            error = ?load_error,
+            "persisted verified primary-name outcome section invalid"
+        );
+        ApiError::internal_error(format!(
+            "persisted verified primary-name payload mismatch for address {address}"
+        ))
+    })?
+    .ok_or_else(|| {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %trace.execution_trace_id,
+            "persisted verified primary-name outcome section missing"
+        );
+        ApiError::internal_error(format!(
+            "persisted verified primary-name outcome missing for address {address}"
+        ))
+    })?;
 
     let status = verified_primary_name
-        .as_object()
-        .and_then(|section| section.get("status"))
+        .get("status")
         .and_then(JsonValue::as_str)
         .ok_or_else(|| {
             error!(
@@ -6617,13 +6799,24 @@ fn persisted_verified_primary_name_section(
             )));
         }
     } else {
-        let trace_verified_primary_name = trace
-            .final_payload
-            .as_ref()
-            .and_then(JsonValue::as_object)
-            .and_then(|payload| payload.get("verified_primary_name"))
-            .and_then(JsonValue::as_object)
-            .map(|section| JsonValue::Object(section.clone()));
+        let trace_verified_primary_name = extract_persisted_verified_primary_name_section(
+            trace.final_payload.as_ref(),
+            "persisted verified primary-name trace.final_payload",
+        )
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                error = ?load_error,
+                "persisted verified primary-name trace final payload invalid"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name payload mismatch for address {address}"
+            ))
+        })?;
         if trace.failure_payload.is_some()
             || outcome.failure_payload.is_some()
             || trace_verified_primary_name.as_ref() != Some(&verified_primary_name)
@@ -6643,6 +6836,107 @@ fn persisted_verified_primary_name_section(
     }
 
     Ok(verified_primary_name)
+}
+
+fn extract_persisted_verified_primary_name_section(
+    payload: Option<&JsonValue>,
+    context: &str,
+) -> Result<Option<JsonValue>> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let payload = payload
+        .as_object()
+        .with_context(|| format!("{context} must be a JSON object"))?;
+    ensure_allowed_json_fields(payload, &["verified_primary_name"], context)?;
+
+    let section_context = format!("{context}.verified_primary_name");
+    let section = payload
+        .get("verified_primary_name")
+        .and_then(JsonValue::as_object)
+        .with_context(|| format!("{section_context} must be a JSON object"))?;
+    ensure_allowed_json_fields(
+        section,
+        &["status", "name", "failure_reason"],
+        &section_context,
+    )?;
+
+    match required_json_string_field(section, "status", &section_context)? {
+        "success" => {
+            validate_persisted_verified_primary_name_ref(
+                section.get("name"),
+                &format!("{section_context}.name"),
+            )?;
+            ensure_json_field_absent(section, "failure_reason", &section_context)?;
+        }
+        "not_found" => {
+            ensure_json_field_absent(section, "name", &section_context)?;
+            optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+        }
+        "mismatch" => {
+            validate_persisted_verified_primary_name_ref(
+                section.get("name"),
+                &format!("{section_context}.name"),
+            )?;
+            optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+        }
+        "invalid_name" => {
+            ensure_json_field_absent(section, "name", &section_context)?;
+            optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+        }
+        "execution_failed" => {
+            ensure_json_field_absent(section, "name", &section_context)?;
+            required_json_string_field(section, "failure_reason", &section_context)?;
+        }
+        status => {
+            bail!(
+                "{section_context} only supports success, not_found, mismatch, invalid_name, and execution_failed; found {status}"
+            );
+        }
+    }
+
+    Ok(Some(JsonValue::Object(section.clone())))
+}
+
+fn validate_persisted_verified_primary_name_ref(
+    value: Option<&JsonValue>,
+    context: &str,
+) -> Result<()> {
+    let name = value
+        .and_then(JsonValue::as_object)
+        .with_context(|| format!("{context} must be a JSON object"))?;
+    ensure_allowed_json_fields(
+        name,
+        &[
+            "logical_name_id",
+            "namespace",
+            "normalized_name",
+            "canonical_display_name",
+            "namehash",
+            "resource_id",
+            "binding_kind",
+        ],
+        context,
+    )?;
+
+    let logical_name_id = required_json_string_field(name, "logical_name_id", context)?;
+    let namespace = required_json_string_field(name, "namespace", context)?;
+    let normalized_name = required_json_string_field(name, "normalized_name", context)?;
+    required_json_string_field(name, "canonical_display_name", context)?;
+    required_json_string_field(name, "namehash", context)?;
+    optional_nonempty_json_string_field(name, "resource_id", context)?;
+    optional_nonempty_json_string_field(name, "binding_kind", context)?;
+
+    if namespace != "ens" {
+        bail!("{context}.namespace must be ens");
+    }
+    if logical_name_id != format!("ens:{normalized_name}") {
+        bail!(
+            "{context}.logical_name_id {logical_name_id} does not match normalized_name {normalized_name}"
+        );
+    }
+
+    Ok(())
 }
 
 fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {

@@ -692,11 +692,43 @@
         ],
         "type": "object"
       },
+      "PrimaryNameVerifiedResult": {
+        "additionalProperties": true,
+        "properties": {
+          "provenance": {
+            "$ref": "#/components/schemas/PrimaryNameVerifiedResultProvenance"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "PrimaryNameVerifiedResultProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "execution_trace_id": {
+            "type": "string"
+          },
+          "manifest_versions": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "required": [
+          "manifest_versions",
+          "execution_trace_id"
+        ],
+        "type": "object"
+      },
       "PrimaryNameVerifiedState": {
         "additionalProperties": false,
         "properties": {
           "verified_primary_name": {
-            "$ref": "#/components/schemas/JsonObject"
+            "$ref": "#/components/schemas/PrimaryNameVerifiedResult"
           }
         },
         "required": [

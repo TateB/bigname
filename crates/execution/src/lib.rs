@@ -66,12 +66,20 @@ pub struct PersistedVerifiedPrimaryNameIdentity {
     pub cache_key: ExecutionCacheKey,
 }
 
+/// Additive verified-primary provenance material anchored to one persisted execution trace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedPrimaryNameReadbackProvenance {
+    pub execution_trace_id: Uuid,
+    pub manifest_versions: Value,
+}
+
 /// Persisted ENS verified-primary result plus the validated stored execution pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedEnsVerifiedPrimaryName {
     pub execution_trace_id: Uuid,
     pub cache_key: ExecutionCacheKey,
     pub verified_primary_name: Value,
+    pub provenance: VerifiedPrimaryNameReadbackProvenance,
     pub trace: ExecutionTrace,
     pub outcome: ExecutionOutcome,
 }
@@ -193,6 +201,7 @@ pub async fn load_persisted_ens_verified_primary_name(
         })?;
 
     let validated = validate_verified_primary_trace_and_outcome(&trace, &outcome)?;
+    let provenance = extract_verified_primary_readback_provenance(&trace, &outcome)?;
     if load_primary_name_current(
         pool,
         &validated.tuple.normalized_address,
@@ -209,6 +218,7 @@ pub async fn load_persisted_ens_verified_primary_name(
         execution_trace_id: trace.execution_trace_id,
         cache_key: outcome.cache_key.clone(),
         verified_primary_name: validated.verified_primary_name.section,
+        provenance,
         trace,
         outcome,
     }))
@@ -333,6 +343,32 @@ fn validate_verified_primary_trace_and_outcome(
     Ok(ValidatedVerifiedPrimaryName {
         tuple,
         verified_primary_name,
+    })
+}
+
+fn extract_verified_primary_readback_provenance(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<VerifiedPrimaryNameReadbackProvenance> {
+    let cache_manifest_versions = required_array(
+        Some(&outcome.cache_key.manifest_versions),
+        "ENS verified-primary cache_key.manifest_versions",
+    )?;
+    if let Some(trace_manifest_versions) = trace.manifest_context.get("manifest_versions") {
+        let trace_manifest_versions = required_array(
+            Some(trace_manifest_versions),
+            "ENS verified-primary trace.manifest_context.manifest_versions",
+        )?;
+        if trace_manifest_versions != cache_manifest_versions {
+            bail!(
+                "ENS verified-primary trace.manifest_context.manifest_versions must match cache_key.manifest_versions"
+            );
+        }
+    }
+
+    Ok(VerifiedPrimaryNameReadbackProvenance {
+        execution_trace_id: trace.execution_trace_id,
+        manifest_versions: Value::Array(cache_manifest_versions.clone()),
     })
 }
 
@@ -3618,6 +3654,15 @@ mod tests {
         }
     }
 
+    fn expected_verified_primary_readback_provenance(
+        request: &PersistEnsVerifiedPrimaryNameRequest,
+    ) -> VerifiedPrimaryNameReadbackProvenance {
+        VerifiedPrimaryNameReadbackProvenance {
+            execution_trace_id: request.trace.execution_trace_id,
+            manifest_versions: request.outcome.cache_key.manifest_versions.clone(),
+        }
+    }
+
     fn verified_primary_success_request() -> PersistEnsVerifiedPrimaryNameRequest {
         verified_primary_request(
             Uuid::from_u128(0x0e7ec7ace00000000000000000000021),
@@ -3775,6 +3820,10 @@ mod tests {
                 .expect("verified-primary readback must exist");
         assert_eq!(loaded.execution_trace_id, request.trace.execution_trace_id);
         assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
+        );
+        assert_eq!(
             loaded.verified_primary_name,
             json!({
                 "status": "success",
@@ -3805,6 +3854,10 @@ mod tests {
                 .await?
                 .expect("mismatch readback must exist");
         assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
+        );
+        assert_eq!(
             loaded.verified_primary_name,
             json!({
                 "status": "mismatch",
@@ -3834,6 +3887,10 @@ mod tests {
                 .await?
                 .expect("not_found readback must exist");
         assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
+        );
+        assert_eq!(
             loaded.verified_primary_name,
             json!({ "status": "not_found" })
         );
@@ -3858,6 +3915,10 @@ mod tests {
             load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
                 .await?
                 .expect("invalid_name readback must exist");
+        assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
+        );
         assert_eq!(
             loaded.verified_primary_name,
             json!({
@@ -3887,6 +3948,10 @@ mod tests {
                 .await?
                 .expect("execution_failed readback must exist");
         assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
+        );
+        assert_eq!(
             loaded.verified_primary_name,
             json!({
                 "status": "execution_failed",
@@ -3897,6 +3962,53 @@ mod tests {
         assert_eq!(
             loaded.outcome.failure_payload,
             request.outcome.failure_payload
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn verified_primary_readback_provenance_remains_execution_local() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = verified_primary_success_request();
+        let metadata = request
+            .trace
+            .request_metadata
+            .as_object_mut()
+            .expect("verified-primary request_metadata must be an object");
+        metadata.insert(
+            "verified_primary_name_lookup".to_owned(),
+            json!({
+                "address": "0x00000000000000000000000000000000000000aa",
+                "namespace": ENS_NAMESPACE,
+                "coin_type": "60",
+            }),
+        );
+        metadata.insert(
+            "verified_primary_name_invalidation".to_owned(),
+            json!({
+                "claim_status": "success",
+                "primary_claim_source": {
+                    "seed": "claim-side-only"
+                },
+            }),
+        );
+        insert_primary_name_anchor(
+            &database,
+            "0x00000000000000000000000000000000000000aa",
+            "60",
+            PrimaryNameClaimStatus::Success,
+        )
+        .await?;
+
+        let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+        let loaded =
+            load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+                .await?
+                .expect("verified-primary readback must exist");
+        assert_eq!(
+            loaded.provenance,
+            expected_verified_primary_readback_provenance(&request)
         );
 
         database.cleanup().await
