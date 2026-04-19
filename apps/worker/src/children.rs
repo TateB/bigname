@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, clear_children_current, delete_children_current,
-    load_canonical_ens_v1_declared_child_sources, load_children_current, load_raw_block,
+    load_canonical_declared_child_sources, load_children_current, load_raw_block,
     upsert_children_current_rows, upsert_name_surfaces, upsert_normalized_events,
     upsert_raw_blocks,
 };
@@ -39,7 +39,7 @@ pub async fn rebuild_children_current(
 
 async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSummary> {
     let deleted_row_count = clear_children_current(pool).await?;
-    let sources = load_canonical_ens_v1_declared_child_sources(pool, None).await?;
+    let sources = load_canonical_declared_child_sources(pool, None).await?;
     let requested_parent_count = sources
         .iter()
         .map(|source| source.parent_logical_name_id.clone())
@@ -60,8 +60,7 @@ async fn rebuild_one_parent(
     parent_logical_name_id: &str,
 ) -> Result<ChildrenCurrentRebuildSummary> {
     let deleted_row_count = delete_children_current(pool, parent_logical_name_id).await?;
-    let sources =
-        load_canonical_ens_v1_declared_child_sources(pool, Some(parent_logical_name_id)).await?;
+    let sources = load_canonical_declared_child_sources(pool, Some(parent_logical_name_id)).await?;
     if sources.is_empty() {
         return Ok(ChildrenCurrentRebuildSummary {
             requested_parent_count: 1,
@@ -336,6 +335,7 @@ mod tests {
             database.pool(),
             &[
                 subregistry_event(
+                    "ens",
                     "alice-active",
                     "node:parent.eth",
                     "node:alice.parent.eth",
@@ -345,6 +345,7 @@ mod tests {
                     true,
                 ),
                 subregistry_event(
+                    "ens",
                     "bob-tombstoned",
                     "node:parent.eth",
                     "node:bob.parent.eth",
@@ -354,6 +355,7 @@ mod tests {
                     false,
                 ),
                 subregistry_event(
+                    "ens",
                     "carol-active",
                     "node:parent.eth",
                     "node:carol.parent.eth",
@@ -463,6 +465,7 @@ mod tests {
         seed_subregistry_events(
             database.pool(),
             &[subregistry_event(
+                "ens",
                 "alice-active",
                 "node:parent.eth",
                 "node:alice.parent.eth",
@@ -493,6 +496,107 @@ mod tests {
 
         let second_rows = load_children_current(database.pool(), parent).await?;
         assert_eq!(first_rows, second_rows);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuilds_basenames_declared_children_from_base_authority_sources() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent = "basenames:base.eth";
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xblockc8", 200, 1_717_172_200),
+                raw_block("base-mainnet", "0xblockc9", 201, 1_717_172_201),
+                raw_block("base-mainnet", "0xblockca", 202, 1_717_172_202),
+            ],
+        )
+        .await?;
+        seed_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(parent, "base.eth", "node:base.eth", 30),
+                name_surface(
+                    "basenames:alice.base.eth",
+                    "alice.base.eth",
+                    "node:alice.base.eth",
+                    31,
+                ),
+                name_surface(
+                    "basenames:bob.base.eth",
+                    "bob.base.eth",
+                    "node:bob.base.eth",
+                    32,
+                ),
+                name_surface(
+                    "basenames:carol.base.eth",
+                    "carol.base.eth",
+                    "node:carol.base.eth",
+                    33,
+                ),
+            ],
+        )
+        .await?;
+        seed_subregistry_events(
+            database.pool(),
+            &[
+                subregistry_event(
+                    "basenames",
+                    "alice-active",
+                    "node:base.eth",
+                    "node:alice.base.eth",
+                    200,
+                    0,
+                    false,
+                    true,
+                ),
+                subregistry_event(
+                    "basenames",
+                    "bob-tombstoned",
+                    "node:base.eth",
+                    "node:bob.base.eth",
+                    201,
+                    0,
+                    true,
+                    false,
+                ),
+                subregistry_event(
+                    "basenames",
+                    "carol-active",
+                    "node:base.eth",
+                    "node:carol.base.eth",
+                    202,
+                    0,
+                    false,
+                    true,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+        assert_eq!(summary.requested_parent_count, 1);
+        assert_eq!(summary.upserted_row_count, 2);
+        assert_eq!(summary.deleted_row_count, 0);
+
+        let rows = load_children_current(database.pool(), parent).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].child_logical_name_id, "basenames:alice.base.eth");
+        assert_eq!(rows[0].namespace, "basenames");
+        assert_eq!(rows[0].surface_class, DECLARED_SURFACE_CLASS);
+        assert_eq!(rows[0].chain_positions["base"]["block_number"], json!(200));
+        assert_eq!(
+            rows[0].provenance["manifest_versions"][0]["source_family"],
+            json!("basenames_base_registry")
+        );
+        assert_eq!(
+            rows[0].canonicality_summary["chains"]["base-mainnet"],
+            json!("finalized")
+        );
+        assert_eq!(rows[1].child_logical_name_id, "basenames:carol.base.eth");
+        assert_eq!(rows[1].last_recomputed_at, timestamp(1_717_172_202));
 
         database.cleanup().await
     }
@@ -543,6 +647,7 @@ mod tests {
             .map(|(namespace, _)| namespace)
             .expect("logical_name_id must include namespace")
             .to_owned();
+        let chain_id = chain_id_for_namespace(&namespace).to_owned();
 
         NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -556,7 +661,7 @@ mod tests {
             normalizer_version: "ensip15@2026-04-16".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id,
             block_hash: format!("0xsurface{block_number:02x}"),
             block_number,
             provenance: json!({"source": "worker_children_current_test", "kind": "name_surface"}),
@@ -565,6 +670,7 @@ mod tests {
     }
 
     fn subregistry_event(
+        namespace: &str,
         event_identity: &str,
         parent_namehash: &str,
         child_namehash: &str,
@@ -577,24 +683,25 @@ mod tests {
             !(tombstone && active_edge),
             "test subregistry_event cannot be both tombstoned and active"
         );
+        let chain_id = chain_id_for_namespace(namespace);
 
         NormalizedEvent {
             event_identity: event_identity.to_owned(),
-            namespace: "ens".to_owned(),
+            namespace: namespace.to_owned(),
             logical_name_id: None,
             resource_id: None,
             event_kind: "SubregistryChanged".to_owned(),
-            source_family: "ens_v1_registry_l1".to_owned(),
+            source_family: source_family_for_namespace(namespace).to_owned(),
             manifest_version: 1,
             source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
+            chain_id: Some(chain_id.to_owned()),
             block_number: Some(block_number),
             block_hash: Some(format!("0xblock{block_number:02x}")),
             transaction_hash: Some(format!("0xtx{block_number:02x}")),
             log_index: Some(log_index),
             raw_fact_ref: json!({
                 "kind": "raw_log",
-                "chain_id": "ethereum-mainnet",
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "log_index": log_index
             }),
@@ -611,6 +718,20 @@ mod tests {
                 "tombstone": tombstone,
                 "active_edge": active_edge
             }),
+        }
+    }
+
+    fn chain_id_for_namespace(namespace: &str) -> &'static str {
+        match namespace {
+            "basenames" => "base-mainnet",
+            _ => "ethereum-mainnet",
+        }
+    }
+
+    fn source_family_for_namespace(namespace: &str) -> &'static str {
+        match namespace {
+            "basenames" => "basenames_base_registry",
+            _ => "ens_v1_registry_l1",
         }
     }
 

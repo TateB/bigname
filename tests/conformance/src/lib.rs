@@ -1298,6 +1298,145 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn name_children_contract_returns_basenames_rows_from_base_authority() -> Result<()>
+        {
+            let database = HarnessDatabase::new().await?;
+            let parent_logical_name_id = "basenames:base.eth";
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface(
+                        parent_logical_name_id,
+                        "base.eth",
+                        "node:base.eth",
+                        40,
+                    ),
+                    collection_name_surface(
+                        "basenames:bob.base.eth",
+                        "bob.base.eth",
+                        "node:bob.base.eth",
+                        41,
+                    ),
+                    collection_name_surface(
+                        "basenames:alice.base.eth",
+                        "alice.base.eth",
+                        "node:alice.base.eth",
+                        42,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert basenames surfaces for children conformance")?;
+            bigname_storage::upsert_children_current_rows(
+                &database.pool,
+                &[
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "basenames:bob.base.eth",
+                        "bob.base.eth",
+                        "node:bob.base.eth",
+                        401,
+                        41,
+                    ),
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "basenames:alice.base.eth",
+                        "alice.base.eth",
+                        "node:alice.base.eth",
+                        402,
+                        42,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert basenames children_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/basenames/base.eth/children")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames children request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ChildrenResponse = read_json(response).await?;
+            assert!(
+                payload
+                    .declared_state
+                    .as_object()
+                    .map(|value| value.is_empty())
+                    .unwrap_or(false)
+            );
+            assert_eq!(payload.coverage.status, "full");
+            assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["declared".to_owned()]
+            );
+            assert_eq!(
+                payload.coverage.enumeration_basis,
+                "declared_direct_children"
+            );
+            assert_eq!(payload.page.sort, "display_name_asc");
+            assert_eq!(payload.consistency, "finalized");
+            assert_eq!(payload.last_updated, "2024-05-31T16:14:02Z");
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": ["402", "401"],
+                    "raw_fact_refs": [
+                        {"kind": "raw_log", "block_number": 42},
+                        {"kind": "raw_log", "block_number": 41}
+                    ],
+                    "manifest_versions": [{
+                        "manifest_version": 1,
+                        "source_family": "basenames_base_registry",
+                        "source_manifest_id": null
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "children_current_rebuild"
+                })
+            );
+            assert_eq!(
+                payload.chain_positions,
+                json!({
+                    "base": {
+                        "chain_id": "base-mainnet",
+                        "block_number": 42,
+                        "block_hash": "0xblock2a",
+                        "timestamp": "2026-04-17T00:00:42Z"
+                    }
+                })
+            );
+
+            let child_ids = payload
+                .data
+                .iter()
+                .map(|row| {
+                    row.get("logical_name_id")
+                        .and_then(Value::as_str)
+                        .expect("child row must include logical_name_id")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                child_ids,
+                vec!["basenames:alice.base.eth", "basenames:bob.base.eth"]
+            );
+            assert_eq!(
+                payload.data[0].get("surface_class").and_then(Value::as_str),
+                Some("declared")
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn name_children_contract_rejects_non_declared_surface_classes() -> Result<()> {
             let database = HarnessDatabase::new().await?;
 
@@ -7379,6 +7518,7 @@ mod shipped_api {
                 .map(|(namespace, _)| namespace)
                 .expect("logical_name_id must include namespace")
                 .to_owned();
+            let chain_id = chain_id_for_namespace(&namespace).to_owned();
 
             NameSurface {
                 logical_name_id: logical_name_id.to_owned(),
@@ -7392,7 +7532,7 @@ mod shipped_api {
                 normalizer_version: "ensip15@2026-04-16".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
-                chain_id: "ethereum-mainnet".to_owned(),
+                chain_id,
                 block_hash: format!("0xsurface{block_number:02x}"),
                 block_number,
                 provenance: json!({"seed": "children_surface"}),
@@ -7408,11 +7548,18 @@ mod shipped_api {
             normalized_event_id: i64,
             block_number: i64,
         ) -> bigname_storage::ChildrenCurrentRow {
+            let namespace = parent_logical_name_id
+                .split_once(':')
+                .map(|(namespace, _)| namespace)
+                .expect("parent_logical_name_id must include namespace");
+            let chain_id = chain_id_for_namespace(namespace);
+            let chain_slot = chain_slot_for_namespace(namespace);
+
             bigname_storage::ChildrenCurrentRow {
                 parent_logical_name_id: parent_logical_name_id.to_owned(),
                 child_logical_name_id: child_logical_name_id.to_owned(),
                 surface_class: "declared".to_owned(),
-                namespace: "ens".to_owned(),
+                namespace: namespace.to_owned(),
                 canonical_display_name: display_name.to_owned(),
                 normalized_name: display_name.to_owned(),
                 namehash: namehash.to_owned(),
@@ -7424,15 +7571,15 @@ mod shipped_api {
                     }],
                     "manifest_versions": [{
                         "manifest_version": 1,
-                        "source_family": "ens_v1_registry_l1",
+                        "source_family": source_family_for_namespace(namespace),
                         "source_manifest_id": null,
                     }],
                     "execution_trace_id": null,
                     "derivation_kind": "children_current_rebuild",
                 }),
                 chain_positions: json!({
-                    "ethereum": {
-                        "chain_id": "ethereum-mainnet",
+                    chain_slot: {
+                        "chain_id": chain_id,
                         "block_number": block_number,
                         "block_hash": format!("0xblock{block_number:02x}"),
                         "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
@@ -7441,11 +7588,32 @@ mod shipped_api {
                 canonicality_summary: json!({
                     "status": "finalized",
                     "chains": {
-                        "ethereum-mainnet": "finalized"
+                        chain_id: "finalized"
                     }
                 }),
                 manifest_version: 1,
                 last_recomputed_at: timestamp(1_717_172_000 + block_number),
+            }
+        }
+
+        fn chain_id_for_namespace(namespace: &str) -> &'static str {
+            match namespace {
+                "basenames" => "base-mainnet",
+                _ => "ethereum-mainnet",
+            }
+        }
+
+        fn chain_slot_for_namespace(namespace: &str) -> &'static str {
+            match namespace {
+                "basenames" => "base",
+                _ => "ethereum",
+            }
+        }
+
+        fn source_family_for_namespace(namespace: &str) -> &'static str {
+            match namespace {
+                "basenames" => "basenames_base_registry",
+                _ => "ens_v1_registry_l1",
             }
         }
 

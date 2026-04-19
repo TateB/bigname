@@ -35,8 +35,9 @@ pub use checkpoints::{
 };
 pub use children::{
     ChildrenCurrentRow, DeclaredChildEventSource, clear_children_current, delete_children_current,
-    load_canonical_ens_v1_declared_child_sources, load_children_current,
-    load_children_current_including_noncanonical, upsert_children_current_rows,
+    load_canonical_declared_child_sources, load_canonical_ens_v1_declared_child_sources,
+    load_children_current, load_children_current_including_noncanonical,
+    upsert_children_current_rows,
 };
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,

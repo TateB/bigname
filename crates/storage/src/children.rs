@@ -4,9 +4,10 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
-const ENSV1_SUBREGISTRY_EVENT_KIND: &str = "SubregistryChanged";
-const ENSV1_SUBREGISTRY_DERIVATION_KIND: &str = "ens_v1_subregistry_changed";
+const SUBREGISTRY_EVENT_KIND: &str = "SubregistryChanged";
+const SUBREGISTRY_DERIVATION_KIND: &str = "ens_v1_subregistry_changed";
 const ENSV1_SUBREGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
+const BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
   AND parent.canonicality_state IN (
       'canonical'::canonicality_state,
@@ -37,7 +38,7 @@ pub struct ChildrenCurrentRow {
     pub last_recomputed_at: OffsetDateTime,
 }
 
-/// Canonical ENSv1 subregistry event seed for rebuilding declared child rows.
+/// Canonical declared-child subregistry event seed for rebuilding declared child rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredChildEventSource {
     pub parent_logical_name_id: String,
@@ -139,8 +140,8 @@ pub async fn clear_children_current(pool: &PgPool) -> Result<u64> {
     .map(|result| result.rows_affected())
 }
 
-/// Load the latest canonical ENSv1 subregistry event per child surface.
-pub async fn load_canonical_ens_v1_declared_child_sources(
+/// Load the latest canonical declared-child subregistry event per child surface.
+pub async fn load_canonical_declared_child_sources(
     pool: &PgPool,
     parent_logical_name_id: Option<&str>,
 ) -> Result<Vec<DeclaredChildEventSource>> {
@@ -181,8 +182,13 @@ pub async fn load_canonical_ens_v1_declared_child_sources(
               ON child.namehash = ne.after_state ->> 'child_node'
             WHERE ne.event_kind = $1
               AND ne.derivation_kind = $2
-              AND ne.source_family = $3
+              AND ne.source_family IN ($3, $4)
               AND parent.namespace = child.namespace
+              AND parent.namespace = ne.namespace
+              AND child.namespace = ne.namespace
+              AND parent.chain_id = child.chain_id
+              AND parent.chain_id = ne.chain_id
+              AND child.chain_id = ne.chain_id
               AND ne.canonicality_state IN (
                     'canonical'::canonicality_state,
                     'safe'::canonicality_state,
@@ -221,29 +227,38 @@ pub async fn load_canonical_ens_v1_declared_child_sources(
         WHERE current_child_rank = 1
           AND tombstone = FALSE
           AND active_edge = TRUE
-          AND ($4::TEXT IS NULL OR parent_logical_name_id = $4)
+          AND ($5::TEXT IS NULL OR parent_logical_name_id = $5)
         ORDER BY
             parent_logical_name_id ASC,
             canonical_display_name ASC,
             child_logical_name_id ASC
         "#,
     )
-    .bind(ENSV1_SUBREGISTRY_EVENT_KIND)
-    .bind(ENSV1_SUBREGISTRY_DERIVATION_KIND)
+    .bind(SUBREGISTRY_EVENT_KIND)
+    .bind(SUBREGISTRY_DERIVATION_KIND)
     .bind(ENSV1_SUBREGISTRY_SOURCE_FAMILY)
+    .bind(BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY)
     .bind(parent_logical_name_id)
     .fetch_all(pool)
     .await
     .with_context(|| match parent_logical_name_id {
         Some(parent_logical_name_id) => format!(
-            "failed to load canonical ENSv1 declared child sources for parent_logical_name_id {parent_logical_name_id}"
+            "failed to load canonical declared child sources for parent_logical_name_id {parent_logical_name_id}"
         ),
-        None => "failed to load canonical ENSv1 declared child sources".to_owned(),
+        None => "failed to load canonical declared child sources".to_owned(),
     })?;
 
     rows.into_iter()
         .map(decode_declared_child_event_source)
         .collect()
+}
+
+/// Back-compat alias for the generalized declared-child source loader.
+pub async fn load_canonical_ens_v1_declared_child_sources(
+    pool: &PgPool,
+    parent_logical_name_id: Option<&str>,
+) -> Result<Vec<DeclaredChildEventSource>> {
+    load_canonical_declared_child_sources(pool, parent_logical_name_id).await
 }
 
 async fn load_children_current_internal(
@@ -597,17 +612,14 @@ fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredChildEventSo
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        str::FromStr,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::str::FromStr;
 
     use anyhow::Result;
     use serde_json::json;
     use sqlx::{
         PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
+        types::Uuid,
     };
 
     use super::*;
@@ -615,8 +627,6 @@ mod tests {
         CanonicalityState, NameSurface, NormalizedEvent, default_database_url,
         upsert_name_surfaces, upsert_normalized_events,
     };
-
-    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestDatabase {
         admin_pool: PgPool,
@@ -631,16 +641,10 @@ mod tests {
                 .unwrap_or_else(|_| default_database_url().to_owned());
             let base_options = PgConnectOptions::from_str(&database_url)
                 .context("failed to parse database URL for children_current tests")?;
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before unix epoch")?
-                .as_nanos();
-            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
             let database_name = format!(
-                "bigname_storage_children_current_test_{}_{}_{}",
+                "bigname_storage_children_current_test_{}_{}",
                 std::process::id(),
-                unique,
-                sequence
+                Uuid::new_v4().simple()
             );
 
             let admin_pool = PgPoolOptions::new()
@@ -709,6 +713,24 @@ mod tests {
         block_number: i64,
         canonicality_state: CanonicalityState,
     ) -> NameSurface {
+        name_surface_on_chain(
+            logical_name_id,
+            display_name,
+            namehash,
+            "ethereum-mainnet",
+            block_number,
+            canonicality_state,
+        )
+    }
+
+    fn name_surface_on_chain(
+        logical_name_id: &str,
+        display_name: &str,
+        namehash: &str,
+        chain_id: &str,
+        block_number: i64,
+        canonicality_state: CanonicalityState,
+    ) -> NameSurface {
         let namespace = logical_name_id
             .split_once(':')
             .map(|(namespace, _)| namespace)
@@ -727,7 +749,7 @@ mod tests {
             normalizer_version: "ensip15@2026-04-16".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: format!("0xsurface{block_number:02x}"),
             block_number,
             provenance: json!({"source": "children_current_test", "kind": "surface"}),
@@ -775,6 +797,9 @@ mod tests {
 
     fn subregistry_event(
         event_identity: &str,
+        namespace: &str,
+        source_family: &str,
+        chain_id: &str,
         parent_namehash: &str,
         child_namehash: &str,
         block_number: i64,
@@ -785,25 +810,25 @@ mod tests {
     ) -> NormalizedEvent {
         NormalizedEvent {
             event_identity: event_identity.to_owned(),
-            namespace: "ens".to_owned(),
+            namespace: namespace.to_owned(),
             logical_name_id: None,
             resource_id: None,
-            event_kind: ENSV1_SUBREGISTRY_EVENT_KIND.to_owned(),
-            source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY.to_owned(),
+            event_kind: SUBREGISTRY_EVENT_KIND.to_owned(),
+            source_family: source_family.to_owned(),
             manifest_version: 1,
             source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
+            chain_id: Some(chain_id.to_owned()),
             block_number: Some(block_number),
             block_hash: Some(format!("0xeventblock{block_number:02x}")),
             transaction_hash: Some(format!("0xtx{block_number:02x}")),
             log_index: Some(log_index),
             raw_fact_ref: json!({
                 "kind": "raw_log",
-                "chain_id": "ethereum-mainnet",
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "log_index": log_index
             }),
-            derivation_kind: ENSV1_SUBREGISTRY_DERIVATION_KIND.to_owned(),
+            derivation_kind: SUBREGISTRY_DERIVATION_KIND.to_owned(),
             canonicality_state,
             before_state: json!({}),
             after_state: json!({
@@ -936,7 +961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canonical_declared_child_sources_filter_noncanonical_events_and_reassignments()
+    async fn children_current_declared_child_sources_filter_noncanonical_events_and_reassignments()
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let parent_a = "ens:parent.eth";
@@ -992,6 +1017,9 @@ mod tests {
             &[
                 subregistry_event(
                     "alice-parent-a",
+                    "ens",
+                    ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                    "ethereum-mainnet",
                     "node:parent.eth",
                     "node:alice.parent.eth",
                     100,
@@ -1002,6 +1030,9 @@ mod tests {
                 ),
                 subregistry_event(
                     "alice-parent-b",
+                    "ens",
+                    ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                    "ethereum-mainnet",
                     "node:other.eth",
                     "node:alice.parent.eth",
                     101,
@@ -1012,6 +1043,9 @@ mod tests {
                 ),
                 subregistry_event(
                     "bob-observed",
+                    "ens",
+                    ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                    "ethereum-mainnet",
                     "node:other.eth",
                     "node:bob.parent.eth",
                     102,
@@ -1022,6 +1056,9 @@ mod tests {
                 ),
                 subregistry_event(
                     "carla-finalized",
+                    "ens",
+                    ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                    "ethereum-mainnet",
                     "node:other.eth",
                     "node:carla.parent.eth",
                     103,
@@ -1032,6 +1069,9 @@ mod tests {
                 ),
                 subregistry_event(
                     "alice-orphaned",
+                    "ens",
+                    ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                    "ethereum-mainnet",
                     "node:parent.eth",
                     "node:alice.parent.eth",
                     104,
@@ -1056,6 +1096,108 @@ mod tests {
         assert_eq!(current[0].parent_logical_name_id, parent_b);
         assert_eq!(current[0].child_logical_name_id, child_alice);
         assert_eq!(current[0].event_identity, "alice-parent-b");
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn children_current_declared_child_sources_include_basenames_base_registry() -> Result<()>
+    {
+        let database = TestDatabase::new().await?;
+        let parent = "basenames:base.eth";
+        let child = "basenames:alice.base.eth";
+        let colliding_ens_parent = "ens:base.eth";
+        let colliding_ens_child = "ens:alice.base.eth";
+
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface_on_chain(
+                    colliding_ens_parent,
+                    "base.eth",
+                    "node:base.eth",
+                    "ethereum-mainnet",
+                    39,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    parent,
+                    "base.eth",
+                    "node:base.eth",
+                    "base-mainnet",
+                    40,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    colliding_ens_child,
+                    "alice.base.eth",
+                    "node:alice.base.eth",
+                    "ethereum-mainnet",
+                    40,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    child,
+                    "alice.base.eth",
+                    "node:alice.base.eth",
+                    "base-mainnet",
+                    41,
+                    CanonicalityState::Finalized,
+                ),
+            ],
+        )
+        .await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                subregistry_event(
+                    "alice-base-registry",
+                    "basenames",
+                    BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY,
+                    "base-mainnet",
+                    "node:base.eth",
+                    "node:alice.base.eth",
+                    200,
+                    0,
+                    CanonicalityState::Finalized,
+                    false,
+                    true,
+                ),
+                subregistry_event(
+                    "alice-base-primary",
+                    "basenames",
+                    "basenames_base_primary",
+                    "base-mainnet",
+                    "node:base.eth",
+                    "node:alice.base.eth",
+                    201,
+                    0,
+                    CanonicalityState::Finalized,
+                    false,
+                    true,
+                ),
+            ],
+        )
+        .await?;
+
+        assert!(
+            load_canonical_declared_child_sources(database.pool(), Some(colliding_ens_parent))
+                .await?
+                .is_empty()
+        );
+
+        let current = load_canonical_declared_child_sources(database.pool(), Some(parent)).await?;
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].parent_logical_name_id, parent);
+        assert_eq!(current[0].child_logical_name_id, child);
+        assert_eq!(
+            current[0].source_family,
+            BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY
+        );
+        assert_eq!(current[0].namespace, "basenames");
+        assert_eq!(current[0].chain_id, "base-mainnet");
+        assert_eq!(current[0].event_identity, "alice-base-registry");
 
         database.cleanup().await
     }
