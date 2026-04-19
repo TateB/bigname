@@ -33,6 +33,7 @@ Implementation detail should stay subordinate to one rule: build the native `v1`
 - measure replacement by consumer capability coverage, not legacy API parity
 - prefer cohesive end-to-end slices over broad scaffolding with undefined semantics
 - freeze cross-workstream interfaces before parallel implementation starts
+- keep chain deployment profiles explicit and mutually exclusive within one canonical corpus
 
 ---
 
@@ -85,6 +86,7 @@ Turn the revised architecture into implementation-ready semantics for the first 
 - frozen `RecordInventory` semantics
 - frozen preimage observation model
 - frozen chain-intake contract for hash-first lineage, checkpoint promotion, and reorg handling
+- frozen deployment-profile rule: ship the mainnet profile first, with later Sepolia support as a separate single-profile option rather than a concurrent chain set
 - frozen consumer capability matrix in `docs/consumer-capabilities.md`
 - frozen workstream boundaries and ownership for shared crates
 - initial ADRs for stack and repo layout
@@ -156,7 +158,7 @@ Make the raw-fact, identity, and replay model concrete.
 
 ### Goal
 
-Ingest Ethereum L1 and Base and build the canonical source graph.
+Ingest the shipped mainnet profile (`ethereum-mainnet` plus `base-mainnet`) and build the canonical source graph.
 
 ### Deliverables
 
@@ -174,6 +176,17 @@ Ingest Ethereum L1 and Base and build the canonical source graph.
 - the system can follow both chains forward
 - every watched contract is explainable through a manifest or discovery edge
 - manifest changes propagate into normalized-event context
+- later additive Sepolia support remains a separate profile choice; the runtime does not ingest mainnet and Sepolia simultaneously
+
+### Planned Follow-On
+
+After the shipped mainnet profile is stable, add Sepolia support as an alternate deployment profile using `ethereum-sepolia` plus `base-sepolia`.
+
+Requirements for that follow-on:
+
+- reuse the same manifest, intake, discovery, and API semantics as the mainnet profile
+- make runtime profile selection explicit so one deployment chooses either the mainnet profile or the Sepolia profile
+- keep mainnet and Sepolia mutually exclusive within one canonical corpus, watch plan, and projection set
 
 ---
 

@@ -120,6 +120,9 @@ Rules:
 - public namespace assignment is explicit and versioned in an internal `NamespaceRegistry`
 - a technically ENS-backed name may still belong to a different public namespace product
 - no public name may exist twice across public namespaces
+- deployment profile is separate from public namespace assignment; it chooses which admitted chain set backs those same public namespaces
+- the shipped baseline uses the mainnet deployment profile
+- later Sepolia support is an alternate deployment profile for the same public namespaces, not a new namespace or a concurrent truth set
 
 Implication:
 
@@ -639,11 +642,17 @@ This graph is part of the truth model and audit surface. It is not a throwaway i
 
 ## 14. Intake Architecture
 
-Run three major intake planes:
+Run three major intake planes for one selected deployment profile at a time:
 
-- blockchain intake for Ethereum L1
-- blockchain intake for Base
+- blockchain intake for Ethereum L1 in the shipped mainnet profile
+- blockchain intake for Base in the shipped mainnet profile
 - execution intake for verified reads and CCIP flows
+
+Profile rules:
+
+- the shipped baseline profile is `ethereum-mainnet` plus `base-mainnet`
+- later Sepolia support is additive as an alternate deployment profile, not a concurrent expansion of the same canonical corpus
+- one deployment must choose exactly one profile at a time; it must not ingest, reconcile, or answer across mainnet and Sepolia in the same truth set
 
 Shared stages:
 

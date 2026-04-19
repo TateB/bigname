@@ -47,10 +47,15 @@ Validation rules:
 
 Cross-chain rules:
 
-- ENS authoritative positions are selected on Ethereum L1
-- Basenames authoritative positions are selected on Base
+- in the shipped mainnet profile, ENS authoritative positions are selected on `ethereum-mainnet`
+- in the shipped mainnet profile, Basenames authoritative positions are selected on `base-mainnet`
 - when a route also needs an auxiliary chain, choose the auxiliary position at the same requested consistency with timestamp less than or equal to the authoritative-chain timestamp
 - verified execution runs against the resolved positions only; it does not advance to a newer head mid-request
+
+Deployment-profile rules:
+
+- later Sepolia support may reuse the same route semantics with a different admitted chain set
+- one deployment answers under exactly one profile at a time; responses and explicit `chain_positions` must not mix mainnet and Sepolia chain keys
 
 ## 2. Shared Response Envelope
 

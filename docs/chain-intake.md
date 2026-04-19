@@ -2,7 +2,7 @@
 
 Status: Phase 0 baseline
 
-This document freezes the Ethereum and Base intake contract for lineage, fetch strategy, reconciliation, and upstream assumptions.
+This document freezes the chain-intake contract for the shipped mainnet deployment profile and the profile-selection rule that later alternate deployments must follow.
 
 ## 1. Mental Model
 
@@ -11,6 +11,7 @@ This document freezes the Ethereum and Base intake contract for lineage, fetch s
 - raw facts are append-only; canonicality and head promotion are explicit state
 - block hash is identity; block number is position
 - live ingestion and backfill must converge on the same raw-fact, normalized-event, and projection pipeline
+- a deployment selects one chain profile at a time; mainnet and Sepolia facts do not share the same canonical corpus, checkpoints, or projection state
 
 ## 2. Scope Boundary
 
@@ -34,7 +35,7 @@ These may exist later as separate capabilities, but they must not leak into the 
 
 ## 3. Upstream Requirements
 
-For each production chain source, the intake plane must have access to:
+For each chain source in the selected deployment profile, the intake plane must have access to:
 
 - block fetch by hash
 - block fetch by number or canonical tag

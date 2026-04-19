@@ -53,6 +53,13 @@ Capabilities are named and versioned. Each flag records:
 - status: `unsupported`, `shadow`, `supported`
 - optional notes
 
+### `chain`
+
+- `chain` names the authority chain for that manifest within the selected deployment profile
+- the shipped baseline uses mainnet chain IDs such as `ethereum-mainnet` and `base-mainnet`
+- later Sepolia support is additive as a separate manifest set and chain-ID set, not a concurrent extension of the same runtime
+- one runtime loads manifests from exactly one deployment profile at a time; it must not combine mainnet and Sepolia manifests in one canonical corpus, watch plan, or discovery graph
+
 ## 4. Example Shape
 
 ```toml
