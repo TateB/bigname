@@ -17,3 +17,9 @@ prefix_rule(
     decision = "allow",
     justification = "Committing per-slice keeps the log bisection-friendly; push stays a user action.",
 )
+
+prefix_rule(
+    pattern = ["./.agents/skills/orchestrate/scripts/slice-log"],
+    decision = "allow",
+    justification = "Deterministic slice-log append via helper script with validated shape and auto-stamped timestamp. Local, reversible, and free of shell redirection so the rule matches cleanly; hand-appends with `echo >>` are treated as opaque single invocations by Codex and always prompt.",
+)

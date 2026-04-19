@@ -66,11 +66,13 @@ All research, design, and review subagents communicate via a shared schema. See 
 
 ## Slice log
 
-When fanning out or looping, append to `.agents/state/slices.jsonl` — one JSON line per event:
+When fanning out or looping, log state transitions by invoking the helper script — do not hand-append with `echo >>`, `tee -a`, or direct `Edit`/`Write` on `slices.jsonl`:
 
 ```
-{"slice_id": "...", "status": "picked|in_flight|completed|blocked", "ts": "...", "owned_paths": [...], "subagent": "...", "notes": "..."}
+./.agents/skills/orchestrate/scripts/slice-log '{"slice_id":"...","status":"picked|in_flight|completed|blocked","owned_paths":[...],"subagent":"...","notes":"..."}'
 ```
+
+The helper auto-stamps `ts` (UTC, ISO 8601), validates `status`, and appends one compact JSON line to `.agents/state/slices.jsonl` in canonical field order. `.codex/rules/default.rules` auto-approves this exact invocation, so no per-session approval prompt fires. Raw `echo '{…}' >> …` contains a shell redirection, which Codex treats as a single opaque invocation that cannot be argv-matched by any rule — every session's first hand-append therefore prompts. Using the helper side-steps that entirely and keeps concurrent workers from racing on the same file write path.
 
 `next_slice_researcher` must read the log before picking so in-flight or completed slices are not re-picked. The log is gitignored and ephemeral; one line per state transition is enough.
 

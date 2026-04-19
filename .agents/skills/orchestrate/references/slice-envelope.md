@@ -28,11 +28,13 @@ Canonical schema for communicating about a slice across research, design, review
 
 ## Slice log
 
-Envelope state transitions append to `.agents/state/slices.jsonl`:
+Envelope state transitions are appended to `.agents/state/slices.jsonl` via the orchestrate helper:
 
 ```
-{"slice_id": "...", "status": "picked|in_flight|completed|blocked", "ts": "...", "owned_paths": [...], "subagent": "...", "notes": "..."}
+./.agents/skills/orchestrate/scripts/slice-log '{"slice_id":"...","status":"picked|in_flight|completed|blocked","owned_paths":[...],"subagent":"...","notes":"..."}'
 ```
+
+`ts` is auto-stamped; `status` is validated. Do not hand-append with shell redirection or direct edits — see the `Slice log` section in `orchestrate/SKILL.md` for why.
 
 - `picked` — researcher chose the slice; envelope exists but no worker is assigned.
 - `in_flight` — at least one worker has started on the slice.
