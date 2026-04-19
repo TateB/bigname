@@ -3227,6 +3227,42 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn resolution_contract_returns_selector_local_unsupported_for_non_alias_ancestor_selected_requests()
+        -> Result<()> {
+            run_resolution_negative_verified_path_case(
+                UnsupportedEnsVerifiedResolutionPathCase::NonAliasAncestorSelected,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn resolution_contract_returns_selector_local_unsupported_for_transport_assisted_requests()
+        -> Result<()> {
+            run_resolution_negative_verified_path_case(
+                UnsupportedEnsVerifiedResolutionPathCase::TransportAssisted,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_explain_contract_returns_not_found_for_non_alias_ancestor_selected_requests()
+        -> Result<()> {
+            run_resolution_execution_explain_negative_verified_path_case(
+                UnsupportedEnsVerifiedResolutionPathCase::NonAliasAncestorSelected,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_explain_contract_returns_not_found_for_transport_assisted_requests()
+        -> Result<()> {
+            run_resolution_execution_explain_negative_verified_path_case(
+                UnsupportedEnsVerifiedResolutionPathCase::TransportAssisted,
+            )
+            .await
+        }
+
+        #[tokio::test]
         async fn resolution_execution_explain_contract_returns_not_found_for_selector_set_cache_miss()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -7275,6 +7311,469 @@ mod shipped_api {
                 ],
                 "finished_at": format_timestamp(timestamp(1_717_171_900)),
             })
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum UnsupportedEnsVerifiedResolutionPathCase {
+            NonAliasAncestorSelected,
+            TransportAssisted,
+        }
+
+        impl UnsupportedEnsVerifiedResolutionPathCase {
+            fn execution_trace_id(self) -> Uuid {
+                match self {
+                    Self::NonAliasAncestorSelected => {
+                        Uuid::from_u128(0x0e7ec7ace00000000000000000000027)
+                    }
+                    Self::TransportAssisted => Uuid::from_u128(0x0e7ec7ace00000000000000000000028),
+                }
+            }
+
+            fn label(self) -> &'static str {
+                match self {
+                    Self::NonAliasAncestorSelected => "non-alias ancestor-selected",
+                    Self::TransportAssisted => "transport-assisted",
+                }
+            }
+
+            fn apply_to_name_row(self, row: &mut bigname_storage::NameCurrentRow) {
+                let summary = row
+                    .declared_summary
+                    .as_object_mut()
+                    .expect("resolution negative fixture requires object declared_summary");
+                summary.insert(
+                    "topology".to_owned(),
+                    self.expected_topology(&row.logical_name_id, row.resource_id),
+                );
+
+                if let Some(resolver) = summary.get_mut("resolver").and_then(Value::as_object_mut) {
+                    resolver.insert(
+                        "address".to_owned(),
+                        Value::String(
+                            match self {
+                                Self::NonAliasAncestorSelected => {
+                                    "0x0000000000000000000000000000000000000def"
+                                }
+                                Self::TransportAssisted => {
+                                    "0x0000000000000000000000000000000000000abc"
+                                }
+                            }
+                            .to_owned(),
+                        ),
+                    );
+                }
+            }
+
+            fn apply_to_trace(self, trace: &mut ExecutionTrace) {
+                let metadata = trace
+                    .request_metadata
+                    .as_object_mut()
+                    .expect("resolution negative fixture requires request_metadata object");
+                match self {
+                    Self::NonAliasAncestorSelected => {
+                        metadata.insert(
+                            "resolver_path".to_owned(),
+                            json!([{
+                                "logical_name_id": "ens:eth",
+                                "namespace": "ens",
+                                "normalized_name": "eth",
+                                "canonical_display_name": "eth",
+                                "resource_id": Uuid::from_u128(0x2210).to_string(),
+                                "chain_id": "ethereum-mainnet",
+                                "address": "0x0000000000000000000000000000000000000def",
+                                "latest_event_kind": "ResolverChanged",
+                            }]),
+                        );
+                    }
+                    Self::TransportAssisted => {
+                        metadata.insert(
+                            "transport".to_owned(),
+                            resolution_transport_assisted_transport(),
+                        );
+                    }
+                }
+            }
+
+            fn expected_topology(self, logical_name_id: &str, resource_id: Option<Uuid>) -> Value {
+                let resource_id = resource_id
+                    .expect("resolution negative fixture requires an exact-surface resource_id");
+                match self {
+                    Self::NonAliasAncestorSelected => {
+                        resolution_non_alias_ancestor_selected_topology(
+                            logical_name_id,
+                            resource_id,
+                        )
+                    }
+                    Self::TransportAssisted => {
+                        resolution_transport_assisted_topology(logical_name_id, resource_id)
+                    }
+                }
+            }
+        }
+
+        struct UnsupportedEnsVerifiedResolutionFixture {
+            logical_name_id: &'static str,
+            resource_id: Uuid,
+        }
+
+        async fn run_resolution_negative_verified_path_case(
+            path_case: UnsupportedEnsVerifiedResolutionPathCase,
+        ) -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture =
+                seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| format!("{} mixed resolution request failed", path_case.label()))?;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{} mixed resolution should keep the declared envelope and explicit unsupported verified results",
+                path_case.label()
+            );
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("mixed negative resolution response must include declared_state")?;
+            let topology = declared_state
+                .get("topology")
+                .context("mixed negative resolution response must include topology")?;
+
+            assert_negative_verified_resolution_topology(
+                path_case,
+                topology,
+                fixture.logical_name_id,
+            );
+            assert_eq!(
+                payload.provenance.get("execution_trace_id"),
+                Some(&Value::Null),
+                "{} mixed resolution must not surface the persisted execution trace id",
+                path_case.label()
+            );
+            assert_eq!(
+                payload.verified_state,
+                Some(resolution_unsupported_verified_state(&[
+                    "avatar",
+                    "text:com.twitter",
+                ])),
+                "{} mixed resolution must keep selector-local unsupported results",
+                path_case.label()
+            );
+
+            let expected_topology =
+                path_case.expected_topology(fixture.logical_name_id, Some(fixture.resource_id));
+            assert_eq!(
+                topology,
+                &expected_topology,
+                "{} mixed resolution topology should stay visible while verified resolution remains unsupported",
+                path_case.label()
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        async fn run_resolution_execution_explain_negative_verified_path_case(
+            path_case: UnsupportedEnsVerifiedResolutionPathCase,
+        ) -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let _fixture =
+                seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!("{} resolution execution explain request failed", path_case.label())
+                })?;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{} resolution execution explain should stay outside the shipped public explain surface",
+                path_case.label()
+            );
+
+            let payload: ErrorResponse = read_json(response).await?;
+            assert_eq!(payload.error.code, "not_found");
+            assert_eq!(
+                payload.error.message,
+                "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+            );
+            assert!(
+                payload.error.details.is_empty(),
+                "{} resolution execution explain should not add extra error details",
+                path_case.label()
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        async fn seed_unsupported_ens_verified_resolution_fixture(
+            database: &HarnessDatabase,
+            path_case: UnsupportedEnsVerifiedResolutionPathCase,
+        ) -> Result<UnsupportedEnsVerifiedResolutionFixture> {
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            database
+                .insert_record_inventory_current_row(record_inventory_row.clone())
+                .await?;
+
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution negative fixture requires an exact-name current row")?;
+            path_case.apply_to_name_row(&mut name_row);
+            database.insert_name_current_row(name_row.clone()).await?;
+
+            let supported_records =
+                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &supported_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = resolution_execution_verified_queries(
+                path_case.execution_trace_id(),
+                &["avatar", "text:com.twitter"],
+            );
+
+            let mut trace = resolution_execution_trace(
+                path_case.execution_trace_id(),
+                &request_key,
+                &["avatar", "text:com.twitter"],
+                persisted_verified_queries.clone(),
+            );
+            path_case.apply_to_trace(&mut trace);
+
+            upsert_execution_trace(&database.pool, &trace).await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    path_case.execution_trace_id(),
+                    cache_key,
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            Ok(UnsupportedEnsVerifiedResolutionFixture {
+                logical_name_id,
+                resource_id,
+            })
+        }
+
+        fn resolution_non_alias_ancestor_selected_topology(
+            logical_name_id: &str,
+            resource_id: Uuid,
+        ) -> Value {
+            let mut topology = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["avatar", "text:com.twitter"],
+            )
+            .get("topology")
+            .cloned()
+            .expect("supported declared resolution state must include topology");
+
+            let topology_object = topology
+                .as_object_mut()
+                .expect("resolution topology must be an object");
+            topology_object.insert(
+                "resolver_path".to_owned(),
+                json!([{
+                    "logical_name_id": "ens:eth",
+                    "namespace": "ens",
+                    "normalized_name": "eth",
+                    "canonical_display_name": "eth",
+                    "resource_id": Uuid::from_u128(0x2210).to_string(),
+                    "chain_id": "ethereum-mainnet",
+                    "address": "0x0000000000000000000000000000000000000def",
+                    "latest_event_kind": "ResolverChanged",
+                }]),
+            );
+            topology_object.insert(
+                "alias".to_owned(),
+                json!({
+                    "final_target": null,
+                    "hops": [],
+                }),
+            );
+            topology_object.insert(
+                "wildcard".to_owned(),
+                json!({
+                    "source": null,
+                    "matched_labels": [],
+                }),
+            );
+            topology_object.insert(
+                "transport".to_owned(),
+                json!({
+                    "source_chain_id": null,
+                    "target_chain_id": null,
+                    "contract_address": null,
+                    "latest_event_kind": null,
+                }),
+            );
+            topology
+        }
+
+        fn resolution_transport_assisted_transport() -> Value {
+            json!({
+                "source_chain_id": "base-mainnet",
+                "target_chain_id": "ethereum-mainnet",
+                "contract_address": "0x0000000000000000000000000000000000000fed",
+                "latest_event_kind": "ResolverTransportUpdated",
+            })
+        }
+
+        fn resolution_transport_assisted_topology(
+            logical_name_id: &str,
+            resource_id: Uuid,
+        ) -> Value {
+            let mut topology = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["avatar", "text:com.twitter"],
+            )
+            .get("topology")
+            .cloned()
+            .expect("supported declared resolution state must include topology");
+
+            let topology_object = topology
+                .as_object_mut()
+                .expect("resolution topology must be an object");
+            topology_object.insert(
+                "alias".to_owned(),
+                json!({
+                    "final_target": null,
+                    "hops": [],
+                }),
+            );
+            topology_object.insert(
+                "wildcard".to_owned(),
+                json!({
+                    "source": null,
+                    "matched_labels": [],
+                }),
+            );
+            topology_object.insert(
+                "transport".to_owned(),
+                resolution_transport_assisted_transport(),
+            );
+            topology
+        }
+
+        fn assert_negative_verified_resolution_topology(
+            path_case: UnsupportedEnsVerifiedResolutionPathCase,
+            topology: &Value,
+            logical_name_id: &str,
+        ) {
+            assert_eq!(
+                topology.get("wildcard"),
+                Some(&json!({
+                    "source": null,
+                    "matched_labels": [],
+                })),
+                "{} topology should explicitly stay outside wildcard-derived coverage in this slice",
+                path_case.label()
+            );
+            assert_eq!(
+                topology.get("alias"),
+                Some(&json!({
+                    "final_target": null,
+                    "hops": [],
+                })),
+                "{} topology should keep alias rewriting out of this negative case",
+                path_case.label()
+            );
+
+            match path_case {
+                UnsupportedEnsVerifiedResolutionPathCase::NonAliasAncestorSelected => {
+                    assert_eq!(
+                        topology.get("transport"),
+                        Some(&json!({
+                            "source_chain_id": null,
+                            "target_chain_id": null,
+                            "contract_address": null,
+                            "latest_event_kind": null,
+                        })),
+                        "ancestor-selected topology should not rely on transport participation",
+                    );
+                    assert_eq!(
+                        topology
+                            .get("resolver_path")
+                            .and_then(Value::as_array)
+                            .and_then(|resolver_path| resolver_path.first())
+                            .and_then(|hop| hop.get("logical_name_id"))
+                            .and_then(Value::as_str),
+                        Some("ens:eth"),
+                        "ancestor-selected topology should expose the selected ancestor hop",
+                    );
+                    assert_ne!(
+                        topology
+                            .get("resolver_path")
+                            .and_then(Value::as_array)
+                            .and_then(|resolver_path| resolver_path.first())
+                            .and_then(|hop| hop.get("logical_name_id"))
+                            .and_then(Value::as_str),
+                        Some(logical_name_id),
+                        "ancestor-selected topology must not collapse back to the request surface",
+                    );
+                }
+                UnsupportedEnsVerifiedResolutionPathCase::TransportAssisted => {
+                    assert_eq!(
+                        topology
+                            .get("resolver_path")
+                            .and_then(Value::as_array)
+                            .and_then(|resolver_path| resolver_path.first())
+                            .and_then(|hop| hop.get("logical_name_id"))
+                            .and_then(Value::as_str),
+                        Some(logical_name_id),
+                        "transport-assisted topology should stay exact-surface on the resolver path",
+                    );
+                    assert_eq!(
+                        topology.get("transport"),
+                        Some(&resolution_transport_assisted_transport()),
+                        "transport-assisted topology should expose the participating compatibility transport",
+                    );
+                }
+            }
         }
 
         fn primary_name_execution_requested_chain_positions() -> Value {
