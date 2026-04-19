@@ -6,7 +6,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bigname_adapters::{
     BlockDerivedNormalizedEventSyncSummary, EnsV1ReverseClaimSyncSummary,
-    EnsV1SubregistryDiscoverySyncSummary, ManifestNormalizedEventSyncSummary,
+    EnsV1SubregistryDiscoverySyncSummary, EnsV1UnwrappedAuthoritySyncSummary,
+    ManifestNormalizedEventSyncSummary,
 };
 use bigname_manifests::{
     DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
@@ -272,6 +273,43 @@ pub(crate) fn log_ens_v1_reverse_claim_sync_summary(
             normalized_event_sync_count = kind_summary.synced_count,
             normalized_event_inserted_count = kind_summary.inserted_count,
             "ENSv1 reverse claim event kind synced"
+        );
+    }
+}
+
+pub(crate) fn log_ens_v1_unwrapped_authority_sync_summary(
+    chain: &str,
+    summary: &EnsV1UnwrappedAuthoritySyncSummary,
+) {
+    if summary.scanned_log_count == 0
+        && summary.total_name_surface_count == 0
+        && summary.total_resource_count == 0
+        && summary.total_surface_binding_count == 0
+        && summary.total_normalized_event_count == 0
+    {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        identity_name_surface_count = summary.total_name_surface_count,
+        identity_resource_count = summary.total_resource_count,
+        identity_surface_binding_count = summary.total_surface_binding_count,
+        identity_normalized_event_count = summary.total_normalized_event_count,
+        identity_event_kind_count = summary.by_kind.len(),
+        "ENSv1 unwrapped authority synced from stored raw logs"
+    );
+
+    for (event_kind, count) in &summary.by_kind {
+        info!(
+            service = "indexer",
+            chain,
+            event_kind,
+            normalized_event_sync_count = count,
+            "ENSv1 unwrapped authority event kind synced"
         );
     }
 }
@@ -622,6 +660,16 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
                 )
             })?;
         log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
+
+        let summary = bigname_adapters::sync_ens_v1_unwrapped_authority(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv1 unwrapped authority from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v1_unwrapped_authority_sync_summary(&chain.chain, &summary);
     }
 
     Ok(())

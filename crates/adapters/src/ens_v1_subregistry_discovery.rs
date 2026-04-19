@@ -10,6 +10,7 @@ use sha3::{Digest, Keccak256};
 use sqlx::{PgPool, Row, types::Uuid};
 
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
+const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const SUBREGISTRY_EDGE_KIND: &str = "subregistry";
 const EVENT_KIND_SUBREGISTRY_CHANGED: &str = "SubregistryChanged";
 const DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED: &str = "ens_v1_subregistry_changed";
@@ -458,7 +459,9 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         let manifest = active_manifests.get(&source_manifest_id).with_context(|| {
             format!("missing active manifest metadata for manifest_id {source_manifest_id}")
         })?;
-        if manifest.source_family != ENS_V1_REGISTRY_SOURCE_FAMILY {
+        if manifest.source_family != ENS_V1_REGISTRY_SOURCE_FAMILY
+            && manifest.source_family != BASENAMES_BASE_REGISTRY_SOURCE_FAMILY
+        {
             continue;
         }
         if manifest.chain != watched_contract.chain {
@@ -784,6 +787,26 @@ mod tests {
     }
 
     fn manifest_contents(include_discovery_rule: bool) -> String {
+        manifest_contents_for_registry(
+            "ens",
+            ENS_V1_REGISTRY_SOURCE_FAMILY,
+            "ethereum-mainnet",
+            "ens_v1",
+            "ENSRegistry",
+            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+            include_discovery_rule,
+        )
+    }
+
+    fn manifest_contents_for_registry(
+        namespace: &str,
+        source_family: &str,
+        chain: &str,
+        deployment_epoch: &str,
+        root_name: &str,
+        root_address: &str,
+        include_discovery_rule: bool,
+    ) -> String {
         let discovery_rule = if include_discovery_rule {
             r#"
 [[discovery_rules]]
@@ -802,10 +825,10 @@ admission = "reachable_from_root"
         format!(
             r#"
 manifest_version = 1
-namespace = "ens"
-source_family = "ens_v1_registry_l1"
-chain = "ethereum-mainnet"
-deployment_epoch = "ens_v1"
+namespace = "{namespace}"
+source_family = "{source_family}"
+chain = "{chain}"
+deployment_epoch = "{deployment_epoch}"
 rollout_status = "active"
 normalizer_version = "uts46-v1"
 
@@ -813,12 +836,12 @@ normalizer_version = "uts46-v1"
 declared_children = "supported"
 
 [[roots]]
-name = "ENSRegistry"
-address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+name = "{root_name}"
+address = "{root_address}"
 
 [[contracts]]
 role = "registry"
-address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+address = "{root_address}"
 proxy_kind = "none"
 {discovery_rule}
 "#
@@ -926,6 +949,13 @@ proxy_kind = "none"
         let mut hasher = Keccak256::new();
         hasher.update(label.as_bytes());
         format!("0x{}", hex_string(hasher.finalize()))
+    }
+
+    fn base_eth_node() -> Result<String> {
+        child_node(
+            &child_node(ZERO_NODE, &labelhash_hex("eth"))?,
+            &labelhash_hex("base"),
+        )
     }
 
     fn encode_new_owner_log_data(owner: &str) -> Vec<u8> {
@@ -1048,6 +1078,125 @@ proxy_kind = "none"
                 addresses: vec![
                     "0x00000000000000000000000000000000000000cc".to_owned(),
                     "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 1,
+                discovery_edge_entry_count: 1,
+            }]
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            "basenames",
+            BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+            "v1",
+            &manifest_contents_for_registry(
+                "basenames",
+                BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+                "base-mainnet",
+                "basenames_v1",
+                "BasenamesRegistry",
+                "0x00000000000000000000000000000000000000bb",
+                true,
+            ),
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            "base-mainnet",
+            "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            42,
+            "0x00000000000000000000000000000000000000bb",
+            "0x00000000000000000000000000000000000000cc",
+            &base_eth_node()?,
+            "alice",
+            CanonicalityState::Finalized,
+        )
+        .await?;
+
+        let first = sync_ens_v1_subregistry_discovery(database.pool(), "base-mainnet").await?;
+        assert_eq!(
+            first,
+            EnsV1SubregistryDiscoverySyncSummary {
+                scanned_log_count: 1,
+                matched_log_count: 1,
+                active_observation_count: 1,
+                active_edge_count: 1,
+                admitted_edge_count: 1,
+                inserted_edge_count: 1,
+                deactivated_edge_count: 0,
+            }
+        );
+
+        let second = sync_ens_v1_subregistry_discovery(database.pool(), "base-mainnet").await?;
+        assert_eq!(
+            second,
+            EnsV1SubregistryDiscoverySyncSummary {
+                scanned_log_count: 1,
+                matched_log_count: 1,
+                active_observation_count: 1,
+                active_edge_count: 1,
+                admitted_edge_count: 1,
+                inserted_edge_count: 0,
+                deactivated_edge_count: 0,
+            }
+        );
+
+        let discovery_source = ens_v1_subregistry_discovery_source("base-mainnet");
+        let parent_node = base_eth_node()?;
+        let discovered_contract_instance_id = load_contract_instance_for_address(
+            database.pool(),
+            "base-mainnet",
+            "0x00000000000000000000000000000000000000cc",
+        )
+        .await?;
+        let normalized_events =
+            load_normalized_events_by_namespace(database.pool(), "basenames").await?;
+        assert_eq!(normalized_events.len(), 1);
+        assert_eq!(normalized_events[0].namespace, "basenames");
+        assert_eq!(
+            normalized_events[0].canonicality_state,
+            CanonicalityState::Finalized
+        );
+        assert_eq!(
+            normalized_events[0].after_state["parent_node"].as_str(),
+            Some(parent_node.as_str())
+        );
+        assert_eq!(
+            normalized_events[0].after_state["active_edge"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            normalized_events[0].after_state["to_contract_instance_id"].as_str(),
+            Some(discovered_contract_instance_id.to_string().as_str())
+        );
+        assert_eq!(
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+            )
+            .bind(&discovery_source)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+        let watched_plan = load_watched_chain_plan(database.pool()).await?;
+        assert_eq!(
+            watched_plan,
+            vec![WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: vec![
+                    "0x00000000000000000000000000000000000000bb".to_owned(),
+                    "0x00000000000000000000000000000000000000cc".to_owned(),
                 ],
                 manifest_root_entry_count: 1,
                 manifest_contract_entry_count: 1,

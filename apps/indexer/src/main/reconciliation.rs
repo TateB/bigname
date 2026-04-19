@@ -21,7 +21,7 @@ use crate::{
     },
     runtime::{
         IntakeChainTask, checkpoint_mode, log_block_derived_normalized_event_summary,
-        log_ens_v1_reverse_claim_sync_summary,
+        log_ens_v1_reverse_claim_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
     },
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,43 +101,6 @@ pub(crate) fn log_chain_reconciliation_outcome(outcome: &ChainReconciliationOutc
         finalized_block_number = outcome.finalized_block_number,
         "provider heads reconciled for chain"
     );
-}
-
-fn log_ens_v1_unwrapped_authority_sync_summary(
-    chain: &str,
-    summary: &bigname_adapters::EnsV1UnwrappedAuthoritySyncSummary,
-) {
-    if summary.scanned_log_count == 0
-        && summary.total_name_surface_count == 0
-        && summary.total_resource_count == 0
-        && summary.total_surface_binding_count == 0
-        && summary.total_normalized_event_count == 0
-    {
-        return;
-    }
-
-    info!(
-        service = "indexer",
-        chain,
-        scanned_raw_log_count = summary.scanned_log_count,
-        matched_raw_log_count = summary.matched_log_count,
-        identity_name_surface_count = summary.total_name_surface_count,
-        identity_resource_count = summary.total_resource_count,
-        identity_surface_binding_count = summary.total_surface_binding_count,
-        identity_normalized_event_count = summary.total_normalized_event_count,
-        identity_event_kind_count = summary.by_kind.len(),
-        "ENSv1 unwrapped authority synced from stored raw logs"
-    );
-
-    for (event_kind, count) in &summary.by_kind {
-        info!(
-            service = "indexer",
-            chain,
-            event_kind,
-            normalized_event_sync_count = count,
-            "ENSv1 unwrapped authority event kind synced"
-        );
-    }
 }
 
 pub(crate) async fn poll_provider_heads(

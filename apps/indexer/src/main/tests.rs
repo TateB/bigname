@@ -59,7 +59,16 @@ impl TestManifestDir {
         source_family: &str,
         contents: &str,
     ) -> Result<PathBuf> {
-        let directory = self.path.join("ens").join(source_family);
+        self.write_manifest_for_namespace_source_family("ens", source_family, contents)
+    }
+
+    fn write_manifest_for_namespace_source_family(
+        &self,
+        namespace: &str,
+        source_family: &str,
+        contents: &str,
+    ) -> Result<PathBuf> {
+        let directory = self.path.join(namespace).join(source_family);
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = directory.join("v1.toml");
@@ -771,6 +780,36 @@ admission = "reachable_from_root"
     .to_owned()
 }
 
+fn basenames_base_registry_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_base_registry"
+chain = "base-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "BasenamesRegistry"
+address = "0xb94704422c2a1e396835a571837aa5ae53285a95"
+
+[[contracts]]
+role = "registry"
+address = "0xb94704422c2a1e396835a571837aa5ae53285a95"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    .to_owned()
+}
+
 fn ens_v1_new_owner_topic0() -> String {
     keccak256_hex(b"NewOwner(bytes32,bytes32,address)")
 }
@@ -789,6 +828,29 @@ async fn insert_raw_new_owner_log(
     block: &ProviderBlock,
     emitting_address: &str,
     owner: &str,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    insert_raw_new_owner_log_for_parent(
+        pool,
+        chain,
+        block,
+        emitting_address,
+        owner,
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "eth",
+        canonicality_state,
+    )
+    .await
+}
+
+async fn insert_raw_new_owner_log_for_parent(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    owner: &str,
+    parent_node: &str,
+    label: &str,
     canonicality_state: CanonicalityState,
 ) -> Result<()> {
     upsert_raw_blocks(
@@ -812,8 +874,8 @@ async fn insert_raw_new_owner_log(
             emitting_address: emitting_address.to_ascii_lowercase(),
             topics: vec![
                 ens_v1_new_owner_topic0(),
-                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-                labelhash_hex("eth"),
+                parent_node.to_owned(),
+                labelhash_hex(label),
             ],
             data: encode_new_owner_log_data(owner),
             canonicality_state,
@@ -1386,13 +1448,25 @@ fn encode_name_wrapped_log_data(dns_name: &[u8]) -> String {
 }
 
 fn dns_encoded_eth_name(label: &str) -> Vec<u8> {
+    dns_encoded_name(&[label, "eth"])
+}
+
+fn dns_encoded_base_eth_name(label: &str) -> Vec<u8> {
+    dns_encoded_name(&[label, "base", "eth"])
+}
+
+fn dns_encoded_name(labels: &[&str]) -> Vec<u8> {
     let mut output = Vec::new();
-    output.push(u8::try_from(label.len()).expect("resolver label length must fit in u8"));
-    output.extend_from_slice(label.as_bytes());
-    output.push(3);
-    output.extend_from_slice(b"eth");
+    for label in labels {
+        output.push(u8::try_from(label.len()).expect("resolver label length must fit in u8"));
+        output.extend_from_slice(label.as_bytes());
+    }
     output.push(0);
     output
+}
+
+fn base_eth_node() -> String {
+    namehash_for_dns_name(&dns_encoded_name(&["base", "eth"]))
 }
 
 fn abi_word_u64(value: u64) -> [u8; 32] {
@@ -1587,6 +1661,29 @@ fn rpc_resolver_text_changed_log_payload(
     })
 }
 
+fn rpc_resolver_text_changed_log_payload_for_namehash(
+    block: &ProviderBlock,
+    address: &str,
+    namehash: &str,
+    key: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            resolver_text_changed_topic0(),
+            namehash,
+            keccak256_hex(key.as_bytes())
+        ],
+        "data": encode_dynamic_string_log_data(key)
+    })
+}
+
 fn rpc_resolver_name_changed_log_payload_for_namehash(
     block: &ProviderBlock,
     address: &str,
@@ -1685,6 +1782,18 @@ fn hex_string(bytes: &[u8]) -> String {
         output.push_str(&format!("{byte:02x}"));
     }
     output
+}
+
+fn decode_hex_string(payload: &str) -> Vec<u8> {
+    let payload = payload.strip_prefix("0x").unwrap_or(payload);
+    payload
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let hex = std::str::from_utf8(chunk).expect("hex payload must be utf-8");
+            u8::from_str_radix(hex, 16).expect("hex payload must contain valid bytes")
+        })
+        .collect()
 }
 
 async fn spawn_json_rpc_server(
@@ -3282,6 +3391,259 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observations()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x347);
+    let registry_contract_instance_id = Uuid::from_u128(0x348);
+    let resolver_contract_instance_id = Uuid::from_u128(0x349);
+    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
+    let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
+    let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
+    let reverse_node = reverse_node_for_address(claimed_address);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'basenames',
+                    'basenames_base_primary',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_primary/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'basenames',
+                    'basenames_base_registry',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_registry/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    3,
+                    1,
+                    'basenames',
+                    'basenames_base_resolver',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_resolver/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context(
+        "failed to insert manifest_versions for Basenames primary-claim source reconciliation test",
+    )?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        registry_address,
+        Some(2),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        resolver_address,
+        Some(3),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        2,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        3,
+        "resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad",
+        Some("0xbebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebe"),
+        65,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![
+            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &reverse_node,
+                resolver_address,
+                1,
+            ),
+            rpc_resolver_name_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &reverse_node,
+                "alice.base.eth",
+                2,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &reverse_node,
+                7,
+                3,
+            ),
+        ],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("Basenames primary-claim source reconciliation must update task state");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND resource_id IS NULL AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.base.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->>'address' FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        claimed_address.to_ascii_lowercase()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->>'reverse_node' FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind = 'RecordVersionChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_node
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->'claim_provenance'->>'source_family' FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames_base_primary".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'primary_claim_source'->'claim_provenance'->>'contract_role' FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        REVERSE_REGISTRAR_ROLE.to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     let registrar_contract_instance_id = Uuid::from_u128(33);
@@ -3724,6 +4086,278 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identity_rows()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registrar_contract_instance_id = Uuid::from_u128(0x351);
+    let registry_contract_instance_id = Uuid::from_u128(0x352);
+    let resolver_contract_instance_id = Uuid::from_u128(0x353);
+    let registrar_address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a";
+    let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
+    let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
+    let alice_namehash = namehash_for_dns_name(&dns_encoded_base_eth_name("alice"));
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'basenames',
+                    'basenames_base_registrar',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_registrar/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'basenames',
+                    'basenames_base_registry',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_registry/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    3,
+                    1,
+                    'basenames',
+                    'basenames_base_resolver',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_resolver/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for Basenames authority reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        registrar_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        "root",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registrar_contract_instance_id,
+        "base-mainnet",
+        registrar_address,
+        Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        registry_address,
+        Some(2),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        resolver_address,
+        Some(3),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "registrar",
+        registrar_contract_instance_id,
+        registrar_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        2,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        3,
+        "resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xedededededededededededededededededededededededededededededededed",
+        Some("0xfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe"),
+        52,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![
+            rpc_registrar_name_registered_log_payload(
+                &canonical_head,
+                registrar_address,
+                "alice",
+                canonical_head.block_timestamp_unix_secs + 31_536_000,
+            ),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &alice_namehash,
+                resolver_address,
+                1,
+            ),
+            rpc_resolver_text_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &alice_namehash,
+                "com.twitter",
+                2,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                resolver_address,
+                &alice_namehash,
+                7,
+                3,
+            ),
+        ],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("Basenames authority reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(52));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM token_lineages")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM resources")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM name_surfaces")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM surface_bindings")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT logical_name_id FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "basenames:alice.base.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT canonical_display_name FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "alice.base.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT namespace FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "basenames".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT binding_kind FROM surface_bindings LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "declared_registry_path".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames_base_registry".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT namespace FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
@@ -3736,42 +4370,45 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         ManifestLoadStatus::Loaded
     );
     assert_eq!(runtime_state.manifest_summary.namespace_count, 2);
-    assert_eq!(runtime_state.manifest_summary.source_family_count, 5);
-    assert_eq!(runtime_state.manifest_summary.manifest_count, 5);
+    assert_eq!(runtime_state.manifest_summary.source_family_count, 10);
+    assert_eq!(runtime_state.manifest_summary.manifest_count, 10);
     assert_eq!(
         runtime_state.sync_summary.status,
         ManifestSyncStatus::Synced
     );
-    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 5);
-    assert_eq!(runtime_state.sync_summary.active_manifest_count, 3);
-    assert_eq!(runtime_state.sync_summary.root_count, 2);
-    assert_eq!(runtime_state.sync_summary.contract_count, 4);
-    assert_eq!(runtime_state.sync_summary.capability_count, 5);
-    assert_eq!(runtime_state.sync_summary.discovery_rule_count, 1);
-    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 3);
-    assert_eq!(runtime_state.discovery_admission.active_root_count, 2);
-    assert_eq!(runtime_state.discovery_admission.active_contract_count, 3);
-    assert_eq!(runtime_state.discovery_admission.active_rule_count, 1);
+    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 10);
+    assert_eq!(runtime_state.sync_summary.active_manifest_count, 8);
+    assert_eq!(runtime_state.sync_summary.root_count, 3);
+    assert_eq!(runtime_state.sync_summary.contract_count, 10);
+    assert_eq!(runtime_state.sync_summary.capability_count, 6);
+    assert_eq!(runtime_state.sync_summary.discovery_rule_count, 2);
+    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_rule_count, 2);
     assert_eq!(
         runtime_state
             .manifest_normalized_event_summary
             .total_synced_count,
-        6
+        12
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
-        3
+        8
     );
-    assert_eq!(runtime_state.watched_contract_summary.source_entry_count, 5);
+    assert_eq!(
+        runtime_state.watched_contract_summary.source_entry_count,
+        11
+    );
     assert_eq!(
         runtime_state.watched_contract_summary.manifest_root_count,
-        2
+        3
     );
     assert_eq!(
         runtime_state
             .watched_contract_summary
             .manifest_contract_count,
-        3
+        8
     );
     assert_eq!(
         runtime_state.watched_contract_summary.discovery_edge_count,
@@ -3779,21 +4416,36 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     );
     assert_eq!(
         runtime_state.watched_chain_plan,
-        vec![WatchedChainPlan {
-            chain: "ethereum-mainnet".to_owned(),
-            addresses: vec![
-                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
-                "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
-                "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb".to_owned(),
-            ],
-            manifest_root_entry_count: 2,
-            manifest_contract_entry_count: 3,
-            discovery_edge_entry_count: 0,
-        }]
+        vec![
+            WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: vec![
+                    "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a".to_owned(),
+                    "0x79ea96012eea67a83431f1701b3dff7e37f9e282".to_owned(),
+                    "0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned(),
+                    "0xc6d566a56a1aff6508b41f6c90ff131615583bcd".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 4,
+                discovery_edge_entry_count: 0,
+            },
+            WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+                    "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+                    "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb".to_owned(),
+                    "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31".to_owned(),
+                ],
+                manifest_root_entry_count: 2,
+                manifest_contract_entry_count: 4,
+                discovery_edge_entry_count: 0,
+            }
+        ]
     );
 
     let stored_admission = load_discovery_admission_state(database.pool()).await?;
-    assert_eq!(stored_admission.active_manifest_count, 3);
+    assert_eq!(stored_admission.active_manifest_count, 8);
 
     database.cleanup().await?;
     Ok(())
@@ -4664,6 +5316,196 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
 }
 
 #[tokio::test]
+async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_backfills_code_hash()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest_for_namespace_source_family(
+        "basenames",
+        "basenames_base_registry",
+        &basenames_base_registry_manifest_contents(),
+    )?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let initial_manifest_summary = initial_state.manifest_summary.clone();
+    let initial_sync_summary = initial_state.sync_summary.clone();
+    let initial_discovery_admission = initial_state.discovery_admission.clone();
+    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
+    let initial_tasks =
+        sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
+
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(initial_tasks.len(), 1);
+    assert_eq!(initial_tasks[0].addresses.len(), 1);
+
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc"),
+        42,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+
+    let (_next_task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &initial_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial Basenames registry poll must update task state");
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    insert_raw_new_owner_log_for_parent(
+        database.pool(),
+        "base-mainnet",
+        &canonical_head,
+        "0xb94704422c2a1e396835a571837aa5ae53285a95",
+        "0x0000000000000000000000000000000000000002",
+        &base_eth_node(),
+        "alice",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let (refreshed_state, refreshed_tasks) =
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+            .await?
+            .expect(
+                "stored Basenames discovery must refresh the watched plan without manifest reload",
+            );
+
+    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
+    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
+    assert_eq!(
+        refreshed_state.discovery_admission,
+        initial_discovery_admission
+    );
+    assert_eq!(
+        refreshed_state.manifest_normalized_event_summary,
+        initial_manifest_event_summary
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+        basenames_base_registry_manifest_contents()
+    );
+    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
+    assert_eq!(refreshed_tasks.len(), 1);
+    assert_eq!(refreshed_state.watched_chain_plan[0].chain, "base-mainnet");
+    assert_eq!(refreshed_state.watched_chain_plan[0].addresses.len(), 2);
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned())
+    );
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0x0000000000000000000000000000000000000002".to_owned())
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_root_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_contract_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+        refreshed_tasks[0].checkpoint.canonical_block_number,
+        Some(42)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_new_owner:base-mainnet' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x0000000000000000000000000000000000000002".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical".to_owned()
+    );
+
+    let unchanged = reconcile_fetched_heads(
+        database.pool(),
+        &refreshed_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    assert!(
+        unchanged.is_none(),
+        "unchanged heads should still backfill code hashes for newly watched Basenames addresses"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -4818,6 +5660,350 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
         .fetch_one(database.pool())
         .await?,
         stored_block.block_hash
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and_authority_from_stored_raw_logs()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x361);
+    let registrar_contract_instance_id = Uuid::from_u128(0x362);
+    let registry_contract_instance_id = Uuid::from_u128(0x363);
+    let resolver_contract_instance_id = Uuid::from_u128(0x364);
+    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let registrar_address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a";
+    let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
+    let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
+    let claimed_address = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    let stored_block = provider_block(
+        "0xdededededededededededededededededededededededededededededededede",
+        Some("0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"),
+        64,
+    );
+    let alice_namehash = namehash_for_dns_name(&dns_encoded_base_eth_name("alice"));
+    let transaction_hash = transaction_hash_for_block(&stored_block);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'basenames',
+                    'basenames_base_primary',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_primary/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'basenames',
+                    'basenames_base_registrar',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_registrar/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    3,
+                    1,
+                    'basenames',
+                    'basenames_base_registry',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_registry/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    4,
+                    1,
+                    'basenames',
+                    'basenames_base_resolver',
+                    'base-mainnet',
+                    'basenames_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/basenames/basenames_base_resolver/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for Basenames runtime bootstrap test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registrar_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        "root",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registrar_contract_instance_id,
+        "base-mainnet",
+        registrar_address,
+        Some(2),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "base-mainnet",
+        registry_address,
+        Some(3),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "base-mainnet",
+        resolver_address,
+        Some(4),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        2,
+        "registrar",
+        registrar_contract_instance_id,
+        registrar_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        3,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        4,
+        "resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            "base-mainnet",
+            &stored_block,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: reverse_address.to_owned(),
+                topics: vec![
+                    reverse_claimed_topic0(),
+                    hex_string(&abi_word_address(claimed_address)),
+                    reverse_node_for_address(claimed_address),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    registrar_name_registered_topic0(),
+                    labelhash_hex("alice"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: decode_hex_string(&encode_registrar_name_registered_log_data(
+                    "alice",
+                    1_700_010_000,
+                )),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![registry_new_resolver_topic0(), alice_namehash.clone()],
+                data: decode_hex_string(&encode_registry_new_resolver_log_data(resolver_address)),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index: 0,
+                log_index: 3,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![
+                    resolver_text_changed_topic0(),
+                    alice_namehash.clone(),
+                    keccak256_hex(b"com.twitter"),
+                ],
+                data: decode_hex_string(&encode_dynamic_string_log_data("com.twitter")),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash,
+                transaction_index: 0,
+                log_index: 4,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![resolver_version_changed_topic0(), alice_namehash],
+                data: decode_hex_string(&encode_resolver_version_changed_log_data(7)),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames_base_primary".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM name_surfaces")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT logical_name_id FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "basenames:alice.base.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordVersionChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
     );
 
     database.cleanup().await?;

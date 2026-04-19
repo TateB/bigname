@@ -19,6 +19,9 @@ use sqlx::{
 const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
+const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
@@ -128,6 +131,7 @@ struct ObservationRef {
     transaction_index: Option<i64>,
     log_index: Option<i64>,
     canonicality_state: CanonicalityState,
+    namespace: String,
     source_manifest_id: i64,
     source_family: String,
     manifest_version: i64,
@@ -258,6 +262,7 @@ struct CanonicalBlockIndex {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NameMetadata {
+    namespace: String,
     logical_name_id: String,
     input_name: String,
     canonical_display_name: String,
@@ -285,6 +290,7 @@ struct BoundaryRef {
     block_number: i64,
     block_timestamp: OffsetDateTime,
     canonicality_state: CanonicalityState,
+    namespace: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +366,60 @@ struct NameHistory {
     registry_resource_anchor: Option<BoundaryRef>,
     latest_registry_owner_ref: Option<ObservationRef>,
     latest_registry_owner_before_registration: Option<ObservationRef>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityProfile {
+    Ens,
+    Basenames,
+}
+
+impl AuthorityProfile {
+    const fn namespace(self) -> &'static str {
+        match self {
+            Self::Ens => "ens",
+            Self::Basenames => "basenames",
+        }
+    }
+
+    const fn registrar_source_family(self) -> &'static str {
+        match self {
+            Self::Ens => SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+        }
+    }
+
+    const fn registry_source_family(self) -> &'static str {
+        match self {
+            Self::Ens => SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+        }
+    }
+
+    const fn resolver_source_family(self) -> &'static str {
+        match self {
+            Self::Ens => SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+        }
+    }
+
+    fn root_node(self) -> String {
+        match self {
+            Self::Ens => eth_node(),
+            Self::Basenames => base_eth_node(),
+        }
+    }
+
+    fn observe_name(self, label: &str, normalizer_version: &str) -> Result<NameMetadata> {
+        observe_registrar_name_with_version(label, self, normalizer_version)
+    }
+}
+
+fn default_registrar_source_family(namespace: &str) -> &'static str {
+    match namespace {
+        "basenames" => SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+        _ => SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+    }
 }
 
 pub async fn sync_ens_v1_unwrapped_authority(
@@ -475,6 +535,10 @@ pub async fn sync_ens_v1_unwrapped_authority(
         block_number: head_block.block_number,
         block_timestamp: head_block.block_timestamp,
         canonicality_state: head_block.canonicality_state,
+        namespace: active_emitters
+            .first()
+            .map(|emitter| emitter.namespace.clone())
+            .unwrap_or_else(|| "ens".to_owned()),
     };
 
     let mut token_lineages = Vec::<TokenLineage>::new();
@@ -721,7 +785,7 @@ fn build_registrar_anchor(lease: &RegistrationLease) -> AuthorityAnchor {
             "token-lineage:{}",
             lease.authority_key
         ))),
-        binding_source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        binding_source_family: lease.start_ref.source_family.clone(),
         binding_manifest_version: lease.start_ref.manifest_version,
         binding_manifest_id: lease.start_ref.source_manifest_id,
     }
@@ -749,7 +813,7 @@ fn registry_anchor_for_history(
         authority_key: format!("registry-only:{chain}:{labelhash}"),
         resource_id: deterministic_uuid(&format!("resource:registry-only:{chain}:{labelhash}")),
         token_lineage_id: None,
-        binding_source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        binding_source_family: reference.source_family.clone(),
         binding_manifest_version: reference.manifest_version,
         binding_manifest_id: reference.source_manifest_id,
     })
@@ -790,9 +854,9 @@ async fn load_reverse_claim_sources(
             ) AS claim_emitting_address
         FROM normalized_events ne
         WHERE ne.chain_id = $1
-          AND ne.namespace = $2
-          AND ne.event_kind = $4
-          AND ne.derivation_kind = $5
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) IN ($2, $3)
+          AND ne.event_kind = $5
+          AND ne.derivation_kind = $6
           AND ne.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -815,12 +879,13 @@ async fn load_reverse_claim_sources(
     )
     .bind(chain)
     .bind("ens")
+    .bind("basenames")
     .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
     .bind(EVENT_KIND_REVERSE_CHANGED)
     .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
     .fetch_all(pool)
     .await
-    .with_context(|| format!("failed to load ENS reverse claim sources for chain {chain}"))?;
+    .with_context(|| format!("failed to load reverse claim sources for chain {chain}"))?;
 
     rows.into_iter()
         .map(|row| {
@@ -905,7 +970,7 @@ async fn build_name_surface(
 
     Ok(Some(NameSurface {
         logical_name_id: name.logical_name_id.clone(),
-        namespace: "ens".to_owned(),
+        namespace: name.namespace.clone(),
         input_name: name.input_name.clone(),
         canonical_display_name: name.canonical_display_name.clone(),
         normalized_name: name.normalized_name.clone(),
@@ -1038,8 +1103,11 @@ async fn apply_observation(
 ) -> Result<()> {
     match observation {
         AuthorityObservation::RegistrationGranted(event) => {
-            let name =
-                observe_registrar_eth_name_with_version(&event.label, ENS_NORMALIZER_VERSION)?;
+            let name = observe_registrar_name_with_reference(
+                &event.label,
+                &event.reference,
+                ENS_NORMALIZER_VERSION,
+            )?;
             history
                 .first_name_ref
                 .get_or_insert(event.reference.clone());
@@ -1061,8 +1129,10 @@ async fn apply_observation(
                 labelhash: event.labelhash.clone(),
                 registrant: event.registrant.clone(),
                 expiry: event.expiry,
-                release_ref: block_index
-                    .first_block_at_or_after(release_after_grace(event.expiry)?),
+                release_ref: block_index.first_block_at_or_after(
+                    release_after_grace(event.expiry)?,
+                    &event.reference.namespace,
+                ),
                 start_ref: event.reference.clone(),
             };
             let after_anchor = Some(build_registrar_anchor(&lease));
@@ -1142,8 +1212,9 @@ async fn apply_observation(
         }
         AuthorityObservation::RegistrationRenewed(event) => {
             if history.name.is_none() {
-                history.name = Some(observe_registrar_eth_name_with_version(
+                history.name = Some(observe_registrar_name_with_reference(
                     &event.label,
+                    &event.reference,
                     ENS_NORMALIZER_VERSION,
                 )?);
                 history
@@ -1169,8 +1240,10 @@ async fn apply_observation(
                         .map(|value| value.registrant.clone())
                         .unwrap_or_else(|| ZERO_ADDRESS.to_owned()),
                     expiry: event.expiry,
-                    release_ref: block_index
-                        .first_block_at_or_after(release_after_grace(event.expiry)?),
+                    release_ref: block_index.first_block_at_or_after(
+                        release_after_grace(event.expiry)?,
+                        &event.reference.namespace,
+                    ),
                     start_ref: event.reference.clone(),
                 };
                 history.current_registration = Some(lease.clone());
@@ -1229,8 +1302,10 @@ async fn apply_observation(
             if let Some(current_registration) = history.current_registration.as_mut() {
                 let before_expiry = current_registration.expiry;
                 current_registration.expiry = event.expiry;
-                current_registration.release_ref =
-                    block_index.first_block_at_or_after(release_after_grace(event.expiry)?);
+                current_registration.release_ref = block_index.first_block_at_or_after(
+                    release_after_grace(event.expiry)?,
+                    &event.reference.namespace,
+                );
 
                 history.events.push(build_normalized_event(
                     &event.reference,
@@ -1839,7 +1914,7 @@ fn transition_authority(
                     .as_ref()
                     .map(|value| value.binding_source_family.clone())
             })
-            .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned());
+            .unwrap_or_else(|| default_registrar_source_family(&name.namespace).to_owned());
         let manifest_version = after
             .as_ref()
             .map(|value| value.binding_manifest_version)
@@ -2201,7 +2276,7 @@ fn emit_registration_released_event(
             "release:{}:{}:{}",
             release_ref.block_hash, name.logical_name_id, lease.authority_key
         ),
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        lease.start_ref.source_family.clone(),
         lease.start_ref.manifest_version,
         Some(lease.start_ref.source_manifest_id),
         release_ref.canonicality_state,
@@ -2223,6 +2298,7 @@ impl ObservationRef {
             block_number: self.block_number,
             block_timestamp: self.block_timestamp,
             canonicality_state: self.canonicality_state,
+            namespace: self.namespace.clone(),
         }
     }
 }
@@ -2250,7 +2326,7 @@ fn build_normalized_event(
             "{}:{}:{}",
             DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY, event_kind, identity_suffix
         ),
-        namespace: "ens".to_owned(),
+        namespace: reference.namespace.clone(),
         logical_name_id,
         resource_id,
         event_kind: event_kind.to_owned(),
@@ -2296,7 +2372,7 @@ fn build_boundary_event(
             "{}:{}:{}",
             DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY, event_kind, identity_suffix
         ),
-        namespace: "ens".to_owned(),
+        namespace: reference.namespace.clone(),
         logical_name_id,
         resource_id,
         event_kind: event_kind.to_owned(),
@@ -2351,8 +2427,9 @@ fn build_authority_observation(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
+    let profile = authority_profile_for_source_family(&raw_log.source_family);
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
         && topic0.eq_ignore_ascii_case(&name_registered_topic0())
     {
         let label = decode_first_dynamic_string(&raw_log.data)?;
@@ -2362,8 +2439,9 @@ fn build_authority_observation(
                 .get(1)
                 .context("NameRegistered log is missing indexed labelhash")?,
         )?;
-        let observed =
-            observe_registrar_eth_name_with_version(&label, &raw_log.normalizer_version)?;
+        let observed = profile
+            .context("registrar observation is missing an authority profile")?
+            .observe_name(&label, &raw_log.normalizer_version)?;
         let observed_labelhash = observed
             .labelhashes
             .first()
@@ -2395,7 +2473,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
         && topic0.eq_ignore_ascii_case(&name_renewed_topic0())
     {
         let label = decode_first_dynamic_string(&raw_log.data)?;
@@ -2405,8 +2483,9 @@ fn build_authority_observation(
                 .get(1)
                 .context("NameRenewed log is missing indexed labelhash")?,
         )?;
-        let observed =
-            observe_registrar_eth_name_with_version(&label, &raw_log.normalizer_version)?;
+        let observed = profile
+            .context("registrar renewal observation is missing an authority profile")?
+            .observe_name(&label, &raw_log.normalizer_version)?;
         let observed_labelhash = observed
             .labelhashes
             .first()
@@ -2431,7 +2510,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
         && topic0.eq_ignore_ascii_case(&transfer_topic0())
     {
         if raw_log.topics.len() < 4 {
@@ -2462,7 +2541,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRY_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
         && topic0.eq_ignore_ascii_case(&new_owner_topic0())
     {
         let parent_node = normalize_hex_32(
@@ -2471,7 +2550,11 @@ fn build_authority_observation(
                 .get(1)
                 .context("NewOwner log is missing parent node")?,
         )?;
-        if parent_node != eth_node() {
+        if parent_node
+            != profile
+                .context("registry observation is missing an authority profile")?
+                .root_node()
+        {
             return Ok(None);
         }
         return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
@@ -2488,7 +2571,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_REGISTRY_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
         && topic0.eq_ignore_ascii_case(&new_resolver_topic0())
     {
         return Ok(Some(AuthorityObservation::ResolverChanged(
@@ -2505,7 +2588,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&text_changed_topic0())
     {
         let key = decode_first_dynamic_string(&raw_log.data)?;
@@ -2538,7 +2621,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&name_changed_topic0())
     {
         return Ok(Some(AuthorityObservation::RecordChanged(
@@ -2561,7 +2644,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&addr_changed_topic0())
     {
         decode_owner_address(&raw_log.data)?;
@@ -2585,7 +2668,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&address_changed_topic0())
     {
         let coin_type = abi_word_to_i64(
@@ -2615,7 +2698,7 @@ fn build_authority_observation(
         )));
     }
 
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&version_changed_topic0())
     {
         return Ok(Some(AuthorityObservation::RecordVersionChanged(
@@ -2652,6 +2735,7 @@ impl AuthorityRawLogRow {
             transaction_index: Some(self.transaction_index),
             log_index: Some(self.log_index),
             canonicality_state: self.canonicality_state,
+            namespace: self.namespace.clone(),
             source_manifest_id: self.source_manifest_id,
             source_family: self.source_family.clone(),
             manifest_version: self.manifest_version,
@@ -2660,7 +2744,11 @@ impl AuthorityRawLogRow {
 }
 
 impl CanonicalBlockIndex {
-    fn first_block_at_or_after(&self, timestamp: OffsetDateTime) -> Option<BoundaryRef> {
+    fn first_block_at_or_after(
+        &self,
+        timestamp: OffsetDateTime,
+        namespace: &str,
+    ) -> Option<BoundaryRef> {
         self.blocks
             .iter()
             .find(|block| block.block_timestamp >= timestamp)
@@ -2670,6 +2758,7 @@ impl CanonicalBlockIndex {
                 block_number: block.block_number,
                 block_timestamp: block.block_timestamp,
                 canonicality_state: block.canonicality_state,
+                namespace: namespace.to_owned(),
             })
     }
 }
@@ -2846,6 +2935,9 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         if manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRY_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
+            && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
+            && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
         {
             continue;
         }
@@ -2929,35 +3021,96 @@ fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> boo
         < (current.source_rank, current.source_manifest_id)
 }
 
-fn observe_registrar_eth_name_with_version(
+fn authority_profile_for_source_family(source_family: &str) -> Option<AuthorityProfile> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
+        | SOURCE_FAMILY_ENS_V1_REGISTRY_L1
+        | SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(AuthorityProfile::Ens),
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
+        | SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
+        | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(AuthorityProfile::Basenames),
+        _ => None,
+    }
+}
+
+fn observe_registrar_name_with_reference(
     label: &str,
+    reference: &ObservationRef,
+    normalizer_version: &str,
+) -> Result<NameMetadata> {
+    authority_profile_for_source_family(&reference.source_family)
+        .with_context(|| {
+            format!(
+                "unsupported authority source family {}",
+                reference.source_family
+            )
+        })?
+        .observe_name(label, normalizer_version)
+}
+
+fn observe_registrar_name_with_version(
+    label: &str,
+    profile: AuthorityProfile,
     normalizer_version: &str,
 ) -> Result<NameMetadata> {
     if label.is_empty() {
         bail!("registrar label must not be empty");
     }
     let normalized_label = label.to_ascii_lowercase();
-    let normalized_name = format!("{normalized_label}.eth");
-    let input_name = format!("{label}.eth");
+    let (normalized_name, input_name, parent_labels) = match profile {
+        AuthorityProfile::Ens => (
+            format!("{normalized_label}.eth"),
+            format!("{label}.eth"),
+            vec![b"eth".to_vec()],
+        ),
+        AuthorityProfile::Basenames => (
+            format!("{normalized_label}.base.eth"),
+            format!("{label}.base.eth"),
+            vec![b"base".to_vec(), b"eth".to_vec()],
+        ),
+    };
     let label_length =
         u8::try_from(normalized_label.len()).context("registrar label exceeds DNS length")?;
-    let mut dns_name = Vec::with_capacity(normalized_label.len() + 6);
+    let dns_capacity = 2
+        + normalized_label.len()
+        + parent_labels
+            .iter()
+            .map(|label| 1 + label.len())
+            .sum::<usize>();
+    let mut dns_name = Vec::with_capacity(dns_capacity);
     dns_name.push(label_length);
     dns_name.extend_from_slice(normalized_label.as_bytes());
-    dns_name.push(3);
-    dns_name.extend_from_slice(b"eth");
+    for label in &parent_labels {
+        dns_name
+            .push(u8::try_from(label.len()).context("registrar suffix label exceeds DNS length")?);
+        dns_name.extend_from_slice(label);
+    }
     dns_name.push(0);
-    let labelhash = keccak256_hex(normalized_label.as_bytes());
+    let mut namehash_labels = Vec::with_capacity(1 + parent_labels.len());
+    namehash_labels.push(normalized_label.as_bytes().to_vec());
+    namehash_labels.extend(parent_labels.iter().cloned());
+    let mut labelhashes = Vec::with_capacity(namehash_labels.len());
+    for label in &namehash_labels {
+        labelhashes.push(keccak256_hex(label));
+    }
     Ok(NameMetadata {
-        logical_name_id: format!("ens:{normalized_name}"),
+        namespace: profile.namespace().to_owned(),
+        logical_name_id: format!("{}:{normalized_name}", profile.namespace()),
         input_name: input_name.clone(),
         canonical_display_name: normalized_name.clone(),
         normalized_name: normalized_name.clone(),
         dns_encoded_name: dns_name.clone(),
-        namehash: namehash_hex(&[normalized_label.as_bytes().to_vec(), b"eth".to_vec()]),
-        labelhashes: vec![labelhash, keccak256_hex(b"eth")],
+        namehash: namehash_hex(&namehash_labels),
+        labelhashes,
         normalizer_version: normalizer_version.to_owned(),
     })
+}
+
+fn observe_registrar_eth_name_with_version(
+    label: &str,
+    normalizer_version: &str,
+) -> Result<NameMetadata> {
+    observe_registrar_name_with_version(label, AuthorityProfile::Ens, normalizer_version)
 }
 
 fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
@@ -3097,6 +3250,10 @@ fn namehash_hex(labels: &[Vec<u8>]) -> String {
 
 fn eth_node() -> String {
     namehash_hex(&[b"eth".to_vec()])
+}
+
+fn base_eth_node() -> String {
+    namehash_hex(&[b"base".to_vec(), b"eth".to_vec()])
 }
 
 fn name_registered_topic0() -> String {
@@ -3391,21 +3548,45 @@ mod tests {
         role: Option<&str>,
         file_path: &str,
     ) -> Result<i64> {
-        let manifest_id = insert_manifest_version(
+        insert_active_contract_fixture_with_manifest(
             pool,
-            1,
             "ens",
             source_family,
             "ethereum-mainnet",
             "ens_v1",
+            declaration_name,
+            address,
+            role,
+            file_path,
+        )
+        .await
+    }
+
+    async fn insert_active_contract_fixture_with_manifest(
+        pool: &PgPool,
+        namespace: &str,
+        source_family: &str,
+        chain: &str,
+        deployment_epoch: &str,
+        declaration_name: &str,
+        address: &str,
+        role: Option<&str>,
+        file_path: &str,
+    ) -> Result<i64> {
+        let manifest_id = insert_manifest_version(
+            pool,
+            1,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
             "active",
             "uts46-v1",
             file_path,
         )
         .await?;
         let contract_instance_id = Uuid::new_v4();
-        insert_contract_instance(pool, contract_instance_id, "ethereum-mainnet", "contract")
-            .await?;
+        insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
         insert_manifest_contract_instance(
             pool,
             manifest_id,
@@ -3417,14 +3598,8 @@ mod tests {
             Some("none"),
         )
         .await?;
-        insert_contract_instance_address(
-            pool,
-            contract_instance_id,
-            "ethereum-mainnet",
-            address,
-            manifest_id,
-        )
-        .await?;
+        insert_contract_instance_address(pool, contract_instance_id, chain, address, manifest_id)
+            .await?;
         Ok(manifest_id)
     }
 
@@ -3434,8 +3609,24 @@ mod tests {
         block_number: i64,
         timestamp: i64,
     ) -> RawBlock {
+        raw_block_on_chain(
+            "ethereum-mainnet",
+            block_hash,
+            parent_hash,
+            block_number,
+            timestamp,
+        )
+    }
+
+    fn raw_block_on_chain(
+        chain_id: &str,
+        block_hash: &str,
+        parent_hash: Option<&str>,
+        block_number: i64,
+        timestamp: i64,
+    ) -> RawBlock {
         RawBlock {
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: block_hash.to_owned(),
             parent_hash: parent_hash.map(str::to_owned),
             block_number,
@@ -3572,6 +3763,63 @@ mod tests {
                     "source_family": "ens_v1_reverse_l1",
                     "contract_role": CONTRACT_ROLE_REVERSE_REGISTRAR,
                     "contract_instance_id": Uuid::from_u128(0x44).to_string(),
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }),
+        }
+    }
+
+    fn basenames_reverse_claim_event(
+        source_manifest_id: i64,
+        block_hash: &str,
+        transaction_hash: &str,
+        log_index: i64,
+        claimed_address: &str,
+        reverse_node: &str,
+        reverse_name: &str,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!(
+                "{DERIVATION_KIND_ENS_V1_REVERSE_CLAIM}:{EVENT_KIND_REVERSE_CHANGED}:{block_hash}:{transaction_hash}:{log_index}:{claimed_address}:basenames"
+            ),
+            namespace: "basenames".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: EVENT_KIND_REVERSE_CHANGED.to_owned(),
+            source_family: "basenames_base_primary".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(source_manifest_id),
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(42),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(transaction_hash.to_owned()),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_hash": block_hash,
+                "block_number": 42,
+                "transaction_hash": transaction_hash,
+                "transaction_index": 0,
+                "log_index": log_index,
+                "emitting_address": "0x00000000000000000000000000000000000000ad",
+            }),
+            derivation_kind: DERIVATION_KIND_ENS_V1_REVERSE_CLAIM.to_owned(),
+            canonicality_state: CanonicalityState::Canonical,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ReverseClaimed",
+                "address": claimed_address,
+                "coin_type": ENS_NATIVE_COIN_TYPE,
+                "namespace": "basenames",
+                "reverse_namespace": "basenames",
+                "reverse_label": claimed_address.trim_start_matches("0x").to_ascii_lowercase(),
+                "reverse_name": reverse_name,
+                "reverse_node": reverse_node,
+                "claim_provenance": {
+                    "source_family": "basenames_base_primary",
+                    "contract_role": CONTRACT_ROLE_REVERSE_REGISTRAR,
+                    "contract_instance_id": Uuid::from_u128(0x45).to_string(),
                     "emitting_address": "0x00000000000000000000000000000000000000ad",
                 },
             }),
@@ -4568,6 +4816,423 @@ mod tests {
             .fetch_one(database.pool())
             .await?,
             1
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_idempotently()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            "base-mainnet",
+            "basenames_v1",
+            "registrar",
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            "manifests/basenames/basenames_base_registrar/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            "base-mainnet",
+            "basenames_v1",
+            "registry",
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            "manifests/basenames/basenames_base_registry/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            "base-mainnet",
+            "basenames_v1",
+            "resolver",
+            "0x00000000000000000000000000000000000000cc",
+            Some("resolver"),
+            "manifests/basenames/basenames_base_resolver/v1.toml",
+        )
+        .await?;
+
+        let block_hash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let transaction_hash = "0xtxdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block_on_chain(
+                "base-mainnet",
+                block_hash,
+                Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                42,
+                1_700_000_042,
+            )],
+        )
+        .await?;
+
+        let alice = observe_registrar_name_with_version(
+            "alice",
+            AuthorityProfile::Basenames,
+            ENS_NORMALIZER_VERSION,
+        )?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        name_registered_topic0(),
+                        keccak256_hex(b"alice"),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                    ],
+                    data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 2,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![
+                        text_changed_topic0(),
+                        alice.namehash.clone(),
+                        keccak256_hex(b"com.twitter"),
+                    ],
+                    data: encode_dynamic_string_log_data("com.twitter"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 3,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                    data: encode_resolver_version_changed_log_data(7),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let first = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
+        assert_eq!(first.scanned_log_count, 4);
+        assert_eq!(first.matched_log_count, 4);
+        assert_eq!(first.total_name_surface_count, 1);
+        assert_eq!(first.total_resource_count, 1);
+        assert_eq!(first.total_surface_binding_count, 1);
+        assert_eq!(first.total_normalized_event_count, 9);
+        assert_eq!(
+            first.by_kind,
+            BTreeMap::from([
+                (EVENT_KIND_AUTHORITY_EPOCH_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_EXPIRY_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_PERMISSION_CHANGED.to_owned(), 2_usize),
+                (EVENT_KIND_RECORD_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_REGISTRATION_GRANTED.to_owned(), 1_usize),
+                (EVENT_KIND_RESOLVER_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_SURFACE_BOUND.to_owned(), 1_usize),
+            ])
+        );
+
+        let second = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
+        assert_eq!(second.scanned_log_count, 4);
+        assert_eq!(second.matched_log_count, 4);
+        assert_eq!(second.total_normalized_event_count, 9);
+
+        let logical_name_id = "basenames:alice.base.eth";
+        let surface = load_name_surface(database.pool(), logical_name_id)
+            .await?
+            .context("Basenames name surface should persist")?;
+        assert_eq!(surface.namespace, "basenames");
+        assert_eq!(surface.canonical_display_name, "alice.base.eth");
+        assert_eq!(surface.namehash, alice.namehash);
+        assert_eq!(surface.labelhashes, alice.labelhashes);
+
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT ARRAY_AGG(DISTINCT namespace ORDER BY namespace) FROM normalized_events"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            vec!["basenames".to_owned()]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT ARRAY_AGG(event_kind ORDER BY log_index) FROM normalized_events WHERE source_family = $1"
+            )
+            .bind(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER)
+            .fetch_one(database.pool())
+            .await?,
+            vec![
+                EVENT_KIND_RECORD_CHANGED.to_owned(),
+                EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
+            ]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            logical_name_id.to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'namehash' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            alice.namehash
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE source_family = $1 AND event_kind = 'PermissionChanged'"
+            )
+            .bind(SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE source_family = $1 AND event_kind = 'PermissionChanged'"
+            )
+            .bind(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY)
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_backfills_basenames_primary_claim_source_observations()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let reverse_manifest_id = insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            "basenames_base_primary",
+            "base-mainnet",
+            "basenames_v1",
+            "reverse_registrar",
+            "0x00000000000000000000000000000000000000ad",
+            Some(CONTRACT_ROLE_REVERSE_REGISTRAR),
+            "manifests/basenames/basenames_base_primary/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            "base-mainnet",
+            "basenames_v1",
+            "registry",
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            "manifests/basenames/basenames_base_registry/v1.toml",
+        )
+        .await?;
+        insert_active_contract_fixture_with_manifest(
+            database.pool(),
+            "basenames",
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            "base-mainnet",
+            "basenames_v1",
+            "resolver",
+            "0x00000000000000000000000000000000000000cc",
+            Some("resolver"),
+            "manifests/basenames/basenames_base_resolver/v1.toml",
+        )
+        .await?;
+
+        let block_hash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let transaction_hash = "0xtxeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let claimed_address = "0x0000000000000000000000000000000000005678";
+        let reverse_node = reverse_node_for_address(claimed_address);
+        let reverse_name = format!(
+            "{}.addr.reverse",
+            reverse_label_for_address(claimed_address)
+        );
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[raw_block_on_chain(
+                "base-mainnet",
+                block_hash,
+                Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+                42,
+                1_700_000_042,
+            )],
+        )
+        .await?;
+        upsert_normalized_events(
+            database.pool(),
+            &[basenames_reverse_claim_event(
+                reverse_manifest_id,
+                block_hash,
+                transaction_hash,
+                0,
+                claimed_address,
+                &reverse_node,
+                &reverse_name,
+            )],
+        )
+        .await?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), reverse_node.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 2,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![name_changed_topic0(), reverse_node.clone()],
+                    data: encode_dynamic_string_log_data("alice.base.eth"),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 42,
+                    transaction_hash: transaction_hash.to_owned(),
+                    transaction_index: 0,
+                    log_index: 3,
+                    emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
+                    topics: vec![version_changed_topic0(), reverse_node.clone()],
+                    data: encode_resolver_version_changed_log_data(7),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let first = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
+        assert_eq!(first.scanned_log_count, 3);
+        assert_eq!(first.matched_log_count, 3);
+        assert_eq!(first.total_name_surface_count, 0);
+        assert_eq!(first.total_resource_count, 0);
+        assert_eq!(first.total_surface_binding_count, 0);
+        assert_eq!(first.total_normalized_event_count, 3);
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+            Some(&1_usize)
+        );
+        assert_eq!(first.by_kind.get(EVENT_KIND_RECORD_CHANGED), Some(&1_usize));
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+            Some(&1_usize)
+        );
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'ResolverChanged' AND logical_name_id IS NULL AND resource_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->>'address' FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'ResolverChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            claimed_address.to_ascii_lowercase()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'raw_name' FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'RecordChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "alice.base.eth".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->>'reverse_node' FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'RecordChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            reverse_node.to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'primary_claim_source'->'claim_provenance'->>'source_family' FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'RecordVersionChanged' AND logical_name_id IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "basenames_base_primary".to_owned()
+        );
+
+        let second = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
+        assert_eq!(second.scanned_log_count, 3);
+        assert_eq!(second.matched_log_count, 3);
+        assert_eq!(second.total_normalized_event_count, 3);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE namespace = 'basenames' AND logical_name_id IS NULL AND event_kind IN ('ResolverChanged', 'RecordChanged', 'RecordVersionChanged')"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            3
         );
 
         database.cleanup().await
