@@ -1,17 +1,8 @@
-use std::{
-    cmp::Ordering,
-    str::FromStr,
-    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
-
-use crate::{CanonicalityState, Resource, default_database_url, upsert_resources};
 
 /// Persisted current effective permission row for one resource-anchored subject and scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +202,89 @@ pub async fn load_permissions_current(
 
     rows.into_iter()
         .map(decode_permissions_current_row)
+        .collect()
+}
+
+/// Load persisted resolver-scoped permission rows across all resources.
+pub async fn load_permissions_current_for_resolver_scope(
+    pool: &PgPool,
+    chain_id: &str,
+    resolver_address: &str,
+) -> Result<Vec<PermissionsCurrentRow>> {
+    let scope = PermissionScope::Resolver {
+        chain_id: chain_id.to_owned(),
+        resolver_address: resolver_address.to_ascii_lowercase(),
+    }
+    .storage_key();
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            resource_id,
+            subject,
+            scope,
+            scope_kind,
+            scope_detail,
+            effective_powers,
+            grant_source,
+            revocation_source,
+            inheritance_path,
+            transfer_behavior,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM permissions_current
+        WHERE scope = $1
+          AND scope_kind = 'resolver'
+        ORDER BY subject ASC, resource_id ASC, manifest_version ASC
+        "#,
+    )
+    .bind(scope)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load resolver-scoped permissions_current rows for chain {chain_id} resolver {resolver_address}"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(decode_permissions_current_row)
+        .collect()
+}
+
+/// Discover resolver targets represented by persisted resolver-scoped permission rows.
+pub async fn load_permissions_current_resolver_targets(
+    pool: &PgPool,
+) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT
+            scope_detail->>'chain_id' AS chain_id,
+            LOWER(scope_detail->>'resolver_address') AS resolver_address
+        FROM permissions_current
+        WHERE scope_kind = 'resolver'
+          AND scope_detail->>'chain_id' IS NOT NULL
+          AND scope_detail->>'chain_id' <> ''
+          AND scope_detail->>'resolver_address' IS NOT NULL
+          AND scope_detail->>'resolver_address' <> ''
+        ORDER BY chain_id, resolver_address
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load resolver targets from permissions_current")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("chain_id")?,
+                row.try_get::<String, _>("resolver_address")?
+                    .to_ascii_lowercase(),
+            ))
+        })
         .collect()
 }
 
@@ -496,8 +570,16 @@ fn json_text_field(value: &Value, field: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        cmp::Ordering,
+        str::FromStr,
+        sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
 
+    use crate::{CanonicalityState, Resource, default_database_url, upsert_resources};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -770,7 +852,7 @@ mod tests {
                 resource_row.clone(),
                 resolver_row.clone(),
                 other_subject_row.clone(),
-                other_resource_row,
+                other_resource_row.clone(),
             ],
         )
         .await?;
@@ -795,7 +877,23 @@ mod tests {
         );
         assert_eq!(
             load_permissions_current(database.pool(), resource_id, None, None).await?,
-            vec![resolver_row, resource_row, other_subject_row]
+            vec![resolver_row.clone(), resource_row, other_subject_row]
+        );
+        assert_eq!(
+            load_permissions_current_for_resolver_scope(
+                database.pool(),
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000DEF",
+            )
+            .await?,
+            vec![resolver_row.clone(), other_resource_row]
+        );
+        assert_eq!(
+            load_permissions_current_resolver_targets(database.pool()).await?,
+            vec![(
+                "ethereum-mainnet".to_owned(),
+                "0x0000000000000000000000000000000000000def".to_owned()
+            )]
         );
 
         database.cleanup().await

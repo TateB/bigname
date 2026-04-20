@@ -2129,6 +2129,14 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
         })
         .expect("resolver row");
     assert_eq!(
+        resolver_row.get("resource_id"),
+        Some(&Value::String(resource_id.to_string()))
+    );
+    assert_eq!(
+        resolver_row.get("subject"),
+        Some(&Value::String(filtered_subject.to_owned()))
+    );
+    assert_eq!(
         resolver_row.get("scope"),
         Some(&json!({
             "kind": "resolver",
@@ -2136,6 +2144,32 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
                 "chain_id": "ethereum-mainnet",
                 "resolver_address": "0x0000000000000000000000000000000000000aaa",
             },
+        }))
+    );
+    assert_eq!(
+        resolver_row.get("effective_powers"),
+        Some(&json!(["set_resolver", "create_subnames"]))
+    );
+    assert_eq!(
+        resolver_row.get("grant_source"),
+        Some(&json!({
+            "kind": "normalized_event",
+            "manifest_version": 8,
+        }))
+    );
+    assert_eq!(
+        resolver_row.get("inheritance_path"),
+        Some(&json!([
+            {
+                "kind": "resource_authority",
+                "resource_id": resource_id,
+            }
+        ]))
+    );
+    assert_eq!(
+        resolver_row.get("transfer_behavior"),
+        Some(&json!({
+            "kind": "resource_rebound",
         }))
     );
 
@@ -2208,9 +2242,17 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
 async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xa301);
+    let other_resource_id = Uuid::from_u128(0xa302);
     let shared_subject = "0x0000000000000000000000000000000000000abc";
+    let other_subject = "0x0000000000000000000000000000000000000def";
+    let resolver_scope_filter =
+        "resolver:ethereum-mainnet:0x0000000000000000000000000000000000000bbb";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[resource(resource_id), resource(other_resource_id)],
+    )
+    .await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
@@ -2233,10 +2275,33 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
             ),
             permission_current_row(
                 resource_id,
-                "0x0000000000000000000000000000000000000def",
-                PermissionScope::Resource,
+                shared_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000ccc".to_owned(),
+                },
+                10,
+                54,
+            ),
+            permission_current_row(
+                resource_id,
+                other_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000bbb".to_owned(),
+                },
                 9,
                 53,
+            ),
+            permission_current_row(
+                other_resource_id,
+                shared_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000bbb".to_owned(),
+                },
+                11,
+                55,
             ),
         ],
     )
@@ -2253,27 +2318,75 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
         )
         .await
         .context("resource permissions subject filter request failed")?;
+    assert_eq!(subject_response.status(), StatusCode::OK);
     let subject_payload: ResourcePermissionsResponse = read_json(subject_response).await?;
     assert_eq!(
         permission_subjects(&subject_payload),
-        vec![shared_subject, shared_subject]
+        vec![shared_subject, shared_subject, shared_subject]
     );
+    assert!(subject_payload.data.iter().all(|row| {
+        row.get("resource_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == resource_id.to_string())
+    }));
 
     let scope_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
                 .uri(&format!(
-                    "/v1/resources/{resource_id}/permissions?scope=resolver:ethereum-mainnet:0x0000000000000000000000000000000000000bbb"
+                    "/v1/resources/{resource_id}/permissions?scope={resolver_scope_filter}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("resource permissions scope filter request failed")?;
+    assert_eq!(scope_response.status(), StatusCode::OK);
     let scope_payload: ResourcePermissionsResponse = read_json(scope_response).await?;
-    assert_eq!(scope_payload.data.len(), 1);
     assert_eq!(
-        scope_payload.data[0].get("scope"),
+        permission_subjects(&scope_payload),
+        vec![shared_subject, other_subject]
+    );
+    assert!(scope_payload.data.iter().all(|row| {
+        row.get("resource_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == resource_id.to_string())
+    }));
+    assert!(scope_payload.data.iter().all(|row| {
+        row.get("scope")
+            == Some(&json!({
+                "kind": "resolver",
+                "detail": {
+                    "chain_id": "ethereum-mainnet",
+                    "resolver_address": "0x0000000000000000000000000000000000000bbb",
+                },
+            }))
+    }));
+
+    let combined_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?subject={shared_subject}&scope={resolver_scope_filter}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions subject and scope filter request failed")?;
+    assert_eq!(combined_response.status(), StatusCode::OK);
+    let combined_payload: ResourcePermissionsResponse = read_json(combined_response).await?;
+    assert_eq!(combined_payload.data.len(), 1);
+    assert_eq!(
+        combined_payload.data[0].get("resource_id"),
+        Some(&Value::String(resource_id.to_string()))
+    );
+    assert_eq!(
+        combined_payload.data[0].get("subject"),
+        Some(&Value::String(shared_subject.to_owned()))
+    );
+    assert_eq!(
+        combined_payload.data[0].get("scope"),
         Some(&json!({
             "kind": "resolver",
             "detail": {

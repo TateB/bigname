@@ -6,7 +6,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
-    clear_resolver_current, delete_resolver_current, upsert_resolver_current_rows,
+    clear_resolver_current, delete_resolver_current, load_permissions_current_for_resolver_scope,
+    load_permissions_current_resolver_targets, upsert_resolver_current_rows,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -15,10 +16,6 @@ use sqlx::{
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
-
-use crate::permissions::{
-    build_current_resolver_permission_rows, load_current_resolver_permission_targets,
-};
 
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
@@ -272,7 +269,7 @@ async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
         })
         .collect::<Result<BTreeSet<_>>>()?;
 
-    for (chain_id, resolver_address) in load_current_resolver_permission_targets(pool).await? {
+    for (chain_id, resolver_address) in load_permissions_current_resolver_targets(pool).await? {
         targets.insert(ResolverTarget {
             chain_id,
             resolver_address,
@@ -441,9 +438,12 @@ async fn load_resolver_permissions(
     pool: &PgPool,
     target: &ResolverTarget,
 ) -> Result<Vec<PermissionsCurrentRow>> {
-    let mut rows =
-        build_current_resolver_permission_rows(pool, &target.chain_id, &target.resolver_address)
-            .await?;
+    let mut rows = load_permissions_current_for_resolver_scope(
+        pool,
+        &target.chain_id,
+        &target.resolver_address,
+    )
+    .await?;
     rows.sort_by(|left, right| {
         left.subject
             .cmp(&right.subject)
@@ -1062,6 +1062,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::permissions::rebuild_permissions_current;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1229,6 +1230,7 @@ mod tests {
             ],
         )
         .await?;
+        rebuild_permissions_current(database.pool(), None).await?;
 
         let summary = rebuild_resolver_current(
             database.pool(),
@@ -1430,6 +1432,7 @@ mod tests {
             )],
         )
         .await?;
+        rebuild_permissions_current(database.pool(), None).await?;
         upsert_resolver_current_rows(
             database.pool(),
             &[ResolverCurrentRow {

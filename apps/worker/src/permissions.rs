@@ -73,51 +73,6 @@ pub async fn rebuild_permissions_current(
     }
 }
 
-pub(crate) async fn load_current_resolver_permission_targets(
-    pool: &PgPool,
-) -> Result<Vec<(String, String)>> {
-    let resource_ids = load_target_resource_ids(pool).await?;
-    let rows = build_rows(pool, &resource_ids).await?;
-    let mut targets = BTreeSet::new();
-
-    for row in rows {
-        if let PermissionScope::Resolver {
-            chain_id,
-            resolver_address,
-        } = row.scope
-        {
-            targets.insert((chain_id, resolver_address));
-        }
-    }
-
-    Ok(targets.into_iter().collect())
-}
-
-pub(crate) async fn build_current_resolver_permission_rows(
-    pool: &PgPool,
-    chain_id: &str,
-    resolver_address: &str,
-) -> Result<Vec<PermissionsCurrentRow>> {
-    let target_resource_ids =
-        load_target_resource_ids_for_resolver_scope(pool, chain_id, resolver_address).await?;
-    let rows = build_rows(pool, &target_resource_ids).await?;
-    let normalized_resolver_address = resolver_address.to_ascii_lowercase();
-
-    Ok(rows
-        .into_iter()
-        .filter(|row| {
-            matches!(
-                &row.scope,
-                PermissionScope::Resolver {
-                    chain_id: row_chain_id,
-                    resolver_address: row_resolver_address,
-                } if row_chain_id == chain_id
-                    && row_resolver_address == &normalized_resolver_address
-            )
-        })
-        .collect())
-}
-
 async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_ids = load_target_resource_ids(pool).await?;
     let deleted_row_count = clear_permissions_current(pool).await?;
@@ -240,40 +195,6 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
     .fetch_all(pool)
     .await
     .context("failed to load resource_ids for permissions_current rebuild")?;
-
-    rows.into_iter()
-        .map(|row| row.try_get("resource_id").context("missing resource_id"))
-        .collect()
-}
-
-async fn load_target_resource_ids_for_resolver_scope(
-    pool: &PgPool,
-    chain_id: &str,
-    resolver_address: &str,
-) -> Result<Vec<Uuid>> {
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT DISTINCT resource_id
-        FROM normalized_events
-        WHERE event_kind = $1
-          AND resource_id IS NOT NULL
-          AND canonicality_state {CANONICAL_STATE_FILTER}
-          AND after_state->'scope'->>'kind' = 'resolver'
-          AND after_state->'scope'->>'chain_id' = $2
-          AND LOWER(after_state->'scope'->>'resolver_address') = $3
-        ORDER BY resource_id
-        "#
-    ))
-    .bind(EVENT_KIND_PERMISSION_CHANGED)
-    .bind(chain_id)
-    .bind(resolver_address.to_ascii_lowercase())
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load resource_ids for resolver-scoped PermissionChanged rows on chain {chain_id} resolver {resolver_address}"
-        )
-    })?;
 
     rows.into_iter()
         .map(|row| row.try_get("resource_id").context("missing resource_id"))

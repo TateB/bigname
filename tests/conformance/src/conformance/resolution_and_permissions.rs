@@ -1,6 +1,5 @@
         #[tokio::test]
-        async fn resolution_contract_returns_declared_and_verified_sections_by_mode() -> Result<()>
-        {
+        async fn resolution_contract_returns_declared_and_verified_sections_by_mode() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
             let resource_id = Uuid::from_u128(0x2200);
@@ -71,21 +70,15 @@
             let declared_payload: ResolutionResponse = read_json(declared_response).await?;
             let verified_payload: ResolutionResponse = read_json(verified_response).await?;
             let both_payload: ResolutionResponse = read_json(both_response).await?;
-            let expected_default_declared_state = resolution_supported_declared_state(
-                logical_name_id,
-                resource_id,
-                &["addr:60", "avatar"],
-            );
+            let expected_default_declared_state =
+                resolution_supported_declared_state(logical_name_id, resource_id, &["addr:60", "avatar"]);
             let expected_declared_state = resolution_supported_declared_state(
                 logical_name_id,
                 resource_id,
                 &["text:com.twitter", "addr:60", "avatar"],
             );
-            let expected_both_declared_state = resolution_supported_declared_state(
-                logical_name_id,
-                resource_id,
-                &["text:com.twitter"],
-            );
+            let expected_both_declared_state =
+                resolution_supported_declared_state(logical_name_id, resource_id, &["text:com.twitter"]);
 
             assert_eq!(
                 default_payload.declared_state.as_ref(),
@@ -436,8 +429,7 @@
                     });
                 }
                 BasenamesDeferredVerifiedPathCase::ReservedOffchainGateway => {
-                    topology["transport"]["gateway"] =
-                        json!("https://basenames.example.test");
+                    topology["transport"]["gateway"] = json!("https://basenames.example.test");
                 }
             }
 
@@ -453,8 +445,7 @@
             let token_lineage_id = Uuid::from_u128(0x7211);
             let surface_binding_id = Uuid::from_u128(0x7212);
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000003a);
-            let request_key =
-                basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+            let request_key = basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
             let persisted_verified_queries =
                 resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
 
@@ -637,16 +628,14 @@
         }
 
         #[tokio::test]
-        async fn resolution_contract_reads_persisted_basenames_transport_direct_answers()
-        -> Result<()> {
+        async fn resolution_contract_reads_persisted_basenames_transport_direct_answers() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
             let resource_id = Uuid::from_u128(0x7200);
             let token_lineage_id = Uuid::from_u128(0x7100);
             let surface_binding_id = Uuid::from_u128(0x7300);
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000034);
-            let request_key =
-                basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+            let request_key = basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
             let persisted_verified_queries =
                 resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
 
@@ -899,8 +888,7 @@
             let token_lineage_id = Uuid::from_u128(0x7404);
             let surface_binding_id = Uuid::from_u128(0x7405);
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000037);
-            let request_key =
-                basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+            let request_key = basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
             let persisted_verified_queries =
                 resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
 
@@ -1022,7 +1010,10 @@
                     ]
                 }))
             );
-            assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+            assert_eq!(
+                payload.provenance.get("execution_trace_id"),
+                Some(&Value::Null)
+            );
 
             let explain_payload: ErrorResponse = read_json(explain_response).await?;
             assert_eq!(explain_payload.error.code, "not_found");
@@ -1032,8 +1023,7 @@
         }
 
         #[tokio::test]
-        async fn resolution_contract_keeps_out_of_class_basenames_transport_explicit()
-        -> Result<()> {
+        async fn resolution_contract_keeps_out_of_class_basenames_transport_explicit() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
             let resource_id = Uuid::from_u128(0x7400);
@@ -1158,7 +1148,10 @@
                     "addr:60",
                 ]))
             );
-            assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+            assert_eq!(
+                payload.provenance.get("execution_trace_id"),
+                Some(&Value::Null)
+            );
 
             let explain_payload: ErrorResponse = read_json(explain_response).await?;
             assert_eq!(explain_payload.error.code, "not_found");
@@ -1172,8 +1165,7 @@
         }
 
         #[tokio::test]
-        async fn resolution_contract_keeps_basenames_deferred_path_classes_selector_local()
-        -> Result<()> {
+        async fn resolution_contract_keeps_basenames_deferred_path_classes_selector_local() -> Result<()> {
             for case in BasenamesDeferredVerifiedPathCase::all() {
                 assert_basenames_deferred_verified_path_case_stays_selector_local(case).await?;
             }
@@ -1264,9 +1256,7 @@
             let resolution_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
-                        )
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -1377,11 +1367,7 @@
             .await?;
             upsert_execution_outcome(
                 &database.pool,
-                &resolution_execution_outcome(
-                    execution_trace_id,
-                    cache_key,
-                    persisted_verified_queries,
-                ),
+                &resolution_execution_outcome(execution_trace_id, cache_key, persisted_verified_queries),
             )
             .await?;
 
@@ -1457,10 +1443,8 @@
                 .context("resolution execution explain requires an exact-name current row")?;
             let record_inventory_row =
                 resolution_record_inventory_current_row(logical_name_id, resource_id);
-            let explain_records = parse_resolution_record_keys(
-                Some("text:com.twitter,addr:60"),
-                ResolutionMode::Verified,
-            )
+            let explain_records =
+                parse_resolution_record_keys(Some("text:com.twitter,addr:60"), ResolutionMode::Verified)
             .map_err(|error| anyhow::anyhow!(error.message))?;
             let cache_key = build_resolution_execution_cache_key(
                 &name_row,
@@ -1468,10 +1452,8 @@
                 Some(&record_inventory_row),
             )?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = resolution_execution_verified_queries(
-                execution_trace_id,
-                &["addr:60", "text:com.twitter"],
-            );
+            let persisted_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["addr:60", "text:com.twitter"]);
 
             upsert_execution_trace(
                 &database.pool,
@@ -1485,11 +1467,7 @@
             .await?;
             upsert_execution_outcome(
                 &database.pool,
-                &resolution_execution_outcome(
-                    execution_trace_id,
-                    cache_key,
-                    persisted_verified_queries,
-                ),
+                &resolution_execution_outcome(execution_trace_id, cache_key, persisted_verified_queries),
             )
             .await?;
 
@@ -1507,9 +1485,7 @@
             let resolution_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60",
-                        )
+                        .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -1521,10 +1497,8 @@
 
             let explain_payload: ResolutionResponse = read_json(explain_response).await?;
             let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
-            let expected_verified_queries = resolution_execution_verified_queries(
-                execution_trace_id,
-                &["text:com.twitter", "addr:60"],
-            );
+            let expected_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
 
             assert_eq!(explain_payload.data, resolution_payload.data);
             assert_eq!(explain_payload.coverage, resolution_payload.coverage);
@@ -1613,11 +1587,7 @@
             .await?;
             upsert_execution_outcome(
                 &database.pool,
-                &resolution_execution_outcome(
-                    execution_trace_id,
-                    cache_key,
-                    persisted_verified_queries,
-                ),
+                &resolution_execution_outcome(execution_trace_id, cache_key, persisted_verified_queries),
             )
             .await?;
 
@@ -1686,8 +1656,8 @@
         }
 
         #[tokio::test]
-        async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_route()
-        -> Result<()> {
+        async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_route() -> Result<()>
+        {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
             let resource_id = Uuid::from_u128(0x2200);
@@ -1736,10 +1706,8 @@
                 Some(&record_inventory_row),
             )?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = resolution_alias_only_verified_queries(
-                execution_trace_id,
-                &["avatar", "text:com.twitter"],
-            );
+            let persisted_verified_queries =
+                resolution_alias_only_verified_queries(execution_trace_id, &["avatar", "text:com.twitter"]);
 
             let mut trace = resolution_execution_trace(
                 execution_trace_id,
@@ -1869,10 +1837,8 @@
                 Some(&record_inventory_row),
             )?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = resolution_alias_only_verified_queries(
-                execution_trace_id,
-                &["avatar", "text:com.twitter"],
-            );
+            let persisted_verified_queries =
+                resolution_alias_only_verified_queries(execution_trace_id, &["avatar", "text:com.twitter"]);
 
             let mut trace = resolution_execution_trace(
                 execution_trace_id,
@@ -1927,8 +1893,7 @@
 
             let explain_payload: ResolutionResponse = read_json(explain_response).await?;
             let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
-            let mut expected_execution =
-                resolution_execution_summary(execution_trace_id, resource_id);
+            let mut expected_execution = resolution_execution_summary(execution_trace_id, resource_id);
             expected_execution["alias"] = json!({
                 "final_target": alias_target.clone(),
                 "hops": [alias_target.clone()],
@@ -2211,8 +2176,7 @@
                 .context("resolution execution explain requires an exact-name current row")?;
             let record_inventory_row =
                 resolution_record_inventory_current_row(logical_name_id, resource_id);
-            let persisted_records =
-                parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
+            let persisted_records = parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
                     .map_err(|error| anyhow::anyhow!(error.message))?;
             let cache_key = build_resolution_execution_cache_key(
                 &name_row,
@@ -2235,11 +2199,7 @@
             .await?;
             upsert_execution_outcome(
                 &database.pool,
-                &resolution_execution_outcome(
-                    execution_trace_id,
-                    cache_key,
-                    persisted_verified_queries,
-                ),
+                &resolution_execution_outcome(execution_trace_id, cache_key, persisted_verified_queries),
             )
             .await?;
 
@@ -2287,6 +2247,201 @@
                     })?;
             }
 
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_statuses() -> Result<()>
+        {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x9200);
+            let token_lineage_id = Uuid::from_u128(0x9201);
+            let surface_binding_id = Uuid::from_u128(0x9202);
+            let resolver_address = "0x0000000000000000000000000000000000000abc";
+            let namehash = "namehash:alice.eth";
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            seed_ens_v2_event_fixture_inputs(
+                &database.pool,
+                &[
+                    ens_v2_record_version_changed_event(
+                        "conformance:ensv2:alice:record-version",
+                        logical_name_id,
+                        resource_id,
+                        resolver_address,
+                        namehash,
+                        "2",
+                        15,
+                        121,
+                        0,
+                    ),
+                    ens_v2_record_changed_event(
+                        "conformance:ensv2:alice:addr60",
+                        logical_name_id,
+                        resource_id,
+                        resolver_address,
+                        namehash,
+                        "addr",
+                        Some("60"),
+                        16,
+                        122,
+                        0,
+                    ),
+                    ens_v2_record_changed_event(
+                        "conformance:ensv2:alice:text",
+                        logical_name_id,
+                        resource_id,
+                        resolver_address,
+                        namehash,
+                        "text",
+                        None,
+                        16,
+                        122,
+                        1,
+                    ),
+                    ens_v2_record_changed_event(
+                        "conformance:ensv2:alice:pubkey",
+                        logical_name_id,
+                        resource_id,
+                        resolver_address,
+                        namehash,
+                        "pubkey",
+                        None,
+                        17,
+                        123,
+                        0,
+                    ),
+                ],
+            )
+            .await?;
+            rebuild_record_inventory_current(&database, resource_id).await?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("ENSv2 declared resolution inventory test requires name_current row")?;
+            name_row.chain_positions["ethereum"] = json!({
+                "chain_id": "ethereum-mainnet",
+                "block_number": 121,
+                "block_hash": "0xensv2block79",
+                "timestamp": "2024-05-31T21:15:21Z",
+            });
+            database.insert_name_current_row(name_row).await?;
+
+            let response = app_router(database.app_state())
+                        .oneshot(
+                            Request::builder()
+                                .uri(
+                                    "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash,pubkey",
+                                )
+                                .body(Body::empty())
+                                .expect("request must build"),
+                        )
+                        .await
+                        .context("ENSv2 declared resolution inventory request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("ENSv2 declared resolution must include declared_state")?;
+            let topology_record_boundary = declared_state
+                .get("topology")
+                .and_then(|value| value.get("version_boundaries"))
+                .and_then(|value| value.get("record_version_boundary"))
+                .context("ENSv2 topology must expose record_version_boundary")?;
+            let record_inventory = declared_state
+                .get("record_inventory")
+                .context("ENSv2 declared resolution must include record_inventory")?;
+            let record_cache = declared_state
+                .get("record_cache")
+                .context("ENSv2 declared resolution must include record_cache")?;
+
+            assert_eq!(
+                record_inventory.get("record_version_boundary"),
+                Some(topology_record_boundary)
+            );
+            assert_eq!(
+                record_cache.get("record_version_boundary"),
+                Some(topology_record_boundary)
+            );
+            assert_eq!(
+                record_inventory
+                    .get("enumeration_basis")
+                    .and_then(|value| value.get("globally_enumerable")),
+                Some(&json!(false))
+            );
+            assert_eq!(
+                record_inventory
+                    .get("selectors")
+                    .and_then(Value::as_array)
+                    .expect("ENSv2 record_inventory selectors must be an array")
+                    .iter()
+                    .map(record_selector_identity_tuple)
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        "addr:60".to_owned(),
+                        "addr".to_owned(),
+                        Some("60".to_owned()),
+                    ),
+                    ("text".to_owned(), "text".to_owned(), None),
+                ]
+            );
+            assert_eq!(
+                record_inventory
+                    .get("unsupported_families")
+                    .and_then(Value::as_array)
+                    .expect("ENSv2 record_inventory unsupported_families must be an array"),
+                &vec![json!({
+                    "record_family": "pubkey",
+                    "unsupported_reason": "record_family_not_supported_in_phase6_projection",
+                })]
+            );
+            assert_eq!(
+                record_cache.get("entries"),
+                Some(&json!([
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events",
+                    },
+                    {
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
+                    },
+                    {
+                        "record_key": "pubkey",
+                        "record_family": "pubkey",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "record_family_not_supported_in_phase6_projection",
+                    }
+                ]))
+            );
+            assert_eq!(payload.verified_state, None);
+
+            database.cleanup().await?;
             Ok(())
         }
 
@@ -2448,7 +2603,7 @@
         }
 
         #[tokio::test]
-        async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_permission_changed_rows()
+        async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_permissions_current()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
@@ -2456,8 +2611,7 @@
             let token_lineage_id = Uuid::from_u128(0xa3b1);
             let surface_binding_id = Uuid::from_u128(0xa3b2);
             let resolver_address = "0x0000000000000000000000000000000000000abc";
-            let subject =
-                BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
+            let subject = BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
 
             seed_basenames_control_vector_rebuild_inputs(
                 &database,
@@ -2471,8 +2625,20 @@
             bigname_storage::upsert_raw_blocks(
                 &database.pool,
                 &[
-                    raw_block("base-mainnet", "0xbase-permission-1", None, 106, 1_717_181_706),
-                    raw_block("base-mainnet", "0xbase-permission-2", None, 107, 1_717_181_707),
+                    raw_block(
+                        "base-mainnet",
+                        "0xbase-permission-1",
+                        None,
+                        106,
+                        1_717_181_706,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        "0xbase-permission-2",
+                        None,
+                        107,
+                        1_717_181_707,
+                    ),
                 ],
             )
             .await?;
@@ -2552,8 +2718,54 @@
                 ],
             )
             .await?;
-            rebuild_resolver_current(&database, Some("base-mainnet"), Some(resolver_address))
-                .await?;
+            rebuild_resolver_current(&database, Some("base-mainnet"), Some(resolver_address)).await?;
+
+            let raw_only_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("Basenames raw-only resolver overview contract request failed")?;
+
+            assert_eq!(raw_only_response.status(), StatusCode::OK);
+
+            let raw_only_payload: ResolverResponse = read_json(raw_only_response).await?;
+            assert_eq!(
+                raw_only_payload.declared_state["bindings"]["count"],
+                json!(1)
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["permissions"],
+                json!({
+                    "status": "supported",
+                    "count": 0,
+                    "items": [],
+                })
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["role_holders"],
+                json!({
+                    "status": "supported",
+                    "count": 0,
+                    "items": [],
+                })
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["event_summary"],
+                json!({
+                    "status": "supported",
+                    "count": 1,
+                    "by_kind": {
+                        "ResolverChanged": 1,
+                    },
+                })
+            );
+
+            rebuild_permissions_current(&database, Some(resource_id)).await?;
+            rebuild_resolver_current(&database, Some("base-mainnet"), Some(resolver_address)).await?;
 
             let response = app_router(database.app_state())
                 .oneshot(
@@ -2576,11 +2788,14 @@
                 })
             );
             assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
-            assert_eq!(payload.declared_state["aliases"], json!({
+            assert_eq!(
+                payload.declared_state["aliases"],
+                json!({
                 "status": "supported",
                 "count": 0,
                 "items": [],
-            }));
+                })
+            );
             assert_eq!(
                 payload.declared_state["permissions"]["items"][0],
                 json!({
@@ -2612,8 +2827,283 @@
         }
 
         #[tokio::test]
-        async fn resource_permissions_contract_returns_rows_with_shared_collection_envelope()
+        async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permission_ledger()
         -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x9300);
+            let other_resource_id = Uuid::from_u128(0x9303);
+            let token_lineage_id = Uuid::from_u128(0x9301);
+            let surface_binding_id = Uuid::from_u128(0x9302);
+            let resolver_address = "0x0000000000000000000000000000000000000aaa";
+            let subject = "0x0000000000000000000000000000000000000abc";
+            let other_subject = "0x0000000000000000000000000000000000000def";
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[ens_v2_resource(
+                    other_resource_id,
+                    132,
+                    "ensv2_resolver_permission_other_resource",
+                )],
+            )
+            .await
+            .context("failed to upsert second ENSv2 resolver permission resource")?;
+            seed_ens_v2_event_fixture_inputs(
+                &database.pool,
+                &[
+                    ens_v2_resolver_event(
+                        "conformance:ensv2:alice:resolver-overview",
+                        logical_name_id,
+                        resource_id,
+                        resolver_address,
+                        "ResolverChanged",
+                        10,
+                        131,
+                        0,
+                        json!({}),
+                        json!({
+                            "resolver": resolver_address,
+                            "namehash": "namehash:alice.eth",
+                        }),
+                    ),
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:alice:resolver-permission",
+                        logical_name_id,
+                        resource_id,
+                        subject,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: resolver_address.to_owned(),
+                        },
+                        &["set_records", "set_resolver"],
+                        11,
+                        132,
+                        0,
+                    ),
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:alice:resolver-permission-other-resource",
+                        logical_name_id,
+                        other_resource_id,
+                        other_subject,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: resolver_address.to_owned(),
+                        },
+                        &["set_records"],
+                        12,
+                        133,
+                        0,
+                    ),
+                ],
+            )
+            .await?;
+            rebuild_resolver_current(&database, Some("ethereum-mainnet"), Some(resolver_address)).await?;
+
+            let raw_only_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 raw-only resolver overview request failed")?;
+
+            assert_eq!(raw_only_response.status(), StatusCode::OK);
+
+            let raw_only_payload: ResolverResponse = read_json(raw_only_response).await?;
+            assert_eq!(
+                raw_only_payload.declared_state["bindings"]["count"],
+                json!(1)
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["permissions"],
+                json!({
+                    "status": "supported",
+                    "count": 0,
+                    "items": [],
+                })
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["role_holders"],
+                json!({
+                    "status": "supported",
+                    "count": 0,
+                    "items": [],
+                })
+            );
+            assert_eq!(
+                raw_only_payload.declared_state["event_summary"],
+                json!({
+                    "status": "supported",
+                    "count": 1,
+                    "by_kind": {
+                        "ResolverChanged": 1,
+                    },
+                })
+            );
+
+            rebuild_permissions_current(&database, Some(resource_id)).await?;
+            rebuild_permissions_current(&database, Some(other_resource_id)).await?;
+
+            let first_permission_rows = bigname_storage::load_permissions_current(
+                &database.pool,
+                resource_id,
+                None,
+                Some(&PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: resolver_address.to_owned(),
+                }),
+            )
+            .await?;
+            let second_permission_rows = bigname_storage::load_permissions_current(
+                &database.pool,
+                other_resource_id,
+                None,
+                Some(&PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: resolver_address.to_owned(),
+                }),
+            )
+            .await?;
+            assert_eq!(first_permission_rows.len(), 1);
+            assert_eq!(second_permission_rows.len(), 1);
+            assert_ne!(
+                first_permission_rows[0].resource_id,
+                second_permission_rows[0].resource_id
+            );
+
+            rebuild_resolver_current(&database, Some("ethereum-mainnet"), Some(resolver_address)).await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 resolver overview request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResolverResponse = read_json(response).await?;
+            assert_eq!(
+                payload.data,
+                json!({
+                    "chain_id": "ethereum-mainnet",
+                    "resolver_address": resolver_address,
+                })
+            );
+            assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
+            assert_eq!(
+                payload.declared_state["bindings"]["items"][0]["logical_name_id"],
+                json!(logical_name_id)
+            );
+            assert_eq!(payload.declared_state["aliases"]["count"], json!(0));
+            assert_eq!(payload.declared_state["permissions"]["count"], json!(2));
+            assert_eq!(
+                payload.declared_state["permissions"]["items"][0],
+                json!({
+                    "resource_id": resource_id.to_string(),
+                    "subject": subject,
+                    "effective_powers": ["set_records", "set_resolver"],
+                    "grant_source": {
+                        "kind": "raw_log",
+                        "source_event": "EACRolesChanged",
+                        "resource_id": resource_id.to_string(),
+                        "changed_powers": ["set_records", "set_resolver"],
+                    },
+                    "revocation_source": null,
+                })
+            );
+            assert_eq!(
+                payload.declared_state["permissions"]["items"][1],
+                json!({
+                    "resource_id": other_resource_id.to_string(),
+                    "subject": other_subject,
+                    "effective_powers": ["set_records"],
+                    "grant_source": {
+                        "kind": "raw_log",
+                        "source_event": "EACRolesChanged",
+                        "resource_id": other_resource_id.to_string(),
+                        "changed_powers": ["set_records"],
+                    },
+                    "revocation_source": null,
+                })
+            );
+            assert_eq!(
+                payload.declared_state["permissions"]["items"][0]
+                    .as_object()
+                    .expect("resolver permission summary item must be an object")
+                    .keys()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    "effective_powers".to_owned(),
+                    "grant_source".to_owned(),
+                    "resource_id".to_owned(),
+                    "revocation_source".to_owned(),
+                    "subject".to_owned(),
+                ])
+            );
+            assert_eq!(
+                payload.declared_state["role_holders"]["items"][0],
+                json!({
+                    "subject": subject,
+                    "resource_count": 1,
+                    "permission_row_count": 1,
+                    "effective_powers": ["set_records", "set_resolver"],
+                    "resource_ids": [resource_id.to_string()],
+                })
+            );
+            assert_eq!(
+                payload.declared_state["role_holders"]["items"][1],
+                json!({
+                    "subject": other_subject,
+                    "resource_count": 1,
+                    "permission_row_count": 1,
+                    "effective_powers": ["set_records"],
+                    "resource_ids": [other_resource_id.to_string()],
+                })
+            );
+            assert_eq!(
+                payload.declared_state["event_summary"],
+                json!({
+                    "status": "supported",
+                    "count": 3,
+                    "by_kind": {
+                        "PermissionChanged": 2,
+                        "ResolverChanged": 1,
+                    },
+                })
+            );
+            assert_eq!(
+                payload.coverage.get("enumeration_basis"),
+                Some(&json!("resolver_overview"))
+            );
+            assert_eq!(
+                payload.coverage.get("source_classes_considered"),
+                Some(&json!(["ens_v2_resolver_l1"]))
+            );
+            assert_eq!(payload.verified_state, None);
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resource_permissions_contract_returns_rows_with_shared_collection_envelope() -> Result<()>
+        {
             let database = HarnessDatabase::new().await?;
             let resource_id = Uuid::from_u128(0xa300);
             let filtered_subject = "0x0000000000000000000000000000000000000abc";
@@ -2637,19 +3127,12 @@
                         filtered_subject,
                         PermissionScope::Resolver {
                             chain_id: "ethereum-mainnet".to_owned(),
-                            resolver_address: "0x0000000000000000000000000000000000000aaa"
-                                .to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
                         },
                         8,
                         42,
                     ),
-                    permission_current_row(
-                        resource_id,
-                        other_subject,
-                        PermissionScope::Registry,
-                        9,
-                        43,
-                    ),
+                    permission_current_row(resource_id, other_subject, PermissionScope::Registry, 9, 43),
                 ],
             )
             .await
@@ -2753,8 +3236,7 @@
                 .await
                 .context("resource permissions first page request failed")?;
             assert_eq!(first_page_response.status(), StatusCode::OK);
-            let first_page_payload: ResourcePermissionsResponse =
-                read_json(first_page_response).await?;
+            let first_page_payload: ResourcePermissionsResponse = read_json(first_page_response).await?;
             let cursor = first_page_payload
                 .page
                 .next_cursor
@@ -2773,8 +3255,7 @@
                 .await
                 .context("resource permissions second page request failed")?;
             assert_eq!(second_page_response.status(), StatusCode::OK);
-            let second_page_payload: ResourcePermissionsResponse =
-                read_json(second_page_response).await?;
+            let second_page_payload: ResourcePermissionsResponse = read_json(second_page_response).await?;
 
             let replay_page_response = app_router(database.app_state())
                 .oneshot(
@@ -2788,8 +3269,7 @@
                 .await
                 .context("resource permissions replay page request failed")?;
             assert_eq!(replay_page_response.status(), StatusCode::OK);
-            let replay_page_payload: ResourcePermissionsResponse =
-                read_json(replay_page_response).await?;
+            let replay_page_payload: ResourcePermissionsResponse = read_json(replay_page_response).await?;
 
             assert_replay_stable_pagination(
                 &payload.data,
@@ -2810,15 +3290,14 @@
         }
 
         #[tokio::test]
-        async fn resource_permissions_contract_reads_basenames_permission_changed_rows_only()
-        -> Result<()> {
+        async fn resource_permissions_contract_reads_basenames_permission_changed_rows_only() -> Result<()>
+        {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:management-only.base.eth";
             let resource_id = Uuid::from_u128(0xa3c0);
             let token_lineage_id = Uuid::from_u128(0xa3c1);
             let surface_binding_id = Uuid::from_u128(0xa3c2);
-            let subject =
-                BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
+            let subject = BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
 
             seed_basenames_control_vector_rebuild_inputs(
                 &database,
@@ -2832,8 +3311,20 @@
             bigname_storage::upsert_raw_blocks(
                 &database.pool,
                 &[
-                    raw_block("base-mainnet", "0xbase-permission-3", None, 106, 1_717_181_706),
-                    raw_block("base-mainnet", "0xbase-permission-4", None, 107, 1_717_181_707),
+                    raw_block(
+                        "base-mainnet",
+                        "0xbase-permission-3",
+                        None,
+                        106,
+                        1_717_181_706,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        "0xbase-permission-4",
+                        None,
+                        107,
+                        1_717_181_707,
+                    ),
                 ],
             )
             .await?;
@@ -2975,6 +3466,146 @@
         }
 
         #[tokio::test]
+        async fn resource_permissions_contract_reads_ensv2_resource_and_resolver_scopes() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x9400);
+            let subject = "0x0000000000000000000000000000000000000abc";
+            let resolver_address = "0x0000000000000000000000000000000000000aaa";
+
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[ens_v2_resource(
+                    resource_id,
+                    141,
+                    "ensv2_permissions_resource",
+                )],
+            )
+            .await
+            .context("failed to upsert ENSv2 permission resource")?;
+            seed_ens_v2_event_fixture_inputs(
+                &database.pool,
+                &[
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:alice:resource-permission",
+                        logical_name_id,
+                        resource_id,
+                        subject,
+                        PermissionScope::Resource,
+                        &["resource_control"],
+                        12,
+                        142,
+                        0,
+                    ),
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:alice:resolver-permission-row",
+                        logical_name_id,
+                        resource_id,
+                        subject,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: resolver_address.to_owned(),
+                        },
+                        &["resolver_control"],
+                        13,
+                        143,
+                        0,
+                    ),
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:alice:revoked-resolver-permission",
+                        logical_name_id,
+                        resource_id,
+                        "0x0000000000000000000000000000000000000def",
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000bbb".to_owned(),
+                        },
+                        &[],
+                        14,
+                        144,
+                        0,
+                    ),
+                ],
+            )
+            .await?;
+            rebuild_permissions_current(&database, Some(resource_id)).await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/resources/{resource_id}/permissions"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 resource permissions request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResourcePermissionsResponse = read_json(response).await?;
+            assert_eq!(payload.data.len(), 2);
+            assert_eq!(permission_subjects(&payload), vec![subject, subject]);
+            assert_eq!(payload.page.sort, "subject_scope_asc");
+            assert_eq!(payload.coverage.enumeration_basis, "resource_permissions");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["ens_v2_resolver_l1".to_owned()]
+            );
+            assert_eq!(payload.verified_state, None);
+            assert_eq!(payload.declared_state, json!({}));
+
+            let resource_row = payload
+                .data
+                .iter()
+                .find(|row| {
+                    row.get("scope")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("resource")
+                })
+                .expect("ENSv2 resource-scoped permission row must be present");
+            assert_eq!(
+                resource_row.get("scope"),
+                Some(&json!({
+                    "kind": "resource",
+                    "detail": {},
+                }))
+            );
+            assert_eq!(
+                resource_row.get("effective_powers"),
+                Some(&json!(["resource_control"]))
+            );
+
+            let resolver_row = payload
+                .data
+                .iter()
+                .find(|row| {
+                    row.get("scope")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("resolver")
+                })
+                .expect("ENSv2 resolver-scoped permission row must be present");
+            assert_eq!(
+                resolver_row.get("scope"),
+                Some(&json!({
+                    "kind": "resolver",
+                    "detail": {
+                        "chain_id": "ethereum-mainnet",
+                        "resolver_address": resolver_address,
+                    },
+                }))
+            );
+            assert_eq!(
+                resolver_row.get("effective_powers"),
+                Some(&json!(["resolver_control"]))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resource_permissions_contract_honors_subject_and_scope_filters() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let resource_id = Uuid::from_u128(0xa301);
@@ -2998,8 +3629,7 @@
                         shared_subject,
                         PermissionScope::Resolver {
                             chain_id: "ethereum-mainnet".to_owned(),
-                            resolver_address: "0x0000000000000000000000000000000000000bbb"
-                                .to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000bbb".to_owned(),
                         },
                         8,
                         52,
