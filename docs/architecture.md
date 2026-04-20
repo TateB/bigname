@@ -492,8 +492,6 @@ Rules:
 
 The system must persist immutable facts for human-readable name revelation, including:
 
-- `LabelObserved`
-- `NameObserved`
 - `PreimageObserved`
 
 These facts may come from:
@@ -509,6 +507,11 @@ Rules:
 - unhashed labels and names must remain attributable to the source that revealed them
 - the system must distinguish between a known surface and an unknown-but-hashed placeholder
 - historical name quality must not depend on transient cache state
+
+ENSv2 observation-only rules:
+
+- admitted ENSv2 registry, registrar, and resolver name-bearing events may produce adapter-owned preimage observations: registry `LabelRegistered`, `LabelReserved`, and `ParentUpdated` expose label text, registrar `NameRegistered` and `NameRenewed` expose `.eth` labels, and resolver `AliasChanged`, `NamedResource`, `NamedTextResource`, and `NamedAddrResource` expose DNS-encoded names used by resolver topology and permission scopes (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L132 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2@554c309).
+- those observations are adapter/intake truth only: they may create identity rows, immutable preimage observation facts, and normalized events, but they do not create projection rows, do not promote public exact-name support, and do not mutate manifest capability state; for the ENSv2 `sepolia-dev` profile, public exact-name profile coverage remains `status=unsupported`, `exhaustiveness=not_applicable`, and `unsupported_reason="ensv2 sepolia-dev exact-name profile is shadow-only"` until a later doc-first manifest/API/projection update promotes `exact_name_profile` to `supported` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309).
 
 ---
 
@@ -828,8 +831,7 @@ Source-specific values include:
 
 ### Identity, preimage, and discovery
 
-- `LabelObserved`
-- `NameObserved`
+- `PreimageObserved`
 - `NameClassified`
 - `SurfaceBound`
 - `SurfaceUnbound`
@@ -880,6 +882,7 @@ ENSv2 adapter mappings:
 
 - `TokenResourceLinked` is emitted from upstream `TokenResource(tokenId, resource)` and is the only adapter event that links the current token ID to the upstream EAC resource (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L216 @ ens_v2@554c309).
 - `TokenRegenerated` is emitted from upstream `TokenRegenerated(oldTokenId, newTokenId)` and must preserve the existing `resource_id`, `token_lineage_id`, and active surface binding unless a separate registry event changes those anchors (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309).
+- `PreimageObserved` rows may be appended from ENSv2 name-bearing registry, registrar, and resolver events, but only as preimage/normalization observations tied to adapter-owned identity rows; they are not projection writes and they do not change public coverage or manifest capability state (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L132 @ ens_v2@554c309).
 - `SubregistryChanged` and `ParentChanged` are the normalized graph events for upstream `SubregistryUpdated` and `ParentUpdated` respectively (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309).
 - `AliasChanged` is the normalized topology event for upstream `PermissionedResolver.AliasChanged`, and the alias path stores source and destination DNS-encoded names from the unindexed event data (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L230 @ ens_v2@554c309).
 - `PermissionChanged` and `RootPermissionChanged` are derived from upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`; root-resource permissions stay distinguishable because EAC root roles are checked separately and also satisfy resource-level checks through root fallback (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L176 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L181 @ ens_v2@554c309).

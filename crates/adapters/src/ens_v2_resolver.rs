@@ -12,8 +12,10 @@ use sqlx::{
 
 const SOURCE_FAMILY_ENS_V2_RESOLVER_L1: &str = "ens_v2_resolver_l1";
 pub(crate) const DERIVATION_KIND_ENS_V2_RESOLVER: &str = "ens_v2_resolver";
+const DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION: &str = "raw_log_preimage_observation";
 const RESOLVER_EDGE_KIND: &str = "resolver";
 
+const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
@@ -24,6 +26,9 @@ const CONTENTHASH_CHANGED_SIGNATURE: &str = "ContenthashChanged(bytes32,bytes)";
 const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
 const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
 const ALIAS_CHANGED_SIGNATURE: &str = "AliasChanged(bytes,bytes,bytes,bytes)";
+const NAMED_RESOURCE_SIGNATURE: &str = "NamedResource(uint256,bytes)";
+const NAMED_TEXT_RESOURCE_SIGNATURE: &str = "NamedTextResource(uint256,bytes,bytes32,string)";
+const NAMED_ADDR_RESOURCE_SIGNATURE: &str = "NamedAddrResource(uint256,bytes,uint256)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV2ResolverSyncSummary {
@@ -90,6 +95,14 @@ struct NameLink {
     namehash: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreimageObservation {
+    dns_encoded_name: String,
+    decoded_name: Option<String>,
+    labelhashes: Vec<String>,
+    namehash: String,
+}
+
 enum ResolverObservation {
     AddressChanged {
         node: String,
@@ -116,6 +129,15 @@ enum ResolverObservation {
     AliasChanged {
         from_name: Vec<u8>,
         to_name: Vec<u8>,
+    },
+    NamedResource {
+        name: Vec<u8>,
+    },
+    NamedTextResource {
+        name: Vec<u8>,
+    },
+    NamedAddrResource {
+        name: Vec<u8>,
     },
 }
 
@@ -306,7 +328,7 @@ async fn build_resolver_events(
                 )
                 .await?
             };
-            Ok(vec![normalized_event(
+            let mut events = vec![normalized_event(
                 raw_log,
                 from_logical_name_id,
                 to_link.resource_id,
@@ -329,7 +351,18 @@ async fn build_resolver_events(
                     "to_namehash": to_link.namehash,
                 }),
                 "alias-changed",
-            )])
+            )];
+            events.extend(alias_preimage_events(raw_log, &from_name, &to_name)?);
+            Ok(events)
+        }
+        ResolverObservation::NamedResource { name } => {
+            named_dns_preimage_events(raw_log, "NamedResource", &name)
+        }
+        ResolverObservation::NamedTextResource { name } => {
+            named_dns_preimage_events(raw_log, "NamedTextResource", &name)
+        }
+        ResolverObservation::NamedAddrResource { name } => {
+            named_dns_preimage_events(raw_log, "NamedAddrResource", &name)
         }
     }
 }
@@ -409,6 +442,21 @@ fn build_resolver_observation(raw_log: &ResolverRawLogRow) -> Result<Option<Reso
         }));
     }
 
+    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_RESOURCE_SIGNATURE)) {
+        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
+        return Ok(Some(ResolverObservation::NamedResource { name }));
+    }
+
+    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE)) {
+        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
+        return Ok(Some(ResolverObservation::NamedTextResource { name }));
+    }
+
+    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_ADDR_RESOURCE_SIGNATURE)) {
+        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
+        return Ok(Some(ResolverObservation::NamedAddrResource { name }));
+    }
+
     Ok(None)
 }
 
@@ -448,6 +496,183 @@ fn normalized_event(
         canonicality_state: raw_log.canonicality_state,
         before_state,
         after_state,
+    }
+}
+
+fn alias_preimage_events(
+    raw_log: &ResolverRawLogRow,
+    from_name: &[u8],
+    to_name: &[u8],
+) -> Result<Vec<NormalizedEvent>> {
+    let mut events = Vec::new();
+    if !from_name.is_empty() {
+        events.push(preimage_observed_event(
+            raw_log,
+            "AliasChanged",
+            observe_dns_encoded_name(from_name)?,
+            Some("from_name"),
+        ));
+    }
+    if !to_name.is_empty() {
+        events.push(preimage_observed_event(
+            raw_log,
+            "AliasChanged",
+            observe_dns_encoded_name(to_name)?,
+            Some("to_name"),
+        ));
+    }
+    Ok(events)
+}
+
+fn named_dns_preimage_events(
+    raw_log: &ResolverRawLogRow,
+    source_event: &str,
+    name: &[u8],
+) -> Result<Vec<NormalizedEvent>> {
+    if name.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![preimage_observed_event(
+        raw_log,
+        source_event,
+        observe_dns_encoded_name(name)?,
+        None,
+    )])
+}
+
+fn preimage_observed_event(
+    raw_log: &ResolverRawLogRow,
+    source_event: &str,
+    observation: PreimageObservation,
+    observation_slot: Option<&str>,
+) -> NormalizedEvent {
+    let identity_suffix = observation_slot
+        .map(|slot| format!(":{slot}"))
+        .unwrap_or_default();
+    let mut after_state = json!({
+        "source_event": source_event,
+        "dns_encoded_name": observation.dns_encoded_name,
+        "decoded_name": observation.decoded_name,
+        "labelhashes": observation.labelhashes,
+        "namehash": observation.namehash,
+    });
+    if let Some(observation_slot) = observation_slot
+        && let Some(object) = after_state.as_object_mut()
+    {
+        object.insert(
+            "observation_slot".to_owned(),
+            Value::String(observation_slot.to_owned()),
+        );
+    }
+    NormalizedEvent {
+        event_identity: format!(
+            "raw_log_preimage_observed:{}:{}:{}:{}:{}{}",
+            raw_log.source_manifest_id,
+            raw_log.block_hash,
+            raw_log.transaction_hash,
+            raw_log.log_index,
+            raw_log.emitting_address,
+            identity_suffix
+        ),
+        namespace: raw_log.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_PREIMAGE_OBSERVED.to_owned(),
+        source_family: raw_log.source_family.clone(),
+        manifest_version: raw_log.manifest_version,
+        source_manifest_id: Some(raw_log.source_manifest_id),
+        chain_id: Some(raw_log.chain_id.clone()),
+        block_number: Some(raw_log.block_number),
+        block_hash: Some(raw_log.block_hash.clone()),
+        transaction_hash: Some(raw_log.transaction_hash.clone()),
+        log_index: Some(raw_log.log_index),
+        raw_fact_ref: raw_log_preimage_fact_ref(raw_log),
+        derivation_kind: DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION.to_owned(),
+        canonicality_state: raw_log.canonicality_state,
+        before_state: json!({}),
+        after_state,
+    }
+}
+
+fn raw_log_preimage_fact_ref(raw_log: &ResolverRawLogRow) -> Value {
+    json!({
+        "kind": "raw_log",
+        "chain_id": raw_log.chain_id,
+        "block_hash": raw_log.block_hash,
+        "block_number": raw_log.block_number,
+        "transaction_hash": raw_log.transaction_hash,
+        "transaction_index": raw_log.transaction_index,
+        "log_index": raw_log.log_index,
+        "emitting_address": raw_log.emitting_address,
+        "topic0": raw_log.topics.first().cloned(),
+        "topic1": raw_log.topics.get(1).cloned(),
+        "topic2": raw_log.topics.get(2).cloned(),
+        "data_hex": hex_string(&raw_log.data),
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod testsupport {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct ResolverPreimageRawLog {
+        pub(crate) chain_id: String,
+        pub(crate) block_hash: String,
+        pub(crate) block_number: i64,
+        pub(crate) transaction_hash: String,
+        pub(crate) transaction_index: i64,
+        pub(crate) log_index: i64,
+        pub(crate) emitting_address: String,
+        pub(crate) topics: Vec<String>,
+        pub(crate) data: Vec<u8>,
+        pub(crate) canonicality_state: CanonicalityState,
+        pub(crate) source_manifest_id: i64,
+        pub(crate) namespace: String,
+        pub(crate) source_family: String,
+        pub(crate) manifest_version: i64,
+    }
+
+    pub(crate) fn build_preimage_observed_events(
+        input: ResolverPreimageRawLog,
+    ) -> Result<Vec<NormalizedEvent>> {
+        let raw_log = ResolverRawLogRow {
+            chain_id: input.chain_id,
+            block_hash: input.block_hash,
+            block_number: input.block_number,
+            event_position_timestamp: OffsetDateTime::UNIX_EPOCH,
+            transaction_hash: input.transaction_hash,
+            transaction_index: input.transaction_index,
+            log_index: input.log_index,
+            emitting_address: input.emitting_address,
+            emitting_contract_instance_id: Uuid::nil(),
+            topics: input.topics,
+            data: input.data,
+            canonicality_state: input.canonicality_state,
+            source_manifest_id: input.source_manifest_id,
+            namespace: input.namespace,
+            source_family: input.source_family,
+            manifest_version: input.manifest_version,
+        };
+
+        let Some(observation) = build_resolver_observation(&raw_log)? else {
+            return Ok(Vec::new());
+        };
+        match observation {
+            ResolverObservation::AliasChanged { from_name, to_name } => {
+                alias_preimage_events(&raw_log, &from_name, &to_name)
+            }
+            ResolverObservation::NamedResource { name } => {
+                named_dns_preimage_events(&raw_log, "NamedResource", &name)
+            }
+            ResolverObservation::NamedTextResource { name } => {
+                named_dns_preimage_events(&raw_log, "NamedTextResource", &name)
+            }
+            ResolverObservation::NamedAddrResource { name } => {
+                named_dns_preimage_events(&raw_log, "NamedAddrResource", &name)
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 }
 
@@ -1106,6 +1331,63 @@ fn dns_decode(bytes: &[u8]) -> Result<String> {
     bail!("DNS-encoded name is missing root label")
 }
 
+fn observe_dns_encoded_name(bytes: &[u8]) -> Result<PreimageObservation> {
+    if bytes.is_empty() {
+        bail!("DNS-encoded name payload must not be empty");
+    }
+
+    let mut labels = Vec::<Vec<u8>>::new();
+    let mut cursor = 0usize;
+    loop {
+        if cursor >= bytes.len() {
+            bail!("DNS-encoded name payload is missing root label");
+        }
+        let label_length = usize::from(bytes[cursor]);
+        cursor += 1;
+        if label_length == 0 {
+            if cursor != bytes.len() {
+                bail!("DNS-encoded name payload has trailing bytes");
+            }
+            break;
+        }
+        if cursor + label_length > bytes.len() {
+            bail!("DNS-encoded name label exceeds payload length");
+        }
+        labels.push(bytes[cursor..cursor + label_length].to_vec());
+        cursor += label_length;
+    }
+
+    let decoded_name = labels
+        .iter()
+        .map(|label| String::from_utf8(label.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()
+        .map(|labels| labels.join("."));
+    let labelhashes = labels
+        .iter()
+        .map(|label| keccak256_hex(label))
+        .collect::<Vec<_>>();
+
+    Ok(PreimageObservation {
+        dns_encoded_name: format!("0x{}", hex_string(bytes)),
+        decoded_name,
+        labelhashes,
+        namehash: namehash_hex(&labels),
+    })
+}
+
+fn namehash_hex(labels: &[Vec<u8>]) -> String {
+    let mut node = [0u8; 32];
+    for label in labels.iter().rev() {
+        let label_hash = keccak256_bytes(label);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&node);
+        combined[32..].copy_from_slice(&label_hash);
+        node = keccak256_bytes(&combined);
+    }
+    format!("0x{}", hex_string(node))
+}
+
 fn display_name(name: &str) -> String {
     let mut labels = name.split('.');
     let Some(first) = labels.next() else {
@@ -1172,6 +1454,10 @@ impl EmptyThenZero for String {
 
 fn keccak_signature_hex(signature: &str) -> String {
     format!("0x{}", hex_string(keccak256_bytes(signature.as_bytes())))
+}
+
+fn keccak256_hex(bytes: &[u8]) -> String {
+    format!("0x{}", hex_string(keccak256_bytes(bytes)))
 }
 
 fn keccak256_bytes(bytes: &[u8]) -> [u8; 32] {

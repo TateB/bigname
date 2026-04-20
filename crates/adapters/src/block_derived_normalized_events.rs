@@ -3,20 +3,45 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedContractSource, load_watched_contracts};
 use bigname_storage::{CanonicalityState, NormalizedEvent, upsert_normalized_events};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha3::{Digest, Keccak256};
 use sqlx::{PgPool, Row};
 
 const DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION: &str = "raw_log_preimage_observation";
 const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
 const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
+const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
+const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
+const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
+const SOURCE_FAMILY_ENS_V2_RESOLVER_L1: &str = "ens_v2_resolver_l1";
+const SOURCE_EVENT_LABEL_REGISTERED: &str = "LabelRegistered";
+const SOURCE_EVENT_LABEL_RESERVED: &str = "LabelReserved";
+const SOURCE_EVENT_PARENT_UPDATED: &str = "ParentUpdated";
 const SOURCE_EVENT_NAME_REGISTERED: &str = "NameRegistered";
 const SOURCE_EVENT_NAME_RENEWED: &str = "NameRenewed";
 const SOURCE_EVENT_NAME_WRAPPED: &str = "NameWrapped";
+const SOURCE_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
+const SOURCE_EVENT_NAMED_RESOURCE: &str = "NamedResource";
+const SOURCE_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
+const SOURCE_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
 const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes,bytes32,address,uint32,uint64)";
 const REGISTRAR_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256)";
 const REGISTRAR_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
+const ENS_V2_LABEL_REGISTERED_SIGNATURE: &str =
+    "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
+const ENS_V2_LABEL_RESERVED_SIGNATURE: &str =
+    "LabelReserved(uint256,bytes32,string,uint64,address)";
+const ENS_V2_PARENT_UPDATED_SIGNATURE: &str = "ParentUpdated(address,string,address)";
+const ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)";
+const ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)";
+const ENS_V2_ALIAS_CHANGED_SIGNATURE: &str = "AliasChanged(bytes,bytes,bytes,bytes)";
+const ENS_V2_NAMED_RESOURCE_SIGNATURE: &str = "NamedResource(uint256,bytes)";
+const ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE: &str =
+    "NamedTextResource(uint256,bytes,bytes32,string)";
+const ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE: &str = "NamedAddrResource(uint256,bytes,uint256)";
 
 /// Sync summary for block-derived normalized events rebuilt from persisted raw payloads.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,16 +137,17 @@ pub async fn sync_block_derived_normalized_events(
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let Some(event) = build_preimage_observed_event(raw_log)? else {
+        let observed_events = build_preimage_observed_events(raw_log)?;
+        if observed_events.is_empty() {
             continue;
-        };
+        }
         matched_log_refs.insert((
             raw_log.chain_id.clone(),
             raw_log.block_hash.clone(),
             raw_log.transaction_hash.clone(),
             raw_log.log_index,
         ));
-        events.push(event);
+        events.extend(observed_events);
     }
 
     if events.is_empty() {
@@ -163,25 +189,31 @@ pub async fn sync_block_derived_normalized_events(
     })
 }
 
-fn build_preimage_observed_event(raw_log: &WatchedRawLogRow) -> Result<Option<NormalizedEvent>> {
-    if let Some(event) = build_registrar_preimage_observed_event(raw_log)? {
-        return Ok(Some(event));
+fn build_preimage_observed_events(raw_log: &WatchedRawLogRow) -> Result<Vec<NormalizedEvent>> {
+    let events = build_registrar_preimage_observed_events(raw_log)?;
+    if !events.is_empty() {
+        return Ok(events);
     }
 
-    build_name_wrapped_preimage_observed_event(raw_log)
+    let events = build_ens_v2_preimage_observed_events(raw_log)?;
+    if !events.is_empty() {
+        return Ok(events);
+    }
+
+    build_name_wrapped_preimage_observed_events(raw_log)
 }
 
-fn build_name_wrapped_preimage_observed_event(
+fn build_name_wrapped_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
-) -> Result<Option<NormalizedEvent>> {
+) -> Result<Vec<NormalizedEvent>> {
     let Some(topic0) = raw_log.topics.first() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if !topic0.eq_ignore_ascii_case(&name_wrapped_topic0()) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    let dns_name = decode_first_dynamic_bytes(&raw_log.data).with_context(|| {
+    let dns_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
         format!(
             "failed to decode NameWrapped bytes payload for chain {} block {} log {}",
             raw_log.chain_id, raw_log.block_hash, raw_log.log_index
@@ -207,29 +239,30 @@ fn build_name_wrapped_preimage_observed_event(
         );
     }
 
-    Ok(Some(build_preimage_observed_normalized_event(
+    Ok(vec![build_preimage_observed_normalized_event(
         raw_log,
         SOURCE_EVENT_NAME_WRAPPED,
         observation,
-    )))
+        None,
+    )])
 }
 
-fn build_registrar_preimage_observed_event(
+fn build_registrar_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
-) -> Result<Option<NormalizedEvent>> {
+) -> Result<Vec<NormalizedEvent>> {
     if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let Some(topic0) = raw_log.topics.first() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let source_event = if topic0.eq_ignore_ascii_case(&registrar_name_registered_topic0()) {
         SOURCE_EVENT_NAME_REGISTERED
     } else if topic0.eq_ignore_ascii_case(&registrar_name_renewed_topic0()) {
         SOURCE_EVENT_NAME_RENEWED
     } else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
     let label = decode_first_dynamic_string(&raw_log.data).with_context(|| {
@@ -262,26 +295,279 @@ fn build_registrar_preimage_observed_event(
         );
     }
 
-    Ok(Some(build_preimage_observed_normalized_event(
+    Ok(vec![build_preimage_observed_normalized_event(
         raw_log,
         source_event,
         observation,
-    )))
+        None,
+    )])
+}
+
+fn build_ens_v2_preimage_observed_events(
+    raw_log: &WatchedRawLogRow,
+) -> Result<Vec<NormalizedEvent>> {
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(Vec::new());
+    };
+
+    if is_ens_v2_registry_source(&raw_log.source_family) {
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE)) {
+            return build_ens_v2_registry_label_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_LABEL_REGISTERED,
+            );
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_LABEL_RESERVED_SIGNATURE)) {
+            return build_ens_v2_registry_label_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_LABEL_RESERVED,
+            );
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE)) {
+            let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
+                format!(
+                    "failed to decode ParentUpdated string label payload for chain {} block {} log {}",
+                    raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+                )
+            })?;
+            let observation = observe_single_label(&label).with_context(|| {
+                format!(
+                    "failed to derive ENSv2 registry parent label preimage for chain {} block {} log {}",
+                    raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+                )
+            })?;
+            return Ok(vec![build_preimage_observed_normalized_event(
+                raw_log,
+                SOURCE_EVENT_PARENT_UPDATED,
+                observation,
+                None,
+            )]);
+        }
+        return Ok(Vec::new());
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 {
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(
+            ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE,
+        )) {
+            return build_ens_v2_registrar_label_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_NAME_REGISTERED,
+            );
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(
+            ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE,
+        )) {
+            return build_ens_v2_registrar_label_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_NAME_RENEWED,
+            );
+        }
+        return Ok(Vec::new());
+    }
+
+    if raw_log.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1 {
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE)) {
+            return build_ens_v2_alias_preimage_observed_events(raw_log);
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE)) {
+            return build_ens_v2_named_dns_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_NAMED_RESOURCE,
+                0,
+                None,
+            );
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE))
+        {
+            return build_ens_v2_named_dns_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_NAMED_TEXT_RESOURCE,
+                0,
+                None,
+            );
+        }
+        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE))
+        {
+            return build_ens_v2_named_dns_preimage_observed_events(
+                raw_log,
+                SOURCE_EVENT_NAMED_ADDR_RESOURCE,
+                0,
+                None,
+            );
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn build_ens_v2_registry_label_preimage_observed_events(
+    raw_log: &WatchedRawLogRow,
+    source_event: &str,
+) -> Result<Vec<NormalizedEvent>> {
+    let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
+        format!(
+            "failed to decode {source_event} string label payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let observation = observe_single_label(&label).with_context(|| {
+        format!(
+            "failed to derive ENSv2 registry label preimage for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let observed_labelhash = observation
+        .labelhashes
+        .first()
+        .context("ENSv2 registry observation is missing the explicit labelhash")?;
+    if let Some(indexed_labelhash) = raw_log.topics.get(2)
+        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
+    {
+        bail!(
+            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
+            indexed_labelhash,
+            observed_labelhash,
+            raw_log.chain_id,
+            raw_log.block_hash,
+            raw_log.log_index
+        );
+    }
+
+    Ok(vec![build_preimage_observed_normalized_event(
+        raw_log,
+        source_event,
+        observation,
+        None,
+    )])
+}
+
+fn build_ens_v2_registrar_label_preimage_observed_events(
+    raw_log: &WatchedRawLogRow,
+    source_event: &str,
+) -> Result<Vec<NormalizedEvent>> {
+    let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
+        format!(
+            "failed to decode {source_event} string label payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let observation = observe_registrar_eth_name(&label).with_context(|| {
+        format!(
+            "failed to derive ENSv2 registrar .eth preimage for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+
+    Ok(vec![build_preimage_observed_normalized_event(
+        raw_log,
+        source_event,
+        observation,
+        None,
+    )])
+}
+
+fn build_ens_v2_alias_preimage_observed_events(
+    raw_log: &WatchedRawLogRow,
+) -> Result<Vec<NormalizedEvent>> {
+    let from_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
+        format!(
+            "failed to decode AliasChanged fromName payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let to_name = decode_dynamic_bytes(&raw_log.data, 1).with_context(|| {
+        format!(
+            "failed to decode AliasChanged toName payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    validate_indexed_bytes_hash(raw_log, 1, &from_name, "AliasChanged indexedFromName")?;
+    validate_indexed_bytes_hash(raw_log, 2, &to_name, "AliasChanged indexedToName")?;
+
+    let mut events = Vec::new();
+    if !from_name.is_empty() {
+        events.push(build_preimage_observed_normalized_event(
+            raw_log,
+            SOURCE_EVENT_ALIAS_CHANGED,
+            observe_dns_encoded_name(&from_name)?,
+            Some("from_name"),
+        ));
+    }
+    if !to_name.is_empty() {
+        events.push(build_preimage_observed_normalized_event(
+            raw_log,
+            SOURCE_EVENT_ALIAS_CHANGED,
+            observe_dns_encoded_name(&to_name)?,
+            Some("to_name"),
+        ));
+    }
+    Ok(events)
+}
+
+fn build_ens_v2_named_dns_preimage_observed_events(
+    raw_log: &WatchedRawLogRow,
+    source_event: &str,
+    offset_word_index: usize,
+    observation_slot: Option<&str>,
+) -> Result<Vec<NormalizedEvent>> {
+    let dns_name = decode_dynamic_bytes(&raw_log.data, offset_word_index).with_context(|| {
+        format!(
+            "failed to decode {source_event} DNS name payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    if dns_name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let observation = observe_dns_encoded_name(&dns_name).with_context(|| {
+        format!(
+            "failed to interpret {source_event} DNS-encoded name for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+
+    Ok(vec![build_preimage_observed_normalized_event(
+        raw_log,
+        source_event,
+        observation,
+        observation_slot,
+    )])
 }
 
 fn build_preimage_observed_normalized_event(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
     observation: PreimageObservation,
+    observation_slot: Option<&str>,
 ) -> NormalizedEvent {
+    let identity_suffix = observation_slot
+        .map(|slot| format!(":{}", slot))
+        .unwrap_or_default();
+    let mut after_state = json!({
+        "source_event": source_event,
+        "dns_encoded_name": observation.dns_encoded_name,
+        "decoded_name": observation.decoded_name,
+        "labelhashes": observation.labelhashes,
+        "namehash": observation.namehash,
+    });
+    if let Some(observation_slot) = observation_slot
+        && let Some(object) = after_state.as_object_mut()
+    {
+        object.insert(
+            "observation_slot".to_owned(),
+            Value::String(observation_slot.to_owned()),
+        );
+    }
     NormalizedEvent {
         event_identity: format!(
-            "raw_log_preimage_observed:{}:{}:{}:{}:{}",
+            "raw_log_preimage_observed:{}:{}:{}:{}:{}{}",
             raw_log.source_manifest_id,
             raw_log.block_hash,
             raw_log.transaction_hash,
             raw_log.log_index,
-            raw_log.emitting_address
+            raw_log.emitting_address,
+            identity_suffix
         ),
         namespace: raw_log.namespace.clone(),
         logical_name_id: None,
@@ -307,18 +593,12 @@ fn build_preimage_observed_normalized_event(
             "topic0": raw_log.topics.first().cloned(),
             "topic1": raw_log.topics.get(1).cloned(),
             "topic2": raw_log.topics.get(2).cloned(),
-            "data_hex": hex_string(&raw_log.data),
+            "data_hex": hex_string_without_prefix(&raw_log.data),
         }),
         derivation_kind: DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION.to_owned(),
         canonicality_state: raw_log.canonicality_state,
         before_state: json!({}),
-        after_state: json!({
-            "source_event": source_event,
-            "dns_encoded_name": observation.dns_encoded_name,
-            "decoded_name": observation.decoded_name,
-            "labelhashes": observation.labelhashes,
-            "namehash": observation.namehash,
-        }),
+        after_state,
     }
 }
 
@@ -620,12 +900,19 @@ fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
     counts
 }
 
-fn decode_first_dynamic_bytes(data: &[u8]) -> Result<Vec<u8>> {
+fn decode_dynamic_bytes(data: &[u8], offset_word_index: usize) -> Result<Vec<u8>> {
     if data.len() < 64 {
         bail!("event data is too short to decode a dynamic bytes parameter");
     }
 
-    let offset = word_to_usize(&data[0..32]).context("invalid ABI offset for dynamic bytes")?;
+    let offset_word_start = offset_word_index
+        .checked_mul(32)
+        .context("ABI offset word index overflow")?;
+    let offset_word_end = offset_word_start + 32;
+    let offset_word = data
+        .get(offset_word_start..offset_word_end)
+        .with_context(|| format!("event data is missing ABI offset word {offset_word_index}"))?;
+    let offset = word_to_usize(offset_word).context("invalid ABI offset for dynamic bytes")?;
     if data.len() < offset + 32 {
         bail!("event data does not contain the dynamic bytes length word");
     }
@@ -641,7 +928,11 @@ fn decode_first_dynamic_bytes(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
-    String::from_utf8(decode_first_dynamic_bytes(data)?)
+    decode_dynamic_string(data, 0)
+}
+
+fn decode_dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {
+    String::from_utf8(decode_dynamic_bytes(data, offset_word_index)?)
         .context("dynamic string payload is not valid UTF-8")
 }
 
@@ -707,6 +998,48 @@ fn observe_registrar_eth_name(label: &str) -> Result<PreimageObservation> {
     observe_dns_encoded_name(&dns_name)
 }
 
+fn observe_single_label(label: &str) -> Result<PreimageObservation> {
+    if label.is_empty() {
+        bail!("label must not be empty");
+    }
+
+    let label_length = u8::try_from(label.len()).context("label exceeds supported DNS length")?;
+    let mut dns_name = Vec::with_capacity(label.len() + 2);
+    dns_name.push(label_length);
+    dns_name.extend_from_slice(label.as_bytes());
+    dns_name.push(0);
+
+    observe_dns_encoded_name(&dns_name)
+}
+
+fn validate_indexed_bytes_hash(
+    raw_log: &WatchedRawLogRow,
+    topic_index: usize,
+    bytes: &[u8],
+    context: &str,
+) -> Result<()> {
+    let Some(indexed_hash) = raw_log.topics.get(topic_index) else {
+        return Ok(());
+    };
+    let observed_hash = keccak256_hex(bytes);
+    if !indexed_hash.eq_ignore_ascii_case(&observed_hash) {
+        bail!(
+            "{context} {} does not match decoded bytes hash {} for chain {} block {} log {}",
+            indexed_hash,
+            observed_hash,
+            raw_log.chain_id,
+            raw_log.block_hash,
+            raw_log.log_index
+        );
+    }
+    Ok(())
+}
+
+fn is_ens_v2_registry_source(source_family: &str) -> bool {
+    source_family == SOURCE_FAMILY_ENS_V2_ROOT_L1
+        || source_family == SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+}
+
 fn word_to_usize(word: &[u8]) -> Result<usize> {
     if word.len() != 32 {
         bail!("ABI word must be exactly 32 bytes");
@@ -742,6 +1075,10 @@ fn registrar_name_renewed_topic0() -> String {
     keccak256_hex(REGISTRAR_NAME_RENEWED_SIGNATURE.as_bytes())
 }
 
+fn keccak_signature_hex(signature: &str) -> String {
+    keccak256_hex(signature.as_bytes())
+}
+
 fn namehash_hex(labels: &[Vec<u8>]) -> String {
     let mut node = [0u8; 32];
     for label in labels.iter().rev() {
@@ -769,6 +1106,14 @@ fn keccak256_hex(bytes: &[u8]) -> String {
 
 fn hex_string(bytes: &[u8]) -> String {
     let mut output = String::from("0x");
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn hex_string_without_prefix(bytes: &[u8]) -> String {
+    let mut output = String::new();
     for byte in bytes {
         output.push_str(&format!("{byte:02x}"));
     }
@@ -1257,6 +1602,310 @@ mod tests {
                 u8::from_str_radix(hex, 16).expect("test address chunk must be valid hex");
         }
         word
+    }
+
+    #[test]
+    fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() -> Result<()> {
+        let registry_log = watched_log(
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            1,
+            vec![
+                keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+                hex_string(&abi_word_u64(1)),
+                keccak256_hex(b"alice"),
+                hex_string(&abi_word_address(
+                    "0x00000000000000000000000000000000000000aa",
+                )),
+            ],
+            encode_ens_v2_label_registered_data(
+                "alice",
+                "0x00000000000000000000000000000000000000bb",
+                2_000_000_000,
+            ),
+        );
+        let registry_events = build_preimage_observed_events(&registry_log)?;
+        assert_eq!(registry_events.len(), 1);
+        assert_eq!(
+            registry_events[0].after_state["source_event"],
+            SOURCE_EVENT_LABEL_REGISTERED
+        );
+        assert_eq!(registry_events[0].after_state["decoded_name"], "alice");
+        assert_eq!(
+            registry_events[0].after_state["labelhashes"][0],
+            keccak256_hex(b"alice")
+        );
+
+        let parent_log = watched_log(
+            SOURCE_FAMILY_ENS_V2_ROOT_L1,
+            2,
+            vec![
+                keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE),
+                hex_string(&abi_word_address(
+                    "0x00000000000000000000000000000000000000cc",
+                )),
+                hex_string(&abi_word_address(
+                    "0x00000000000000000000000000000000000000dd",
+                )),
+            ],
+            encode_single_dynamic_string("eth"),
+        );
+        let parent_events = build_preimage_observed_events(&parent_log)?;
+        assert_eq!(parent_events.len(), 1);
+        assert_eq!(
+            parent_events[0].after_state["source_event"],
+            SOURCE_EVENT_PARENT_UPDATED
+        );
+        assert_eq!(parent_events[0].after_state["decoded_name"], "eth");
+
+        let registrar_log = watched_log(
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            3,
+            vec![
+                keccak_signature_hex(ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE),
+                hex_string(&abi_word_u64(1)),
+            ],
+            encode_ens_v2_registrar_name_renewed_data("renewed"),
+        );
+        let registrar_events = build_preimage_observed_events(&registrar_log)?;
+        assert_eq!(registrar_events.len(), 1);
+        assert_eq!(
+            registrar_events[0].after_state["source_event"],
+            SOURCE_EVENT_NAME_RENEWED
+        );
+        assert_eq!(
+            registrar_events[0].after_state["decoded_name"],
+            "renewed.eth"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> {
+        let alice_dns_name = dns_encoded_name(&["alice", "eth"]);
+        let bob_dns_name = dns_encoded_name(&["bob", "eth"]);
+        let alias_log = watched_log(
+            SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+            4,
+            vec![
+                keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE),
+                keccak256_hex(&alice_dns_name),
+                keccak256_hex(&bob_dns_name),
+            ],
+            encode_two_dynamic_bytes(&alice_dns_name, &bob_dns_name),
+        );
+        let alias_events = build_preimage_observed_events(&alias_log)?;
+        let resolver_alias_events = resolver_preimage_events_for_watched_log(&alias_log)?;
+        assert_eq!(resolver_alias_events, alias_events);
+        assert_eq!(alias_events.len(), 2);
+        assert_eq!(
+            alias_events[0].after_state["source_event"],
+            SOURCE_EVENT_ALIAS_CHANGED
+        );
+        assert_eq!(alias_events[0].after_state["observation_slot"], "from_name");
+        assert_eq!(alias_events[0].after_state["decoded_name"], "alice.eth");
+        assert_eq!(alias_events[1].after_state["observation_slot"], "to_name");
+        assert_eq!(alias_events[1].after_state["decoded_name"], "bob.eth");
+        assert_ne!(
+            alias_events[0].event_identity,
+            alias_events[1].event_identity
+        );
+
+        let named_cases = [
+            (
+                ENS_V2_NAMED_RESOURCE_SIGNATURE,
+                SOURCE_EVENT_NAMED_RESOURCE,
+                encode_single_dynamic_bytes(&alice_dns_name),
+                vec![
+                    keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE),
+                    hex_string(&abi_word_u64(42)),
+                ],
+            ),
+            (
+                ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE,
+                SOURCE_EVENT_NAMED_TEXT_RESOURCE,
+                encode_dynamic_bytes_and_string(&alice_dns_name, "url"),
+                vec![
+                    keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE),
+                    hex_string(&abi_word_u64(43)),
+                    keccak256_hex(b"url"),
+                ],
+            ),
+            (
+                ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE,
+                SOURCE_EVENT_NAMED_ADDR_RESOURCE,
+                encode_single_dynamic_bytes(&alice_dns_name),
+                vec![
+                    keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE),
+                    hex_string(&abi_word_u64(44)),
+                    hex_string(&abi_word_u64(60)),
+                ],
+            ),
+        ];
+        for (index, (_signature, source_event, data, topics)) in named_cases.into_iter().enumerate()
+        {
+            let named_log = watched_log(
+                SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+                10 + i64::try_from(index)?,
+                topics,
+                data,
+            );
+            let events = build_preimage_observed_events(&named_log)?;
+            let resolver_events = resolver_preimage_events_for_watched_log(&named_log)?;
+            assert_eq!(resolver_events, events);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].after_state["source_event"], source_event);
+            assert_eq!(events[0].after_state["decoded_name"], "alice.eth");
+        }
+
+        Ok(())
+    }
+
+    fn watched_log(
+        source_family: &str,
+        log_index: i64,
+        topics: Vec<String>,
+        data: Vec<u8>,
+    ) -> WatchedRawLogRow {
+        WatchedRawLogRow {
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: format!("0xblock{log_index}"),
+            block_number: 100 + log_index,
+            transaction_hash: format!("0xtx{log_index}"),
+            transaction_index: 0,
+            log_index,
+            emitting_address: "0x00000000000000000000000000000000000000ee".to_owned(),
+            topics,
+            data,
+            canonicality_state: CanonicalityState::Finalized,
+            source_manifest_id: 1,
+            namespace: "ens".to_owned(),
+            source_family: source_family.to_owned(),
+            manifest_version: 1,
+        }
+    }
+
+    fn resolver_preimage_events_for_watched_log(
+        raw_log: &WatchedRawLogRow,
+    ) -> Result<Vec<NormalizedEvent>> {
+        crate::ens_v2_resolver::testsupport::build_preimage_observed_events(
+            crate::ens_v2_resolver::testsupport::ResolverPreimageRawLog {
+                chain_id: raw_log.chain_id.clone(),
+                block_hash: raw_log.block_hash.clone(),
+                block_number: raw_log.block_number,
+                transaction_hash: raw_log.transaction_hash.clone(),
+                transaction_index: raw_log.transaction_index,
+                log_index: raw_log.log_index,
+                emitting_address: raw_log.emitting_address.clone(),
+                topics: raw_log.topics.clone(),
+                data: raw_log.data.clone(),
+                canonicality_state: raw_log.canonicality_state,
+                source_manifest_id: raw_log.source_manifest_id,
+                namespace: raw_log.namespace.clone(),
+                source_family: raw_log.source_family.clone(),
+                manifest_version: raw_log.manifest_version,
+            },
+        )
+    }
+
+    fn encode_ens_v2_label_registered_data(label: &str, owner: &str, expiry_unix: u64) -> Vec<u8> {
+        encode_dynamic_string_with_prefix(
+            label,
+            &[abi_word_address(owner), abi_word_u64(expiry_unix)],
+        )
+    }
+
+    fn encode_ens_v2_registrar_name_renewed_data(label: &str) -> Vec<u8> {
+        encode_dynamic_string_with_prefix(
+            label,
+            &[
+                abi_word_u64(31_536_000),
+                abi_word_u64(2_000_000_000),
+                abi_word_address("0x0000000000000000000000000000000000000000"),
+                [0u8; 32],
+                abi_word_u64(1),
+            ],
+        )
+    }
+
+    fn encode_single_dynamic_string(value: &str) -> Vec<u8> {
+        encode_dynamic_string_with_prefix(value, &[])
+    }
+
+    fn encode_dynamic_string_with_prefix(value: &str, fixed_words: &[[u8; 32]]) -> Vec<u8> {
+        let value_bytes = value.as_bytes();
+        let dynamic_offset = 32 * (fixed_words.len() + 1);
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(dynamic_offset).expect("test ABI offset must fit in u64"),
+        ));
+        for word in fixed_words {
+            output.extend_from_slice(word);
+        }
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
+        ));
+        output.extend_from_slice(value_bytes);
+        let padded_length = ((value_bytes.len() + 31) / 32) * 32;
+        output.resize(dynamic_offset + 32 + padded_length, 0);
+        output
+    }
+
+    fn encode_single_dynamic_bytes(value: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(32));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(value.len()).expect("test bytes length must fit in u64"),
+        ));
+        output.extend_from_slice(value);
+        let padded_length = ((value.len() + 31) / 32) * 32;
+        output.resize(64 + padded_length, 0);
+        output
+    }
+
+    fn encode_two_dynamic_bytes(left: &[u8], right: &[u8]) -> Vec<u8> {
+        let left_padded_length = ((left.len() + 31) / 32) * 32;
+        let right_offset = 64 + 32 + left_padded_length;
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(64));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(right_offset).expect("test ABI offset must fit in u64"),
+        ));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(left.len()).expect("left bytes length must fit in u64"),
+        ));
+        output.extend_from_slice(left);
+        output.resize(64 + 32 + left_padded_length, 0);
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(right.len()).expect("right bytes length must fit in u64"),
+        ));
+        output.extend_from_slice(right);
+        let right_padded_length = ((right.len() + 31) / 32) * 32;
+        output.resize(right_offset + 32 + right_padded_length, 0);
+        output
+    }
+
+    fn encode_dynamic_bytes_and_string(bytes: &[u8], value: &str) -> Vec<u8> {
+        let bytes_padded_length = ((bytes.len() + 31) / 32) * 32;
+        let string_offset = 64 + 32 + bytes_padded_length;
+        let value_bytes = value.as_bytes();
+        let mut output = Vec::new();
+        output.extend_from_slice(&abi_word_u64(64));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(string_offset).expect("test ABI offset must fit in u64"),
+        ));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(bytes.len()).expect("test bytes length must fit in u64"),
+        ));
+        output.extend_from_slice(bytes);
+        output.resize(64 + 32 + bytes_padded_length, 0);
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
+        ));
+        output.extend_from_slice(value_bytes);
+        let string_padded_length = ((value_bytes.len() + 31) / 32) * 32;
+        output.resize(string_offset + 32 + string_padded_length, 0);
+        output
     }
 
     #[tokio::test]

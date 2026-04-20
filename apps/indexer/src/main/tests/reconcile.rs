@@ -2059,6 +2059,54 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
         .fetch_one(database.pool())
         .await?
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PreimageObserved' AND logical_name_id IS NULL AND resource_id IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(after_state->>'source_event' ORDER BY after_state->>'source_event') FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            "AliasChanged".to_owned(),
+            "LabelRegistered".to_owned(),
+            "NamedResource".to_owned(),
+        ]
+    );
+    let resolver_preimage_fact_refs = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT after_state->>'source_event', raw_fact_ref->>'data_hex'
+        FROM normalized_events
+        WHERE event_kind = 'PreimageObserved'
+          AND after_state->>'source_event' IN ('AliasChanged', 'NamedResource')
+        ORDER BY after_state->>'source_event'
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        resolver_preimage_fact_refs,
+        vec![
+            (
+                "AliasChanged".to_owned(),
+                encode_two_dynamic_bytes_log_data(&alice_dns_name, &[])
+                    .trim_start_matches("0x")
+                    .to_owned(),
+            ),
+            (
+                "NamedResource".to_owned(),
+                encode_dynamic_bytes_log_data(&alice_dns_name)
+                    .trim_start_matches("0x")
+                    .to_owned(),
+            ),
+        ]
+    );
 
     let pre_admission_hash =
         "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
