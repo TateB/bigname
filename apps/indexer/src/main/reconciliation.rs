@@ -22,7 +22,8 @@ use crate::{
     runtime::{
         IntakeChainTask, checkpoint_mode, log_block_derived_normalized_event_summary,
         log_ens_v1_reverse_claim_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
-        log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
+        log_ens_v2_permissions_sync_summary, log_ens_v2_registrar_sync_summary,
+        log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
     },
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -656,6 +657,10 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     log_ens_v2_registry_resource_surface_sync_summary(chain, &ens_v2_registry_summary);
     let ens_v2_registrar_summary = bigname_adapters::sync_ens_v2_registrar(pool, chain).await?;
     log_ens_v2_registrar_sync_summary(chain, &ens_v2_registrar_summary);
+    let ens_v2_resolver_summary = bigname_adapters::sync_ens_v2_resolver(pool, chain).await?;
+    log_ens_v2_resolver_sync_summary(chain, &ens_v2_resolver_summary);
+    let ens_v2_permissions_summary = bigname_adapters::sync_ens_v2_permissions(pool, chain).await?;
+    log_ens_v2_permissions_sync_summary(chain, &ens_v2_permissions_summary);
 
     Ok(())
 }

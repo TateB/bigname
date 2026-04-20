@@ -1715,6 +1715,491 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_contract_instance_id = Uuid::from_u128(0x371);
+    let registry_address = "0x0000000000000000000000000000000000000371";
+    let resolver_address = "0x0000000000000000000000000000000000000372";
+    let owner_address = "0x00000000000000000000000000000000000000aa";
+    let sender_address = "0x00000000000000000000000000000000000000bb";
+    let operator_address = "0x00000000000000000000000000000000000000cc";
+    let record_address = "0x00000000000000000000000000000000000000dd";
+    let token_id = hex_string(&abi_word_u64(1));
+    let upstream_resource = hex_string(&abi_word_u64(42));
+    let alice_dns_name = dns_encoded_eth_name("alice");
+    let alice_namehash = namehash_for_dns_name(&alice_dns_name);
+    let new_role_bitmap = hex_string(&abi_word_u64(1));
+    let zero_role_bitmap = hex_string(&abi_word_u64(0));
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'ens',
+                    'ens_v2_registry_l1',
+                    'ethereum-mainnet',
+                    'ens_v2',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v2_registry_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'ens',
+                    'ens_v2_resolver_l1',
+                    'ethereum-mainnet',
+                    'ens_v2',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v2_resolver_l1/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for ENSv2 resolver reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        registry_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        1,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        1,
+        "resolver",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xf1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+        Some("0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"),
+        61,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x0",
+                "address": registry_address,
+                "topics": [
+                    ens_v2_label_registered_topic0(),
+                    token_id.clone(),
+                    labelhash_hex("alice"),
+                    hex_string(&abi_word_address(sender_address))
+                ],
+                "data": encode_ens_v2_label_registered_log_data(
+                    "alice",
+                    owner_address,
+                    canonical_head.block_timestamp_unix_secs + 31_536_000,
+                )
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x1",
+                "address": registry_address,
+                "topics": [
+                    ens_v2_token_resource_topic0(),
+                    token_id.clone(),
+                    upstream_resource.clone()
+                ],
+                "data": "0x"
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x2",
+                "address": registry_address,
+                "topics": [
+                    ens_v2_resolver_updated_topic0(),
+                    token_id.clone(),
+                    hex_string(&abi_word_address(resolver_address)),
+                    hex_string(&abi_word_address(sender_address))
+                ],
+                "data": "0x"
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x3",
+                "address": resolver_address,
+                "topics": [
+                    ens_v2_resolver_address_changed_topic0(),
+                    alice_namehash.clone()
+                ],
+                "data": encode_ens_v2_resolver_address_changed_log_data(
+                    60,
+                    &decode_hex_string(record_address),
+                )
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x4",
+                "address": resolver_address,
+                "topics": [
+                    ens_v2_named_resource_topic0(),
+                    upstream_resource.clone()
+                ],
+                "data": encode_dynamic_bytes_log_data(&alice_dns_name)
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x5",
+                "address": resolver_address,
+                "topics": [
+                    ens_v2_eac_roles_changed_topic0(),
+                    upstream_resource.clone(),
+                    hex_string(&abi_word_address(operator_address))
+                ],
+                "data": encode_eac_roles_changed_log_data(&zero_role_bitmap, &new_role_bitmap)
+            }),
+            json!({
+                "blockHash": canonical_head.block_hash.clone(),
+                "blockNumber": format!("0x{:x}", canonical_head.block_number),
+                "transactionHash": transaction_hash_for_block(&canonical_head),
+                "transactionIndex": "0x0",
+                "logIndex": "0x6",
+                "address": resolver_address,
+                "topics": [
+                    ens_v2_alias_changed_topic0()
+                ],
+                "data": encode_two_dynamic_bytes_log_data(&alice_dns_name, &[])
+            }),
+        ],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("ENSv2 resolver reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(61));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT cia.address FROM discovery_edges de JOIN contract_instance_addresses cia ON cia.contract_instance_id = de.to_contract_instance_id WHERE de.edge_kind = 'resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        resolver_address.to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'RecordChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens:alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'record_key' FROM normalized_events WHERE event_kind = 'RecordChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "addr:60".to_owned()
+    );
+    let record_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id FROM normalized_events WHERE event_kind = 'RecordChanged' AND derivation_kind = 'ens_v2_resolver'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        record_resource_id,
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM surface_bindings WHERE logical_name_id = 'ens:alice.eth'"
+        )
+        .fetch_one(database.pool())
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens:alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'scope'->>'kind' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "resolver".to_owned()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT after_state->'effective_powers' ? 'set_addr' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v2_resolver_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'alias_state' FROM normalized_events WHERE event_kind = 'AliasChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "removed".to_owned()
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT (after_state->>'active')::BOOLEAN FROM normalized_events WHERE event_kind = 'AliasChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?
+    );
+
+    let pre_admission_hash =
+        "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
+    let pre_admission_tx =
+        "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+    sqlx::query(
+        r#"
+            INSERT INTO raw_blocks (
+                chain_id,
+                block_hash,
+                parent_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES (
+                'ethereum-mainnet',
+                $1,
+                '0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0',
+                60,
+                to_timestamp($2),
+                'canonical'
+            )
+            "#,
+    )
+    .bind(pre_admission_hash)
+    .bind(canonical_head.block_timestamp_unix_secs - 12)
+    .execute(database.pool())
+    .await
+    .context("failed to insert pre-admission raw block")?;
+    sqlx::query(
+        r#"
+            INSERT INTO raw_logs (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state
+            )
+            VALUES (
+                'ethereum-mainnet',
+                $1,
+                60,
+                $2,
+                0,
+                0,
+                $3,
+                $4,
+                $5,
+                'canonical'
+            )
+            "#,
+    )
+    .bind(pre_admission_hash)
+    .bind(pre_admission_tx)
+    .bind(resolver_address)
+    .bind(vec![
+        ens_v2_resolver_address_changed_topic0(),
+        alice_namehash.clone(),
+    ])
+    .bind(decode_hex_string(&encode_ens_v2_resolver_address_changed_log_data(
+        60,
+        &decode_hex_string(record_address),
+    )))
+    .execute(database.pool())
+    .await
+    .context("failed to insert pre-admission resolver raw log")?;
+    sqlx::query(
+        r#"
+            INSERT INTO raw_logs (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state
+            )
+            VALUES (
+                'ethereum-mainnet',
+                $1,
+                60,
+                $2,
+                0,
+                1,
+                $3,
+                $4,
+                $5,
+                'canonical'
+            )
+            "#,
+    )
+    .bind(pre_admission_hash)
+    .bind(pre_admission_tx)
+    .bind(resolver_address)
+    .bind(vec![
+        ens_v2_eac_roles_changed_topic0(),
+        upstream_resource.clone(),
+        hex_string(&abi_word_address(operator_address)),
+    ])
+    .bind(decode_hex_string(&encode_eac_roles_changed_log_data(
+        &zero_role_bitmap,
+        &new_role_bitmap,
+    )))
+    .execute(database.pool())
+    .await
+    .context("failed to insert pre-admission permissions raw log")?;
+
+    bigname_adapters::sync_ens_v2_resolver(database.pool(), "ethereum-mainnet").await?;
+    bigname_adapters::sync_ens_v2_permissions(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged' AND derivation_kind = 'ens_v2_resolver'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND derivation_kind = 'ens_v2_permissions'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identity_rows()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1985,4 +2470,3 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
     database.cleanup().await?;
     Ok(())
 }
-

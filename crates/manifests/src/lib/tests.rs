@@ -606,7 +606,7 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
     assert_eq!(summary.root_count, 3);
     assert_eq!(summary.contract_count, 3);
     assert_eq!(summary.capability_count, 3);
-    assert_eq!(summary.discovery_rule_count, 2);
+    assert_eq!(summary.discovery_rule_count, 3);
     assert_eq!(
         summary.removed_manifest_count,
         main_repository.manifests().len()
@@ -730,7 +730,7 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
     assert_eq!(admission_state.active_manifest_count, 4);
     assert_eq!(admission_state.active_root_count, 3);
     assert_eq!(admission_state.active_contract_count, 3);
-    assert_eq!(admission_state.active_rule_count, 2);
+    assert_eq!(admission_state.active_rule_count, 3);
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
         "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"

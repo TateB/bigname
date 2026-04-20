@@ -30,3 +30,8 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"

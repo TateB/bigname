@@ -7,8 +7,10 @@ mod block_derived_normalized_events;
 mod ens_v1_reverse_claim;
 mod ens_v1_subregistry_discovery;
 mod ens_v1_unwrapped_authority;
+mod ens_v2_permissions;
 mod ens_v2_registrar;
 mod ens_v2_registry;
+mod ens_v2_resolver;
 mod manifest_normalized_events;
 
 /// Current adapter bootstrap status.
@@ -29,11 +31,17 @@ pub use ens_v1_subregistry_discovery::{
 pub use ens_v1_unwrapped_authority::{
     EnsV1UnwrappedAuthoritySyncSummary, sync_ens_v1_unwrapped_authority,
 };
+pub use ens_v2_permissions::{
+    EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,
+};
 pub use ens_v2_registrar::{
     EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary, sync_ens_v2_registrar,
 };
 pub use ens_v2_registry::{
     EnsV2RegistryResourceSurfaceSyncSummary, sync_ens_v2_registry_resource_surface,
+};
+pub use ens_v2_resolver::{
+    EnsV2ResolverKindSyncSummary, EnsV2ResolverSyncSummary, sync_ens_v2_resolver,
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,

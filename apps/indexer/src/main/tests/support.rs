@@ -1091,6 +1091,32 @@ async fn insert_manifest_contract_instance(
     Ok(())
 }
 
+async fn insert_manifest_discovery_rule(
+    pool: &PgPool,
+    manifest_id: i64,
+    edge_kind: &str,
+    from_role: &str,
+    admission: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_discovery_rules (manifest_id, edge_kind, from_role, admission)
+            VALUES ($1, $2, $3, $4)
+            "#,
+    )
+    .bind(manifest_id)
+    .bind(edge_kind)
+    .bind(from_role)
+    .bind(admission)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert {edge_kind} discovery rule for manifest_id {manifest_id}")
+    })?;
+
+    Ok(())
+}
+
 async fn insert_active_discovery_edge(
     pool: &PgPool,
     chain: &str,
@@ -1342,8 +1368,28 @@ fn registry_new_resolver_topic0() -> String {
     keccak256_hex(b"NewResolver(bytes32,address)")
 }
 
+fn ens_v2_label_registered_topic0() -> String {
+    keccak256_hex(b"LabelRegistered(uint256,bytes32,string,address,uint64,address)")
+}
+
+fn ens_v2_resolver_updated_topic0() -> String {
+    keccak256_hex(b"ResolverUpdated(uint256,address,address)")
+}
+
+fn ens_v2_token_resource_topic0() -> String {
+    keccak256_hex(b"TokenResource(uint256,uint256)")
+}
+
 fn resolver_addr_changed_topic0() -> String {
     keccak256_hex(b"AddrChanged(bytes32,address)")
+}
+
+fn ens_v2_resolver_address_changed_topic0() -> String {
+    keccak256_hex(b"AddressChanged(bytes32,uint256,bytes)")
+}
+
+fn ens_v2_alias_changed_topic0() -> String {
+    keccak256_hex(b"AliasChanged(bytes,bytes,bytes,bytes)")
 }
 
 fn resolver_text_changed_topic0() -> String {
@@ -1356,6 +1402,14 @@ fn resolver_name_changed_topic0() -> String {
 
 fn resolver_version_changed_topic0() -> String {
     keccak256_hex(b"VersionChanged(bytes32,uint64)")
+}
+
+fn ens_v2_named_resource_topic0() -> String {
+    keccak256_hex(b"NamedResource(uint256,bytes)")
+}
+
+fn ens_v2_eac_roles_changed_topic0() -> String {
+    keccak256_hex(b"EACRolesChanged(uint256,address,uint256,uint256)")
 }
 
 fn reverse_claimed_topic0() -> String {
@@ -1475,6 +1529,16 @@ fn abi_word_u64(value: u64) -> [u8; 32] {
     word
 }
 
+fn abi_word_bytes32(value: &str) -> [u8; 32] {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    let mut word = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).expect("test bytes32 must be utf-8 hex");
+        word[index] = u8::from_str_radix(hex, 16).expect("test bytes32 chunk must be valid hex");
+    }
+    word
+}
+
 fn abi_word_address(address: &str) -> [u8; 32] {
     let address = address.strip_prefix("0x").unwrap_or(address);
     let mut word = [0u8; 32];
@@ -1512,6 +1576,28 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> S
     data.extend_from_slice(&abi_word_u64(expiry_unix as u64));
     data.extend_from_slice(&abi_word_u64(
         u64::try_from(label_bytes.len()).expect("registrar label test payload must fit in u64"),
+    ));
+    data.extend_from_slice(label_bytes);
+
+    let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+    data.resize(32 * 4 + padded_length, 0);
+
+    hex_string(&data)
+}
+
+fn encode_ens_v2_label_registered_log_data(
+    label: &str,
+    owner: &str,
+    expiry_unix: i64,
+) -> String {
+    let label_bytes = label.as_bytes();
+    let mut data = Vec::new();
+
+    data.extend_from_slice(&abi_word_u64(96));
+    data.extend_from_slice(&abi_word_address(owner));
+    data.extend_from_slice(&abi_word_u64(expiry_unix as u64));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(label_bytes.len()).expect("ENSv2 label test payload must fit in u64"),
     ));
     data.extend_from_slice(label_bytes);
 
@@ -1569,6 +1655,40 @@ fn encode_registry_new_resolver_log_data(resolver: &str) -> String {
     hex_string(&abi_word_address(resolver))
 }
 
+fn encode_dynamic_bytes_log_data(value: &[u8]) -> String {
+    let mut output = Vec::new();
+    output.extend_from_slice(&abi_word_u64(32));
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(value.len()).expect("test bytes length must fit in u64"),
+    ));
+    output.extend_from_slice(value);
+    let padded_length = ((value.len() + 31) / 32) * 32;
+    output.resize(64 + padded_length, 0);
+    hex_string(&output)
+}
+
+fn encode_two_dynamic_bytes_log_data(left: &[u8], right: &[u8]) -> String {
+    let left_padded_length = ((left.len() + 31) / 32) * 32;
+    let right_offset = 64 + 32 + left_padded_length;
+    let mut output = Vec::new();
+    output.extend_from_slice(&abi_word_u64(64));
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(right_offset).expect("test ABI offset must fit in u64"),
+    ));
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(left.len()).expect("left bytes length must fit in u64"),
+    ));
+    output.extend_from_slice(left);
+    output.resize(64 + 32 + left_padded_length, 0);
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(right.len()).expect("right bytes length must fit in u64"),
+    ));
+    output.extend_from_slice(right);
+    let right_padded_length = ((right.len() + 31) / 32) * 32;
+    output.resize(right_offset + 32 + right_padded_length, 0);
+    hex_string(&output)
+}
+
 fn encode_dynamic_string_log_data(value: &str) -> String {
     let value_bytes = value.as_bytes();
     let mut output = Vec::new();
@@ -1586,8 +1706,28 @@ fn encode_resolver_addr_changed_log_data(address: &str) -> String {
     hex_string(&abi_word_address(address))
 }
 
+fn encode_ens_v2_resolver_address_changed_log_data(coin_type: u64, address_bytes: &[u8]) -> String {
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_u64(coin_type));
+    data.extend_from_slice(&abi_word_u64(64));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(address_bytes.len()).expect("address bytes test payload must fit in u64"),
+    ));
+    data.extend_from_slice(address_bytes);
+    let padded_length = ((address_bytes.len() + 31) / 32) * 32;
+    data.resize(96 + padded_length, 0);
+    hex_string(&data)
+}
+
 fn encode_resolver_version_changed_log_data(version: u64) -> String {
     hex_string(&abi_word_u64(version))
+}
+
+fn encode_eac_roles_changed_log_data(old_role_bitmap: &str, new_role_bitmap: &str) -> String {
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_bytes32(old_role_bitmap));
+    data.extend_from_slice(&abi_word_bytes32(new_role_bitmap));
+    hex_string(&data)
 }
 
 fn rpc_registry_new_resolver_log_payload(
@@ -1872,4 +2012,3 @@ async fn spawn_json_rpc_server(
 
     Ok((url, server))
 }
-

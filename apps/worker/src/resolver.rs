@@ -21,6 +21,7 @@ use crate::permissions::{
 };
 
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
+const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
@@ -65,6 +66,24 @@ struct CurrentBindingSeed {
     block_timestamp: Option<OffsetDateTime>,
     raw_fact_ref: Value,
     canonicality_state: CanonicalityState,
+}
+
+#[derive(Clone, Debug)]
+struct AliasSeed {
+    chain_id: String,
+    resolver_address: String,
+    normalized_event_id: i64,
+    logical_name_id: Option<String>,
+    resource_id: Option<Uuid>,
+    source_family: String,
+    manifest_version: i64,
+    source_manifest_id: Option<i64>,
+    block_number: i64,
+    block_hash: String,
+    block_timestamp: Option<OffsetDateTime>,
+    raw_fact_ref: Value,
+    canonicality_state: CanonicalityState,
+    after_state: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -143,19 +162,21 @@ async fn build_resolver_current_row(
     target: &ResolverTarget,
 ) -> Result<Option<ResolverCurrentRow>> {
     let bindings = load_current_bindings(pool, target).await?;
+    let aliases = load_alias_events(pool, target).await?;
     let permissions = load_resolver_permissions(pool, target).await?;
-    if bindings.is_empty() && permissions.is_empty() {
+    if bindings.is_empty() && aliases.is_empty() && permissions.is_empty() {
         return Ok(None);
     }
 
-    let declared_summary = build_declared_summary(&bindings, &permissions);
-    let provenance = build_provenance(&bindings, &permissions)?;
-    let coverage = build_coverage(&bindings, &permissions);
-    let chain_positions = build_chain_positions(&bindings, &permissions);
-    let canonicality_summary = build_canonicality_summary(&bindings, &permissions)?;
+    let declared_summary = build_declared_summary(&bindings, &aliases, &permissions);
+    let provenance = build_provenance(&bindings, &aliases, &permissions)?;
+    let coverage = build_coverage(&bindings, &aliases, &permissions);
+    let chain_positions = build_chain_positions(&bindings, &aliases, &permissions);
+    let canonicality_summary = build_canonicality_summary(&bindings, &aliases, &permissions)?;
     let manifest_version = bindings
         .iter()
         .map(|binding| binding.manifest_version)
+        .chain(aliases.iter().map(|alias| alias.manifest_version))
         .chain(
             permissions
                 .iter()
@@ -166,6 +187,7 @@ async fn build_resolver_current_row(
     let last_recomputed_at = bindings
         .iter()
         .filter_map(|binding| binding.block_timestamp)
+        .chain(aliases.iter().filter_map(|alias| alias.block_timestamp))
         .chain(
             permissions
                 .iter()
@@ -256,8 +278,43 @@ async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
             resolver_address,
         });
     }
+    for target in load_alias_target_resolvers(pool).await? {
+        targets.insert(target);
+    }
 
     Ok(targets.into_iter().collect())
+}
+
+async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT DISTINCT
+            chain_id,
+            LOWER(after_state->>'resolver') AS resolver_address
+        FROM normalized_events
+        WHERE event_kind = $1
+          AND chain_id IS NOT NULL
+          AND after_state->>'resolver' IS NOT NULL
+          AND canonicality_state {CANONICAL_STATE_FILTER}
+        ORDER BY chain_id, resolver_address
+        "#
+    ))
+    .bind(EVENT_KIND_ALIAS_CHANGED)
+    .fetch_all(pool)
+    .await
+    .context("failed to load AliasChanged resolver_current rebuild targets")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ResolverTarget {
+                chain_id: row.try_get("chain_id").context("missing chain_id")?,
+                resolver_address: normalize_resolver_address(
+                    &row.try_get::<String, _>("resolver_address")
+                        .context("missing resolver_address")?,
+                ),
+            })
+        })
+        .collect()
 }
 
 async fn load_current_bindings(
@@ -396,17 +453,85 @@ async fn load_resolver_permissions(
     Ok(rows)
 }
 
+async fn load_alias_events(pool: &PgPool, target: &ResolverTarget) -> Result<Vec<AliasSeed>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT DISTINCT ON (ne.after_state->>'from_dns_encoded_name')
+            ne.normalized_event_id,
+            ne.logical_name_id,
+            ne.resource_id,
+            ne.source_family,
+            ne.manifest_version,
+            ne.source_manifest_id,
+            ne.chain_id,
+            ne.block_number,
+            ne.block_hash,
+            rb.block_timestamp,
+            ne.raw_fact_ref,
+            ne.canonicality_state::TEXT AS canonicality_state,
+            ne.after_state,
+            LOWER(ne.after_state->>'resolver') AS resolver_address
+        FROM normalized_events ne
+        LEFT JOIN raw_blocks rb
+          ON rb.chain_id = ne.chain_id
+         AND rb.block_hash = ne.block_hash
+        WHERE ne.event_kind = $1
+          AND ne.chain_id = $2
+          AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND LOWER(ne.after_state->>'resolver') = $3
+        ORDER BY
+            ne.after_state->>'from_dns_encoded_name',
+            ne.block_number DESC NULLS LAST,
+            ne.log_index DESC NULLS LAST,
+            ne.normalized_event_id DESC
+        "#
+    ))
+    .bind(EVENT_KIND_ALIAS_CHANGED)
+    .bind(&target.chain_id)
+    .bind(&target.resolver_address)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load AliasChanged events for resolver {} on chain {}",
+            target.resolver_address, target.chain_id
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(AliasSeed {
+                chain_id: row.try_get("chain_id")?,
+                resolver_address: normalize_resolver_address(
+                    &row.try_get::<String, _>("resolver_address")?,
+                ),
+                normalized_event_id: row.try_get("normalized_event_id")?,
+                logical_name_id: row.try_get("logical_name_id")?,
+                resource_id: row.try_get("resource_id")?,
+                source_family: row.try_get("source_family")?,
+                manifest_version: row.try_get("manifest_version")?,
+                source_manifest_id: row.try_get("source_manifest_id")?,
+                block_number: row.try_get("block_number")?,
+                block_hash: row.try_get("block_hash")?,
+                block_timestamp: row.try_get("block_timestamp")?,
+                raw_fact_ref: row.try_get("raw_fact_ref")?,
+                canonicality_state: parse_canonicality_state(
+                    &row.try_get::<String, _>("canonicality_state")?,
+                )?,
+                after_state: row.try_get("after_state")?,
+            })
+        })
+        .collect()
+}
+
 fn build_declared_summary(
     bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
     permissions: &[PermissionsCurrentRow],
 ) -> Value {
     json!({
         "bindings": build_binding_summary(bindings.iter()),
-        "aliases": build_binding_summary(
-            bindings
-                .iter()
-                .filter(|binding| binding.binding_kind == SurfaceBindingKind::ResolverAliasPath)
-        ),
+        "aliases": build_alias_summary(bindings, aliases),
         "permissions": {
             "status": "supported",
             "count": permissions.len(),
@@ -424,7 +549,7 @@ fn build_declared_summary(
                 .collect::<Vec<_>>(),
         },
         "role_holders": build_role_holders_summary(permissions),
-        "event_summary": build_event_summary(bindings, permissions),
+        "event_summary": build_event_summary(bindings, aliases, permissions),
     })
 }
 
@@ -446,6 +571,49 @@ fn build_binding_item(binding: &CurrentBindingSeed) -> Value {
         "resource_id": binding.resource_id,
         "surface_binding_id": binding.surface_binding_id,
         "binding_kind": binding.binding_kind.as_str(),
+    })
+}
+
+fn build_alias_summary(bindings: &[CurrentBindingSeed], aliases: &[AliasSeed]) -> Value {
+    let mut items = bindings
+        .iter()
+        .filter(|binding| binding.binding_kind == SurfaceBindingKind::ResolverAliasPath)
+        .map(build_binding_item)
+        .collect::<Vec<_>>();
+    items.extend(aliases.iter().map(build_alias_item));
+    items.sort_by(|left, right| {
+        left.get("logical_name_id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("logical_name_id").and_then(Value::as_str))
+            .then(
+                left.get("from_dns_encoded_name")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("from_dns_encoded_name").and_then(Value::as_str)),
+            )
+    });
+    json!({
+        "status": "supported",
+        "count": items.len(),
+        "items": items,
+    })
+}
+
+fn build_alias_item(alias: &AliasSeed) -> Value {
+    json!({
+        "logical_name_id": alias.logical_name_id,
+        "resource_id": alias.resource_id,
+        "binding_kind": "resolver_alias_path",
+        "alias_state": alias.after_state.get("alias_state").cloned().unwrap_or_else(|| json!("active")),
+        "active": alias.after_state.get("active").cloned().unwrap_or_else(|| json!(true)),
+        "chain_id": alias.chain_id,
+        "resolver_address": alias.resolver_address,
+        "from_dns_encoded_name": alias.after_state.get("from_dns_encoded_name").cloned().unwrap_or(Value::Null),
+        "to_dns_encoded_name": alias.after_state.get("to_dns_encoded_name").cloned().unwrap_or(Value::Null),
+        "from_name": alias.after_state.get("from_name").cloned().unwrap_or(Value::Null),
+        "to_name": alias.after_state.get("to_name").cloned().unwrap_or(Value::Null),
+        "to_logical_name_id": alias.after_state.get("to_logical_name_id").cloned().unwrap_or(Value::Null),
+        "to_resource_id": alias.after_state.get("to_resource_id").cloned().unwrap_or(Value::Null),
+        "latest_event_kind": EVENT_KIND_ALIAS_CHANGED,
     })
 }
 
@@ -482,9 +650,11 @@ fn build_role_holders_summary(permissions: &[PermissionsCurrentRow]) -> Value {
 
 fn build_event_summary(
     bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
     permissions: &[PermissionsCurrentRow],
 ) -> Value {
     let resolver_changed_count = bindings.len();
+    let alias_changed_count = aliases.len();
     let permission_changed_count = permissions
         .iter()
         .map(|permission| {
@@ -496,25 +666,47 @@ fn build_event_summary(
                 .unwrap_or(0)
         })
         .sum::<usize>();
-    let total_count = resolver_changed_count + permission_changed_count;
+    let total_count = resolver_changed_count + alias_changed_count + permission_changed_count;
+    let mut by_kind = serde_json::Map::new();
+    if alias_changed_count > 0 {
+        by_kind.insert(
+            EVENT_KIND_ALIAS_CHANGED.to_owned(),
+            Value::Number(alias_changed_count.into()),
+        );
+    }
+    if permission_changed_count > 0 {
+        by_kind.insert(
+            EVENT_KIND_PERMISSION_CHANGED.to_owned(),
+            Value::Number(permission_changed_count.into()),
+        );
+    }
+    if resolver_changed_count > 0 {
+        by_kind.insert(
+            EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+            Value::Number(resolver_changed_count.into()),
+        );
+    }
 
     json!({
         "status": "supported",
         "count": total_count,
-        "by_kind": {
-            EVENT_KIND_PERMISSION_CHANGED: permission_changed_count,
-            EVENT_KIND_RESOLVER_CHANGED: resolver_changed_count,
-        },
+        "by_kind": by_kind,
     })
 }
 
 fn build_provenance(
     bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
     permissions: &[PermissionsCurrentRow],
 ) -> Result<Value> {
     let normalized_event_ids = bindings
         .iter()
         .map(|binding| Value::Number(binding.normalized_event_id.into()))
+        .chain(
+            aliases
+                .iter()
+                .map(|alias| Value::Number(alias.normalized_event_id.into())),
+        )
         .chain(permissions.iter().flat_map(|permission| {
             extract_json_array(&permission.provenance, "normalized_event_ids")
         }))
@@ -522,6 +714,7 @@ fn build_provenance(
     let raw_fact_refs = bindings
         .iter()
         .map(|binding| binding.raw_fact_ref.clone())
+        .chain(aliases.iter().map(|alias| alias.raw_fact_ref.clone()))
         .chain(
             permissions
                 .iter()
@@ -538,6 +731,13 @@ fn build_provenance(
                     "manifest_version": binding.manifest_version,
                 })
             })
+            .chain(aliases.iter().map(|alias| {
+                json!({
+                    "source_manifest_id": alias.source_manifest_id,
+                    "source_family": alias.source_family,
+                    "manifest_version": alias.manifest_version,
+                })
+            }))
             .chain(permissions.iter().flat_map(|permission| {
                 extract_json_array(&permission.provenance, "manifest_versions")
             }))
@@ -552,11 +752,17 @@ fn build_provenance(
     }))
 }
 
-fn build_coverage(bindings: &[CurrentBindingSeed], permissions: &[PermissionsCurrentRow]) -> Value {
+fn build_coverage(
+    bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
+    permissions: &[PermissionsCurrentRow],
+) -> Value {
     let mut source_classes = bindings
         .iter()
         .map(|binding| binding.source_family.clone())
         .collect::<BTreeSet<_>>();
+
+    source_classes.extend(aliases.iter().map(|alias| alias.source_family.clone()));
 
     for permission in permissions {
         for value in extract_json_string_array(&permission.coverage, "source_classes_considered") {
@@ -575,6 +781,7 @@ fn build_coverage(bindings: &[CurrentBindingSeed], permissions: &[PermissionsCur
 
 fn build_chain_positions(
     bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
     permissions: &[PermissionsCurrentRow],
 ) -> Value {
     let mut chain_positions = BTreeMap::<String, ChainPositionCandidate>::new();
@@ -587,6 +794,19 @@ fn build_chain_positions(
             chain_id: binding.chain_id.clone(),
             block_number: binding.block_number,
             block_hash: binding.block_hash.clone(),
+            timestamp: format_timestamp(timestamp),
+        };
+        merge_chain_position(&mut chain_positions, candidate);
+    }
+
+    for alias in aliases {
+        let Some(timestamp) = alias.block_timestamp else {
+            continue;
+        };
+        let candidate = ChainPositionCandidate {
+            chain_id: alias.chain_id.clone(),
+            block_number: alias.block_number,
+            block_hash: alias.block_hash.clone(),
             timestamp: format_timestamp(timestamp),
         };
         merge_chain_position(&mut chain_positions, candidate);
@@ -624,6 +844,7 @@ fn build_chain_positions(
 
 fn build_canonicality_summary(
     bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
     permissions: &[PermissionsCurrentRow],
 ) -> Result<Value> {
     let mut statuses = bindings
@@ -637,6 +858,15 @@ fn build_canonicality_summary(
             &mut chain_states,
             binding.chain_id.clone(),
             binding.canonicality_state,
+        );
+    }
+
+    for alias in aliases {
+        statuses.push(alias.canonicality_state);
+        merge_chain_state(
+            &mut chain_states,
+            alias.chain_id.clone(),
+            alias.canonicality_state,
         );
     }
 
@@ -1072,6 +1302,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolver_current_projects_latest_ensv2_alias_tombstone() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resolver_address = "0x0000000000000000000000000000000000000aaa";
+        let target_resource_id = Uuid::from_u128(0x8102);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0xres0300", 300, 1_776_200_300),
+                raw_block("ethereum-mainnet", "0xres0301", 301, 1_776_200_301),
+            ],
+        )
+        .await?;
+        upsert_resources(database.pool(), &[resource(target_resource_id)]).await?;
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                alias_event(
+                    "alias-active",
+                    Some("ens:from.eth"),
+                    Some(target_resource_id),
+                    resolver_address,
+                    "0x0466726f6d0365746800",
+                    "0x02746f0365746800",
+                    Some("from.eth"),
+                    Some("to.eth"),
+                    "active",
+                    300,
+                    0,
+                ),
+                alias_event(
+                    "alias-removed",
+                    Some("ens:from.eth"),
+                    None,
+                    resolver_address,
+                    "0x0466726f6d0365746800",
+                    "0x",
+                    Some("from.eth"),
+                    None,
+                    "removed",
+                    301,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_resolver_current(
+            database.pool(),
+            Some("ethereum-mainnet"),
+            Some(resolver_address),
+        )
+        .await?;
+        assert_eq!(summary.upserted_row_count, 1);
+
+        let row = load_resolver_current(database.pool(), "ethereum-mainnet", resolver_address)
+            .await?
+            .context("resolver_current row should exist")?;
+        assert_eq!(row.declared_summary["aliases"]["count"], json!(1));
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0]["alias_state"],
+            json!("removed")
+        );
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0]["active"],
+            json!(false)
+        );
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0]["to_dns_encoded_name"],
+            json!("0x")
+        );
+        assert_eq!(row.provenance["normalized_event_ids"], json!([2]));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn resolver_current_full_rebuild_clears_stale_rows_and_rebuilds_all_targets() -> Result<()>
     {
         let database = TestDatabase::new().await?;
@@ -1383,6 +1690,57 @@ mod tests {
                 "revocation_source": Value::Null,
                 "inheritance_path": [],
                 "transfer_behavior": {},
+            }),
+        }
+    }
+
+    fn alias_event(
+        event_identity: &str,
+        logical_name_id: Option<&str>,
+        resource_id: Option<Uuid>,
+        resolver_address: &str,
+        from_dns_encoded_name: &str,
+        to_dns_encoded_name: &str,
+        from_name: Option<&str>,
+        to_name: Option<&str>,
+        alias_state: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: logical_name_id.map(str::to_owned),
+            resource_id,
+            event_kind: EVENT_KIND_ALIAS_CHANGED.to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xres{block_number:04}")),
+            transaction_hash: Some(format!("0xalias{block_number:04x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "log_index": log_index,
+            }),
+            derivation_kind: "ens_v2_resolver".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "AliasChanged",
+                "resolver": resolver_address,
+                "from_dns_encoded_name": from_dns_encoded_name,
+                "to_dns_encoded_name": to_dns_encoded_name,
+                "alias_state": alias_state,
+                "active": alias_state == "active",
+                "from_name": from_name,
+                "to_name": to_name,
+                "to_logical_name_id": to_name.map(|name| format!("ens:{name}")),
+                "to_resource_id": resource_id.map(|value| value.to_string()),
             }),
         }
     }

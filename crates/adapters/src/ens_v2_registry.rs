@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
-    DiscoveryObservation, WatchedContractSource, load_watched_contracts,
-    reconcile_discovery_observations,
+    DiscoveryObservation, DiscoveryReconciliationSummary, WatchedContractSource,
+    load_watched_contracts, reconcile_discovery_observations,
 };
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
@@ -25,6 +25,7 @@ use sqlx::{
 const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE: &str = "ens_v2_registry_resource_surface";
+const RESOLVER_EDGE_KIND: &str = "resolver";
 const SUBREGISTRY_EDGE_KIND: &str = "subregistry";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -305,10 +306,10 @@ pub async fn sync_ens_v2_registry_resource_surface(
         )?;
     }
 
-    let discovery_source = ens_v2_subregistry_discovery_source(chain);
     let latest_observations = latest_discovery_observations(observations)?;
-    let reconciliation =
-        reconcile_discovery_observations(pool, &discovery_source, &latest_observations).await?;
+    let reconciliation = reconcile_discovery_observations_by_source(pool, &latest_observations)
+        .await
+        .with_context(|| format!("failed to reconcile ENSv2 discovery observations for {chain}"))?;
 
     let mut token_lineages = Vec::<TokenLineage>::new();
     let mut resources = Vec::<Resource>::new();
@@ -695,6 +696,34 @@ fn apply_registry_observation(
                     }),
                     format!("resolver-updated:{token_id}"),
                 ));
+                observations.push(DiscoveryObservation {
+                    chain: reference.chain_id.clone(),
+                    from_address: reference.emitting_address.clone(),
+                    to_address: resolver.clone(),
+                    edge_kind: RESOLVER_EDGE_KIND.to_owned(),
+                    discovery_source: ens_v2_resolver_discovery_source(&reference.chain_id),
+                    active_from_block_number: Some(reference.block_number),
+                    active_from_block_hash: Some(reference.block_hash.clone()),
+                    active_to_block_number: None,
+                    active_to_block_hash: None,
+                    provenance: json!({
+                        "source": "raw_log",
+                        "source_event": "ResolverUpdated",
+                        "observation_key": format!("resolver:{}:{}", reference.emitting_address, state.name.namehash),
+                        "token_id": token_id,
+                        "from_address": reference.emitting_address,
+                        "to_address": resolver.clone(),
+                        "logical_name_id": state.name.logical_name_id,
+                        "resource_id": state.resource.as_ref().map(|link| link.resource_id.to_string()),
+                        "chain_id": reference.chain_id,
+                        "block_hash": reference.block_hash,
+                        "block_number": reference.block_number,
+                        "transaction_hash": reference.transaction_hash,
+                        "transaction_index": reference.transaction_index,
+                        "log_index": reference.log_index,
+                        "tombstone": normalize_address(&resolver) == ZERO_ADDRESS,
+                    }),
+                });
             }
         }
         RegistryObservation::TokenResource {
@@ -1786,6 +1815,41 @@ fn latest_discovery_observations(
     Ok(latest.into_values().collect())
 }
 
+async fn reconcile_discovery_observations_by_source(
+    pool: &PgPool,
+    observations: &[DiscoveryObservation],
+) -> Result<DiscoveryReconciliationSummary> {
+    let mut by_source = BTreeMap::<String, Vec<DiscoveryObservation>>::new();
+    for observation in observations {
+        by_source
+            .entry(observation.discovery_source.clone())
+            .or_default()
+            .push(observation.clone());
+    }
+
+    let mut summary = DiscoveryReconciliationSummary {
+        active_edge_count: 0,
+        admitted_edge_count: 0,
+        inserted_edge_count: 0,
+        deactivated_edge_count: 0,
+        admitted_edges: Vec::new(),
+    };
+    for (discovery_source, source_observations) in by_source {
+        let source_summary =
+            reconcile_discovery_observations(pool, &discovery_source, &source_observations)
+                .await
+                .with_context(|| {
+                    format!("failed to reconcile discovery_source {discovery_source}")
+                })?;
+        summary.active_edge_count += source_summary.active_edge_count;
+        summary.admitted_edge_count += source_summary.admitted_edge_count;
+        summary.inserted_edge_count += source_summary.inserted_edge_count;
+        summary.deactivated_edge_count += source_summary.deactivated_edge_count;
+        summary.admitted_edges.extend(source_summary.admitted_edges);
+    }
+    Ok(summary)
+}
+
 fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for event in events {
@@ -1816,6 +1880,10 @@ fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> boo
 
 fn ens_v2_subregistry_discovery_source(chain: &str) -> String {
     format!("ens_v2_registry_subregistry:{chain}")
+}
+
+fn ens_v2_resolver_discovery_source(chain: &str) -> String {
+    format!("ens_v2_registry_resolver:{chain}")
 }
 
 fn decode_dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {

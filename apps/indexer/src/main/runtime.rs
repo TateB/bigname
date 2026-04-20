@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use bigname_adapters::{
     BlockDerivedNormalizedEventSyncSummary, EnsV1ReverseClaimSyncSummary,
     EnsV1SubregistryDiscoverySyncSummary, EnsV1UnwrappedAuthoritySyncSummary,
-    EnsV2RegistrarSyncSummary, EnsV2RegistryResourceSurfaceSyncSummary,
+    EnsV2PermissionsSyncSummary, EnsV2RegistrarSyncSummary,
+    EnsV2RegistryResourceSurfaceSyncSummary, EnsV2ResolverSyncSummary,
     ManifestNormalizedEventSyncSummary,
 };
 use bigname_manifests::{
@@ -428,6 +429,47 @@ pub(crate) fn log_ens_v2_registrar_sync_summary(chain: &str, summary: &EnsV2Regi
     );
 }
 
+pub(crate) fn log_ens_v2_resolver_sync_summary(chain: &str, summary: &EnsV2ResolverSyncSummary) {
+    if summary.scanned_log_count == 0 && summary.total_synced_count == 0 {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        normalized_event_sync_total_count = summary.total_synced_count,
+        normalized_event_inserted_total_count = summary.total_inserted_count,
+        normalized_event_kind_count = summary.by_kind.len(),
+        "ENSv2 resolver facts synced from stored raw logs"
+    );
+}
+
+pub(crate) fn log_ens_v2_permissions_sync_summary(
+    chain: &str,
+    summary: &EnsV2PermissionsSyncSummary,
+) {
+    if summary.scanned_log_count == 0
+        && summary.total_resource_count == 0
+        && summary.total_synced_count == 0
+    {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        identity_resource_count = summary.total_resource_count,
+        normalized_event_sync_total_count = summary.total_synced_count,
+        normalized_event_inserted_total_count = summary.total_inserted_count,
+        normalized_event_kind_count = summary.by_kind.len(),
+        "ENSv2 permissions facts synced from stored raw logs"
+    );
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchedChainPlanState {
     pub(crate) chain_count: usize,
@@ -741,6 +783,26 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
                 )
             })?;
         log_ens_v2_registrar_sync_summary(&chain.chain, &summary);
+
+        let summary = bigname_adapters::sync_ens_v2_resolver(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v2_resolver_sync_summary(&chain.chain, &summary);
+
+        let summary = bigname_adapters::sync_ens_v2_permissions(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv2 permissions state from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
     }
 
     Ok(())

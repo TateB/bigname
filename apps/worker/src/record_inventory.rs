@@ -19,6 +19,7 @@ use uuid::Uuid;
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 const DERIVATION_KIND_DECLARED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
+const DERIVATION_KIND_ENS_V2_RESOLVER: &str = "ens_v2_resolver";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 const RECORD_INVENTORY_CURRENT_DERIVATION_KIND: &str = "record_inventory_current_rebuild";
 const RECORD_INVENTORY_ENUMERATION_BASIS: &str = "declared_record_inventory";
@@ -154,18 +155,19 @@ async fn delete_record_inventory_rows_for_resource(
 }
 
 async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
+    let derivation_kinds = record_inventory_derivation_kinds();
     let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT resource_id
         FROM normalized_events
-        WHERE derivation_kind = $1
+        WHERE derivation_kind = ANY($1::TEXT[])
           AND event_kind IN ($2, $3)
           AND resource_id IS NOT NULL
           AND canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY resource_id
         "#
     ))
-    .bind(DERIVATION_KIND_DECLARED_AUTHORITY)
+    .bind(&derivation_kinds)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .fetch_all(pool)
@@ -254,6 +256,7 @@ async fn build_row(pool: &PgPool, resource_id: Uuid) -> Result<Option<RecordInve
 }
 
 async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<RelevantEvent>> {
+    let derivation_kinds = record_inventory_derivation_kinds();
     let rows = sqlx::query(&format!(
         r#"
         SELECT
@@ -276,7 +279,7 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
         LEFT JOIN raw_blocks rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.derivation_kind = $1
+        WHERE ne.derivation_kind = ANY($1::TEXT[])
           AND ne.event_kind IN ($2, $3)
           AND ne.resource_id = $4
           AND ne.logical_name_id IS NOT NULL
@@ -290,7 +293,7 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
             ne.normalized_event_id ASC
         "#
     ))
-    .bind(DERIVATION_KIND_DECLARED_AUTHORITY)
+    .bind(&derivation_kinds)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .bind(resource_id)
@@ -301,6 +304,13 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
     })?;
 
     rows.into_iter().map(decode_relevant_event).collect()
+}
+
+fn record_inventory_derivation_kinds() -> Vec<String> {
+    vec![
+        DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
+        DERIVATION_KIND_ENS_V2_RESOLVER.to_owned(),
+    ]
 }
 
 fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
@@ -1348,6 +1358,69 @@ mod tests {
                 "gap_reason": GAP_REASON_NOT_OBSERVED,
             }])
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x9701);
+        let mut boundary = record_version_changed_event(
+            "ensv2-boundary",
+            "ens:alice.eth",
+            resource_id,
+            21,
+            1050,
+            0,
+        );
+        boundary.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
+        boundary.source_family = "ens_v2_resolver_l1".to_owned();
+        let mut record = record_changed_event(
+            "ensv2-record",
+            "ens:alice.eth",
+            resource_id,
+            "addr:60",
+            "addr",
+            Some("60"),
+            1051,
+            0,
+        );
+        record.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
+        record.source_family = "ens_v2_resolver_l1".to_owned();
+
+        seed_resources(database.pool(), &[resource_id]).await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0xrec1050", 1050, 1_776_200_050),
+                raw_block("ethereum-mainnet", "0xrec1051", 1051, 1_776_200_051),
+            ],
+        )
+        .await?;
+        seed_events(database.pool(), &[boundary, record]).await?;
+
+        rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+        let row = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &record_version_boundary(
+                "ens:alice.eth",
+                resource_id,
+                Some(1),
+                Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+                1050,
+                "0xrec1050",
+                1_776_200_050,
+                "ethereum-mainnet",
+            ),
+        )
+        .await?
+        .context("ENSv2 resolver row must exist")?;
+
+        assert_eq!(row.selectors[0]["record_key"], json!("addr:60"));
+        assert_eq!(row.entries[0]["record_key"], json!("addr:60"));
 
         database.cleanup().await
     }
