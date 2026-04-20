@@ -3954,6 +3954,33 @@ async fn get_resolution_rejects_malformed_records() -> Result<()> {
 }
 
 #[tokio::test]
+async fn get_resolution_returns_not_found_when_exact_surface_projection_is_missing() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request without exact surface projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "name alice.eth was not found in namespace ens"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
@@ -4002,6 +4029,60 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
 
     let payload: ResolutionResponse = read_json(response).await?;
     assert_eq!(payload.verified_state, None);
+
+    {
+        let declared_state = payload
+            .declared_state
+            .as_ref()
+            .expect("declared_state must be present");
+        let topology_record_boundary = declared_state
+            .pointer("/topology/version_boundaries/record_version_boundary")
+            .expect("topology record boundary must be present");
+        let record_inventory = declared_state
+            .get("record_inventory")
+            .expect("record_inventory must be present");
+        let record_cache = declared_state
+            .get("record_cache")
+            .expect("record_cache must be present");
+
+        assert_eq!(
+            record_inventory.get("record_version_boundary"),
+            Some(topology_record_boundary)
+        );
+        assert_eq!(
+            record_cache.get("record_version_boundary"),
+            Some(topology_record_boundary)
+        );
+        assert_eq!(
+            cacheable_selector_identities(record_inventory),
+            record_cache_entry_identities(record_cache)
+        );
+        assert_eq!(
+            record_keys(
+                record_inventory
+                    .get("selectors")
+                    .expect("selectors must be present")
+            ),
+            ["addr:60", "avatar", "text:com.twitter"]
+        );
+        assert_eq!(
+            record_keys(
+                record_cache
+                    .get("entries")
+                    .expect("cache entries must be present")
+            ),
+            ["addr:60", "avatar"]
+        );
+        assert_eq!(
+            record_statuses(
+                record_cache
+                    .get("entries")
+                    .expect("cache entries must be present")
+            ),
+            ["success", "unsupported"]
+        );
+    }
+
     assert_eq!(
         payload.declared_state,
         Some(json!({
@@ -4362,6 +4443,37 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
     assert_eq!(response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    let record_inventory = declared_state
+        .get("record_inventory")
+        .expect("record_inventory must be present");
+    let record_cache = declared_state
+        .get("record_cache")
+        .expect("record_cache must be present");
+
+    assert_eq!(
+        record_inventory.get("record_version_boundary"),
+        record_cache.get("record_version_boundary")
+    );
+    assert_eq!(
+        record_keys(
+            record_cache
+                .get("entries")
+                .expect("cache entries must be present")
+        ),
+        ["text:com.twitter", "addr:60", "avatar"]
+    );
+    assert_eq!(
+        record_statuses(
+            record_cache
+                .get("entries")
+                .expect("cache entries must be present")
+        ),
+        ["not_found", "success", "unsupported"]
+    );
     assert_eq!(
         payload
             .declared_state
@@ -4399,6 +4511,63 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
 
     database.cleanup().await?;
     Ok(())
+}
+
+fn record_identity(value: &Value) -> Value {
+    json!({
+        "record_key": value.get("record_key").cloned().unwrap_or(Value::Null),
+        "record_family": value.get("record_family").cloned().unwrap_or(Value::Null),
+        "selector_key": value.get("selector_key").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn cacheable_selector_identities(record_inventory: &Value) -> Vec<Value> {
+    record_inventory
+        .get("selectors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|selector| selector.get("cacheable").and_then(Value::as_bool) == Some(true))
+        .map(record_identity)
+        .collect()
+}
+
+fn record_cache_entry_identities(record_cache: &Value) -> Vec<Value> {
+    record_cache
+        .get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(record_identity)
+        .collect()
+}
+
+fn record_keys(records: &Value) -> Vec<&str> {
+    records
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|record| {
+            record
+                .get("record_key")
+                .and_then(Value::as_str)
+                .expect("record must include record_key")
+        })
+        .collect()
+}
+
+fn record_statuses(records: &Value) -> Vec<&str> {
+    records
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|record| {
+            record
+                .get("status")
+                .and_then(Value::as_str)
+                .expect("record must include status")
+        })
+        .collect()
 }
 
 #[tokio::test]
