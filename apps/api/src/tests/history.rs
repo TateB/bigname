@@ -1476,6 +1476,873 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
     Ok(())
 }
 
+fn ensv2_history_event(
+    event_identity: &str,
+    logical_name_id: Option<&str>,
+    resource_id: Option<Uuid>,
+    event_kind: &str,
+    block_number: i64,
+    block_hash: &str,
+    after_state: Value,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    let mut event = history_event(
+        event_identity,
+        logical_name_id,
+        resource_id,
+        Some("ethereum-sepolia"),
+        Some(block_number),
+        Some(block_hash),
+        Some(&format!("0xensv2tx{block_number}")),
+        Some(0),
+        canonicality_state,
+    );
+    event.event_kind = event_kind.to_owned();
+    event.source_family = "ens_v2_registry_l1".to_owned();
+    event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    event.before_state = json!({});
+    event.after_state = ensv2_history_after_state(event_identity, after_state);
+    event
+}
+
+fn ensv2_history_after_state(event_identity: &str, mut after_state: Value) -> Value {
+    let object = after_state
+        .as_object_mut()
+        .expect("ENSv2 history test after_state must be an object");
+    object.insert(
+        "provenance".to_owned(),
+        json!({
+            "after": event_identity,
+        }),
+    );
+    object.insert(
+        "coverage".to_owned(),
+        json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["normalized_events"],
+            "enumeration_basis": event_identity,
+            "unsupported_reason": null,
+        }),
+    );
+    after_state
+}
+
+#[tokio::test]
+async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let registrant = "0x0000000000000000000000000000000000000b0b";
+    let controller = "0x0000000000000000000000000000000000000c0c";
+    let unrelated = "0x0000000000000000000000000000000000000dad";
+    let current_logical_name_id = "ens:current-v2.eth";
+    let historical_logical_name_id = "ens:historical-v2.eth";
+    let pending_logical_name_id = "ens:pending-v2.eth";
+    let controller_logical_name_id = "ens:controller-v2.eth";
+    let observed_logical_name_id = "ens:observed-v2.eth";
+    let unrelated_logical_name_id = "ens:unrelated-v2.eth";
+    let current_resource_id = Uuid::from_u128(0xa260);
+    let current_token_lineage_id = Uuid::from_u128(0xa261);
+    let current_surface_binding_id = Uuid::from_u128(0xb260);
+    let historical_resource_id = Uuid::from_u128(0xa262);
+    let controller_resource_id = Uuid::from_u128(0xa263);
+    let observed_resource_id = Uuid::from_u128(0xa264);
+    let unrelated_resource_id = Uuid::from_u128(0xa265);
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-sepolia", "0xe702", None, 702, 1_700_000_702),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe703",
+                Some("0xe702"),
+                703,
+                1_700_000_703,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe704",
+                Some("0xe703"),
+                704,
+                1_700_000_704,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe705",
+                Some("0xe704"),
+                705,
+                1_700_000_705,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe706",
+                Some("0xe705"),
+                706,
+                1_700_000_706,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe707",
+                Some("0xe706"),
+                707,
+                1_700_000_707,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe708",
+                Some("0xe707"),
+                708,
+                1_700_000_708,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe709",
+                Some("0xe708"),
+                709,
+                1_700_000_709,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe710",
+                Some("0xe709"),
+                710,
+                1_700_000_710,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe711",
+                Some("0xe710"),
+                711,
+                1_700_000_711,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe712",
+                Some("0xe711"),
+                712,
+                1_700_000_712,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe713",
+                Some("0xe712"),
+                713,
+                1_700_000_713,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe714",
+                Some("0xe713"),
+                714,
+                1_700_000_714,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe715",
+                Some("0xe714"),
+                715,
+                1_700_000_715,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe716",
+                Some("0xe715"),
+                716,
+                1_700_000_716,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xe717",
+                Some("0xe716"),
+                717,
+                1_700_000_717,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[TokenLineage {
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xe700".to_owned(),
+            block_number: 700,
+            ..address_name_token_lineage(current_token_lineage_id, "0xe700", 700)
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[
+            Resource {
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xe701".to_owned(),
+                block_number: 701,
+                ..address_name_resource(
+                    current_resource_id,
+                    Some(current_token_lineage_id),
+                    "0xe701",
+                    701,
+                )
+            },
+            Resource {
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xe713".to_owned(),
+                block_number: 713,
+                ..address_name_resource(historical_resource_id, None, "0xe713", 713)
+            },
+            Resource {
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xe708".to_owned(),
+                block_number: 708,
+                ..address_name_resource(controller_resource_id, None, "0xe708", 708)
+            },
+            Resource {
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xe705".to_owned(),
+                block_number: 705,
+                ..address_name_resource(observed_resource_id, None, "0xe705", 705)
+            },
+            Resource {
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xe703".to_owned(),
+                block_number: 703,
+                ..address_name_resource(unrelated_resource_id, None, "0xe703", 703)
+            },
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(
+                current_logical_name_id,
+                "current-v2.eth",
+                "node:current-v2.eth",
+                701,
+            ),
+            collection_name_surface(
+                historical_logical_name_id,
+                "historical-v2.eth",
+                "node:historical-v2.eth",
+                713,
+            ),
+            collection_name_surface(
+                pending_logical_name_id,
+                "pending-v2.eth",
+                "node:pending-v2.eth",
+                711,
+            ),
+            collection_name_surface(
+                controller_logical_name_id,
+                "controller-v2.eth",
+                "node:controller-v2.eth",
+                708,
+            ),
+            collection_name_surface(
+                observed_logical_name_id,
+                "observed-v2.eth",
+                "node:observed-v2.eth",
+                705,
+            ),
+            collection_name_surface(
+                unrelated_logical_name_id,
+                "unrelated-v2.eth",
+                "node:unrelated-v2.eth",
+                703,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[SurfaceBinding {
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xe701".to_owned(),
+            block_number: 701,
+            ..address_name_surface_binding(
+                current_surface_binding_id,
+                current_logical_name_id,
+                current_resource_id,
+                "0xe701",
+                701,
+                1_717_173_701,
+            )
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[
+            address_name_current_row(
+                registrant,
+                current_logical_name_id,
+                bigname_storage::AddressNameRelation::Registrant,
+                "current-v2.eth",
+                "current-v2.eth",
+                "node:current-v2.eth",
+                current_surface_binding_id,
+                current_resource_id,
+                Some(current_token_lineage_id),
+                701,
+            ),
+            address_name_current_row(
+                controller,
+                current_logical_name_id,
+                bigname_storage::AddressNameRelation::EffectiveController,
+                "current-v2.eth",
+                "current-v2.eth",
+                "node:current-v2.eth",
+                current_surface_binding_id,
+                current_resource_id,
+                Some(current_token_lineage_id),
+                701,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            ensv2_history_event(
+                "ensv2-current-observed",
+                Some(current_logical_name_id),
+                Some(current_resource_id),
+                "TokenResourceLinked",
+                717,
+                "0xe717",
+                json!({}),
+                CanonicalityState::Observed,
+            ),
+            ensv2_history_event(
+                "ensv2-current-resource",
+                None,
+                Some(current_resource_id),
+                "TokenResourceLinked",
+                716,
+                "0xe716",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-current-surface",
+                Some(current_logical_name_id),
+                None,
+                "LabelRegistered",
+                715,
+                "0xe715",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-historical-surface",
+                Some(historical_logical_name_id),
+                None,
+                "LabelRegistered",
+                714,
+                "0xe714",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-historical-resource",
+                None,
+                Some(historical_resource_id),
+                "TokenResourceLinked",
+                713,
+                "0xe713",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-historical-grant",
+                Some(historical_logical_name_id),
+                Some(historical_resource_id),
+                "RegistrationGranted",
+                712,
+                "0xe712",
+                json!({
+                    "registrant": "0x0000000000000000000000000000000000000B0B",
+                }),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-pending-surface",
+                Some(pending_logical_name_id),
+                None,
+                "LabelRegistered",
+                711,
+                "0xe711",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-pending-grant",
+                Some(pending_logical_name_id),
+                None,
+                "RegistrationGranted",
+                710,
+                "0xe710",
+                json!({
+                    "registrant": "0x0000000000000000000000000000000000000B0B",
+                }),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-controller-surface",
+                Some(controller_logical_name_id),
+                None,
+                "LabelRegistered",
+                709,
+                "0xe709",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-controller-resource",
+                None,
+                Some(controller_resource_id),
+                "TokenResourceLinked",
+                708,
+                "0xe708",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-controller-authority",
+                Some(controller_logical_name_id),
+                Some(controller_resource_id),
+                "AuthorityTransferred",
+                707,
+                "0xe707",
+                json!({
+                    "owner": "0x0000000000000000000000000000000000000C0C",
+                }),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-observed-anchor-leak-surface",
+                Some(observed_logical_name_id),
+                None,
+                "LabelRegistered",
+                706,
+                "0xe706",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-observed-anchor-leak-resource",
+                None,
+                Some(observed_resource_id),
+                "TokenResourceLinked",
+                705,
+                "0xe705",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-observed-grant",
+                Some(observed_logical_name_id),
+                Some(observed_resource_id),
+                "RegistrationGranted",
+                704,
+                "0xe704",
+                json!({
+                    "registrant": "0x0000000000000000000000000000000000000B0B",
+                }),
+                CanonicalityState::Observed,
+            ),
+            ensv2_history_event(
+                "ensv2-unrelated-surface",
+                Some(unrelated_logical_name_id),
+                None,
+                "LabelRegistered",
+                703,
+                "0xe703",
+                json!({}),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_history_event(
+                "ensv2-unrelated-grant",
+                Some(unrelated_logical_name_id),
+                Some(unrelated_resource_id),
+                "RegistrationGranted",
+                702,
+                "0xe702",
+                json!({
+                    "registrant": unrelated,
+                }),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let name_both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/current-v2.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 name history request failed")?;
+    assert_eq!(name_both_response.status(), StatusCode::OK);
+    let name_both_payload: HistoryResponse = read_json(name_both_response).await?;
+    assert_eq!(
+        history_event_identities(&name_both_payload),
+        vec!["ensv2-current-resource", "ensv2-current-surface"]
+    );
+    assert_eq!(name_both_payload.page.sort, "chain_position_desc");
+    assert_eq!(name_both_payload.declared_state, json!({}));
+    assert_eq!(
+        name_both_payload.coverage.enumeration_basis,
+        "canonical normalized-event history for the requested both scope"
+    );
+    assert_eq!(
+        name_both_payload.chain_positions["ethereum-sepolia"]["block_number"],
+        json!(716)
+    );
+    assert_eq!(
+        name_both_payload.data[0]
+            .get("source_family")
+            .and_then(Value::as_str),
+        Some("ens_v2_registry_l1")
+    );
+    assert_eq!(
+        name_both_payload.data[0]
+            .get("derivation_kind")
+            .and_then(Value::as_str),
+        Some("ens_v2_registry_resource_surface")
+    );
+
+    let name_surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/current-v2.eth?scope=surface")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 name surface-scope history request failed")?;
+    assert_eq!(name_surface_response.status(), StatusCode::OK);
+    let name_surface_payload: HistoryResponse = read_json(name_surface_response).await?;
+    assert_eq!(
+        history_event_identities(&name_surface_payload),
+        vec!["ensv2-current-surface"]
+    );
+
+    let name_resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/current-v2.eth?scope=resource")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 name resource-scope history request failed")?;
+    assert_eq!(name_resource_response.status(), StatusCode::OK);
+    let name_resource_payload: HistoryResponse = read_json(name_resource_response).await?;
+    assert_eq!(
+        history_event_identities(&name_resource_payload),
+        vec!["ensv2-current-resource"]
+    );
+
+    let resource_both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{current_resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 resource history request failed")?;
+    assert_eq!(resource_both_response.status(), StatusCode::OK);
+    let resource_both_payload: HistoryResponse = read_json(resource_both_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_both_payload),
+        vec!["ensv2-current-resource", "ensv2-current-surface"]
+    );
+
+    let resource_surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{current_resource_id}?scope=surface"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 resource surface-scope history request failed")?;
+    assert_eq!(resource_surface_response.status(), StatusCode::OK);
+    let resource_surface_payload: HistoryResponse = read_json(resource_surface_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_surface_payload),
+        vec!["ensv2-current-surface"]
+    );
+
+    let resource_resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{current_resource_id}?scope=resource"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 resource resource-scope history request failed")?;
+    assert_eq!(resource_resource_response.status(), StatusCode::OK);
+    let resource_resource_payload: HistoryResponse = read_json(resource_resource_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_resource_payload),
+        vec!["ensv2-current-resource"]
+    );
+
+    let address_surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=surface"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address surface-scope history request failed")?;
+    assert_eq!(address_surface_response.status(), StatusCode::OK);
+    let address_surface_payload: HistoryResponse = read_json(address_surface_response).await?;
+    assert_eq!(
+        history_event_identities(&address_surface_payload),
+        vec![
+            "ensv2-current-surface",
+            "ensv2-historical-surface",
+            "ensv2-historical-grant",
+            "ensv2-pending-surface",
+            "ensv2-pending-grant",
+        ]
+    );
+
+    let address_resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=resource"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address resource-scope history request failed")?;
+    assert_eq!(address_resource_response.status(), StatusCode::OK);
+    let address_resource_payload: HistoryResponse = read_json(address_resource_response).await?;
+    assert_eq!(
+        history_event_identities(&address_resource_payload),
+        vec![
+            "ensv2-current-resource",
+            "ensv2-historical-resource",
+            "ensv2-historical-grant",
+        ]
+    );
+
+    let address_both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address history request failed")?;
+    assert_eq!(address_both_response.status(), StatusCode::OK);
+    let address_both_payload: HistoryResponse = read_json(address_both_response).await?;
+    assert_eq!(
+        history_event_identities(&address_both_payload),
+        vec![
+            "ensv2-current-resource",
+            "ensv2-current-surface",
+            "ensv2-historical-surface",
+            "ensv2-historical-resource",
+            "ensv2-historical-grant",
+            "ensv2-pending-surface",
+            "ensv2-pending-grant",
+        ]
+    );
+    assert_eq!(
+        address_both_payload.coverage.enumeration_basis,
+        "canonical normalized-event history for the requested both scope"
+    );
+
+    let address_first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address first page request failed")?;
+    assert_eq!(address_first_page_response.status(), StatusCode::OK);
+    let address_first_page_payload: HistoryResponse =
+        read_json(address_first_page_response).await?;
+    let cursor = address_first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("ENSv2 address first page must include next_cursor");
+
+    let address_second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address second page request failed")?;
+    assert_eq!(address_second_page_response.status(), StatusCode::OK);
+    let address_second_page_payload: HistoryResponse =
+        read_json(address_second_page_response).await?;
+
+    let address_replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address replay page request failed")?;
+    assert_eq!(address_replay_page_response.status(), StatusCode::OK);
+    let address_replay_page_payload: HistoryResponse =
+        read_json(address_replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &address_both_payload.data,
+        &address_both_payload.page,
+        &address_first_page_payload.data,
+        &address_first_page_payload.page,
+        &address_second_page_payload.data,
+        &address_second_page_payload.page,
+        &address_replay_page_payload.data,
+        &address_replay_page_payload.page,
+        "chain_position_desc",
+        50,
+        2,
+    );
+
+    let controller_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{controller}?namespace=ens&relation=effective_controller"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 address relation-filtered history request failed")?;
+    assert_eq!(controller_response.status(), StatusCode::OK);
+    let controller_payload: HistoryResponse = read_json(controller_response).await?;
+    assert_eq!(
+        history_event_identities(&controller_payload),
+        vec![
+            "ensv2-current-resource",
+            "ensv2-current-surface",
+            "ensv2-controller-surface",
+            "ensv2-controller-resource",
+            "ensv2-controller-authority",
+        ]
+    );
+
+    let missing_name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/missing-v2.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 missing name history request failed")?;
+    assert_eq!(missing_name_response.status(), StatusCode::NOT_FOUND);
+    let missing_name_payload: ErrorResponse = read_json(missing_name_response).await?;
+    assert_eq!(missing_name_payload.error.code, "not_found");
+    assert_eq!(
+        missing_name_payload.error.message,
+        "name missing-v2.eth was not found in namespace ens"
+    );
+
+    let missing_resource_id = Uuid::from_u128(0xa2ff);
+    let missing_resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{missing_resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 missing resource history request failed")?;
+    assert_eq!(missing_resource_response.status(), StatusCode::NOT_FOUND);
+    let missing_resource_payload: ErrorResponse = read_json(missing_resource_response).await?;
+    assert_eq!(missing_resource_payload.error.code, "not_found");
+    assert_eq!(
+        missing_resource_payload.error.message,
+        format!("resource {missing_resource_id} was not found")
+    );
+
+    let unsupported_name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/unknown/current-v2.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 unsupported namespace name history request failed")?;
+    assert_eq!(unsupported_name_response.status(), StatusCode::NOT_FOUND);
+    let unsupported_name_payload: ErrorResponse = read_json(unsupported_name_response).await?;
+    assert_eq!(unsupported_name_payload.error.code, "not_found");
+    assert_eq!(
+        unsupported_name_payload.error.message,
+        "namespace unknown is not supported"
+    );
+
+    let unsupported_address_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{registrant}?namespace=unknown"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 unsupported address namespace history request failed")?;
+    assert_eq!(
+        unsupported_address_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unsupported_address_payload: ErrorResponse =
+        read_json(unsupported_address_response).await?;
+    assert_eq!(unsupported_address_payload.error.code, "invalid_input");
+    assert_eq!(
+        unsupported_address_payload.error.message,
+        "namespace must be one of: ens, basenames"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

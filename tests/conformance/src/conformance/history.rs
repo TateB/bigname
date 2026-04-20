@@ -570,6 +570,355 @@
         }
 
         #[tokio::test]
+        async fn ensv2_history_routes_read_back_canonical_rows_and_address_anchors() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture = EnsV2HistoryFixture::new();
+            fixture.seed(&database).await?;
+
+            let name_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/history/names/ens/current-v2.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 name history request failed")?;
+            assert_eq!(name_response.status(), StatusCode::OK);
+            let name_payload: HistoryResponse = read_json(name_response).await?;
+            assert_eq!(
+                history_event_identities(&name_payload),
+                vec!["ensv2-current-resource", "ensv2-current-surface"]
+            );
+            assert_eq!(name_payload.declared_state, json!({}));
+            assert_eq!(name_payload.page.sort, "chain_position_desc");
+            assert_eq!(name_payload.page.page_size, 50);
+            assert_eq!(
+                name_payload.coverage.source_classes_considered,
+                vec!["normalized_events".to_owned()]
+            );
+            assert_eq!(
+                name_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested both scope"
+            );
+            assert_eq!(
+                name_payload
+                    .provenance
+                    .get("derivation_kind")
+                    .and_then(Value::as_str),
+                Some("normalized_event_history")
+            );
+            assert_eq!(name_payload.consistency, "head");
+            assert_eq!(
+                name_payload.chain_positions["ethereum-sepolia"]["block_number"],
+                json!(fixture.base_block_number + 7)
+            );
+            assert_eq!(
+                name_payload.data[0]
+                    .get("source_family")
+                    .and_then(Value::as_str),
+                Some("ens_v2_registry_l1")
+            );
+
+            let name_surface_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/history/names/ens/current-v2.eth?scope=surface")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 name surface-scope history request failed")?;
+            assert_eq!(name_surface_response.status(), StatusCode::OK);
+            let name_surface_payload: HistoryResponse = read_json(name_surface_response).await?;
+            assert_eq!(
+                history_event_identities(&name_surface_payload),
+                vec!["ensv2-current-surface"]
+            );
+            assert_eq!(
+                name_surface_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested surface scope"
+            );
+
+            let name_resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/history/names/ens/current-v2.eth?scope=resource")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 name resource-scope history request failed")?;
+            assert_eq!(name_resource_response.status(), StatusCode::OK);
+            let name_resource_payload: HistoryResponse = read_json(name_resource_response).await?;
+            assert_eq!(
+                history_event_identities(&name_resource_payload),
+                vec!["ensv2-current-resource"]
+            );
+            assert_eq!(
+                name_resource_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested resource scope"
+            );
+
+            let resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/resources/{}",
+                            fixture.current_resource_id
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 resource history request failed")?;
+            assert_eq!(resource_response.status(), StatusCode::OK);
+            let resource_payload: HistoryResponse = read_json(resource_response).await?;
+            assert_eq!(
+                history_event_identities(&resource_payload),
+                vec!["ensv2-current-resource", "ensv2-current-surface"]
+            );
+            assert_eq!(resource_payload.declared_state, json!({}));
+            assert_eq!(resource_payload.page.sort, "chain_position_desc");
+            assert_eq!(
+                resource_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested both scope"
+            );
+            assert_eq!(
+                resource_payload.chain_positions["ethereum-sepolia"]["block_number"],
+                json!(fixture.base_block_number + 7)
+            );
+
+            let resource_surface_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/resources/{}?scope=surface",
+                            fixture.current_resource_id
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 resource surface-scope history request failed")?;
+            assert_eq!(resource_surface_response.status(), StatusCode::OK);
+            let resource_surface_payload: HistoryResponse =
+                read_json(resource_surface_response).await?;
+            assert_eq!(
+                history_event_identities(&resource_surface_payload),
+                vec!["ensv2-current-surface"]
+            );
+
+            let resource_resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/resources/{}?scope=resource",
+                            fixture.current_resource_id
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 resource resource-scope history request failed")?;
+            assert_eq!(resource_resource_response.status(), StatusCode::OK);
+            let resource_resource_payload: HistoryResponse =
+                read_json(resource_resource_response).await?;
+            assert_eq!(
+                history_event_identities(&resource_resource_payload),
+                vec!["ensv2-current-resource"]
+            );
+
+            let address_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 registrant address history request failed")?;
+            assert_eq!(address_response.status(), StatusCode::OK);
+            let address_payload: HistoryResponse = read_json(address_response).await?;
+            assert_eq!(
+                history_event_identities(&address_payload),
+                fixture.expected_registrant_history_event_identities()
+            );
+            assert_eq!(address_payload.declared_state, json!({}));
+            assert_eq!(address_payload.page.sort, "chain_position_desc");
+            assert_eq!(address_payload.page.page_size, 50);
+            assert_eq!(
+                address_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested both scope"
+            );
+            assert_eq!(
+                address_payload
+                    .provenance
+                    .get("derivation_kind")
+                    .and_then(Value::as_str),
+                Some("normalized_event_history")
+            );
+            assert_eq!(
+                address_payload.chain_positions["ethereum-sepolia"]["block_number"],
+                json!(fixture.base_block_number + 7)
+            );
+            assert!(
+                !history_event_identities(&address_payload)
+                    .iter()
+                    .any(|event_identity| event_identity.contains("observed"))
+            );
+
+            let address_surface_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant&scope=surface",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 registrant address surface-scope history request failed")?;
+            assert_eq!(address_surface_response.status(), StatusCode::OK);
+            let address_surface_payload: HistoryResponse =
+                read_json(address_surface_response).await?;
+            assert_eq!(
+                history_event_identities(&address_surface_payload),
+                vec![
+                    "ensv2-current-surface",
+                    "ensv2-historical-surface",
+                    "ensv2-historical-grant",
+                    "ensv2-historical-authority",
+                    "ensv2-pending-grant",
+                    "ensv2-pending-surface",
+                ]
+            );
+            assert_eq!(
+                address_surface_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested surface scope"
+            );
+
+            let address_resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant&scope=resource",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 registrant address resource-scope history request failed")?;
+            assert_eq!(address_resource_response.status(), StatusCode::OK);
+            let address_resource_payload: HistoryResponse =
+                read_json(address_resource_response).await?;
+            assert_eq!(
+                history_event_identities(&address_resource_payload),
+                vec![
+                    "ensv2-current-resource",
+                    "ensv2-historical-resource",
+                    "ensv2-historical-grant",
+                    "ensv2-historical-authority",
+                ]
+            );
+            assert_eq!(
+                address_resource_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested resource scope"
+            );
+
+            let first_page_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant&page_size=2",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 address history first page request failed")?;
+            assert_eq!(first_page_response.status(), StatusCode::OK);
+            let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+            let cursor = first_page_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("ENSv2 address history first page must include next_cursor");
+
+            let second_page_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 address history second page request failed")?;
+            assert_eq!(second_page_response.status(), StatusCode::OK);
+            let second_page_payload: HistoryResponse = read_json(second_page_response).await?;
+
+            let replay_page_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 address history replay page request failed")?;
+            assert_eq!(replay_page_response.status(), StatusCode::OK);
+            let replay_page_payload: HistoryResponse = read_json(replay_page_response).await?;
+
+            assert_replay_stable_pagination(
+                &address_payload.data,
+                &address_payload.page,
+                &first_page_payload.data,
+                &first_page_payload.page,
+                &second_page_payload.data,
+                &second_page_payload.page,
+                &replay_page_payload.data,
+                &replay_page_payload.page,
+                "chain_position_desc",
+                50,
+                2,
+            );
+
+            let controller_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{}?namespace=ens&relation=effective_controller",
+                            fixture.controller
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 effective-controller address history request failed")?;
+            assert_eq!(controller_response.status(), StatusCode::OK);
+            let controller_payload: HistoryResponse = read_json(controller_response).await?;
+            assert_eq!(
+                history_event_identities(&controller_payload),
+                fixture.expected_effective_controller_history_event_identities()
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn address_history_contract_honors_namespace_and_relation_filters() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000def";

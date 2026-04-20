@@ -13,7 +13,12 @@ use crate::{
     },
 };
 
-const ADDRESS_HISTORY_MATCH_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
+const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
+const ENS_V2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
+const ADDRESS_HISTORY_MATCH_DERIVATION_KINDS: &[&str] = &[
+    ENS_V1_AUTHORITY_DERIVATION_KIND,
+    ENS_V2_REGISTRY_DERIVATION_KIND,
+];
 const ADDRESS_HISTORY_MATCH_EVENT_KINDS: &[&str] = &[
     "RegistrationGranted",
     "TokenControlTransferred",
@@ -322,11 +327,14 @@ async fn load_historical_address_history_matches(
         FROM normalized_events ne
         LEFT JOIN resources r
           ON r.resource_id = ne.resource_id
-        WHERE ne.derivation_kind = 
+        WHERE ne.derivation_kind IN (
         "#,
     );
-    builder.push_bind(ADDRESS_HISTORY_MATCH_DERIVATION_KIND);
-    builder.push(" AND ne.event_kind IN (");
+    let mut separated = builder.separated(", ");
+    for derivation_kind in ADDRESS_HISTORY_MATCH_DERIVATION_KINDS {
+        separated.push_bind(*derivation_kind);
+    }
+    separated.push_unseparated(") AND ne.event_kind IN (");
     let mut separated = builder.separated(", ");
     for event_kind in ADDRESS_HISTORY_MATCH_EVENT_KINDS {
         separated.push_bind(*event_kind);
@@ -405,6 +413,8 @@ fn push_tokenized_address_match_filter<'a>(
         "#,
     );
     builder.push_bind("basenames");
+    builder.push(" OR ne.derivation_kind = ");
+    builder.push_bind(ENS_V2_REGISTRY_DERIVATION_KIND);
     builder.push(
         r#"
             )
@@ -440,7 +450,15 @@ fn push_registry_owner_match_filter<'a>(
     builder.push(
         r#"
         (
-            r.token_lineage_id IS NULL
+            (
+                r.token_lineage_id IS NULL
+                OR ne.derivation_kind =
+        "#,
+    );
+    builder.push_bind(ENS_V2_REGISTRY_DERIVATION_KIND);
+    builder.push(
+        r#"
+            )
             AND ne.event_kind = 'AuthorityTransferred'
             AND LOWER(COALESCE(ne.after_state ->> 'owner', '')) = 
         "#,
@@ -963,7 +981,7 @@ mod tests {
         NormalizedEvent {
             event_kind: event_kind.to_owned(),
             source_family: "ens_v1_registrar_l1".to_owned(),
-            derivation_kind: ADDRESS_HISTORY_MATCH_DERIVATION_KIND.to_owned(),
+            derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
             after_state,
             before_state: json!({}),
             ..history_event(
@@ -976,6 +994,37 @@ mod tests {
                 Some(&format!("0xtx{block_number}")),
                 Some(0),
                 CanonicalityState::Canonical,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensv2_registry_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Option<Uuid>,
+        event_kind: &str,
+        block_number: i64,
+        block_hash: &str,
+        after_state: Value,
+        canonicality_state: CanonicalityState,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_kind: event_kind.to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            derivation_kind: ENS_V2_REGISTRY_DERIVATION_KIND.to_owned(),
+            after_state,
+            before_state: json!({}),
+            ..history_event(
+                event_identity,
+                Some(logical_name_id),
+                resource_id,
+                Some("ethereum-sepolia"),
+                Some(block_number),
+                Some(block_hash),
+                Some(&format!("0xensv2tx{block_number}")),
+                Some(0),
+                canonicality_state,
             )
         }
     }
@@ -2203,11 +2252,7 @@ mod tests {
         )
         .await?;
 
-        upsert_token_lineages(
-            database.pool(),
-            &[token_lineage(current_token_lineage_id)],
-        )
-        .await?;
+        upsert_token_lineages(database.pool(), &[token_lineage(current_token_lineage_id)]).await?;
         upsert_resources(
             database.pool(),
             &[
@@ -2359,6 +2404,289 @@ mod tests {
                 .map(|row| row.event_identity.as_str())
                 .collect::<Vec<_>>(),
             vec!["current-resource", "current-surface"]
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn address_history_ensv2_uses_current_and_historical_registry_matches() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let holder = "0x0000000000000000000000000000000000000b0b";
+        let controller = "0x0000000000000000000000000000000000000c0c";
+        let current_logical_name_id = "ens:current-v2.eth";
+        let historical_logical_name_id = "ens:historical-v2.eth";
+        let pending_logical_name_id = "ens:pending-v2.eth";
+        let observed_logical_name_id = "ens:observed-v2.eth";
+        let current_resource_id = Uuid::from_u128(0xa24a);
+        let current_token_lineage_id = Uuid::from_u128(0xa24b);
+        let current_surface_binding_id = Uuid::from_u128(0xb24a);
+        let historical_resource_id = Uuid::from_u128(0xa24c);
+        let historical_token_lineage_id = Uuid::from_u128(0xa24d);
+        let observed_resource_id = Uuid::from_u128(0xa24e);
+        let observed_token_lineage_id = Uuid::from_u128(0xa24f);
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-sepolia", "0xev2430", None, 430, 1_700_000_430),
+                raw_block("ethereum-sepolia", "0xev2431", None, 431, 1_700_000_431),
+                raw_block("ethereum-sepolia", "0xev2432", None, 432, 1_700_000_432),
+                raw_block("ethereum-sepolia", "0xev2433", None, 433, 1_700_000_433),
+                raw_block("ethereum-sepolia", "0xev2434", None, 434, 1_700_000_434),
+                raw_block("ethereum-sepolia", "0xev2435", None, 435, 1_700_000_435),
+                raw_block("ethereum-sepolia", "0xev2436", None, 436, 1_700_000_436),
+                raw_block("ethereum-sepolia", "0xev2437", None, 437, 1_700_000_437),
+                raw_block("ethereum-sepolia", "0xev2439", None, 439, 1_700_000_439),
+                raw_block("ethereum-sepolia", "0xev2440", None, 440, 1_700_000_440),
+                raw_block("ethereum-sepolia", "0xev2441", None, 441, 1_700_000_441),
+            ],
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[
+                token_lineage(current_token_lineage_id),
+                token_lineage(historical_token_lineage_id),
+                token_lineage(observed_token_lineage_id),
+            ],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[
+                tokenized_resource(current_resource_id, current_token_lineage_id),
+                tokenized_resource(historical_resource_id, historical_token_lineage_id),
+                tokenized_resource(observed_resource_id, observed_token_lineage_id),
+            ],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(current_logical_name_id),
+                name_surface(historical_logical_name_id),
+                name_surface(pending_logical_name_id),
+                name_surface(observed_logical_name_id),
+            ],
+        )
+        .await?;
+        upsert_surface_bindings(
+            database.pool(),
+            &[surface_binding(
+                current_surface_binding_id,
+                current_logical_name_id,
+                current_resource_id,
+                timestamp(1_700_000_430),
+            )],
+        )
+        .await?;
+        upsert_address_names_current_rows(
+            database.pool(),
+            &[
+                address_name_current_row(
+                    holder,
+                    current_logical_name_id,
+                    AddressNameRelation::Registrant,
+                    current_surface_binding_id,
+                    current_resource_id,
+                    Some(current_token_lineage_id),
+                    430,
+                ),
+                address_name_current_row(
+                    controller,
+                    current_logical_name_id,
+                    AddressNameRelation::EffectiveController,
+                    current_surface_binding_id,
+                    current_resource_id,
+                    Some(current_token_lineage_id),
+                    431,
+                ),
+            ],
+        )
+        .await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                history_event(
+                    "current-resource",
+                    None,
+                    Some(current_resource_id),
+                    Some("ethereum-sepolia"),
+                    Some(437),
+                    Some("0xev2437"),
+                    Some("0xev2tx437"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "current-surface",
+                    Some(current_logical_name_id),
+                    None,
+                    Some("ethereum-sepolia"),
+                    Some(436),
+                    Some("0xev2436"),
+                    Some("0xev2tx436"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "historical-surface",
+                    Some(historical_logical_name_id),
+                    None,
+                    Some("ethereum-sepolia"),
+                    Some(435),
+                    Some("0xev2435"),
+                    Some("0xev2tx435"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "historical-resource",
+                    None,
+                    Some(historical_resource_id),
+                    Some("ethereum-sepolia"),
+                    Some(434),
+                    Some("0xev2434"),
+                    Some("0xev2tx434"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                ensv2_registry_event(
+                    "historical-v2-grant",
+                    historical_logical_name_id,
+                    Some(historical_resource_id),
+                    "RegistrationGranted",
+                    433,
+                    "0xev2433",
+                    json!({
+                        "registrant": "0x0000000000000000000000000000000000000B0B",
+                    }),
+                    CanonicalityState::Canonical,
+                ),
+                ensv2_registry_event(
+                    "historical-v2-authority",
+                    historical_logical_name_id,
+                    Some(historical_resource_id),
+                    "AuthorityTransferred",
+                    432,
+                    "0xev2432",
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000C0C",
+                    }),
+                    CanonicalityState::Canonical,
+                ),
+                ensv2_registry_event(
+                    "pending-v2-grant",
+                    pending_logical_name_id,
+                    None,
+                    "RegistrationGranted",
+                    431,
+                    "0xev2431",
+                    json!({
+                        "registrant": "0x0000000000000000000000000000000000000B0B",
+                        "resource_pending": true,
+                    }),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "pending-surface",
+                    Some(pending_logical_name_id),
+                    None,
+                    Some("ethereum-sepolia"),
+                    Some(430),
+                    Some("0xev2430"),
+                    Some("0xev2tx430"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "observed-anchor-leak-surface",
+                    Some(observed_logical_name_id),
+                    None,
+                    Some("ethereum-sepolia"),
+                    Some(441),
+                    Some("0xev2441"),
+                    Some("0xev2tx441"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "observed-anchor-leak-resource",
+                    None,
+                    Some(observed_resource_id),
+                    Some("ethereum-sepolia"),
+                    Some(440),
+                    Some("0xev2440"),
+                    Some("0xev2tx440"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                ensv2_registry_event(
+                    "observed-v2-grant",
+                    observed_logical_name_id,
+                    Some(observed_resource_id),
+                    "RegistrationGranted",
+                    439,
+                    "0xev2439",
+                    json!({
+                        "registrant": "0x0000000000000000000000000000000000000B0B",
+                    }),
+                    CanonicalityState::Observed,
+                ),
+            ],
+        )
+        .await?;
+
+        let holder_rows = load_address_history(
+            database.pool(),
+            holder,
+            Some("ens"),
+            Some(AddressNameRelation::Registrant),
+            HistoryScope::Both,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            holder_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "current-resource",
+                "current-surface",
+                "historical-surface",
+                "historical-resource",
+                "historical-v2-grant",
+                "historical-v2-authority",
+                "pending-v2-grant",
+                "pending-surface",
+            ]
+        );
+
+        let controller_rows = load_address_history(
+            database.pool(),
+            controller,
+            Some("ens"),
+            Some(AddressNameRelation::EffectiveController),
+            HistoryScope::Both,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            controller_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "current-resource",
+                "current-surface",
+                "historical-surface",
+                "historical-resource",
+                "historical-v2-grant",
+                "historical-v2-authority",
+            ]
         );
 
         database.cleanup().await

@@ -148,6 +148,20 @@ Execution notes:
   normalized-event provenance, and default `both` scope behavior, plus the shipped
   `namespace=ens&relation=registrant` filter combination and
   `relation=effective_controller` with `scope=surface`, `scope=resource`, and `scope=both`
+- the ENSv2 history readback contract seeds canonical ENSv2 normalized-event rows plus the
+  existing surface, resource, token-lineage, binding, and address-name anchors, then asserts
+  readback through the shared history envelopes for
+  `GET /v1/history/names/{namespace}/{name}`,
+  `GET /v1/history/resources/{resource_id}`, and
+  `GET /v1/history/addresses/{address}`. Name and resource history stay scoped to canonical
+  normalized events for the requested `surface`, `resource`, or `both` scope; address history
+  uses the same normalized-event history route with the shipped `namespace=ens`,
+  `relation=registrant`, `relation=effective_controller`, and replay-stable paging behavior. The
+  route contract and row shape remain unchanged with empty `declared_state`; this does not claim
+  public exact-name support, manifest capability graduation, verified execution, universal
+  resolver support, an ENSv2-specific history ledger, or execution-trace history. The ENSv2
+  `sepolia-dev` exact-name profile remains shadow-only with
+  `unsupported_reason="ensv2 sepolia-dev exact-name profile is shadow-only"`
 - the Basenames history readback contract seeds canonical Basenames rows and asserts they read
   back through the existing shared history envelopes for
   `GET /v1/history/names/{namespace}/{name}`,

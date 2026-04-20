@@ -1445,6 +1445,323 @@
         const ENSV2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
         const ENSV2_PERMISSIONS_DERIVATION_KIND: &str = "ens_v2_permissions";
         const ENSV2_RESOLVER_DERIVATION_KIND: &str = "ens_v2_resolver";
+        const ENSV2_HISTORY_CHAIN_ID: &str = "ethereum-sepolia";
+
+        #[derive(Clone, Debug)]
+        struct EnsV2HistoryFixture {
+            address: &'static str,
+            controller: &'static str,
+            current_logical_name_id: &'static str,
+            historical_logical_name_id: &'static str,
+            pending_logical_name_id: &'static str,
+            observed_logical_name_id: &'static str,
+            current_resource_id: Uuid,
+            current_token_lineage_id: Uuid,
+            current_surface_binding_id: Uuid,
+            historical_resource_id: Uuid,
+            historical_token_lineage_id: Uuid,
+            observed_resource_id: Uuid,
+            observed_token_lineage_id: Uuid,
+            base_block_number: i64,
+        }
+
+        impl EnsV2HistoryFixture {
+            fn new() -> Self {
+                Self {
+                    address: "0x0000000000000000000000000000000000000b0b",
+                    controller: "0x0000000000000000000000000000000000000c0c",
+                    current_logical_name_id: "ens:current-v2.eth",
+                    historical_logical_name_id: "ens:historical-v2.eth",
+                    pending_logical_name_id: "ens:pending-v2.eth",
+                    observed_logical_name_id: "ens:observed-v2.eth",
+                    current_resource_id: Uuid::from_u128(0xa24a),
+                    current_token_lineage_id: Uuid::from_u128(0xa24b),
+                    current_surface_binding_id: Uuid::from_u128(0xb24a),
+                    historical_resource_id: Uuid::from_u128(0xa24c),
+                    historical_token_lineage_id: Uuid::from_u128(0xa24d),
+                    observed_resource_id: Uuid::from_u128(0xa24e),
+                    observed_token_lineage_id: Uuid::from_u128(0xa24f),
+                    base_block_number: 430,
+                }
+            }
+
+            async fn seed(&self, database: &HarnessDatabase) -> Result<()> {
+                let raw_blocks = self.raw_blocks();
+                bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture raw blocks")?;
+
+                let token_lineages = self.token_lineages();
+                bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture token lineages")?;
+
+                let resources = self.resources();
+                bigname_storage::upsert_resources(&database.pool, &resources)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture resources")?;
+
+                let name_surfaces = self.name_surfaces();
+                bigname_storage::upsert_name_surfaces(&database.pool, &name_surfaces)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture name surfaces")?;
+
+                let surface_bindings = self.surface_bindings();
+                bigname_storage::upsert_surface_bindings(&database.pool, &surface_bindings)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture surface bindings")?;
+
+                let current_rows = self.address_name_current_rows();
+                bigname_storage::upsert_address_names_current_rows(&database.pool, &current_rows)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture address-name anchors")?;
+
+                let events = self.normalized_events();
+                bigname_storage::upsert_normalized_events(&database.pool, &events)
+                    .await
+                    .context("failed to upsert ENSv2 history fixture normalized events")?;
+
+                Ok(())
+            }
+
+            fn expected_registrant_history_event_identities(&self) -> Vec<&'static str> {
+                vec![
+                    "ensv2-current-resource",
+                    "ensv2-current-surface",
+                    "ensv2-historical-surface",
+                    "ensv2-historical-resource",
+                    "ensv2-historical-grant",
+                    "ensv2-historical-authority",
+                    "ensv2-pending-grant",
+                    "ensv2-pending-surface",
+                ]
+            }
+
+            fn expected_effective_controller_history_event_identities(&self) -> Vec<&'static str> {
+                vec![
+                    "ensv2-current-resource",
+                    "ensv2-current-surface",
+                    "ensv2-historical-surface",
+                    "ensv2-historical-resource",
+                    "ensv2-historical-grant",
+                    "ensv2-historical-authority",
+                ]
+            }
+
+            fn raw_blocks(&self) -> Vec<RawBlock> {
+                (self.base_block_number..=self.base_block_number + 11)
+                    .map(|block_number| {
+                        raw_block(
+                            ENSV2_HISTORY_CHAIN_ID,
+                            &ens_v2_history_block_hash(block_number),
+                            None,
+                            block_number,
+                            1_700_000_000 + block_number,
+                        )
+                    })
+                    .collect()
+            }
+
+            fn token_lineages(&self) -> [TokenLineage; 3] {
+                [
+                    ens_v2_history_token_lineage(
+                        self.current_token_lineage_id,
+                        self.base_block_number,
+                    ),
+                    ens_v2_history_token_lineage(
+                        self.historical_token_lineage_id,
+                        self.base_block_number + 1,
+                    ),
+                    ens_v2_history_token_lineage(
+                        self.observed_token_lineage_id,
+                        self.base_block_number + 9,
+                    ),
+                ]
+            }
+
+            fn resources(&self) -> [Resource; 3] {
+                [
+                    ens_v2_history_resource(
+                        self.current_resource_id,
+                        Some(self.current_token_lineage_id),
+                        self.base_block_number,
+                        "ens_v2_history_current_resource",
+                    ),
+                    ens_v2_history_resource(
+                        self.historical_resource_id,
+                        Some(self.historical_token_lineage_id),
+                        self.base_block_number + 1,
+                        "ens_v2_history_historical_resource",
+                    ),
+                    ens_v2_history_resource(
+                        self.observed_resource_id,
+                        Some(self.observed_token_lineage_id),
+                        self.base_block_number + 9,
+                        "ens_v2_history_observed_resource",
+                    ),
+                ]
+            }
+
+            fn name_surfaces(&self) -> [NameSurface; 4] {
+                [
+                    ens_v2_history_name_surface(
+                        self.current_logical_name_id,
+                        self.base_block_number,
+                    ),
+                    ens_v2_history_name_surface(
+                        self.historical_logical_name_id,
+                        self.base_block_number + 1,
+                    ),
+                    ens_v2_history_name_surface(
+                        self.pending_logical_name_id,
+                        self.base_block_number + 2,
+                    ),
+                    ens_v2_history_name_surface(
+                        self.observed_logical_name_id,
+                        self.base_block_number + 9,
+                    ),
+                ]
+            }
+
+            fn surface_bindings(&self) -> [SurfaceBinding; 1] {
+                [ens_v2_history_surface_binding(
+                    self.current_surface_binding_id,
+                    self.current_logical_name_id,
+                    self.current_resource_id,
+                    self.base_block_number,
+                    1_717_182_430,
+                )]
+            }
+
+            fn address_name_current_rows(&self) -> [bigname_storage::AddressNameCurrentRow; 2] {
+                [
+                    ens_v2_history_address_name_current_row(
+                        self.address,
+                        self.current_logical_name_id,
+                        bigname_storage::AddressNameRelation::Registrant,
+                        self.current_surface_binding_id,
+                        self.current_resource_id,
+                        Some(self.current_token_lineage_id),
+                        self.base_block_number,
+                    ),
+                    ens_v2_history_address_name_current_row(
+                        self.controller,
+                        self.current_logical_name_id,
+                        bigname_storage::AddressNameRelation::EffectiveController,
+                        self.current_surface_binding_id,
+                        self.current_resource_id,
+                        Some(self.current_token_lineage_id),
+                        self.base_block_number + 1,
+                    ),
+                ]
+            }
+
+            fn normalized_events(&self) -> Vec<NormalizedEvent> {
+                vec![
+                    ens_v2_history_event(
+                        "ensv2-current-resource",
+                        None,
+                        Some(self.current_resource_id),
+                        self.base_block_number + 7,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-current-surface",
+                        Some(self.current_logical_name_id),
+                        None,
+                        self.base_block_number + 6,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-historical-surface",
+                        Some(self.historical_logical_name_id),
+                        None,
+                        self.base_block_number + 5,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-historical-resource",
+                        None,
+                        Some(self.historical_resource_id),
+                        self.base_block_number + 4,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_registry_match_event(
+                        "ensv2-historical-grant",
+                        self.historical_logical_name_id,
+                        Some(self.historical_resource_id),
+                        "RegistrationGranted",
+                        self.base_block_number + 3,
+                        json!({
+                            "registrant": self.address.to_ascii_uppercase(),
+                        }),
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_registry_match_event(
+                        "ensv2-historical-authority",
+                        self.historical_logical_name_id,
+                        Some(self.historical_resource_id),
+                        "AuthorityTransferred",
+                        self.base_block_number + 2,
+                        json!({
+                            "owner": self.controller.to_ascii_uppercase(),
+                        }),
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_registry_match_event(
+                        "ensv2-pending-grant",
+                        self.pending_logical_name_id,
+                        None,
+                        "RegistrationGranted",
+                        self.base_block_number + 1,
+                        json!({
+                            "registrant": self.address.to_ascii_uppercase(),
+                            "resource_pending": true,
+                        }),
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-pending-surface",
+                        Some(self.pending_logical_name_id),
+                        None,
+                        self.base_block_number,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-observed-anchor-leak-surface",
+                        Some(self.observed_logical_name_id),
+                        None,
+                        self.base_block_number + 11,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_event(
+                        "ensv2-observed-anchor-leak-resource",
+                        None,
+                        Some(self.observed_resource_id),
+                        self.base_block_number + 10,
+                        0,
+                        CanonicalityState::Canonical,
+                    ),
+                    ens_v2_history_registry_match_event(
+                        "ensv2-observed-grant",
+                        self.observed_logical_name_id,
+                        Some(self.observed_resource_id),
+                        "RegistrationGranted",
+                        self.base_block_number + 9,
+                        json!({
+                            "registrant": self.address.to_ascii_uppercase(),
+                        }),
+                        CanonicalityState::Observed,
+                    ),
+                ]
+            }
+        }
 
         #[derive(Clone, Debug)]
         struct EnsV2DeclaredChildFixture {
@@ -1916,6 +2233,216 @@
             Ok(())
         }
 
+        fn ens_v2_history_name_surface(logical_name_id: &str, block_number: i64) -> NameSurface {
+            let normalized_name = ens_namespace_normalized_name(logical_name_id);
+
+            NameSurface {
+                logical_name_id: logical_name_id.to_owned(),
+                namespace: "ens".to_owned(),
+                input_name: normalized_name.clone(),
+                canonical_display_name: normalized_name.clone(),
+                normalized_name: normalized_name.clone(),
+                dns_encoded_name: normalized_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{normalized_name}"),
+                labelhashes: vec![format!("labelhash:{normalized_name}")],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: ENSV2_HISTORY_CHAIN_ID.to_owned(),
+                block_hash: ens_v2_history_block_hash(block_number),
+                block_number,
+                provenance: json!({"seed": "ens_v2_history_surface"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn ens_v2_history_token_lineage(
+            token_lineage_id: Uuid,
+            block_number: i64,
+        ) -> TokenLineage {
+            TokenLineage {
+                token_lineage_id,
+                chain_id: ENSV2_HISTORY_CHAIN_ID.to_owned(),
+                block_hash: ens_v2_history_block_hash(block_number),
+                block_number,
+                provenance: json!({"seed": "ens_v2_history_token_lineage"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn ens_v2_history_resource(
+            resource_id: Uuid,
+            token_lineage_id: Option<Uuid>,
+            block_number: i64,
+            seed: &str,
+        ) -> Resource {
+            Resource {
+                resource_id,
+                token_lineage_id,
+                chain_id: ENSV2_HISTORY_CHAIN_ID.to_owned(),
+                block_hash: ens_v2_history_block_hash(block_number),
+                block_number,
+                provenance: json!({
+                    "seed": seed,
+                    "upstream_resource": format!("0x{resource_id}"),
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn ens_v2_history_surface_binding(
+            surface_binding_id: Uuid,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            block_number: i64,
+            active_from: i64,
+        ) -> SurfaceBinding {
+            SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                active_from: timestamp(active_from),
+                active_to: None,
+                chain_id: ENSV2_HISTORY_CHAIN_ID.to_owned(),
+                block_hash: ens_v2_history_block_hash(block_number),
+                block_number,
+                provenance: json!({
+                    "seed": "ens_v2_history_binding",
+                    "binding_kind": "linked_subregistry_path",
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn ens_v2_history_address_name_current_row(
+            address: &str,
+            logical_name_id: &str,
+            relation: bigname_storage::AddressNameRelation,
+            surface_binding_id: Uuid,
+            resource_id: Uuid,
+            token_lineage_id: Option<Uuid>,
+            block_number: i64,
+        ) -> bigname_storage::AddressNameCurrentRow {
+            let normalized_name = ens_namespace_normalized_name(logical_name_id);
+
+            bigname_storage::AddressNameCurrentRow {
+                address: address.to_owned(),
+                logical_name_id: logical_name_id.to_owned(),
+                relation,
+                namespace: "ens".to_owned(),
+                canonical_display_name: normalized_name.clone(),
+                normalized_name: normalized_name.clone(),
+                namehash: format!("namehash:{normalized_name}"),
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                provenance: json!({
+                    "normalized_event_ids": [block_number],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "chain_id": ENSV2_HISTORY_CHAIN_ID,
+                        "block_number": block_number,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": 11,
+                        "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                        "source_manifest_id": null,
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "address_names_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": [ENSV2_REGISTRY_SOURCE_FAMILY],
+                    "unsupported_reason": null,
+                    "enumeration_basis": "surface_current_relations",
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": ENSV2_HISTORY_CHAIN_ID,
+                        "block_number": block_number,
+                        "block_hash": ens_v2_history_block_hash(block_number),
+                        "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        ENSV2_HISTORY_CHAIN_ID: "finalized",
+                    }
+                }),
+                manifest_version: 11,
+                last_recomputed_at: timestamp(1_717_182_000 + block_number),
+            }
+        }
+
+        fn ens_v2_history_event(
+            event_identity: &str,
+            logical_name_id: Option<&str>,
+            resource_id: Option<Uuid>,
+            block_number: i64,
+            log_index: i64,
+            canonicality_state: CanonicalityState,
+        ) -> NormalizedEvent {
+            let block_hash = ens_v2_history_block_hash(block_number);
+            let transaction_hash = ens_v2_history_transaction_hash(block_number);
+
+            NormalizedEvent {
+                source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                manifest_version: 11,
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "chain_id": ENSV2_HISTORY_CHAIN_ID,
+                    "event_identity": event_identity,
+                }),
+                ..history_event(
+                    event_identity,
+                    logical_name_id,
+                    resource_id,
+                    Some(ENSV2_HISTORY_CHAIN_ID),
+                    Some(block_number),
+                    Some(&block_hash),
+                    Some(&transaction_hash),
+                    Some(log_index),
+                    canonicality_state,
+                )
+            }
+        }
+
+        fn ens_v2_history_registry_match_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Option<Uuid>,
+            event_kind: &str,
+            block_number: i64,
+            after_state: Value,
+            canonicality_state: CanonicalityState,
+        ) -> NormalizedEvent {
+            NormalizedEvent {
+                event_kind: event_kind.to_owned(),
+                derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+                before_state: json!({}),
+                after_state,
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "chain_id": ENSV2_HISTORY_CHAIN_ID,
+                    "event_identity": event_identity,
+                    "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                }),
+                ..ens_v2_history_event(
+                    event_identity,
+                    Some(logical_name_id),
+                    resource_id,
+                    block_number,
+                    0,
+                    canonicality_state,
+                )
+            }
+        }
+
         fn ens_v2_permission_current_row(
             resource_id: Uuid,
             subject: &str,
@@ -2281,6 +2808,14 @@
 
         fn ens_v2_transaction_hash(block_number: i64) -> String {
             format!("0xensv2tx{block_number:02x}")
+        }
+
+        fn ens_v2_history_block_hash(block_number: i64) -> String {
+            format!("0xensv2history{block_number:02x}")
+        }
+
+        fn ens_v2_history_transaction_hash(block_number: i64) -> String {
+            format!("0xensv2historytx{block_number:02x}")
         }
 
         fn address_name_token_lineage(
