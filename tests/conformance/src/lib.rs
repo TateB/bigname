@@ -4,7 +4,7 @@ mod shipped_api {
     include!(concat!(env!("OUT_DIR"), "/api_main.rs"));
 
     #[cfg(test)]
-    mod conformance {
+    pub(crate) mod conformance {
         include!("conformance/harness.rs");
 
         include!("conformance/helpers.rs");
@@ -18,5 +18,13 @@ mod shipped_api {
         include!("conformance/primary_names.rs");
 
         include!("conformance/history.rs");
+
+        include!("conformance/replay.rs");
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn replay_capability_conformance() -> anyhow::Result<()> {
+    shipped_api::conformance::run_replay_capability_conformance().await
 }

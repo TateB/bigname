@@ -207,3 +207,11 @@ Execution notes:
   topology-boundary, and record-boundary
   invalidation evicts the persisted ENS verified-resolution answer from the mixed
   `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
+- replay capability conformance seeds a per-test supported-read corpus from existing source-truth
+  fixtures, snapshots exact-name, child and address-name collection, name/resource/address
+  history, resolution, resource-permissions, resolver-overview, and primary-name route payloads,
+  runs `bigname-worker replay all-current-projections` against that same database, and asserts the
+  route payloads remain byte-for-byte JSON stable. This locks replay idempotence over the shipped
+  route contracts only; it does not widen exact-name support, coverage semantics, verified
+  execution support, ENSv2 exact-name support, Basenames path classes, or consumer-replacement
+  claims

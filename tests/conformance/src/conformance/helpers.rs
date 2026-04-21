@@ -967,6 +967,47 @@
             Ok(())
         }
 
+        async fn replay_all_current_projections(database: &HarnessDatabase) -> Result<()> {
+            let database_url = database.database_url.clone();
+            let worker_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let output = Command::new(cargo)
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("replay")
+                    .arg("all-current-projections")
+                    .arg("--database-url")
+                    .arg(&database_url)
+                    .output()
+                    .context(
+                        "failed to invoke bigname-worker replay all-current-projections",
+                    )?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "bigname-worker replay all-current-projections failed\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker all-current-projections replay task panicked")??;
+
+            Ok(())
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn history_event(
             event_identity: &str,
