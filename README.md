@@ -46,6 +46,11 @@ Useful cargo aliases:
 - `cargo worker -- run`
 - `cargo worker -- migrate`
 
+The API process also exposes a private, non-`/v1` readiness check at
+`GET /healthz` on its bind address. In local development that is
+`http://127.0.0.1:3000/healthz` by default; see `docs/development.md` for
+the operator response contract.
+
 ## Guardrails
 
 - treat the Phase 0 docs as the interface freeze

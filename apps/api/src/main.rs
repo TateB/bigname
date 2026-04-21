@@ -41,7 +41,7 @@ use sqlx::{
         time::{OffsetDateTime, UtcOffset},
     },
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -198,6 +198,21 @@ struct HealthResponse {
     service: &'static str,
     phase: &'static str,
     status: &'static str,
+    process: HealthProcessResponse,
+    database: HealthDatabaseResponse,
+}
+
+#[derive(Serialize)]
+struct HealthProcessResponse {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct HealthDatabaseResponse {
+    status: &'static str,
+    reachable: bool,
+    check: &'static str,
+    error: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
