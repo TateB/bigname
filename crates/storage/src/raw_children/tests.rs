@@ -258,6 +258,46 @@ async fn rejects_mismatched_raw_transaction_identity() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rejects_mismatched_raw_receipt_and_log_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_receipts(
+        database.pool(),
+        &[raw_receipt(CanonicalityState::Canonical)],
+    )
+    .await?;
+    upsert_raw_logs(database.pool(), &[raw_log(CanonicalityState::Canonical)]).await?;
+
+    let mut conflicting_receipt = raw_receipt(CanonicalityState::Observed);
+    conflicting_receipt.gas_used = Some(42_000);
+    let receipt_error = upsert_raw_receipts(database.pool(), &[conflicting_receipt])
+        .await
+        .expect_err("immutable raw receipt identity mismatch must fail");
+
+    assert!(
+        receipt_error
+            .to_string()
+            .contains("raw receipt identity mismatch for chain eth-mainnet block 0xaaa index 0"),
+        "unexpected error: {receipt_error:#}"
+    );
+
+    let mut conflicting_log = raw_log(CanonicalityState::Observed);
+    conflicting_log.data = vec![0xca, 0xfe];
+    let log_error = upsert_raw_logs(database.pool(), &[conflicting_log])
+        .await
+        .expect_err("immutable raw log identity mismatch must fail");
+
+    assert!(
+        log_error
+            .to_string()
+            .contains("raw log identity mismatch for chain eth-mainnet block 0xaaa log 0"),
+        "unexpected error: {log_error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
     let database = TestDatabase::new().await?;
 
