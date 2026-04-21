@@ -24,7 +24,7 @@ const SOURCE_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
 const SOURCE_EVENT_NAMED_RESOURCE: &str = "NamedResource";
 const SOURCE_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
 const SOURCE_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
-const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes,bytes32,address,uint32,uint64)";
+const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
 const REGISTRAR_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256)";
 const REGISTRAR_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
@@ -1256,6 +1256,15 @@ mod tests {
 
     use super::*;
 
+    const UPSTREAM_NAME_WRAPPED_SIGNATURE: &str =
+        "NameWrapped(bytes32,bytes,address,uint32,uint64)";
+    const UPSTREAM_NAME_WRAPPED_TOPIC0: &str =
+        "0x8ce7013e8abebc55c3890a68f5a27c67c3f7efa64e584de5fb22363c606fd340";
+    const OLD_SWAPPED_NAME_WRAPPED_SIGNATURE: &str =
+        "NameWrapped(bytes,bytes32,address,uint32,uint64)";
+    const OLD_SWAPPED_NAME_WRAPPED_TOPIC0: &str =
+        "0xaeee18e42fd564b93988f0f5a001eb2dea6bde99cb3caa60a682c28105483c67";
+
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestDatabase {
@@ -1566,7 +1575,10 @@ mod tests {
                 transaction_index: 0,
                 log_index: 0,
                 emitting_address: address.to_owned(),
-                topics: vec![name_wrapped_topic0(), namehash_hex_bytes(&dns_name)],
+                topics: vec![
+                    UPSTREAM_NAME_WRAPPED_TOPIC0.to_owned(),
+                    namehash_hex_bytes(&dns_name),
+                ],
                 data: encode_name_wrapped_log_data(&dns_name),
                 canonicality_state,
             }],
@@ -1716,6 +1728,58 @@ mod tests {
                 u8::from_str_radix(hex, 16).expect("test address chunk must be valid hex");
         }
         word
+    }
+
+    #[test]
+    fn name_wrapped_topic0_matches_upstream_shape_and_not_old_swapped_shape() {
+        assert_eq!(
+            keccak_signature_hex(UPSTREAM_NAME_WRAPPED_SIGNATURE),
+            UPSTREAM_NAME_WRAPPED_TOPIC0
+        );
+        assert_eq!(name_wrapped_topic0(), UPSTREAM_NAME_WRAPPED_TOPIC0);
+
+        assert_eq!(
+            keccak_signature_hex(OLD_SWAPPED_NAME_WRAPPED_SIGNATURE),
+            OLD_SWAPPED_NAME_WRAPPED_TOPIC0
+        );
+        assert_ne!(name_wrapped_topic0(), OLD_SWAPPED_NAME_WRAPPED_TOPIC0);
+    }
+
+    #[test]
+    fn name_wrapped_upstream_topic_emits_preimage_and_old_swapped_topic_is_ignored() -> Result<()> {
+        let dns_name = dns_encoded_name(&["wrapped", "eth"]);
+        let upstream_log = watched_log(
+            "ens_v1_wrapper_l1",
+            1,
+            vec![
+                UPSTREAM_NAME_WRAPPED_TOPIC0.to_owned(),
+                namehash_hex_bytes(&dns_name),
+            ],
+            encode_name_wrapped_log_data(&dns_name),
+        );
+        let upstream_events = build_preimage_observed_events(&upstream_log)?;
+        assert_eq!(upstream_events.len(), 1);
+        assert_eq!(
+            upstream_events[0].after_state["source_event"],
+            SOURCE_EVENT_NAME_WRAPPED
+        );
+        assert_eq!(
+            upstream_events[0].after_state["decoded_name"],
+            "wrapped.eth"
+        );
+
+        let old_swapped_log = watched_log(
+            "ens_v1_wrapper_l1",
+            2,
+            vec![
+                OLD_SWAPPED_NAME_WRAPPED_TOPIC0.to_owned(),
+                namehash_hex_bytes(&dns_name),
+            ],
+            encode_name_wrapped_log_data(&dns_name),
+        );
+        assert!(build_preimage_observed_events(&old_swapped_log)?.is_empty());
+
+        Ok(())
     }
 
     #[test]

@@ -226,6 +226,10 @@ Translate ENSv1 raw facts into stable internal events and serve the first useful
 - declared child enumeration works for direct declared children in supported ENSv1 cases
 - history reconstructs from normalized events without manual patching
 
+### Shared-Interface Freezes
+
+- `phase4-ensv1-wrapper-resolver-source-family-admission`: ENSv1 Phase 4 admits `ens_v1_wrapper_l1` as the NameWrapper source-family owner for current wrapper-backed authority, wrapper-token holder, fuse, expiry, wrapper-revealed name, and wrapper-driven registry resolver / TTL observations, and admits `ens_v1_resolver_l1` as the PublicResolver source-family owner for declared resolver record state, record-version observations, and resolver-local authorization facts; those admissions are adapter input boundaries only and do not add wrapper / migration history support, public routes, route coverage graduation, primary-name fallback sources, verified execution widening, or consumer-replacement claims (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L676 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114 @ ens_v1@91c966f).
+
 ---
 
 ## 8. Phase 5: ENSv2 Adapter Slice

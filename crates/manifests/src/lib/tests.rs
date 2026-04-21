@@ -1327,6 +1327,176 @@ async fn checked_in_reverse_manifest_is_admitted_as_authoritative_watch_target()
 }
 
 #[tokio::test]
+async fn checked_in_wrapper_and_resolver_manifests_admit_phase4_input_families() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let wrapper_manifest = checked_in_manifest_contents("ens", "ens_v1_wrapper_l1", "v1")?;
+    let resolver_manifest = checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?;
+
+    for citation in [
+        "(upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L2 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L54 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L80 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L90 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L102 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L138 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L140 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L479 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L500 @ ens_v1@91c966f)",
+    ] {
+        assert!(
+            wrapper_manifest.contains(citation),
+            "wrapper manifest is missing upstream citation {citation}"
+        );
+    }
+    for citation in [
+        "(upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L5 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L6 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L7 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L8 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L9 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L10 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L11 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L12 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L13 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114 @ ens_v1@91c966f)",
+    ] {
+        assert!(
+            resolver_manifest.contains(citation),
+            "resolver manifest is missing upstream citation {citation}"
+        );
+    }
+
+    test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &wrapper_manifest)?;
+    test_dir.write_manifest("ens", "ens_v1_resolver_l1", "v1", &resolver_manifest)?;
+
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.manifests().len(), 2);
+
+    let manifests_by_source_family = repository
+        .manifests()
+        .iter()
+        .map(|loaded_manifest| {
+            (
+                loaded_manifest.manifest.source_family.as_str(),
+                &loaded_manifest.manifest,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let wrapper = manifests_by_source_family["ens_v1_wrapper_l1"];
+    assert_eq!(wrapper.chain, "ethereum-mainnet");
+    assert_eq!(wrapper.deployment_epoch, "ens_v1");
+    assert_eq!(wrapper.rollout_status, RolloutStatus::Active);
+    assert!(wrapper.roots.is_empty());
+    assert!(wrapper.discovery_rules.is_empty());
+    assert!(wrapper.capability_flags.is_empty());
+    assert_eq!(wrapper.contracts.len(), 1);
+    assert_eq!(wrapper.contracts[0].role, "name_wrapper");
+    assert_eq!(
+        normalize_address(&wrapper.contracts[0].address),
+        "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401"
+    );
+    assert_eq!(wrapper.contracts[0].proxy_kind, "none");
+
+    let resolver = manifests_by_source_family["ens_v1_resolver_l1"];
+    assert_eq!(resolver.chain, "ethereum-mainnet");
+    assert_eq!(resolver.deployment_epoch, "ens_v1");
+    assert_eq!(resolver.rollout_status, RolloutStatus::Active);
+    assert!(resolver.roots.is_empty());
+    assert!(resolver.discovery_rules.is_empty());
+    assert!(resolver.capability_flags.is_empty());
+    assert_eq!(resolver.contracts.len(), 1);
+    assert_eq!(resolver.contracts[0].role, "public_resolver");
+    assert_eq!(
+        normalize_address(&resolver.contracts[0].address),
+        "0xf29100983e058b709f3d539b0c765937b804ac15"
+    );
+    assert_eq!(resolver.contracts[0].proxy_kind, "none");
+
+    let summary = sync_repository(database.pool(), &repository).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.synced_manifest_count, 2);
+    assert_eq!(summary.active_manifest_count, 2);
+    assert_eq!(summary.root_count, 0);
+    assert_eq!(summary.contract_count, 2);
+    assert_eq!(summary.capability_count, 0);
+    assert_eq!(summary.discovery_rule_count, 0);
+
+    assert_eq!(
+        load_manifest_rollout_statuses(database.pool(), "ens").await?,
+        vec![
+            ("ens_v1_resolver_l1".to_owned(), "active".to_owned()),
+            ("ens_v1_wrapper_l1".to_owned(), "active".to_owned()),
+        ]
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v1_wrapper_l1")
+            .await?,
+        BTreeMap::new()
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v1_resolver_l1")
+            .await?,
+        BTreeMap::new()
+    );
+
+    let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
+    assert_eq!(
+        active_manifests
+            .iter()
+            .map(|manifest| manifest.source_family.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ens_v1_resolver_l1", "ens_v1_wrapper_l1"]
+    );
+    assert!(
+        active_manifests
+            .iter()
+            .all(|manifest| manifest.capability_flags.is_empty())
+    );
+
+    let wrapper_address = normalize_address("0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401");
+    let resolver_address = normalize_address("0xF29100983E058B709F3D539b0c765937B804AC15");
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert_eq!(watched_contracts.len(), 2);
+    assert!(watched_contracts.iter().any(|contract| {
+        contract.source_family == "ens_v1_wrapper_l1"
+            && contract.address == wrapper_address
+            && contract.source == WatchedContractSource::ManifestContract
+    }));
+    assert!(watched_contracts.iter().any(|contract| {
+        contract.source_family == "ens_v1_resolver_l1"
+            && contract.address == resolver_address
+            && contract.source == WatchedContractSource::ManifestContract
+    }));
+
+    assert_eq!(
+        load_watched_chain_plan(database.pool()).await?,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![wrapper_address.clone(), resolver_address.clone()],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 2,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    let admission_state = load_discovery_admission_state(database.pool()).await?;
+    assert!(admission_state.has_authoritative_address("ethereum-mainnet", &wrapper_address));
+    assert!(admission_state.has_authoritative_address("ethereum-mainnet", &resolver_address));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_families()
 -> Result<()> {
     let test_dir = TestDir::new()?;
