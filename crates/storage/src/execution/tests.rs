@@ -425,6 +425,55 @@ async fn upserts_and_loads_execution_trace_with_ordered_steps() -> Result<()> {
 }
 
 #[tokio::test]
+async fn loads_execution_trace_inspection_without_mutating_execution_storage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    let outcome = execution_outcome(&trace);
+    insert_trace_and_outcome(&database, &trace, &outcome).await?;
+
+    let before_counts = execution_storage_counts(database.pool()).await?;
+    let inspection = load_execution_trace_inspection(database.pool(), trace.execution_trace_id)
+        .await?
+        .expect("execution trace inspection must exist");
+    let after_counts = execution_storage_counts(database.pool()).await?;
+
+    assert_eq!(inspection.trace, trace);
+    assert_eq!(after_counts, before_counts);
+    assert_eq!(
+        load_execution_outcome(database.pool(), &outcome.cache_key).await?,
+        Some(outcome),
+        "execution trace inspection must not mutate cache outcomes"
+    );
+    assert_eq!(
+        inspection
+            .trace
+            .steps
+            .iter()
+            .map(|step| step.step_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "execution trace inspection must preserve persisted step order"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn load_execution_trace_inspection_returns_none_for_missing_trace() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    assert!(
+        load_execution_trace_inspection(
+            database.pool(),
+            Uuid::from_u128(0x0e7ec7ace00000000000000000999999),
+        )
+        .await?
+        .is_none()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rejects_execution_trace_without_steps() -> Result<()> {
     let database = TestDatabase::new().await?;
     let mut trace = execution_trace();
@@ -434,6 +483,23 @@ async fn rejects_execution_trace_without_steps() -> Result<()> {
     expect_trace_validation_error(&database, &trace, "must include at least one step").await?;
 
     database.cleanup().await
+}
+
+async fn execution_storage_counts(pool: &PgPool) -> Result<(i64, i64, i64)> {
+    let trace_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_traces")
+        .fetch_one(pool)
+        .await
+        .context("failed to count execution_traces")?;
+    let step_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_steps")
+        .fetch_one(pool)
+        .await
+        .context("failed to count execution_steps")?;
+    let outcome_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+        .fetch_one(pool)
+        .await
+        .context("failed to count execution_cache_outcomes")?;
+
+    Ok((trace_count, step_count, outcome_count))
 }
 
 #[tokio::test]

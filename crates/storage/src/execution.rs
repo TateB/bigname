@@ -36,6 +36,12 @@ pub struct ExecutionTraceStep {
     pub step_payload: Value,
 }
 
+/// Read-only operational inspection snapshot for one persisted execution trace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionTraceInspection {
+    pub trace: ExecutionTrace,
+}
+
 /// Deterministic cache identity for one verified execution outcome snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionCacheKey {
@@ -92,6 +98,19 @@ pub async fn load_execution_trace(
     };
     trace.steps = load_execution_steps_internal(pool, execution_trace_id).await?;
     Ok(Some(trace))
+}
+
+/// Load one persisted execution trace for operational inspection.
+///
+/// This helper reads only `execution_traces` and `execution_steps`; it does not
+/// mutate cache outcomes or start a fresh execution.
+pub async fn load_execution_trace_inspection(
+    pool: &PgPool,
+    execution_trace_id: Uuid,
+) -> Result<Option<ExecutionTraceInspection>> {
+    Ok(load_execution_trace(pool, execution_trace_id)
+        .await?
+        .map(|trace| ExecutionTraceInspection { trace }))
 }
 
 /// Insert one execution trace and its ordered steps transactionally, or reload the

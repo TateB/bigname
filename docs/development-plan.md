@@ -482,6 +482,10 @@ Replace the current indexer dependencies in first-party apps with the native `v1
 - remaining gaps are explicitly tracked as unsupported native `v1` capabilities
 - operations can detect drift before it becomes user-visible
 
+### Current contract-freeze status
+
+- `phase10-execution-trace-inspection-cli`: worker-owned `bigname-worker inspect execution-trace --execution-trace-id <id> --json` is frozen as read-only operational JSON over persisted `execution_traces` and `execution_steps`; it does not create a public `v1` route, expose raw execution or gateway payload APIs, execute fresh resolution or primary-name verification, synthesize topology, mutate cache/projection/manifest/discovery state, or widen the public execution-explain route boundary.
+
 ---
 
 ## 14. Recommended First Vertical Slice

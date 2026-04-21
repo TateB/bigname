@@ -1508,7 +1508,7 @@ Required tooling:
 - backfill source range
 - inspect backfill job and range checkpoints
 - rerun projections from normalized events
-- inspect explain trace
+- inspect persisted execution trace
 - inspect raw facts
 - inspect manifest versions
 - diff declared vs verified answers
@@ -1519,6 +1519,8 @@ Required tooling:
 - inspect resolver topology
 
 Canonicality and raw-fact inspection is worker-owned operational tooling over read-only storage audit helpers. The worker inspection surface is the single-block command `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves only one `(chain_id, block_hash)` at a time. It may report whether that block hash has a stored lineage row and, for stored rows, the lineage, canonicality state, parent hash, block number, raw fact counts, and normalized-event counts for that block. Range-oriented storage helpers, where present, are observed/stored lineage listings for known rows only; they do not infer missing heights, gaps, or range-level canonicality status. The tooling must not expose a public `v1` route, mutate storage, or let user-facing API code bypass the projection and execution-read boundaries.
+
+Execution trace inspection is worker-owned operational tooling over persisted `execution_traces` and `execution_steps`. It returns stable JSON for one stored trace and its persisted step summaries; it does not execute a fresh resolution or primary-name request, expose raw execution payload APIs, synthesize topology, mutate caches or projections, mutate manifests or discovery, or change the public `GET /v1/explain/resolutions/{namespace}/{name}/execution` boundary.
 
 Audit expectations:
 

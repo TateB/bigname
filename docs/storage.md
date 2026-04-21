@@ -243,6 +243,8 @@ Postgres stores the digest, size, content type, and object key.
 
 The execution storage boundary separates durable audit artifacts from cache reuse. `execution_traces` and `execution_steps` preserve what was executed and why; normal `execution_cache_outcomes` writes record whether a verified outcome can be reused under its request key, manifest versions, and block-hash-bearing dependency boundaries. Phase 9 reorg invalidation updates cache eligibility only through the synchronous indexer/reorg repair exception and does not promote ENSv2 exact-name support, widen verified execution support, or graduate any manifest capability.
 
+Worker-owned execution trace inspection reads only persisted `execution_traces`, `execution_steps`, and trace attachment metadata needed to render stable operational JSON for one stored trace. Inspection helpers must not execute fresh calls, read adapter internals, synthesize declared topology, mutate `execution_cache_outcomes`, write projections, update manifests or discovery rows, or expose a public `v1` route.
+
 ## 9. Migration Rules
 
 - schema changes land through checked-in migrations only
@@ -266,3 +268,4 @@ To keep parallel work safe:
 - API code must not query raw-fact tables directly except for explicit audit endpoints
 - canonicality, raw-fact, and stored lineage range inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route, infer missing lineage, or bypass the API boundary for user-facing reads
 - backfill job inspection tooling is worker-owned, read-only operational tooling over `backfill_*`; it does not create a public `v1` route, mutate operational state, or bypass API read boundaries for user-facing data
+- execution trace inspection tooling is worker-owned, read-only operational tooling over `execution_*`; it does not create a public `v1` route, execute fresh verification, mutate cache eligibility, or bypass the public explain-route boundary

@@ -54,7 +54,8 @@ pub use children::{
 };
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
-    ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace, ExecutionTraceStep,
+    ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
+    ExecutionTraceInspection, ExecutionTraceStep,
     invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
     invalidate_execution_outcomes_for_orphaned_blocks,
@@ -62,8 +63,9 @@ pub use execution::{
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
     invalidate_execution_outcomes_for_topology_boundary_and_request_key, load_execution_outcome,
-    load_execution_trace, upsert_execution_outcome, upsert_execution_outcome_in_transaction,
-    upsert_execution_trace, upsert_execution_trace_in_transaction,
+    load_execution_trace, load_execution_trace_inspection, upsert_execution_outcome,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace,
+    upsert_execution_trace_in_transaction,
 };
 pub use history::{
     HistoryEvent, HistoryScope, load_address_history, load_name_history, load_name_history_head,

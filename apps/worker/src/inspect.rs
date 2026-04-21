@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
-    CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, RawFactAuditCounts,
-    StoredLineageRangeBlock,
+    CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, ExecutionTraceInspection,
+    ExecutionTraceStep, RawFactAuditCounts, StoredLineageRangeBlock,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use uuid::Uuid;
 
 #[derive(Args, Debug)]
 pub(crate) struct InspectArgs {
@@ -20,6 +21,8 @@ pub(crate) enum InspectCommand {
     BackfillJob(InspectBackfillJobArgs),
     #[command(about = "Inspect canonicality and block-scoped audit counts for one block hash")]
     Canonicality(InspectCanonicalityArgs),
+    #[command(about = "Inspect one persisted execution trace and its ordered steps")]
+    ExecutionTrace(InspectExecutionTraceArgs),
     #[command(about = "List stored lineage rows for a bounded chain block range")]
     StoredLineageRange(InspectStoredLineageRangeArgs),
 }
@@ -43,6 +46,16 @@ pub(crate) struct InspectCanonicalityArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct InspectExecutionTraceArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) execution_trace_id: Uuid,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct InspectStoredLineageRangeArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
@@ -58,6 +71,7 @@ pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
     match args.command {
         InspectCommand::BackfillJob(args) => inspect_backfill_job(args).await,
         InspectCommand::Canonicality(args) => inspect_canonicality(args).await,
+        InspectCommand::ExecutionTrace(args) => inspect_execution_trace(args).await,
         InspectCommand::StoredLineageRange(args) => inspect_stored_lineage_range(args).await,
     }
 }
@@ -77,6 +91,18 @@ async fn inspect_canonicality(args: InspectCanonicalityArgs) -> Result<()> {
             .await?;
 
     println!("{}", render_canonicality_inspection(&inspection));
+    Ok(())
+}
+
+async fn inspect_execution_trace(args: InspectExecutionTraceArgs) -> Result<()> {
+    let _emit_json = args.json;
+    let pool = bigname_storage::connect(&args.database).await?;
+    let inspection =
+        bigname_storage::load_execution_trace_inspection(&pool, args.execution_trace_id)
+            .await?
+            .with_context(|| format!("missing execution trace {}", args.execution_trace_id))?;
+
+    println!("{}", render_execution_trace_inspection(&inspection));
     Ok(())
 }
 
@@ -204,6 +230,64 @@ fn render_failure(reason: Option<&str>, metadata: &Value) -> Value {
     })
 }
 
+fn render_execution_trace_inspection(inspection: &ExecutionTraceInspection) -> Value {
+    let trace = &inspection.trace;
+    json!({
+        "command": "inspect execution-trace",
+        "execution_trace_id": trace.execution_trace_id.to_string(),
+        "request_type": trace.request_type.as_str(),
+        "request_key": trace.request_key.as_str(),
+        "namespace": trace.namespace.as_str(),
+        "request": {
+            "type": trace.request_type.as_str(),
+            "key": trace.request_key.as_str(),
+            "metadata": trace.request_metadata.clone(),
+        },
+        "request_metadata": trace.request_metadata.clone(),
+        "chain_positions": persisted_context_array(&trace.chain_context, &[
+            "chain_positions",
+            "requested_positions",
+        ]),
+        "chain_context": trace.chain_context.clone(),
+        "manifest_versions": persisted_context_array(&trace.manifest_context, &[
+            "manifest_versions",
+            "versions",
+        ]),
+        "manifest_context": trace.manifest_context.clone(),
+        "contracts_called": trace.contracts_called.clone(),
+        "gateway_digests": trace.gateway_digests.clone(),
+        "status": execution_trace_status(inspection),
+        "final_value_digest": persisted_digest_metadata(trace.final_payload.as_ref(), &[
+            "final_value_digest",
+            "value_digest",
+            "digest",
+        ]),
+        "failure_reason": persisted_failure_reason(trace.failure_payload.as_ref()),
+        "finished_at": trace.finished_at.map(format_timestamp),
+        "steps": trace
+            .steps
+            .iter()
+            .map(render_execution_trace_step)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn render_execution_trace_step(step: &ExecutionTraceStep) -> Value {
+    json!({
+        "step_index": step.step_index,
+        "step_kind": step.step_kind.as_str(),
+        "input_digest": step.input_digest.as_deref(),
+        "output_digest": step.output_digest.as_deref(),
+        "latency_ms": step.latency_ms,
+        "canonicality_dependency": step.canonicality_dependency.clone(),
+        "attachment_digest_metadata": persisted_digest_metadata(Some(&step.step_payload), &[
+            "attachment_digest_metadata",
+            "attachment_digests",
+            "attachments",
+        ]),
+    })
+}
+
 fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value {
     json!({
         "chain_id": inspection.chain_id.as_str(),
@@ -247,6 +331,36 @@ fn render_stored_lineage_block(block: &StoredLineageRangeBlock) -> Value {
         "receipts_root": block.receipts_root.as_deref(),
         "state_root": block.state_root.as_deref(),
     })
+}
+
+fn persisted_context_array(context: &Value, keys: &[&str]) -> Value {
+    keys.iter()
+        .find_map(|key| context.get(*key).filter(|value| value.is_array()))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn persisted_digest_metadata(payload: Option<&Value>, keys: &[&str]) -> Option<Value> {
+    let payload = payload?;
+    keys.iter().find_map(|key| payload.get(*key).cloned())
+}
+
+fn persisted_failure_reason(payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    ["failure_reason", "reason", "message"]
+        .iter()
+        .find_map(|key| payload.get(*key)?.as_str().map(str::to_owned))
+}
+
+fn execution_trace_status(inspection: &ExecutionTraceInspection) -> &'static str {
+    let trace = &inspection.trace;
+    if trace.failure_payload.is_some() {
+        "failed"
+    } else if trace.final_payload.is_some() {
+        "succeeded"
+    } else {
+        "unknown"
+    }
 }
 
 fn format_timestamp(value: OffsetDateTime) -> String {
@@ -319,7 +433,9 @@ const fn canonicality_state_label(state: CanonicalityState) -> &'static str {
 mod tests {
     use super::*;
     use bigname_storage::{
-        BackfillJobCreate, BackfillRangeSpec, ChainLineageBlock, upsert_chain_lineage_blocks,
+        BackfillJobCreate, BackfillRangeSpec, ChainLineageBlock, ExecutionCacheKey,
+        ExecutionOutcome, ExecutionTrace, ExecutionTraceInspection, ExecutionTraceStep,
+        upsert_chain_lineage_blocks,
     };
     use serde_json::json;
     use sqlx::{
@@ -487,6 +603,152 @@ mod tests {
             receipts_root: None,
             state_root: None,
             canonicality_state,
+        }
+    }
+
+    fn execution_trace() -> ExecutionTrace {
+        ExecutionTrace {
+            execution_trace_id: Uuid::from_u128(0x0e7ec7ace00000000000000000000abc),
+            request_type: "verified_resolution".to_owned(),
+            request_key: "ens:alice.eth:addr:60".to_owned(),
+            namespace: "ens".to_owned(),
+            chain_context: json!({
+                "requested_positions": [
+                    {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_000,
+                        "block_hash": "0xabc123"
+                    }
+                ],
+                "topology_version_boundary": {
+                    "ethereum-mainnet": 21_000_000
+                }
+            }),
+            manifest_context: json!({
+                "manifest_versions": [
+                    {
+                        "source_family": "ens_execution",
+                        "manifest_version": 5
+                    }
+                ],
+                "rollout_boundary": 5
+            }),
+            contracts_called: json!([
+                {
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "selector": "0x9061b923"
+                }
+            ]),
+            gateway_digests: json!([
+                {
+                    "digest": "sha256:gateway",
+                    "content_type": "application/json",
+                    "size": 512
+                }
+            ]),
+            final_payload: Some(json!({
+                "final_value_digest": {
+                    "digest": "sha256:final",
+                    "content_type": "application/json",
+                    "size": 96
+                }
+            })),
+            failure_payload: None,
+            request_metadata: json!({
+                "surface": "alice.eth",
+                "records": ["addr:60"]
+            }),
+            finished_at: Some(timestamp(1_700_000_100)),
+            steps: vec![
+                ExecutionTraceStep {
+                    step_index: 0,
+                    step_kind: "load_declared_topology".to_owned(),
+                    input_digest: Some("sha256:topology-in".to_owned()),
+                    output_digest: Some("sha256:topology-out".to_owned()),
+                    latency_ms: Some(3),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xabc123",
+                            "block_number": 21_000_000
+                        }
+                    }),
+                    step_payload: json!({}),
+                },
+                ExecutionTraceStep {
+                    step_index: 1,
+                    step_kind: "call_universal_resolver".to_owned(),
+                    input_digest: Some("sha256:call-in".to_owned()),
+                    output_digest: Some("sha256:call-out".to_owned()),
+                    latency_ms: Some(21),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xabc123",
+                            "block_number": 21_000_000
+                        }
+                    }),
+                    step_payload: json!({
+                        "attachment_digest_metadata": [
+                            {
+                                "digest": "sha256:ccip-body",
+                                "content_type": "application/octet-stream",
+                                "size": 1024
+                            }
+                        ]
+                    }),
+                },
+            ],
+        }
+    }
+
+    fn execution_outcome(trace: &ExecutionTrace) -> ExecutionOutcome {
+        ExecutionOutcome {
+            cache_key: ExecutionCacheKey {
+                request_key: trace.request_key.clone(),
+                requested_chain_positions: json!([{
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_000,
+                    "block_hash": "0xabc123"
+                }]),
+                manifest_versions: json!([{
+                    "source_family": "ens_execution",
+                    "manifest_version": 5
+                }]),
+                topology_version_boundary: json!({
+                    "logical_name_id": "ens:alice.eth",
+                    "resource_id": "0e7ec7ac-e000-0000-0000-00000000aaa1",
+                    "normalized_event_id": null,
+                    "event_kind": null,
+                    "chain_position": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_000,
+                        "block_hash": "0xabc123",
+                        "timestamp": "2023-11-14T22:15:00Z"
+                    }
+                }),
+                record_version_boundary: json!({
+                    "logical_name_id": "ens:alice.eth",
+                    "resource_id": "0e7ec7ac-e000-0000-0000-00000000aaa2",
+                    "normalized_event_id": null,
+                    "event_kind": null,
+                    "chain_position": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_000,
+                        "block_hash": "0xabc123",
+                        "timestamp": "2023-11-14T22:15:00Z"
+                    }
+                }),
+            },
+            execution_trace_id: trace.execution_trace_id,
+            request_type: trace.request_type.clone(),
+            namespace: trace.namespace.clone(),
+            outcome_payload: Some(json!({
+                "status": "success"
+            })),
+            failure_payload: None,
+            finished_at: trace
+                .finished_at
+                .expect("execution trace fixture must finish"),
         }
     }
 
@@ -711,6 +973,68 @@ mod tests {
         assert!(rendered["blocks"][1]["state_root"].is_null());
     }
 
+    #[test]
+    fn renders_execution_trace_inspection_json() {
+        let trace = execution_trace();
+        let rendered = render_execution_trace_inspection(&ExecutionTraceInspection {
+            trace: trace.clone(),
+        });
+
+        assert_eq!(rendered["command"], "inspect execution-trace");
+        assert_eq!(
+            rendered["execution_trace_id"],
+            trace.execution_trace_id.to_string()
+        );
+        assert_eq!(rendered["request_type"], "verified_resolution");
+        assert_eq!(rendered["request_key"], "ens:alice.eth:addr:60");
+        assert_eq!(rendered["namespace"], "ens");
+        assert_eq!(rendered["request"]["type"], "verified_resolution");
+        assert_eq!(rendered["request"]["key"], "ens:alice.eth:addr:60");
+        assert_eq!(rendered["request_metadata"]["surface"], "alice.eth");
+        assert_eq!(
+            rendered["chain_positions"][0]["chain_id"],
+            "ethereum-mainnet"
+        );
+        assert_eq!(
+            rendered["manifest_versions"][0]["source_family"],
+            "ens_execution"
+        );
+        assert_eq!(
+            rendered["contracts_called"][0]["contract_address"],
+            "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        );
+        assert_eq!(rendered["gateway_digests"][0]["digest"], "sha256:gateway");
+        assert_eq!(rendered["status"], "succeeded");
+        assert_eq!(rendered["final_value_digest"]["digest"], "sha256:final");
+        assert!(rendered["failure_reason"].is_null());
+        assert_eq!(rendered["finished_at"], "2023-11-14T22:15:00Z");
+
+        assert_eq!(
+            rendered["steps"]
+                .as_array()
+                .expect("steps must be an array")
+                .len(),
+            2
+        );
+        assert_eq!(rendered["steps"][0]["step_index"], 0);
+        assert_eq!(rendered["steps"][0]["step_kind"], "load_declared_topology");
+        assert_eq!(rendered["steps"][0]["input_digest"], "sha256:topology-in");
+        assert_eq!(rendered["steps"][0]["output_digest"], "sha256:topology-out");
+        assert_eq!(rendered["steps"][0]["latency_ms"], 3);
+        assert_eq!(
+            rendered["steps"][0]["canonicality_dependency"]["ethereum-mainnet"]["block_hash"],
+            "0xabc123"
+        );
+        assert!(rendered["steps"][0]["attachment_digest_metadata"].is_null());
+
+        assert_eq!(rendered["steps"][1]["step_index"], 1);
+        assert_eq!(rendered["steps"][1]["step_kind"], "call_universal_resolver");
+        assert_eq!(
+            rendered["steps"][1]["attachment_digest_metadata"][0]["digest"],
+            "sha256:ccip-body"
+        );
+    }
+
     #[tokio::test]
     async fn inspect_stored_lineage_range_orders_and_bounds_stored_rows() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -786,6 +1110,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_execution_trace_missing_trace_returns_error() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let missing_id = Uuid::from_u128(0x0e7ec7ace00000000000000000009999);
+        let error = inspect_execution_trace(InspectExecutionTraceArgs {
+            database: database.database_config(),
+            execution_trace_id: missing_id,
+            json: true,
+        })
+        .await
+        .expect_err("missing execution trace inspection must fail");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("missing execution trace {missing_id}")),
+            "unexpected error: {error:#}"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn inspect_backfill_job_does_not_mutate_backfill_storage() -> Result<()> {
         let database = TestDatabase::new().await?;
         let created = bigname_storage::create_backfill_job(
@@ -822,6 +1168,43 @@ mod tests {
         let after =
             load_backfill_job_inspection(database.pool(), created.job.backfill_job_id).await?;
         assert_eq!(after, before);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn inspect_execution_trace_does_not_mutate_execution_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let trace = execution_trace();
+        let outcome = execution_outcome(&trace);
+        bigname_storage::upsert_execution_trace(database.pool(), &trace).await?;
+        bigname_storage::upsert_execution_outcome(database.pool(), &outcome).await?;
+
+        let before_trace = bigname_storage::load_execution_trace_inspection(
+            database.pool(),
+            trace.execution_trace_id,
+        )
+        .await?;
+        let before_outcome =
+            bigname_storage::load_execution_outcome(database.pool(), &outcome.cache_key).await?;
+
+        inspect_execution_trace(InspectExecutionTraceArgs {
+            database: database.database_config(),
+            execution_trace_id: trace.execution_trace_id,
+            json: true,
+        })
+        .await?;
+
+        let after_trace = bigname_storage::load_execution_trace_inspection(
+            database.pool(),
+            trace.execution_trace_id,
+        )
+        .await?;
+        let after_outcome =
+            bigname_storage::load_execution_outcome(database.pool(), &outcome.cache_key).await?;
+
+        assert_eq!(after_trace, before_trace);
+        assert_eq!(after_outcome, before_outcome);
 
         database.cleanup().await
     }

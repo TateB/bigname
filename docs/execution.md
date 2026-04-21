@@ -135,6 +135,31 @@ Each step records:
 
 Execution traces and execution steps are durable audit artifacts. Reorg-driven cache invalidation must not delete `execution_traces`, `execution_steps`, object-store attachments, or the trace-local step list; it only changes whether a persisted verified outcome can be reused as a cache hit.
 
+### Worker Trace Inspection
+
+`bigname-worker inspect execution-trace --execution-trace-id <id> --json` is the worker-owned operational inspection surface for one persisted execution trace.
+
+The stable JSON output is limited to already persisted trace and step state:
+
+- `command`
+- `execution_trace_id`
+- request metadata already stored on the trace
+- request type and request key
+- namespace
+- chain positions
+- manifest versions
+- trace status, final value digest, failure reason, and finished timestamp
+- ordered `steps` entries with step index, step kind, input digest, output digest, latency, canonicality dependency, and attachment digest metadata where present
+
+Rules:
+
+- the command reads `execution_traces`, `execution_steps`, and trace attachment metadata only
+- it does not execute or re-execute resolution, primary-name verification, CCIP calls, or topology discovery
+- it does not expose a public `v1` route, raw execution API, raw gateway transcript API, or batch trace dump
+- it does not synthesize declared topology, resolver paths, wildcard paths, alias paths, or transport paths from non-trace storage
+- it does not mutate `execution_cache_outcomes`, projections, manifests, discovery edges, watch plans, or normalized events
+- it preserves the public explain boundary: `GET /v1/explain/resolutions/{namespace}/{name}/execution` remains the route-local explain view over persisted supported resolution traces, while this command is operational read-only inspection
+
 ## 5. Cache Key And Invalidation
 
 Persisted verified outcomes are cached in `execution_cache_outcomes` by:

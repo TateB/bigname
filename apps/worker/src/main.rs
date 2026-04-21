@@ -934,6 +934,31 @@ mod tests {
     }
 
     #[test]
+    fn inspect_execution_trace_cli_is_available() {
+        let trace_id = "0e7ec7ac-e000-0000-0000-000000000abc";
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "inspect",
+            "execution-trace",
+            "--execution-trace-id",
+            trace_id,
+            "--json",
+        ]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::Inspect(args) => match args.command {
+                inspect::InspectCommand::ExecutionTrace(args) => {
+                    assert_eq!(args.execution_trace_id.to_string(), trace_id);
+                    assert!(args.json);
+                }
+                other => panic!("expected execution trace inspect command, got {other:?}"),
+            },
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn inspect_stored_lineage_range_cli_is_available() {
         let cli = Cli::parse_from([
             "bigname-worker",
