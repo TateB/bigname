@@ -2115,6 +2115,94 @@
         ]
       }
     },
+    "/v1/resolve/{name}": {
+      "get": {
+        "operationId": "resolve_current",
+        "parameters": [
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resolution read mode.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "declared",
+              "enum": [
+                "declared",
+                "verified",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
+            "explode": false,
+            "in": "query",
+            "name": "records",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Namespace-inferred resolution topology, inventory, and verified reads",
+        "tags": [
+          "Resolution"
+        ]
+      }
+    },
     "/v1/resolvers/{chain_id}/{resolver_address}": {
       "get": {
         "operationId": "resolver_current",

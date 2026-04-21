@@ -570,6 +570,431 @@ fn resolution_unsupported_verified_state(records: &[&str]) -> Value {
     })
 }
 
+async fn seed_resolution_route_name_current(
+    database: &TestDatabase,
+    namespace: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+) -> Result<()> {
+    let logical_name_id = format!("{namespace}:{normalized_name}");
+    let namehash = format!("namehash:{normalized_name}");
+
+    database
+        .seed_name_current_binding(
+            &logical_name_id,
+            namespace,
+            normalized_name,
+            canonical_display_name,
+            &namehash,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(resolution_route_name_row(
+            namespace,
+            normalized_name,
+            canonical_display_name,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        ))
+        .await
+}
+
+fn resolution_route_name_row(
+    namespace: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+) -> bigname_storage::NameCurrentRow {
+    let logical_name_id = format!("{namespace}:{normalized_name}");
+    let mut row = exact_name_row(
+        &logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = namespace.to_owned();
+    row.normalized_name = normalized_name.to_owned();
+    row.canonical_display_name = canonical_display_name.to_owned();
+    row.namehash = format!("namehash:{normalized_name}");
+
+    if namespace == "basenames" {
+        row.declared_summary = json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "resolver": basenames_exact_name_resolver_summary()
+        });
+        row.provenance = json!({
+            "normalized_event_ids": [201, 202],
+            "raw_fact_refs": [
+                {
+                    "kind": "log",
+                    "chain_id": "base-mainnet",
+                    "block_hash": "0xbase-binding"
+                }
+            ],
+            "manifest_versions": [
+                {
+                    "manifest_version": 4,
+                    "source_family": "basenames_base_resolver",
+                    "chain": "base-mainnet",
+                    "deployment_epoch": "basenames_v1"
+                }
+            ],
+            "execution_trace_id": null,
+            "derivation_kind": "projection_apply"
+        });
+        row.coverage = json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["basenames_base_registry"],
+            "unsupported_reason": null,
+            "enumeration_basis": "exact_name"
+        });
+        row.chain_positions = json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        });
+        row.canonicality_summary = json!({
+            "status": "finalized",
+            "chains": {
+                "base-mainnet": "finalized"
+            }
+        });
+        row.manifest_version = 4;
+    }
+
+    row
+}
+
+fn resolution_request_key_for(namespace: &str, normalized_name: &str, records: &[&str]) -> String {
+    let mut records = records
+        .iter()
+        .map(|record| (*record).to_owned())
+        .collect::<Vec<_>>();
+    records.sort_unstable();
+    format!("{namespace}:{normalized_name}:{}", records.join(","))
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_route_infers_base_eth_as_ens() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let resource_id = Uuid::from_u128(0x7100);
+    let token_lineage_id = Uuid::from_u128(0x7101);
+    let surface_binding_id = Uuid::from_u128(0x7102);
+
+    seed_resolution_route_name_current(
+        &database,
+        "ens",
+        "base.eth",
+        "Base.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let inferred_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/base.eth")
+                .body(Body::empty())
+                .expect("inferred request must build"),
+        )
+        .await
+        .context("inferred base.eth resolution request failed")?;
+    let canonical_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/base.eth")
+                .body(Body::empty())
+                .expect("canonical request must build"),
+        )
+        .await
+        .context("canonical base.eth resolution request failed")?;
+
+    assert_eq!(inferred_response.status(), StatusCode::OK);
+    assert_eq!(canonical_response.status(), StatusCode::OK);
+
+    let inferred_payload: ResolutionResponse = read_json(inferred_response).await?;
+    let canonical_payload: ResolutionResponse = read_json(canonical_response).await?;
+    assert_eq!(inferred_payload, canonical_payload);
+    assert_eq!(inferred_payload.data.get("namespace"), Some(&json!("ens")));
+    assert_eq!(
+        inferred_payload.data.get("logical_name_id"),
+        Some(&json!("ens:base.eth"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let resource_id = Uuid::from_u128(0x7110);
+    let token_lineage_id = Uuid::from_u128(0x7111);
+    let surface_binding_id = Uuid::from_u128(0x7112);
+
+    seed_resolution_route_name_current(
+        &database,
+        "ens",
+        "alice.eth",
+        "Alice.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let inferred_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth")
+                .body(Body::empty())
+                .expect("inferred request must build"),
+        )
+        .await
+        .context("inferred alice.eth resolution request failed")?;
+    let canonical_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("canonical request must build"),
+        )
+        .await
+        .context("canonical alice.eth resolution request failed")?;
+
+    assert_eq!(inferred_response.status(), StatusCode::OK);
+    assert_eq!(canonical_response.status(), StatusCode::OK);
+
+    let inferred_payload: ResolutionResponse = read_json(inferred_response).await?;
+    let canonical_payload: ResolutionResponse = read_json(canonical_response).await?;
+    assert_eq!(inferred_payload, canonical_payload);
+    assert_eq!(inferred_payload.data.get("namespace"), Some(&json!("ens")));
+    assert_eq!(
+        inferred_payload.data.get("logical_name_id"),
+        Some(&json!("ens:alice.eth"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_route_infers_child_base_eth_as_basenames() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let resource_id = Uuid::from_u128(0x7200);
+    let token_lineage_id = Uuid::from_u128(0x7201);
+    let surface_binding_id = Uuid::from_u128(0x7202);
+
+    seed_resolution_route_name_current(
+        &database,
+        "basenames",
+        "alice.base.eth",
+        "Alice.base.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let inferred_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.base.eth")
+                .body(Body::empty())
+                .expect("inferred request must build"),
+        )
+        .await
+        .context("inferred alice.base.eth resolution request failed")?;
+    let canonical_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth")
+                .body(Body::empty())
+                .expect("canonical request must build"),
+        )
+        .await
+        .context("canonical alice.base.eth resolution request failed")?;
+
+    assert_eq!(inferred_response.status(), StatusCode::OK);
+    assert_eq!(canonical_response.status(), StatusCode::OK);
+
+    let inferred_payload: ResolutionResponse = read_json(inferred_response).await?;
+    let canonical_payload: ResolutionResponse = read_json(canonical_response).await?;
+    assert_eq!(inferred_payload, canonical_payload);
+    assert_eq!(
+        inferred_payload.data.get("namespace"),
+        Some(&json!("basenames"))
+    );
+    assert_eq!(
+        inferred_payload.data.get("logical_name_id"),
+        Some(&json!("basenames:alice.base.eth"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_basenames_verified_does_not_fallback_to_ens() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let ens_logical_name_id = "ens:alice.base.eth";
+    let ens_resource_id = Uuid::from_u128(0x7300);
+    let ens_token_lineage_id = Uuid::from_u128(0x7301);
+    let ens_surface_binding_id = Uuid::from_u128(0x7302);
+    let basenames_resource_id = Uuid::from_u128(0x7400);
+    let basenames_token_lineage_id = Uuid::from_u128(0x7401);
+    let basenames_surface_binding_id = Uuid::from_u128(0x7402);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000040);
+    let request_key = resolution_request_key_for("ens", "alice.base.eth", &["addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    seed_resolution_route_name_current(
+        &database,
+        "ens",
+        "alice.base.eth",
+        "Alice.base.eth",
+        ens_resource_id,
+        ens_token_lineage_id,
+        ens_surface_binding_id,
+    )
+    .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            ens_logical_name_id,
+            ens_resource_id,
+        ))
+        .await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.request_metadata["surface"] = json!("alice.base.eth");
+    if let Some(call_step) = trace
+        .steps
+        .iter_mut()
+        .find(|step| step.step_kind == "call_universal_resolver")
+    {
+        call_step.step_payload["name"] = json!("alice.base.eth");
+        call_step.step_payload["record_count"] = json!(1);
+    }
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        ens_logical_name_id,
+        ens_resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    seed_resolution_route_name_current(
+        &database,
+        "basenames",
+        "alice.base.eth",
+        "Alice.base.eth",
+        basenames_resource_id,
+        basenames_token_lineage_id,
+        basenames_surface_binding_id,
+    )
+    .await?;
+
+    let canonical_ens_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.base.eth?mode=verified&records=addr:60")
+                .body(Body::empty())
+                .expect("canonical ENS request must build"),
+        )
+        .await
+        .context("canonical ENS alice.base.eth resolution request failed")?;
+    let inferred_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.base.eth?mode=verified&records=addr:60")
+                .body(Body::empty())
+                .expect("inferred request must build"),
+        )
+        .await
+        .context("inferred alice.base.eth verified resolution request failed")?;
+
+    assert_eq!(canonical_ens_response.status(), StatusCode::OK);
+    assert_eq!(inferred_response.status(), StatusCode::OK);
+
+    let canonical_ens_payload: ResolutionResponse = read_json(canonical_ens_response).await?;
+    assert_eq!(
+        canonical_ens_payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
+
+    let inferred_payload: ResolutionResponse = read_json(inferred_response).await?;
+    assert_eq!(
+        inferred_payload.data.get("namespace"),
+        Some(&json!("basenames"))
+    );
+    assert_eq!(
+        inferred_payload.data.get("logical_name_id"),
+        Some(&json!("basenames:alice.base.eth"))
+    );
+    assert_eq!(
+        inferred_payload.verified_state,
+        Some(resolution_unsupported_verified_state(&["addr:60"]))
+    );
+    assert_eq!(
+        inferred_payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BasenamesDeferredVerifiedPathCase {
     AliasParticipating,

@@ -18,6 +18,7 @@ impl ApiRouteDefinition {
             ApiRouteId::NamespaceMetadata => router.route(self.path, get(namespace_metadata)),
             ApiRouteId::NameChildren => router.route(self.path, get(name_children)),
             ApiRouteId::NameCurrent => router.route(self.path, get(name_current)),
+            ApiRouteId::ResolveCurrent => router.route(self.path, get(resolve_current)),
             ApiRouteId::ResolutionCurrent => router.route(self.path, get(resolution_current)),
             ApiRouteId::ResolverCurrent => router.route(self.path, get(resolver_current)),
             ApiRouteId::NameHistory => router.route(self.path, get(name_history)),
@@ -47,6 +48,7 @@ impl ApiRouteId {
             Self::NamespaceMetadata => "namespace_metadata",
             Self::NameChildren => "name_children",
             Self::NameCurrent => "name_current",
+            Self::ResolveCurrent => "resolve_current",
             Self::ResolutionCurrent => "resolution_current",
             Self::ResolverCurrent => "resolver_current",
             Self::NameHistory => "name_history",
@@ -213,6 +215,25 @@ impl ApiRouteId {
                 vec![namespace_path_parameter(), name_path_parameter()],
                 "ExactNameResponse",
                 false,
+                true,
+            ),
+            Self::ResolveCurrent => openapi_json_get_operation(
+                self.operation_id(),
+                "Namespace-inferred resolution topology, inventory, and verified reads",
+                "Resolution",
+                vec![
+                    name_path_parameter(),
+                    resolution_mode_query_parameter(),
+                    csv_query_parameter(
+                        "records",
+                        "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
+                        json!({
+                            "type": "string",
+                        }),
+                    ),
+                ],
+                "ResolutionResponse",
+                true,
                 true,
             ),
             Self::ResolutionCurrent => openapi_json_get_operation(

@@ -368,10 +368,33 @@ async fn resolution_current(
 ) -> ApiResult<Json<ResolutionResponse>> {
     ensure_public_namespace(&namespace)?;
 
+    Ok(Json(
+        resolution_response_for_name(&state.pool, &namespace, &name, query).await?,
+    ))
+}
+
+async fn resolve_current(
+    Path(name): Path<String>,
+    Query(query): Query<ResolutionQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ResolutionResponse>> {
+    let namespace = infer_resolution_namespace(&name);
+
+    Ok(Json(
+        resolution_response_for_name(&state.pool, namespace, &name, query).await?,
+    ))
+}
+
+async fn resolution_response_for_name(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+    query: ResolutionQuery,
+) -> ApiResult<ResolutionResponse> {
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
     let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
+    let row = load_name_current(pool, &logical_name_id)
         .await
         .map_err(|load_error| {
             error!(
@@ -398,7 +421,7 @@ async fn resolution_current(
     };
 
     let record_inventory_current = if mode.includes_declared() || mode.includes_verified() {
-        load_supported_record_inventory_current(&state.pool, &row)
+        load_supported_record_inventory_current(pool, &row)
             .await
             .map_err(|load_error| {
                 error!(
@@ -422,7 +445,7 @@ async fn resolution_current(
 
     let persisted_verified_outcome = if mode.includes_verified() {
         load_resolution_verified_outcome(
-            &state.pool,
+            pool,
             &row,
             &records,
             record_inventory_current.as_ref(),
@@ -448,30 +471,43 @@ async fn resolution_current(
         None
     };
 
-    Ok(Json(
-        build_resolution_response(
-            row,
-            mode,
-            &records,
-            record_inventory_current.as_ref(),
-            persisted_verified_outcome.as_ref(),
-        )
-        .map_err(|build_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                mode = ?mode,
-                records = ?records,
-                error = ?build_error,
-                "failed to build resolution response"
-            );
-            ApiError::internal_error(format!(
-                "failed to load resolution projection for name {namespace}/{name}"
-            ))
-        })?,
-    ))
+    build_resolution_response(
+        row,
+        mode,
+        &records,
+        record_inventory_current.as_ref(),
+        persisted_verified_outcome.as_ref(),
+    )
+    .map_err(|build_error| {
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            logical_name_id = %logical_name_id,
+            mode = ?mode,
+            records = ?records,
+            error = ?build_error,
+            "failed to build resolution response"
+        );
+        ApiError::internal_error(format!(
+            "failed to load resolution projection for name {namespace}/{name}"
+        ))
+    })
+}
+
+fn infer_resolution_namespace(name: &str) -> &'static str {
+    if name == "base.eth" {
+        return "ens";
+    }
+
+    if name
+        .strip_suffix(".base.eth")
+        .is_some_and(|prefix| !prefix.is_empty())
+    {
+        "basenames"
+    } else {
+        "ens"
+    }
 }
 
 async fn primary_names(

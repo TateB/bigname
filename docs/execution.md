@@ -41,6 +41,14 @@ Verified resolution follows this sequence:
 5. follow CCIP-Read when allowed by the manifest and resolver family
 6. persist the execution trace and final answer
 
+For the namespace-inferred convenience route `GET /v1/resolve/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple used by the rest of the flow:
+
+- exact `base.eth` resolves as `namespace=ens`
+- names matching `*.base.eth` resolve as `namespace=basenames`
+- other supported ENS names resolve as `namespace=ens`
+
+The inferred namespace is not execution-local metadata. It selects the declared topology, execution entrypoint, trace namespace, request key, provenance, and cache identity exactly as if the caller had used `GET /v1/resolutions/{namespace}/{name}`.
+
 For ENS on Ethereum Mainnet, step 2 is frozen to the `ens_execution` source family. Its canonical manifest-declared execution entrypoint is the ENS Universal Resolver: `[[contracts]] role = "universal_resolver"` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.
 
 For Basenames on the shipped mainnet profile, step 2 is frozen to the `basenames_execution` source family. Its canonical manifest-declared execution entrypoint is the Basenames L1 Resolver: `[[contracts]] role = "l1_resolver"` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
@@ -56,6 +64,7 @@ Rules:
 - execution returns one `verified_queries` result object per requested selector and uses the shared `ResultStatus` vocabulary
 - execution entrypoint selection is attributable to the manifest-declared `source_family` and `role`; it is not implied by registry-family presence alone
 - wildcard traversal and alias rewriting must be explicit in the trace
+- namespace inference and verified support are separate gates: inferred `namespace=basenames` requests never retry as `namespace=ens` when Basenames verified support is unavailable
 - unsupported record families stay explicit as `status=unsupported`; they do not silently degrade to declared cache values
 - supported selector requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`
 
@@ -181,6 +190,8 @@ Invalidate on:
 
 For resolution, `request key` includes the normalized explicit selector set so the cache boundary matches `verified_queries`.
 
+For `GET /v1/resolve/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized explicit selector set. A namespace-inferred request and the equivalent canonical `GET /v1/resolutions/{namespace}/{name}` request therefore share cache identity after inference; the raw convenience path string is not a separate cache namespace.
+
 For verified primary-name, `request key` is the normalized tuple string `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that key; projection updates for that row may invalidate request-matching verified answers, but the projection does not persist verified result payloads or trace IDs.
 
 Phase 9 reorg invalidation rules:
@@ -229,5 +240,6 @@ For the shipped Phase 7 slice:
 - when `basenames_execution` graduates from `shadow` to `supported`, that frozen Basenames class uses the same declared-topology snapshot as the mixed route: `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`, `wildcard.source` is `null` with `matched_labels=[]`, `alias.final_target` is `null` with `hops=[]`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, and `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 - when that frozen Basenames class is promoted, CCIP-participating traces are eligible rather than selector-local `status=unsupported` because the upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`; the explain route must therefore surface the resulting persisted CCIP steps for that class without inventing a second trace family (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
 - after that promotion, Basenames paths outside that frozen transport-assisted direct class remain explicit `unsupported`, and that verified-resolution promotion still does not widen route-level primary-name coverage or add a new manifest flag; the first Basenames `verified_primary_name` support class on `GET /v1/primary-names/{address}` is instead the separate exact-tuple persisted-readback class under the same reverse-intake / execution split (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+- `GET /v1/resolve/{name}` does not widen this support boundary: exact `base.eth` is inferred as `namespace=ens`, names matching `*.base.eth` are inferred as `namespace=basenames`, and inferred Basenames verified selectors return selector-local `status=unsupported` unless the requested snapshot satisfies the same frozen transport-assisted direct-path Basenames support class
 - ENS and Basenames primary-name coverage both remain bootstrap-only: the public route may be present, the owning source families may be admitted, and persisted exact-tuple `verified_primary_name` readback may land, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer claimed payloads, and any fallback beyond the currently admitted claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all

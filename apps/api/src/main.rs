@@ -91,6 +91,7 @@ enum ApiRouteId {
     NamespaceMetadata,
     NameChildren,
     NameCurrent,
+    ResolveCurrent,
     ResolutionCurrent,
     ResolverCurrent,
     NameHistory,
@@ -153,6 +154,11 @@ const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition {
         id: ApiRouteId::NameCurrent,
         path: "/v1/names/{namespace}/{name}",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::ResolveCurrent,
+        path: "/v1/resolve/{name}",
         published_in_contract: true,
     },
     ApiRouteDefinition {

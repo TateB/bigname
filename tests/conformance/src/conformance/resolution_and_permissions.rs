@@ -219,6 +219,207 @@
             Ok(())
         }
 
+        async fn get_resolution_payload(
+            database: &HarnessDatabase,
+            uri: &str,
+        ) -> Result<ResolutionResponse> {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| format!("resolution request failed for {uri}"))?;
+
+            assert_eq!(response.status(), StatusCode::OK, "uri {uri}");
+
+            read_json(response).await
+        }
+
+        #[tokio::test]
+        async fn resolution_inferred_route_matches_canonical_ens_for_exact_base_eth() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:base.eth";
+            let resource_id = Uuid::from_u128(0x7e10);
+            let token_lineage_id = Uuid::from_u128(0x7e11);
+            let surface_binding_id = Uuid::from_u128(0x7e12);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let canonical_payload =
+                get_resolution_payload(&database, "/v1/resolutions/ens/base.eth").await?;
+            let inferred_payload = get_resolution_payload(&database, "/v1/resolve/base.eth").await?;
+
+            assert_eq!(inferred_payload, canonical_payload);
+            assert_eq!(
+                inferred_payload.data.get("namespace"),
+                Some(&json!("ens"))
+            );
+            assert_eq!(
+                inferred_payload.data.get("logical_name_id"),
+                Some(&json!("ens:base.eth"))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verified_selector_local()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let basenames_logical_name_id = "basenames:alice.base.eth";
+            let basenames_resource_id = Uuid::from_u128(0x7b10);
+            let basenames_token_lineage_id = Uuid::from_u128(0x7b11);
+            let basenames_surface_binding_id = Uuid::from_u128(0x7b12);
+            let ens_logical_name_id = "ens:alice.base.eth";
+            let ens_resource_id = Uuid::from_u128(0x7e20);
+            let ens_token_lineage_id = Uuid::from_u128(0x7e21);
+            let ens_surface_binding_id = Uuid::from_u128(0x7e22);
+            let ens_execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000041);
+            let records_query = "text:com.twitter,addr:60";
+
+            seed_basenames_resolution_rebuild_inputs(
+                &database,
+                basenames_logical_name_id,
+                basenames_resource_id,
+                basenames_token_lineage_id,
+                basenames_surface_binding_id,
+            )
+            .await?;
+            database
+                .rebuild_name_current(basenames_logical_name_id)
+                .await?;
+            rebuild_record_inventory_current(&database, basenames_resource_id).await?;
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    ens_logical_name_id,
+                    ens_resource_id,
+                    ens_token_lineage_id,
+                    ens_surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(ens_logical_name_id).await?;
+            let ens_record_inventory_row =
+                resolution_record_inventory_current_row(ens_logical_name_id, ens_resource_id);
+            database
+                .insert_record_inventory_current_row(ens_record_inventory_row.clone())
+                .await?;
+            let ens_name_row = bigname_storage::load_name_current(
+                &database.pool,
+                ens_logical_name_id,
+            )
+            .await?
+            .context("ENS decoy row must exist for inferred basenames fallback guard")?;
+            let ens_records = parse_resolution_record_keys(
+                Some(records_query),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let ens_cache_key = build_resolution_execution_cache_key(
+                &ens_name_row,
+                &ens_records,
+                Some(&ens_record_inventory_row),
+            )?;
+            let ens_request_key = ens_cache_key.request_key.clone();
+            let ens_verified_queries =
+                resolution_execution_verified_queries(ens_execution_trace_id, &[
+                    "text:com.twitter",
+                    "addr:60",
+                ]);
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    ens_execution_trace_id,
+                    &ens_request_key,
+                    &["text:com.twitter", "addr:60"],
+                    ens_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    ens_execution_trace_id,
+                    ens_cache_key,
+                    ens_verified_queries,
+                ),
+            )
+            .await?;
+
+            let canonical_declared_payload = get_resolution_payload(
+                &database,
+                "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+            )
+            .await?;
+            let inferred_declared_payload = get_resolution_payload(
+                &database,
+                "/v1/resolve/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+            )
+            .await?;
+            let canonical_verified_payload = get_resolution_payload(
+                &database,
+                "/v1/resolutions/basenames/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
+            )
+            .await?;
+            let inferred_verified_payload = get_resolution_payload(
+                &database,
+                "/v1/resolve/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
+            )
+            .await?;
+
+            assert_eq!(inferred_declared_payload, canonical_declared_payload);
+            assert_eq!(inferred_verified_payload, canonical_verified_payload);
+            assert_eq!(
+                inferred_declared_payload.data.get("namespace"),
+                Some(&json!("basenames"))
+            );
+            assert_eq!(
+                inferred_declared_payload.data.get("logical_name_id"),
+                Some(&json!("basenames:alice.base.eth"))
+            );
+            assert_eq!(
+                inferred_verified_payload.data.get("namespace"),
+                Some(&json!("basenames"))
+            );
+            assert_eq!(
+                inferred_verified_payload.data.get("logical_name_id"),
+                Some(&json!("basenames:alice.base.eth"))
+            );
+            assert_eq!(
+                inferred_verified_payload.verified_state,
+                Some(resolution_unsupported_verified_state(&[
+                    "text:com.twitter",
+                    "addr:60",
+                ]))
+            );
+            assert_eq!(
+                inferred_verified_payload.provenance.get("execution_trace_id"),
+                Some(&Value::Null)
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
         #[tokio::test]
         async fn resolution_contract_requires_records_for_verified_modes() -> Result<()> {
             let database = HarnessDatabase::new().await?;

@@ -8,6 +8,7 @@ Bootstrap supported-read contract harness for already-shipped routes and collect
 - `GET /v1/addresses/{address}/names`
 - `GET /v1/names/{namespace}/{name}`
 - `GET /v1/resolutions/{namespace}/{name}`
+- `GET /v1/resolve/{name}`
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/primary-names/{address}`
 - `GET /v1/resources/{resource_id}/permissions`
@@ -95,7 +96,11 @@ Execution notes:
   and reserved offchain-gateway Basenames path classes stay selector-local `unsupported` with
   `provenance.execution_trace_id=null` on the mixed route; beyond those shipped lanes, other
   transport-assisted, other non-alias ancestor-selected, and broader non-wildcard non-direct
-  verified support remain out of scope. Standalone ENSv2 declared record-inventory coverage
+  verified support remain out of scope. The inferred convenience route
+  `GET /v1/resolve/{name}` is locked to the canonical resolution envelope for `base.eth` as ENS
+  and `alice.base.eth` as Basenames, including shared `mode` / `records` semantics and the
+  Basenames verified unsupported selector-local behavior even when an ENS row for the same name
+  has a persisted verified answer. Standalone ENSv2 declared record-inventory coverage
   reads normalized resolver events into `record_inventory` and `record_cache` only: supported
   selector inventory is limited to retained selector identity and the shared
   `record_version_boundary`, requested `addr:60` and `text` cache entries remain

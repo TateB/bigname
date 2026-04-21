@@ -67,6 +67,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/namespaces/{namespace}".to_owned(),
             "/v1/primary-names/{address}".to_owned(),
             "/v1/resolutions/{namespace}/{name}".to_owned(),
+            "/v1/resolve/{name}".to_owned(),
             "/v1/resolvers/{chain_id}/{resolver_address}".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
         ]
@@ -134,6 +135,34 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     let records = openapi_parameter(resolutions, "records");
     assert_eq!(records.get("style"), Some(&json!("form")));
     assert_eq!(records.get("explode"), Some(&json!(false)));
+
+    let inferred_resolutions = openapi_operation(&document, "/v1/resolve/{name}");
+    let inferred_resolution_parameters = inferred_resolutions
+        .get("parameters")
+        .and_then(Value::as_array)
+        .expect("namespace-inferred resolution must expose parameters");
+    let inferred_resolution_parameter_names = inferred_resolution_parameters
+        .iter()
+        .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inferred_resolution_parameter_names,
+        vec!["name", "mode", "records"]
+    );
+    let inferred_mode = openapi_parameter(inferred_resolutions, "mode");
+    assert_eq!(inferred_mode.get("schema"), mode.get("schema"));
+    let inferred_records = openapi_parameter(inferred_resolutions, "records");
+    assert_eq!(inferred_records.get("style"), Some(&json!("form")));
+    assert_eq!(inferred_records.get("explode"), Some(&json!(false)));
+    assert_eq!(
+        inferred_resolutions
+            .get("responses")
+            .and_then(|responses| responses.get("200"))
+            .and_then(|response| response.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|content_type| content_type.get("schema")),
+        Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
+    );
 
     let resolution_execution = openapi_operation(
         &document,

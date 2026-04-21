@@ -10,7 +10,7 @@ This document freezes the external `v1` read contract strongly enough for API, p
 - responses are JSON with `snake_case` keys
 - timestamps are RFC 3339 UTC strings
 - semantic identities are strings; opaque internal IDs are never inferred by clients
-- `namespace` is always explicit for name-based reads
+- `namespace` is always explicit for canonical name-based reads; any documented namespace-inferred convenience route still returns the inferred namespace in identity fields
 - names in path segments are normalized names, URL-encoded as plain text
 - every externally visible answer includes provenance, coverage, chain position context, and consistency
 
@@ -444,6 +444,7 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | shipped declared-state |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | shipped declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
+| `GET /v1/resolve/{name}` | Namespace-inferred convenience route for the same resolution response | shipped mixed declared+verified |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain for one exact-name resolution request | shipped verified-state explain |
 | `GET /v1/primary-names/{address}` | Bootstrap claimed and verified primary-name answer | shipped bootstrap mixed declared+verified |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
@@ -459,6 +460,8 @@ Queued routes stay prose-frozen in this document until their handlers ship.
 `GET /v1/explain/resolutions/{namespace}/{name}/execution` is now shipped and published in `docs/api-v1.openapi.json`. Its generated contract matches the current handler surface: path parameters `{namespace}` and `{name}` plus required `records`.
 
 `GET /v1/primary-names/{address}` remains published in `docs/api-v1.openapi.json` on the same bootstrap route envelope. The shipped ENS exact-tuple persisted `verified_primary_name` readback slice and the now-shipped Basenames exact-tuple persisted `verified_primary_name` readback slice change only the route-local `verified_primary_name` contents for supported exact tuple reads; they do not widen published query parameters, top-level response shell shape, or route-level coverage semantics.
+
+`GET /v1/resolve/{name}` is shipped and published in `docs/api-v1.openapi.json` as the namespace-inferred convenience route for the same resolution response envelope.
 
 ## 5. Route-Level Semantics
 
@@ -784,6 +787,8 @@ Rules:
 
 This route ships one mixed declared+verified envelope for resolution reads.
 
+This is the canonical namespaced resolution route. `namespace` remains part of the public resource identity and is the stable key for storage, execution, provenance, and cache semantics.
+
 Supported query parameters:
 
 - `at`
@@ -946,6 +951,33 @@ Rules:
 - the additive alias-only and wildcard-derived support classes, and the remaining support-boundary `unsupported` results, do not change the mixed route envelope, selector order, query parameters, the shared route-level `coverage` object, or the already-published machine-readable route shape in `docs/api-v1.openapi.json`
 - deeper execution explanation stays on the shipped `GET /v1/explain/resolutions/{namespace}/{name}/execution` route; `GET /v1/resolutions/{namespace}/{name}` does not inline ordered step lists or a raw trace dump
 - route-level `coverage` explains declared completeness for topology, inventory, and cache at the requested snapshot; per-selector verified misses or failures do not change that shared route-level `coverage` object by themselves
+
+### `GET /v1/resolve/{name}`
+
+This route is a namespace-inferred convenience alias for the canonical resolution contract.
+
+Supported query parameters:
+
+- `mode=declared|verified|both`
+- `records`
+
+The shipped route currently exposes only `mode` and `records`. It returns the same `ResolutionResponse` envelope as `GET /v1/resolutions/{namespace}/{name}` after namespace inference. It does not define a second response shape, a second selector vocabulary, or a second execution truth system.
+
+Namespace inference runs on the normalized `{name}` path value:
+
+- exact `base.eth` resolves as `namespace=ens`
+- names matching `*.base.eth` resolve as `namespace=basenames`
+- other supported ENS names resolve as `namespace=ens`
+
+Rules:
+
+- `GET /v1/resolutions/{namespace}/{name}` remains the canonical route; clients that already know the namespace should use it, and all persisted identity continues to be namespaced
+- the response must surface the inferred namespace through the existing identity fields, including `data.namespace` and `data.logical_name_id`
+- after inference, `mode`, `records`, declared-state, verified-state, provenance, coverage, and error semantics follow the canonical route for the inferred `{namespace, name}` tuple within this shipped query surface
+- selector identity is namespace-local after inference: for `*.base.eth`, `records` is interpreted against the inferred `basenames` record selector space, not the ENS selector space
+- namespace inference and verified support are separate gates; `*.base.eth` requests do not fall back to `namespace=ens` when Basenames verified support is unavailable for the read
+- for inferred `namespace=basenames`, `mode=verified|both` uses the same Basenames verified-support boundary frozen for the canonical route above; until the required transport-assisted direct-path class is supported for the read, each requested verified selector returns `status=unsupported`
+- exact `base.eth` follows the inferred `namespace=ens` canonical route and therefore uses ENS support and selector semantics
 
 ### `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 
