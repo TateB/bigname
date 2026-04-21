@@ -7,8 +7,11 @@ Bootstrap supported-read contract harness for already-shipped routes and collect
 - `GET /v1/names/{namespace}/{name}/children`
 - `GET /v1/addresses/{address}/names`
 - `GET /v1/names/{namespace}/{name}`
+- `GET /v1/explain/names/{namespace}/{name}/surface-binding`
+- `GET /v1/explain/names/{namespace}/{name}/authority-control`
 - `GET /v1/resolutions/{namespace}/{name}`
 - `GET /v1/resolve/{name}`
+- `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/primary-names/{address}`
 - `GET /v1/resources/{resource_id}/permissions`
@@ -30,6 +33,16 @@ Run the full route set:
 ```sh
 cargo test
 ```
+
+Focused OpenAPI publication coverage guard, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml openapi
+```
+
+This no-Postgres guard reads `docs/api-v1.openapi.json` and fails if a published
+public path lacks either a conformance harness owner or an explicit private/out-of-scope reason;
+private `/healthz` remains out of scope.
 
 Focused backfilled-data consumer conformance job, from the repository root:
 

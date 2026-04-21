@@ -1,5 +1,5 @@
         use std::{
-            collections::BTreeSet,
+            collections::{BTreeMap, BTreeSet},
             path::PathBuf,
             process::Command,
             str::FromStr,
@@ -46,6 +46,185 @@
 
         static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
         static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
+
+        #[derive(Clone, Copy, Debug)]
+        struct OpenApiConformanceCoverage {
+            path: &'static str,
+            scope: OpenApiConformanceScope,
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum OpenApiConformanceScope {
+            HarnessOwner(&'static str),
+            OutOfScope(&'static str),
+        }
+
+        const OPENAPI_CONFORMANCE_COVERAGE: &[OpenApiConformanceCoverage] = &[
+            OpenApiConformanceCoverage {
+                path: "/healthz",
+                scope: OpenApiConformanceScope::OutOfScope(
+                    "private operator endpoint; not published in docs/api-v1.openapi.json",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/addresses/{address}/names",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "collections.rs::address_names_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/coverage/{namespace}/{name}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "exact_name.rs::coverage_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/explain/names/{namespace}/{name}/authority-control",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "exact_name.rs::authority_control_explain_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/explain/names/{namespace}/{name}/surface-binding",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "exact_name.rs::surface_binding_explain_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/explain/resolutions/{namespace}/{name}/execution",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "resolution_and_permissions.rs::resolution_execution_explain_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/history/addresses/{address}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "history.rs::address_history_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/history/names/{namespace}/{name}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "history.rs::name_history_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/history/resources/{resource_id}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "history.rs::resource_history_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/manifests/{namespace}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "collections.rs::namespace_manifests_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/names/{namespace}/{name}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "exact_name.rs::exact_name_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/names/{namespace}/{name}/children",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "collections.rs::name_children_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/namespaces/{namespace}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "collections.rs::smoke_supported_reads_contract_bootstrap",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/primary-names/{address}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "primary_names.rs::primary_names_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/resolutions/{namespace}/{name}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "resolution_and_permissions.rs::resolution_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/resolve/{name}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "resolution_and_permissions.rs::resolution_inferred_route_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/resolvers/{chain_id}/{resolver_address}",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "resolution_and_permissions.rs::resolver_overview_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/resources/{resource_id}/permissions",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "resolution_and_permissions.rs::resource_permissions_contract_*",
+                ),
+            },
+        ];
+
+        #[test]
+        fn openapi_public_paths_have_conformance_coverage_owner() -> Result<()> {
+            let document: Value = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/api-v1.openapi.json"
+            )))
+            .context("checked-in OpenAPI artifact must be valid JSON")?;
+            let published_paths = document
+                .get("paths")
+                .and_then(Value::as_object)
+                .context("checked-in OpenAPI artifact must expose paths")?;
+
+            let mut coverage_by_path = BTreeMap::new();
+            for coverage in OPENAPI_CONFORMANCE_COVERAGE {
+                match coverage.scope {
+                    OpenApiConformanceScope::HarnessOwner(owner) => {
+                        assert!(
+                            !owner.trim().is_empty(),
+                            "OpenAPI conformance owner must be explicit for {}",
+                            coverage.path
+                        );
+                    }
+                    OpenApiConformanceScope::OutOfScope(reason) => {
+                        assert!(
+                            !reason.trim().is_empty(),
+                            "OpenAPI out-of-scope reason must be explicit for {}",
+                            coverage.path
+                        );
+                    }
+                }
+                assert!(
+                    coverage_by_path
+                        .insert(coverage.path, coverage.scope)
+                        .is_none(),
+                    "duplicate OpenAPI conformance coverage entry for {}",
+                    coverage.path
+                );
+            }
+
+            let missing_coverage = published_paths
+                .keys()
+                .filter(|path| !coverage_by_path.contains_key(path.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                missing_coverage.is_empty(),
+                "OpenAPI paths without conformance ownership or explicit out-of-scope reason: {missing_coverage:#?}"
+            );
+            assert!(
+                !published_paths.contains_key("/healthz"),
+                "private /healthz must stay outside docs/api-v1.openapi.json"
+            );
+
+            Ok(())
+        }
 
         struct HarnessDatabase {
             admin_pool: PgPool,
@@ -865,4 +1044,3 @@
                 Ok(())
             }
         }
-
