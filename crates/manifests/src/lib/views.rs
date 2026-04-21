@@ -421,19 +421,36 @@ pub async fn load_manifest_code_hash_observations(
 
             SELECT
                 de.chain_id AS chain,
-                mv.source_family AS source_family,
+                COALESCE(target_mv.source_family, mv.source_family) AS source_family,
                 de.to_contract_instance_id AS contract_instance_id,
                 cia.address AS address,
                 'discovery_edge'::TEXT AS source,
-                de.source_manifest_id AS source_manifest_id
+                COALESCE(target_mv.manifest_id, de.source_manifest_id) AS source_manifest_id
             FROM discovery_edges de
             JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            LEFT JOIN manifest_versions target_mv
+              ON target_mv.rollout_status = 'active'
+             AND target_mv.namespace = mv.namespace
+             AND target_mv.chain = de.chain_id
+             AND target_mv.deployment_epoch = mv.deployment_epoch
+             AND target_mv.source_family = CASE
+                 WHEN de.edge_kind = 'resolver' AND mv.source_family = 'ens_v1_registry_l1'
+                     THEN 'ens_v1_resolver_l1'
+                 WHEN de.edge_kind = 'resolver' AND mv.source_family = 'basenames_base_registry'
+                     THEN 'basenames_base_resolver'
+                 ELSE NULL
+             END
             JOIN contract_instance_addresses cia
               ON cia.contract_instance_id = de.to_contract_instance_id
              AND cia.deactivated_at IS NULL
             WHERE mv.rollout_status = 'active'
               AND de.deactivated_at IS NULL
               AND de.edge_kind <> 'migration'
+              AND (
+                  de.edge_kind <> 'resolver'
+                  OR mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
+                  OR target_mv.manifest_id IS NOT NULL
+              )
         )
         SELECT DISTINCT ON (
             active_targets.chain,
@@ -661,21 +678,38 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
 
             SELECT
                 de.chain_id AS chain,
-                mv.source_family AS source_family,
+                COALESCE(target_mv.source_family, mv.source_family) AS source_family,
                 cia.address AS address,
                 de.to_contract_instance_id AS contract_instance_id,
                 'discovery_edge'::TEXT AS source,
-                de.source_manifest_id AS source_manifest_id,
+                COALESCE(target_mv.manifest_id, de.source_manifest_id) AS source_manifest_id,
                 de.active_from_block_number AS active_from_block_number,
                 de.active_to_block_number AS active_to_block_number
             FROM discovery_edges de
             JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            LEFT JOIN manifest_versions target_mv
+              ON target_mv.rollout_status = 'active'
+             AND target_mv.namespace = mv.namespace
+             AND target_mv.chain = de.chain_id
+             AND target_mv.deployment_epoch = mv.deployment_epoch
+             AND target_mv.source_family = CASE
+                 WHEN de.edge_kind = 'resolver' AND mv.source_family = 'ens_v1_registry_l1'
+                     THEN 'ens_v1_resolver_l1'
+                 WHEN de.edge_kind = 'resolver' AND mv.source_family = 'basenames_base_registry'
+                     THEN 'basenames_base_resolver'
+                 ELSE NULL
+             END
             JOIN contract_instance_addresses cia
               ON cia.contract_instance_id = de.to_contract_instance_id
              AND cia.deactivated_at IS NULL
             WHERE mv.rollout_status = 'active'
               AND de.deactivated_at IS NULL
               AND de.edge_kind <> 'migration'
+              AND (
+                  de.edge_kind <> 'resolver'
+                  OR mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
+                  OR target_mv.manifest_id IS NOT NULL
+              )
         ) watched_contracts
         ORDER BY chain, source_family, address, source, source_manifest_id, contract_instance_id
         "#,

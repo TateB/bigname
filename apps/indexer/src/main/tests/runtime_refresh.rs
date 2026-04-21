@@ -1,3 +1,8 @@
+use bigname_manifests::{
+    WatchedContractSource, WatchedSourceSelector, load_watched_contracts,
+    load_watched_source_selector_plan,
+};
+
 #[tokio::test]
 async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1081,6 +1086,153 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
 }
 
 #[tokio::test]
+async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reload() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_contents = ens_v1_registry_resolver_discovery_manifest_contents();
+    let manifest_path =
+        manifests.write_manifest_for_source_family("ens_v1_registry_l1", &manifest_contents)?;
+    manifests.write_manifest_for_source_family(
+        "ens_v1_resolver_l1",
+        &ens_v1_resolver_manifest_contents(),
+    )?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let initial_manifest_summary = initial_state.manifest_summary.clone();
+    let initial_sync_summary = initial_state.sync_summary.clone();
+    let initial_discovery_admission = initial_state.discovery_admission.clone();
+    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
+    let initial_tasks =
+        sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
+
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(initial_tasks.len(), 1);
+    assert_eq!(initial_tasks[0].addresses.len(), 1);
+
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+        43,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+
+    reconcile_fetched_heads(
+        database.pool(),
+        &initial_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial ENSv1 registry poll must update task state");
+
+    insert_raw_new_resolver_log_for_node(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000003",
+        &namehash_for_dns_name(&dns_encoded_eth_name("alice")),
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let (refreshed_state, refreshed_tasks) =
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+            .await?
+            .expect(
+                "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
+            );
+
+    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
+    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
+    assert_eq!(
+        refreshed_state.discovery_admission,
+        initial_discovery_admission
+    );
+    assert_eq!(
+        refreshed_state.manifest_normalized_event_summary,
+        initial_manifest_event_summary
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+        manifest_contents
+    );
+    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
+    assert_eq!(refreshed_tasks.len(), 1);
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].addresses,
+        vec![
+            "0x0000000000000000000000000000000000000003".to_owned(),
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        ]
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    let resolver_source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_resolver_l1".to_owned()),
+        43,
+        43,
+    )
+    .await?;
+    assert_eq!(resolver_source_plan.selected_targets.len(), 1);
+    assert_eq!(
+        resolver_source_plan.selected_targets[0].source_family,
+        "ens_v1_resolver_l1"
+    );
+    assert_eq!(
+        resolver_source_plan.selected_targets[0].address,
+        "0x0000000000000000000000000000000000000003"
+    );
+    let resolver_manifest_id = sqlx::query_scalar::<_, i64>(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v1_resolver_l1' AND rollout_status = 'active'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert!(watched_contracts.iter().any(|contract| {
+        contract.chain == "ethereum-mainnet"
+            && contract.address == "0x0000000000000000000000000000000000000003"
+            && contract.source == WatchedContractSource::DiscoveryEdge
+            && contract.source_family == "ens_v1_resolver_l1"
+            && contract.source_manifest_id == Some(resolver_manifest_id)
+    }));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_resolver:ethereum-mainnet' AND edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT (after_state->>'resolver_profile_supported')::BOOLEAN FROM normalized_events WHERE event_kind = 'ResolverChanged' AND derivation_kind = 'ens_v1_registry_resolver_changed'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        false
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_backfills_code_hash()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1300,4 +1452,95 @@ from_role = "registry"
 admission = "reachable_from_root"
 "#
     )
+}
+
+fn ens_v1_registry_resolver_discovery_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "ENSRegistry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    .to_owned()
+}
+
+fn ens_v1_resolver_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_resolver_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+contracts = []
+discovery_rules = []
+
+[capability_flags]
+"#
+    .to_owned()
+}
+
+async fn insert_raw_new_resolver_log_for_node(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    resolver: &str,
+    node: &str,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[provider_block_to_raw_block(
+            chain,
+            block,
+            canonicality_state,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index: 1,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics: vec![registry_new_resolver_topic0(), node.to_owned()],
+            data: decode_hex_string(&encode_registry_new_resolver_log_data(resolver)),
+            canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
 }

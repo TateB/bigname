@@ -22,6 +22,13 @@ const BASENAMES_NAMESPACE: &str = "basenames";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
 const ENS_V2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 const ENS_V2_REGISTRAR_DERIVATION_KIND: &str = "ens_v2_registrar";
+const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
+const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
+const SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH: &str = "ens_v2_sepolia_dev";
+const EXACT_NAME_PROFILE_CAPABILITY: &str = "exact_name_profile";
+const CAPABILITY_STATUS_SUPPORTED: &str = "supported";
+const MANIFEST_ROLLOUT_STATUS_ACTIVE: &str = "active";
+const ETHEREUM_SEPOLIA_CHAIN_ID: &str = "ethereum-sepolia";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
@@ -96,6 +103,13 @@ struct RelevantEvent {
     source_family: String,
     manifest_version: i64,
     source_manifest_id: Option<i64>,
+    source_manifest_version: Option<i64>,
+    source_manifest_namespace: Option<String>,
+    source_manifest_source_family: Option<String>,
+    source_manifest_chain: Option<String>,
+    source_manifest_deployment_epoch: Option<String>,
+    source_manifest_rollout_status: Option<String>,
+    exact_name_profile_status: Option<String>,
     chain_id: Option<String>,
     block_number: Option<i64>,
     block_hash: Option<String>,
@@ -800,6 +814,13 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
                 ne.source_family,
                 ne.manifest_version,
                 ne.source_manifest_id,
+                mv.manifest_version AS source_manifest_version,
+                mv.namespace AS source_manifest_namespace,
+                mv.source_family AS source_manifest_source_family,
+                mv.chain AS source_manifest_chain,
+                mv.deployment_epoch AS source_manifest_deployment_epoch,
+                mv.rollout_status::TEXT AS source_manifest_rollout_status,
+                mcf.status::TEXT AS exact_name_profile_status,
                 ne.chain_id,
                 ne.block_number,
                 ne.block_hash,
@@ -811,6 +832,11 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
             LEFT JOIN raw_blocks rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
+            LEFT JOIN manifest_versions mv
+              ON mv.manifest_id = ne.source_manifest_id
+            LEFT JOIN manifest_capability_flags mcf
+              ON mcf.manifest_id = ne.source_manifest_id
+             AND mcf.capability_name = 'exact_name_profile'
             WHERE ne.namespace = $1
               AND ne.logical_name_id = $2
               AND ne.derivation_kind = ANY($3::TEXT[])
@@ -840,6 +866,13 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
                 ne.source_family,
                 ne.manifest_version,
                 ne.source_manifest_id,
+                mv.manifest_version AS source_manifest_version,
+                mv.namespace AS source_manifest_namespace,
+                mv.source_family AS source_manifest_source_family,
+                mv.chain AS source_manifest_chain,
+                mv.deployment_epoch AS source_manifest_deployment_epoch,
+                mv.rollout_status::TEXT AS source_manifest_rollout_status,
+                mcf.status::TEXT AS exact_name_profile_status,
                 ne.chain_id,
                 ne.block_number,
                 ne.block_hash,
@@ -851,6 +884,11 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
             LEFT JOIN raw_blocks rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
+            LEFT JOIN manifest_versions mv
+              ON mv.manifest_id = ne.source_manifest_id
+            LEFT JOIN manifest_capability_flags mcf
+              ON mcf.manifest_id = ne.source_manifest_id
+             AND mcf.capability_name = 'exact_name_profile'
             WHERE ne.namespace = $1
               AND ne.logical_name_id = $2
               AND ne.derivation_kind = ANY($3::TEXT[])
@@ -880,21 +918,40 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
 }
 
 fn build_exact_name_coverage(namespace: &str, events: &[RelevantEvent]) -> Value {
-    let ens_v2_only = namespace == ENS_NAMESPACE
-        && events
+    if namespace == ENS_NAMESPACE {
+        let has_ens_v2 = events
             .iter()
-            .any(|event| event.source_family.starts_with("ens_v2_"))
-        && !events
+            .any(|event| event.source_family.starts_with("ens_v2_"));
+        let has_ens_v1 = events
             .iter()
             .any(|event| event.source_family.starts_with("ens_v1_"));
-    if ens_v2_only {
-        return json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": ["ensv2_registry_resource_surface"],
-            "unsupported_reason": "ensv2_exact_name_profile_shadow",
-            "enumeration_basis": "exact_name",
-        });
+        if has_ens_v2 && has_ens_v1 {
+            return json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_applicable",
+                "source_classes_considered": ens_v2_exact_name_coverage_source_classes(),
+                "unsupported_reason": "mixed_ensv1_ensv2_exact_name_corpus",
+                "enumeration_basis": "exact_name_profile",
+            });
+        }
+        if has_ens_v2 && ens_v2_sepolia_dev_exact_name_supported(events) {
+            return json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ens_v2_exact_name_coverage_source_classes(),
+                "unsupported_reason": Value::Null,
+                "enumeration_basis": "exact_name_profile",
+            });
+        }
+        if has_ens_v2 {
+            return json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_applicable",
+                "source_classes_considered": ["ensv2_registry_resource_surface"],
+                "unsupported_reason": "ensv2_exact_name_profile_shadow",
+                "enumeration_basis": "exact_name",
+            });
+        }
     }
 
     json!({
@@ -904,6 +961,51 @@ fn build_exact_name_coverage(namespace: &str, events: &[RelevantEvent]) -> Value
         "unsupported_reason": Value::Null,
         "enumeration_basis": "exact_name",
     })
+}
+
+fn ens_v2_sepolia_dev_exact_name_supported(events: &[RelevantEvent]) -> bool {
+    let mut has_registry = false;
+    let mut has_supported_registrar = false;
+
+    for event in events
+        .iter()
+        .filter(|event| event.source_family.starts_with("ens_v2_"))
+        .filter(|event| ens_v2_event_uses_active_selected_exact_name_manifest(event))
+    {
+        match event.source_family.as_str() {
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => {
+                has_registry = true;
+            }
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1
+                if event.exact_name_profile_status.as_deref()
+                    == Some(CAPABILITY_STATUS_SUPPORTED) =>
+            {
+                has_supported_registrar = true;
+            }
+            _ => {}
+        }
+    }
+
+    has_registry && has_supported_registrar
+}
+
+fn ens_v2_event_uses_active_selected_exact_name_manifest(event: &RelevantEvent) -> bool {
+    event.source_manifest_id.is_some()
+        && event.chain_id.as_deref() == Some(ETHEREUM_SEPOLIA_CHAIN_ID)
+        && event.source_manifest_version == Some(event.manifest_version)
+        && event.source_manifest_namespace.as_deref() == Some(ENS_NAMESPACE)
+        && event.source_manifest_source_family.as_deref() == Some(event.source_family.as_str())
+        && event.source_manifest_chain.as_deref() == Some(ETHEREUM_SEPOLIA_CHAIN_ID)
+        && event.source_manifest_deployment_epoch.as_deref()
+            == Some(SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH)
+        && event.source_manifest_rollout_status.as_deref() == Some(MANIFEST_ROLLOUT_STATUS_ACTIVE)
+}
+
+fn ens_v2_exact_name_coverage_source_classes() -> &'static [&'static str] {
+    &[
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+    ]
 }
 
 fn exact_name_coverage_source_classes(namespace: &str) -> &'static [&'static str] {
@@ -1008,6 +1110,27 @@ fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
         source_manifest_id: row
             .try_get("source_manifest_id")
             .context("missing source_manifest_id")?,
+        source_manifest_version: row
+            .try_get("source_manifest_version")
+            .context("missing source_manifest_version")?,
+        source_manifest_namespace: row
+            .try_get("source_manifest_namespace")
+            .context("missing source_manifest_namespace")?,
+        source_manifest_source_family: row
+            .try_get("source_manifest_source_family")
+            .context("missing source_manifest_source_family")?,
+        source_manifest_chain: row
+            .try_get("source_manifest_chain")
+            .context("missing source_manifest_chain")?,
+        source_manifest_deployment_epoch: row
+            .try_get("source_manifest_deployment_epoch")
+            .context("missing source_manifest_deployment_epoch")?,
+        source_manifest_rollout_status: row
+            .try_get("source_manifest_rollout_status")
+            .context("missing source_manifest_rollout_status")?,
+        exact_name_profile_status: row
+            .try_get("exact_name_profile_status")
+            .context("missing exact_name_profile_status")?,
         chain_id: row.try_get("chain_id").context("missing chain_id")?,
         block_number: row
             .try_get("block_number")
@@ -1067,12 +1190,10 @@ fn weakest_canonicality(
 }
 
 fn chain_slot(chain_id: &str) -> String {
-    if chain_id.starts_with("ethereum") {
-        "ethereum".to_owned()
-    } else if chain_id.starts_with("base") {
-        "base".to_owned()
-    } else {
-        chain_id.to_owned()
+    match chain_id {
+        "ethereum-mainnet" => "ethereum".to_owned(),
+        "base-mainnet" => "base".to_owned(),
+        _ => chain_id.to_owned(),
     }
 }
 
@@ -1404,6 +1525,8 @@ mod tests {
     #[tokio::test]
     async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() -> Result<()> {
         let database = TestDatabase::new().await?;
+        let (registry_manifest_id, registrar_manifest_id) =
+            seed_ens_v2_exact_name_profile_manifests(database.pool()).await?;
         let binding =
             IdentityBinding::new("ens:bob.alice.eth", "bob.alice.eth", 0x9100, 0x9200, 0x9300);
 
@@ -1413,6 +1536,7 @@ mod tests {
                 raw_block("ethereum-sepolia", "0xensv2-surface", 700, 1_717_172_700),
                 raw_block("ethereum-sepolia", "0xensv2-link", 701, 1_717_172_701),
                 raw_block("ethereum-sepolia", "0xensv2-regen", 702, 1_717_172_702),
+                raw_block("ethereum-sepolia", "0xensv2-renew", 703, 1_717_172_703),
             ],
         )
         .await?;
@@ -1494,50 +1618,75 @@ mod tests {
         seed_events(
             database.pool(),
             &[
-                ens_v2_registry_event(
-                    &binding,
-                    "token-resource",
-                    "TokenResourceLinked",
-                    "0xensv2-link",
-                    701,
-                    0,
-                    json!({}),
-                    json!({
-                        "token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
-                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
-                        "resource_id": binding.resource_id.to_string(),
-                    }),
+                with_source_manifest_id(
+                    ens_v2_registry_event(
+                        &binding,
+                        "token-resource",
+                        "TokenResourceLinked",
+                        "0xensv2-link",
+                        701,
+                        0,
+                        json!({}),
+                        json!({
+                            "token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
+                            "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                            "resource_id": binding.resource_id.to_string(),
+                        }),
+                    ),
+                    registry_manifest_id,
                 ),
-                ens_v2_registry_event(
-                    &binding,
-                    "grant",
-                    "RegistrationGranted",
-                    "0xensv2-link",
-                    701,
-                    1,
-                    json!({}),
-                    json!({
-                        "authority_kind": "ens_v2_registry",
-                        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
-                        "registrant": "0x0000000000000000000000000000000000000b0b",
-                        "expiry": 1_900_000_000_i64,
-                    }),
+                with_source_manifest_id(
+                    ens_v2_registry_event(
+                        &binding,
+                        "grant",
+                        "RegistrationGranted",
+                        "0xensv2-link",
+                        701,
+                        1,
+                        json!({}),
+                        json!({
+                            "authority_kind": "ens_v2_registry",
+                            "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+                            "registrant": "0x0000000000000000000000000000000000000b0b",
+                            "expiry": 1_900_000_000_i64,
+                        }),
+                    ),
+                    registry_manifest_id,
                 ),
-                ens_v2_registry_event(
-                    &binding,
-                    "regen",
-                    "TokenRegenerated",
-                    "0xensv2-regen",
-                    702,
-                    0,
-                    json!({
-                        "token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
-                    }),
-                    json!({
-                        "old_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
-                        "new_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a02",
-                        "resource_id": binding.resource_id.to_string(),
-                    }),
+                with_source_manifest_id(
+                    ens_v2_registry_event(
+                        &binding,
+                        "regen",
+                        "TokenRegenerated",
+                        "0xensv2-regen",
+                        702,
+                        0,
+                        json!({
+                            "token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
+                        }),
+                        json!({
+                            "old_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a01",
+                            "new_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a02",
+                            "resource_id": binding.resource_id.to_string(),
+                        }),
+                    ),
+                    registry_manifest_id,
+                ),
+                with_source_manifest_id(
+                    ens_v2_registrar_event(
+                        &binding,
+                        "renew",
+                        "RegistrationRenewed",
+                        "0xensv2-renew",
+                        703,
+                        0,
+                        json!({}),
+                        json!({
+                            "duration": 31_536_000_i64,
+                            "expiry": 1_931_536_000_i64,
+                        }),
+                    ),
+                    registrar_manifest_id,
                 ),
             ],
         )
@@ -1565,8 +1714,391 @@ mod tests {
         assert!(
             row.provenance["normalized_event_ids"]
                 .as_array()
-                .is_some_and(|ids| ids.len() >= 3)
+                .is_some_and(|ids| ids.len() >= 4)
         );
+        assert_eq!(row.coverage["status"], Value::String("full".to_owned()));
+        assert_eq!(
+            row.coverage["exhaustiveness"],
+            Value::String("authoritative".to_owned())
+        );
+        assert_eq!(
+            row.coverage["source_classes_considered"],
+            json!(["ens_v2_registry_l1", "ens_v2_registrar_l1"])
+        );
+        assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+        assert_eq!(
+            row.coverage["enumeration_basis"],
+            Value::String("exact_name_profile".to_owned())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_ignores_deprecated_ens_v2_registrar_shadow_events_after_supported_promotion()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let registry_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            1,
+            MANIFEST_ROLLOUT_STATUS_ACTIVE,
+        )
+        .await?;
+        let deprecated_registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            1,
+            "deprecated",
+        )
+        .await?;
+        insert_capability_flag(
+            database.pool(),
+            deprecated_registrar_manifest_id,
+            EXACT_NAME_PROFILE_CAPABILITY,
+            "shadow",
+        )
+        .await?;
+        let supported_registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            2,
+            MANIFEST_ROLLOUT_STATUS_ACTIVE,
+        )
+        .await?;
+        insert_capability_flag(
+            database.pool(),
+            supported_registrar_manifest_id,
+            EXACT_NAME_PROFILE_CAPABILITY,
+            CAPABILITY_STATUS_SUPPORTED,
+        )
+        .await?;
+
+        let binding = IdentityBinding::new(
+            "ens:promotion.alice.eth",
+            "promotion.alice.eth",
+            0x9150,
+            0x9250,
+            0x9350,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(
+                    ETHEREUM_SEPOLIA_CHAIN_ID,
+                    "0xensv2-promotion-surface",
+                    820,
+                    1_717_172_820,
+                ),
+                raw_block(
+                    ETHEREUM_SEPOLIA_CHAIN_ID,
+                    "0xensv2-promotion-link",
+                    821,
+                    1_717_172_821,
+                ),
+                raw_block(
+                    ETHEREUM_SEPOLIA_CHAIN_ID,
+                    "0xensv2-promotion-deprecated",
+                    822,
+                    1_717_172_822,
+                ),
+                raw_block(
+                    ETHEREUM_SEPOLIA_CHAIN_ID,
+                    "0xensv2-promotion-supported",
+                    823,
+                    1_717_172_823,
+                ),
+            ],
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[TokenLineage {
+                token_lineage_id: binding.token_lineage_id,
+                chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
+                block_hash: "0xensv2-promotion-link".to_owned(),
+                block_number: 821,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[Resource {
+                resource_id: binding.resource_id,
+                token_lineage_id: Some(binding.token_lineage_id),
+                chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
+                block_hash: "0xensv2-promotion-link".to_owned(),
+                block_number: 821,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[NameSurface {
+                logical_name_id: binding.logical_name_id.clone(),
+                namespace: ENS_NAMESPACE.to_owned(),
+                input_name: binding.display_name.clone(),
+                canonical_display_name: binding.display_name.clone(),
+                normalized_name: binding.display_name.clone(),
+                dns_encoded_name: binding.display_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{}", binding.display_name),
+                labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
+                block_hash: "0xensv2-promotion-surface".to_owned(),
+                block_number: 820,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_surface_bindings(
+            database.pool(),
+            &[SurfaceBinding {
+                surface_binding_id: binding.surface_binding_id,
+                logical_name_id: binding.logical_name_id.clone(),
+                resource_id: binding.resource_id,
+                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                active_from: timestamp(1_717_172_821),
+                active_to: None,
+                chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
+                block_hash: "0xensv2-promotion-link".to_owned(),
+                block_number: 821,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+
+        let mut deprecated_registrar_event = ens_v2_registrar_event(
+            &binding,
+            "deprecated-renew",
+            "RegistrationRenewed",
+            "0xensv2-promotion-deprecated",
+            822,
+            0,
+            json!({}),
+            json!({
+                "duration": 31_536_000_i64,
+                "expiry": 1_920_000_000_i64,
+            }),
+        );
+        deprecated_registrar_event.manifest_version = 1;
+        seed_events(
+            database.pool(),
+            &[
+                with_source_manifest_id(
+                    ens_v2_registry_event(
+                        &binding,
+                        "promotion-grant",
+                        "RegistrationGranted",
+                        "0xensv2-promotion-link",
+                        821,
+                        0,
+                        json!({}),
+                        json!({
+                            "authority_kind": "ens_v2_registry",
+                            "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+                            "registrant": "0x0000000000000000000000000000000000000b0b",
+                            "expiry": 1_900_000_000_i64,
+                        }),
+                    ),
+                    registry_manifest_id,
+                ),
+                with_source_manifest_id(
+                    deprecated_registrar_event,
+                    deprecated_registrar_manifest_id,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+        let stale_only_row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt stale ENSv2 row must exist")?;
+        assert_eq!(
+            stale_only_row.coverage["status"],
+            Value::String("unsupported".to_owned())
+        );
+        assert_eq!(
+            stale_only_row.coverage["unsupported_reason"],
+            Value::String("ensv2_exact_name_profile_shadow".to_owned())
+        );
+
+        seed_events(
+            database.pool(),
+            &[with_source_manifest_id(
+                ens_v2_registrar_event(
+                    &binding,
+                    "supported-renew",
+                    "RegistrationRenewed",
+                    "0xensv2-promotion-supported",
+                    823,
+                    0,
+                    json!({}),
+                    json!({
+                        "duration": 31_536_000_i64,
+                        "expiry": 1_931_536_000_i64,
+                    }),
+                ),
+                supported_registrar_manifest_id,
+            )],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+        let promoted_row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt promoted ENSv2 row must exist")?;
+        assert_eq!(
+            promoted_row.coverage["status"],
+            Value::String("full".to_owned())
+        );
+        assert_eq!(promoted_row.coverage["unsupported_reason"], Value::Null);
+        assert_eq!(
+            promoted_row.coverage["enumeration_basis"],
+            Value::String("exact_name_profile".to_owned())
+        );
+        assert_eq!(
+            promoted_row.chain_positions["ethereum-sepolia"]["chain_id"],
+            Value::String(ETHEREUM_SEPOLIA_CHAIN_ID.to_owned())
+        );
+        assert!(promoted_row.chain_positions.get("ethereum").is_none());
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_keeps_ens_v2_registry_only_exact_name_coverage_shadow() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let (registry_manifest_id, _) =
+            seed_ens_v2_exact_name_profile_manifests(database.pool()).await?;
+        let binding = IdentityBinding::new(
+            "ens:registry-only.alice.eth",
+            "registry-only.alice.eth",
+            0x9140,
+            0x9240,
+            0x9340,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-registry-only-surface",
+                    710,
+                    1_717_172_710,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-registry-only-link",
+                    711,
+                    1_717_172_711,
+                ),
+            ],
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[TokenLineage {
+                token_lineage_id: binding.token_lineage_id,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-registry-only-link".to_owned(),
+                block_number: 711,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[Resource {
+                resource_id: binding.resource_id,
+                token_lineage_id: Some(binding.token_lineage_id),
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-registry-only-link".to_owned(),
+                block_number: 711,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[NameSurface {
+                logical_name_id: binding.logical_name_id.clone(),
+                namespace: "ens".to_owned(),
+                input_name: binding.display_name.clone(),
+                canonical_display_name: binding.display_name.clone(),
+                normalized_name: binding.display_name.clone(),
+                dns_encoded_name: binding.display_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{}", binding.display_name),
+                labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+                normalizer_version: "uts46-v1".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-registry-only-surface".to_owned(),
+                block_number: 710,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_surface_bindings(
+            database.pool(),
+            &[SurfaceBinding {
+                surface_binding_id: binding.surface_binding_id,
+                logical_name_id: binding.logical_name_id.clone(),
+                resource_id: binding.resource_id,
+                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                active_from: timestamp(1_717_172_711),
+                active_to: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-registry-only-link".to_owned(),
+                block_number: 711,
+                provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[with_source_manifest_id(
+                ens_v2_registry_event(
+                    &binding,
+                    "registry-only-grant",
+                    "RegistrationGranted",
+                    "0xensv2-registry-only-link",
+                    711,
+                    0,
+                    json!({}),
+                    json!({
+                        "authority_kind": "ens_v2_registry",
+                        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+                        "registrant": "0x0000000000000000000000000000000000000b0b",
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                ),
+                registry_manifest_id,
+            )],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt registry-only ENSv2 row must exist")?;
         assert_eq!(
             row.coverage["status"],
             Value::String("unsupported".to_owned())
@@ -1585,6 +2117,100 @@ mod tests {
         );
 
         database.cleanup().await
+    }
+
+    #[test]
+    fn exact_name_coverage_rejects_mixed_ensv1_ensv2_corpus() {
+        let coverage = build_exact_name_coverage(
+            ENS_NAMESPACE,
+            &[
+                coverage_event("ens_v1_registrar_l1", "ethereum-mainnet"),
+                coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, "ethereum-sepolia"),
+                coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, "ethereum-sepolia"),
+            ],
+        );
+
+        assert_eq!(coverage["status"], Value::String("unsupported".to_owned()));
+        assert_eq!(
+            coverage["unsupported_reason"],
+            Value::String("mixed_ensv1_ensv2_exact_name_corpus".to_owned())
+        );
+        assert_eq!(
+            coverage["source_classes_considered"],
+            json!(["ens_v2_registry_l1", "ens_v2_registrar_l1"])
+        );
+        assert_eq!(
+            coverage["enumeration_basis"],
+            Value::String("exact_name_profile".to_owned())
+        );
+    }
+
+    #[test]
+    fn exact_name_coverage_rejects_ensv2_shadow_manifest_capability() {
+        let coverage = build_exact_name_coverage(
+            ENS_NAMESPACE,
+            &[
+                selected_ens_v2_coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, 1, 100, None),
+                selected_ens_v2_coverage_event(
+                    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+                    2,
+                    101,
+                    Some("shadow"),
+                ),
+            ],
+        );
+
+        assert_eq!(coverage["status"], Value::String("unsupported".to_owned()));
+        assert_eq!(
+            coverage["unsupported_reason"],
+            Value::String("ensv2_exact_name_profile_shadow".to_owned())
+        );
+    }
+
+    #[test]
+    fn exact_name_coverage_rejects_ensv2_manifest_version_drift() {
+        let mut drifted_registrar = selected_ens_v2_coverage_event(
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            2,
+            101,
+            Some(CAPABILITY_STATUS_SUPPORTED),
+        );
+        drifted_registrar.source_manifest_version = Some(99);
+
+        let coverage = build_exact_name_coverage(
+            ENS_NAMESPACE,
+            &[
+                selected_ens_v2_coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, 1, 100, None),
+                drifted_registrar,
+            ],
+        );
+
+        assert_eq!(coverage["status"], Value::String("unsupported".to_owned()));
+        assert_eq!(
+            coverage["unsupported_reason"],
+            Value::String("ensv2_exact_name_profile_shadow".to_owned())
+        );
+    }
+
+    #[test]
+    fn exact_name_coverage_rejects_ensv2_missing_manifest_linkage() {
+        let mut unlinked_registrar =
+            coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+        unlinked_registrar.exact_name_profile_status = Some(CAPABILITY_STATUS_SUPPORTED.to_owned());
+
+        let coverage = build_exact_name_coverage(
+            ENS_NAMESPACE,
+            &[
+                selected_ens_v2_coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, 1, 100, None),
+                unlinked_registrar,
+            ],
+        );
+
+        assert_eq!(coverage["status"], Value::String("unsupported".to_owned()));
+        assert_eq!(
+            coverage["unsupported_reason"],
+            Value::String("ensv2_exact_name_profile_shadow".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -2783,6 +3409,100 @@ mod tests {
         Ok(())
     }
 
+    async fn seed_ens_v2_exact_name_profile_manifests(pool: &PgPool) -> Result<(i64, i64)> {
+        let registry_manifest_id = insert_manifest_version(
+            pool,
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            1,
+            MANIFEST_ROLLOUT_STATUS_ACTIVE,
+        )
+        .await?;
+        let registrar_manifest_id = insert_manifest_version(
+            pool,
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            2,
+            MANIFEST_ROLLOUT_STATUS_ACTIVE,
+        )
+        .await?;
+        insert_capability_flag(
+            pool,
+            registrar_manifest_id,
+            EXACT_NAME_PROFILE_CAPABILITY,
+            CAPABILITY_STATUS_SUPPORTED,
+        )
+        .await?;
+
+        Ok((registry_manifest_id, registrar_manifest_id))
+    }
+
+    async fn insert_manifest_version(
+        pool: &PgPool,
+        source_family: &str,
+        manifest_version: i64,
+        rollout_status: &str,
+    ) -> Result<i64> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::manifest_rollout_status, $7, $8, $9::jsonb)
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(manifest_version)
+        .bind(ENS_NAMESPACE)
+        .bind(source_family)
+        .bind(ETHEREUM_SEPOLIA_CHAIN_ID)
+        .bind(SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH)
+        .bind(rollout_status)
+        .bind("ensip15@2026-04-16")
+        .bind(format!(
+            "tests/{source_family}/ens-v2-sepolia-dev-v{manifest_version}.toml"
+        ))
+        .bind(json!({}))
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
+        .try_get("manifest_id")
+        .context("failed to read manifest_id")
+    }
+
+    async fn insert_capability_flag(
+        pool: &PgPool,
+        manifest_id: i64,
+        capability_name: &str,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_capability_flags (
+                manifest_id,
+                capability_name,
+                status,
+                notes
+            )
+            VALUES ($1, $2, $3::capability_support_status, NULL)
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(capability_name)
+        .bind(status)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to insert capability flag {capability_name}"))?;
+
+        Ok(())
+    }
+
     fn raw_block(
         chain_id: &str,
         block_hash: &str,
@@ -2955,6 +3675,98 @@ mod tests {
             before_state,
             after_state,
         }
+    }
+
+    fn ens_v2_registrar_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        event_kind: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: i64,
+        before_state: Value,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-test:ens-v2-registrar:{event_kind}:{identity_suffix}"),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: event_kind.to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRAR_L1.to_owned(),
+            manifest_version: 2,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:ens-v2-registrar:{identity_suffix}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:ens-v2-registrar:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V2_REGISTRAR_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state,
+            after_state,
+        }
+    }
+
+    fn with_source_manifest_id(
+        mut event: NormalizedEvent,
+        source_manifest_id: i64,
+    ) -> NormalizedEvent {
+        event.source_manifest_id = Some(source_manifest_id);
+        event
+    }
+
+    fn coverage_event(source_family: &str, chain_id: &str) -> RelevantEvent {
+        RelevantEvent {
+            normalized_event_id: 1,
+            resource_id: None,
+            event_kind: "RegistrationGranted".to_owned(),
+            source_family: source_family.to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            source_manifest_version: None,
+            source_manifest_namespace: None,
+            source_manifest_source_family: None,
+            source_manifest_chain: None,
+            source_manifest_deployment_epoch: None,
+            source_manifest_rollout_status: None,
+            exact_name_profile_status: None,
+            chain_id: Some(chain_id.to_owned()),
+            block_number: Some(1),
+            block_hash: Some(format!("0x{chain_id}")),
+            block_timestamp: None,
+            raw_fact_ref: json!({"kind": "raw_log"}),
+            canonicality_state: CanonicalityState::Finalized,
+            after_state: json!({}),
+        }
+    }
+
+    fn selected_ens_v2_coverage_event(
+        source_family: &str,
+        manifest_version: i64,
+        source_manifest_id: i64,
+        exact_name_profile_status: Option<&str>,
+    ) -> RelevantEvent {
+        let mut event = coverage_event(source_family, ETHEREUM_SEPOLIA_CHAIN_ID);
+        event.manifest_version = manifest_version;
+        event.source_manifest_id = Some(source_manifest_id);
+        event.source_manifest_version = Some(manifest_version);
+        event.source_manifest_namespace = Some(ENS_NAMESPACE.to_owned());
+        event.source_manifest_source_family = Some(source_family.to_owned());
+        event.source_manifest_chain = Some(ETHEREUM_SEPOLIA_CHAIN_ID.to_owned());
+        event.source_manifest_deployment_epoch =
+            Some(SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH.to_owned());
+        event.source_manifest_rollout_status = Some(MANIFEST_ROLLOUT_STATUS_ACTIVE.to_owned());
+        event.exact_name_profile_status = exact_name_profile_status.map(str::to_owned);
+        event
     }
 
     fn resolver_event(

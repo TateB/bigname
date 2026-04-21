@@ -744,6 +744,114 @@ async fn get_name_reads_rebuilt_basenames_exact_name_projection() -> Result<()> 
 }
 
 #[tokio::test]
+async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:bob.alice.eth";
+    let resource_id = Uuid::from_u128(0x8c10);
+    let token_lineage_id = Uuid::from_u128(0x8c11);
+    let surface_binding_id = Uuid::from_u128(0x8c12);
+    let registrant = "0x0000000000000000000000000000000000000b0b";
+    let controller = "0x0000000000000000000000000000000000000c0c";
+    let (registry_manifest_id, registrar_manifest_id) =
+        seed_ensv2_exact_name_profile_manifests(&database).await?;
+
+    database
+        .seed_ensv2_address_names_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+            registrant,
+            controller,
+        )
+        .await?;
+    seed_ensv2_exact_name_profile_registrar_event(
+        &database,
+        logical_name_id,
+        resource_id,
+        registrar_manifest_id,
+    )
+    .await?;
+    assign_ensv2_exact_name_profile_source_manifests(
+        &database,
+        logical_name_id,
+        registry_manifest_id,
+        registrar_manifest_id,
+    )
+    .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+
+    let name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/bob.alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 sepolia-dev exact-name request failed")?;
+    let coverage_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/coverage/ens/bob.alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 sepolia-dev coverage request failed")?;
+
+    assert_eq!(name_response.status(), StatusCode::OK);
+    assert_eq!(coverage_response.status(), StatusCode::OK);
+
+    let name_payload: NameResponse = read_json(name_response).await?;
+    let coverage_payload: NameResponse = read_json(coverage_response).await?;
+    let supported_coverage = json!({
+        "status": "full",
+        "exhaustiveness": "authoritative",
+        "source_classes_considered": ["ens_v2_registry_l1", "ens_v2_registrar_l1"],
+        "unsupported_reason": null,
+        "enumeration_basis": "exact_name_profile",
+    });
+
+    assert_eq!(name_payload.data["logical_name_id"], json!(logical_name_id));
+    assert_eq!(name_payload.data["namespace"], json!("ens"));
+    assert_eq!(
+        name_payload.data["binding_kind"],
+        json!("linked_subregistry_path")
+    );
+    assert_eq!(
+        name_payload.declared_state["registration"]["authority_kind"],
+        json!("ens_v2_registry")
+    );
+    assert_eq!(
+        name_payload.declared_state["registration"]["latest_event_kind"],
+        json!("RegistrationRenewed")
+    );
+    assert_eq!(
+        name_payload.declared_state["control"]["registry_owner"],
+        json!(controller)
+    );
+    assert_eq!(name_payload.coverage, supported_coverage);
+    assert_eq!(coverage_payload.coverage, name_payload.coverage);
+    assert_eq!(coverage_payload.declared_state, supported_coverage);
+    assert_eq!(
+        name_payload.chain_positions,
+        json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 206,
+                "block_hash": "0xensv2-regen",
+                "timestamp": "2024-05-31T19:03:26Z"
+            }
+        })
+    );
+    assert_eq!(name_payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_reads_rebuilt_basenames_exact_name_control_vectors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let cases = [
@@ -978,5 +1086,109 @@ async fn get_basenames_exact_name_explains_reuse_projection_envelope_fields() ->
     );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+async fn seed_ensv2_exact_name_profile_registrar_event(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    source_manifest_id: i64,
+) -> Result<()> {
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[NormalizedEvent {
+            event_identity: format!("api-test:{logical_name_id}:ensv2-registrar-renew"),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: "RegistrationRenewed".to_owned(),
+            source_family: "ens_v2_registrar_l1".to_owned(),
+            manifest_version: 11,
+            source_manifest_id: Some(source_manifest_id),
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(204),
+            block_hash: Some("0xensv2-grant".to_owned()),
+            transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-registrar-renew")),
+            log_index: Some(1),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "event_identity": format!("api-test:{logical_name_id}:ensv2-registrar-renew"),
+            }),
+            derivation_kind: "ens_v2_registrar".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "duration": 31_536_000_i64,
+                "expiry": 1_931_536_000_i64,
+            }),
+        }],
+    )
+    .await
+    .context("failed to upsert ENSv2 registrar exact-name profile event for API test")?;
+
+    Ok(())
+}
+
+async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Result<(i64, i64)> {
+    let registry_manifest_id = database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_dev",
+            11,
+            "active",
+            "ensip15@2026-04-16",
+        )
+        .await?;
+    let registrar_manifest_id = database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registrar_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_dev",
+            11,
+            "active",
+            "ensip15@2026-04-16",
+        )
+        .await?;
+    database
+        .insert_capability_flag(
+            registrar_manifest_id,
+            "exact_name_profile",
+            "supported",
+            None,
+        )
+        .await?;
+
+    Ok((registry_manifest_id, registrar_manifest_id))
+}
+
+async fn assign_ensv2_exact_name_profile_source_manifests(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    registry_manifest_id: i64,
+    registrar_manifest_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET source_manifest_id = CASE source_family
+            WHEN 'ens_v2_registry_l1' THEN $2
+            WHEN 'ens_v2_registrar_l1' THEN $3
+            ELSE source_manifest_id
+        END
+        WHERE logical_name_id = $1
+          AND source_family IN ('ens_v2_registry_l1', 'ens_v2_registrar_l1')
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(registry_manifest_id)
+    .bind(registrar_manifest_id)
+    .execute(&database.pool)
+    .await
+    .context("failed to attach ENSv2 exact-name source manifests for API test")?;
+
     Ok(())
 }

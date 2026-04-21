@@ -353,6 +353,54 @@ async fn load_capability_flags_for_source_family(
         .collect()
 }
 
+async fn load_capability_flags_for_source_family_version(
+    pool: &PgPool,
+    namespace: &str,
+    source_family: &str,
+    manifest_version: i64,
+) -> Result<BTreeMap<String, CapabilityFlag>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT mcf.capability_name, mcf.status::TEXT AS status, mcf.notes
+        FROM manifest_versions mv
+        JOIN manifest_capability_flags mcf ON mcf.manifest_id = mv.manifest_id
+        WHERE mv.namespace = $1
+          AND mv.source_family = $2
+          AND mv.manifest_version = $3
+        ORDER BY mcf.capability_name
+        "#,
+    )
+    .bind(namespace)
+    .bind(source_family)
+    .bind(manifest_version)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load capability flags for {namespace}/{source_family} v{manifest_version}"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let capability_name = row
+                .try_get::<String, _>("capability_name")
+                .context("failed to read capability_name")?;
+            let status = row
+                .try_get::<String, _>("status")
+                .context("failed to read capability status")?;
+            let notes = row.try_get("notes").context("failed to read notes")?;
+            Ok((
+                capability_name,
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::from_db_value(&status)?,
+                    notes,
+                },
+            ))
+        })
+        .collect()
+}
+
 async fn active_manifest_id_for_source_family(
     pool: &PgPool,
     namespace: &str,
@@ -867,20 +915,27 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
     );
     assert_eq!(sepolia_repository.summary().namespace_count, 1);
     assert_eq!(sepolia_repository.summary().source_family_count, 4);
-    assert_eq!(sepolia_repository.summary().manifest_count, 4);
+    assert_eq!(sepolia_repository.summary().manifest_count, 5);
 
-    let sepolia_source_families = sepolia_repository
+    let sepolia_source_versions = sepolia_repository
         .manifests()
         .iter()
-        .map(|loaded_manifest| loaded_manifest.manifest.source_family.as_str())
+        .map(|loaded_manifest| {
+            (
+                loaded_manifest.manifest.source_family.as_str(),
+                loaded_manifest.version_tag.as_str(),
+                loaded_manifest.manifest.manifest_version,
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
-        sepolia_source_families,
+        sepolia_source_versions,
         vec![
-            "ens_v2_registrar_l1",
-            "ens_v2_registry_l1",
-            "ens_v2_resolver_l1",
-            "ens_v2_root_l1",
+            ("ens_v2_registrar_l1", "v1", 1),
+            ("ens_v2_registrar_l1", "v2", 2),
+            ("ens_v2_registry_l1", "v1", 1),
+            ("ens_v2_resolver_l1", "v1", 1),
+            ("ens_v2_root_l1", "v1", 1),
         ]
     );
     assert!(!main_repository.manifests().iter().any(|loaded_manifest| {
@@ -900,32 +955,42 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
     );
 
     for loaded_manifest in sepolia_repository.manifests() {
-        assert_eq!(loaded_manifest.version_tag, "v1");
-        assert_eq!(loaded_manifest.manifest.manifest_version, 1);
         assert_eq!(loaded_manifest.manifest.namespace, "ens");
         assert_eq!(loaded_manifest.manifest.chain, "ethereum-sepolia");
         assert_eq!(
             loaded_manifest.manifest.deployment_epoch,
             "ens_v2_sepolia_dev"
         );
-        assert_eq!(
-            loaded_manifest.manifest.rollout_status,
-            RolloutStatus::Active
-        );
+        if loaded_manifest.manifest.source_family == "ens_v2_registrar_l1"
+            && loaded_manifest.manifest.manifest_version == 1
+        {
+            assert_eq!(
+                loaded_manifest.manifest.rollout_status,
+                RolloutStatus::Deprecated
+            );
+        } else {
+            assert_eq!(
+                loaded_manifest.manifest.rollout_status,
+                RolloutStatus::Active
+            );
+        }
     }
 
-    let manifests_by_source_family = sepolia_repository
+    let manifests_by_source_family_version = sepolia_repository
         .manifests()
         .iter()
         .map(|loaded_manifest| {
             (
-                loaded_manifest.manifest.source_family.as_str(),
+                (
+                    loaded_manifest.manifest.source_family.as_str(),
+                    loaded_manifest.manifest.manifest_version,
+                ),
                 &loaded_manifest.manifest,
             )
         })
         .collect::<BTreeMap<_, _>>();
 
-    let root_manifest = manifests_by_source_family["ens_v2_root_l1"];
+    let root_manifest = manifests_by_source_family_version[&("ens_v2_root_l1", 1)];
     assert_eq!(root_manifest.roots.len(), 1);
     assert_eq!(root_manifest.roots[0].name, "RootRegistry");
     assert_eq!(
@@ -939,7 +1004,7 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
         "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
     );
 
-    let registry_manifest = manifests_by_source_family["ens_v2_registry_l1"];
+    let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 1)];
     assert_eq!(registry_manifest.roots.len(), 1);
     assert_eq!(registry_manifest.roots[0].name, "ETHRegistry");
     assert_eq!(
@@ -953,7 +1018,17 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
         "0x796fff2e907449be8d5921bcc215b1b76d89d080"
     );
 
-    let registrar_manifest = manifests_by_source_family["ens_v2_registrar_l1"];
+    let registrar_manifest_v1 = manifests_by_source_family_version[&("ens_v2_registrar_l1", 1)];
+    assert_eq!(
+        registrar_manifest_v1.rollout_status,
+        RolloutStatus::Deprecated
+    );
+    assert_eq!(
+        registrar_manifest_v1.capability_flags["exact_name_profile"].status,
+        CapabilitySupportStatus::Shadow
+    );
+
+    let registrar_manifest = manifests_by_source_family_version[&("ens_v2_registrar_l1", 2)];
     assert_eq!(registrar_manifest.roots.len(), 1);
     assert_eq!(registrar_manifest.roots[0].name, "ETHRegistrar");
     assert_eq!(
@@ -966,8 +1041,12 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
         normalize_address(&registrar_manifest.contracts[0].address),
         "0x68586418353b771cf2425ed14a07512aa880c532"
     );
+    assert_eq!(
+        registrar_manifest.capability_flags["exact_name_profile"].status,
+        CapabilitySupportStatus::Supported
+    );
 
-    let resolver_manifest = manifests_by_source_family["ens_v2_resolver_l1"];
+    let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 1)];
     assert!(resolver_manifest.roots.is_empty());
     assert!(resolver_manifest.contracts.is_empty());
     assert!(resolver_manifest.discovery_rules.is_empty());
@@ -1011,11 +1090,11 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
 
     let summary = sync_repository(database.pool(), &sepolia_repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 4);
+    assert_eq!(summary.synced_manifest_count, 5);
     assert_eq!(summary.active_manifest_count, 4);
-    assert_eq!(summary.root_count, 3);
-    assert_eq!(summary.contract_count, 3);
-    assert_eq!(summary.capability_count, 3);
+    assert_eq!(summary.root_count, 4);
+    assert_eq!(summary.contract_count, 4);
+    assert_eq!(summary.capability_count, 5);
     assert_eq!(summary.discovery_rule_count, 3);
     assert_eq!(
         summary.removed_manifest_count,
@@ -1025,6 +1104,7 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
     assert_eq!(
         load_manifest_rollout_statuses(database.pool(), "ens").await?,
         vec![
+            ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registrar_l1".to_owned(), "active".to_owned()),
             ("ens_v2_registry_l1".to_owned(), "active".to_owned()),
             ("ens_v2_resolver_l1".to_owned(), "active".to_owned()),
@@ -1046,8 +1126,13 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
         )])
     );
     assert_eq!(
-        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v2_registrar_l1")
-            .await?,
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registrar_l1",
+            1
+        )
+        .await?,
         BTreeMap::from([
             (
                 "exact_name_profile".to_owned(),
@@ -1055,6 +1140,34 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
                     status: CapabilitySupportStatus::Shadow,
                     notes: Some(
                         "sepolia-dev registrar lifecycle facts are admitted before product reads depend on them"
+                            .to_owned(),
+                    ),
+                },
+            ),
+            (
+                "name_history".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Shadow,
+                    notes: Some("sepolia-dev registrar history remains downstream work".to_owned()),
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registrar_l1",
+            2
+        )
+        .await?,
+        BTreeMap::from([
+            (
+                "exact_name_profile".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Supported,
+                    notes: Some(
+                        "selected sepolia-dev exact-name profile reads are supported from admitted ETHRegistry and ETHRegistrar sources only"
                             .to_owned(),
                     ),
                 },
@@ -1100,6 +1213,12 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
             .iter()
             .any(|manifest| manifest.source_family.starts_with("ens_v1_"))
     );
+    assert!(active_manifests.iter().any(|manifest| {
+        manifest.source_family == "ens_v2_registrar_l1"
+            && manifest.manifest_version == 2
+            && manifest.capability_flags["exact_name_profile"].status
+                == CapabilitySupportStatus::Supported
+    }));
 
     let watched_contracts = load_watched_contracts(database.pool()).await?;
     assert!(
@@ -1157,6 +1276,301 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
         "ethereum-sepolia",
         "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c"
     ));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<()> {
+    for case in [
+        (
+            "ens",
+            "ens_v1_registry_l1",
+            "ens_v1_resolver_l1",
+            "ethereum-mainnet",
+            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+            "0xF29100983E058B709F3D539b0c765937B804AC15",
+            [
+                "(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)",
+                "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)",
+                "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f)",
+            ],
+        ),
+        (
+            "basenames",
+            "basenames_base_registry",
+            "basenames_base_resolver",
+            "base-mainnet",
+            "0xb94704422c2a1e396835a571837aa5ae53285a95",
+            "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
+            [
+                "(upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)",
+                "(upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)",
+                "(upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)",
+            ],
+        ),
+    ] {
+        let (
+            namespace,
+            source_family,
+            resolver_source_family,
+            chain,
+            registry_address,
+            resolver_address,
+            citations,
+        ) = case;
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+        let manifest = checked_in_manifest_contents(namespace, source_family, "v2")?;
+
+        for citation in citations {
+            assert!(
+                manifest.contains(citation),
+                "{namespace}/{source_family}/v2 manifest is missing upstream citation {citation}"
+            );
+        }
+
+        let resolver_manifest =
+            checked_in_manifest_contents(namespace, resolver_source_family, "v1")?;
+        test_dir.write_manifest(namespace, source_family, "v2", &manifest)?;
+        test_dir.write_manifest(namespace, resolver_source_family, "v1", &resolver_manifest)?;
+        let repository = load_repository(&test_dir.path)?;
+        assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+        assert_eq!(repository.manifests().len(), 2);
+
+        let loaded_manifest = &repository
+            .manifests()
+            .iter()
+            .find(|loaded_manifest| {
+                loaded_manifest.manifest.source_family == source_family
+                    && loaded_manifest.manifest.manifest_version == 2
+            })
+            .expect("registry v2 manifest must load")
+            .manifest;
+        assert_eq!(loaded_manifest.manifest_version, 2);
+        assert_eq!(loaded_manifest.rollout_status, RolloutStatus::Active);
+        assert_eq!(
+            loaded_manifest.discovery_rules,
+            vec![
+                DiscoveryRule {
+                    edge_kind: "subregistry".to_owned(),
+                    from_role: "registry".to_owned(),
+                    admission: "reachable_from_root".to_owned(),
+                },
+                DiscoveryRule {
+                    edge_kind: "resolver".to_owned(),
+                    from_role: "registry".to_owned(),
+                    admission: "reachable_from_root".to_owned(),
+                },
+            ]
+        );
+
+        let summary = sync_repository(database.pool(), &repository).await?;
+        assert_eq!(summary.status, ManifestSyncStatus::Synced);
+        assert_eq!(summary.synced_manifest_count, 2);
+        assert_eq!(summary.active_manifest_count, 2);
+        assert_eq!(summary.root_count, 1);
+        assert_eq!(summary.contract_count, 2);
+        assert_eq!(summary.capability_count, 1);
+        assert_eq!(summary.discovery_rule_count, 2);
+
+        let active_manifests =
+            load_active_manifests_for_namespace(database.pool(), namespace).await?;
+        assert_eq!(active_manifests.len(), 2);
+        assert!(active_manifests.iter().any(|manifest| {
+            manifest.source_family == source_family && manifest.manifest_version == 2
+        }));
+        assert!(active_manifests.iter().any(|manifest| {
+            manifest.source_family == resolver_source_family && manifest.manifest_version == 1
+        }));
+        let registry_manifest_id =
+            active_manifest_id_for_source_family(database.pool(), namespace, source_family).await?;
+        let resolver_manifest_id = active_manifest_id_for_source_family(
+            database.pool(),
+            namespace,
+            resolver_source_family,
+        )
+        .await?;
+
+        let admission_state = load_discovery_admission_state(database.pool()).await?;
+        assert_eq!(admission_state.active_manifest_count, 2);
+        assert_eq!(admission_state.active_rule_count, 2);
+        assert!(admission_state.has_authoritative_address(chain, registry_address));
+        assert!(admission_state.has_authoritative_address(chain, resolver_address));
+
+        let persistence_summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: resolver_address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "registry_resolver_observation".to_owned(),
+                active_from_block_number: Some(123),
+                active_from_block_hash: Some(
+                    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                ),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "resolver",
+                }),
+            },
+        )
+        .await?;
+        assert_eq!(persistence_summary.admitted_edge_count, 1);
+        assert_eq!(persistence_summary.inserted_edge_count, 1);
+        assert_eq!(persistence_summary.admitted_edges[0].edge_kind, "resolver");
+        assert_eq!(
+            persistence_summary.admitted_edges[0].admission,
+            "reachable_from_root"
+        );
+        assert_eq!(persistence_summary.admitted_edges[0].from_role, "registry");
+        assert_eq!(
+            persistence_summary.admitted_edges[0].source_manifest_id,
+            registry_manifest_id
+        );
+
+        let resolver_address = normalize_address(resolver_address);
+        let watched_contracts = load_watched_contracts(database.pool()).await?;
+        assert!(watched_contracts.iter().any(|contract| {
+            contract.chain == chain
+                && contract.source_family == resolver_source_family
+                && contract.address == resolver_address
+                && contract.source == WatchedContractSource::DiscoveryEdge
+                && contract.source_manifest_id == Some(resolver_manifest_id)
+        }));
+        let resolver_source_plan = load_watched_source_selector_plan(
+            database.pool(),
+            chain,
+            WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
+            123,
+            123,
+        )
+        .await?;
+        assert_eq!(resolver_source_plan.selected_targets.len(), 1);
+        assert_eq!(
+            resolver_source_plan.selected_targets[0].source_family,
+            resolver_source_family
+        );
+        assert_eq!(
+            resolver_source_plan.selected_targets[0].contract_instance_id,
+            persistence_summary.admitted_edges[0]
+                .to_contract_instance_id
+                .expect("resolver discovery must admit a target contract instance")
+        );
+        let discovery_edge = sqlx::query(
+            r#"
+            SELECT source_manifest_id, provenance
+            FROM discovery_edges
+            WHERE edge_kind = 'resolver'
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            discovery_edge
+                .try_get::<Option<i64>, _>("source_manifest_id")?
+                .expect("resolver discovery edge must retain source manifest provenance"),
+            registry_manifest_id
+        );
+        assert!(
+            !discovery_edge
+                .try_get::<serde_json::Value, _>("provenance")?
+                .as_object()
+                .expect("resolver discovery provenance must be an object")
+                .contains_key(PROPAGATED_ROLE_PROVENANCE_FIELD)
+        );
+
+        database.cleanup().await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_discovery_edges_do_not_become_transitive_registry_parents() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v2",
+        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v2")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let resolver_address = "0x00000000000000000000000000000000000000CC";
+    let child_address = "0x00000000000000000000000000000000000000DD";
+    let summary = reconcile_discovery_observations(
+        database.pool(),
+        "unit-test-registry-observations",
+        &[
+            DiscoveryObservation {
+                chain: "ethereum-mainnet".to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: resolver_address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "unit-test-registry-observations".to_owned(),
+                active_from_block_number: Some(123),
+                active_from_block_hash: Some(
+                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                ),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": "resolver-edge",
+                }),
+            },
+            DiscoveryObservation {
+                chain: "ethereum-mainnet".to_owned(),
+                from_address: resolver_address.to_owned(),
+                to_address: child_address.to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: "unit-test-registry-observations".to_owned(),
+                active_from_block_number: Some(124),
+                active_from_block_hash: Some(
+                    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                ),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": "resolver-as-parent",
+                }),
+            },
+        ],
+    )
+    .await?;
+
+    assert_eq!(summary.active_edge_count, 1);
+    assert_eq!(summary.admitted_edge_count, 1);
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.admitted_edges[0].edge_kind, "resolver");
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'subregistry' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert!(
+        !sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT provenance FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?
+        .as_object()
+        .expect("resolver discovery provenance must be an object")
+        .contains_key(PROPAGATED_ROLE_PROVENANCE_FIELD)
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -1639,10 +2053,16 @@ async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_
         "v2",
         &checked_in_manifest_contents("basenames", "basenames_execution", "v2")?,
     )?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_base_registry",
+        "v2",
+        &checked_in_manifest_contents("basenames", "basenames_base_registry", "v2")?,
+    )?;
 
     let repository = load_repository(&test_dir.path)?;
     assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
-    assert_eq!(repository.manifests().len(), 7);
+    assert_eq!(repository.manifests().len(), 8);
     assert!(
         !repository
             .manifests()
@@ -1652,9 +2072,9 @@ async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_
 
     let summary = sync_repository(database.pool(), &repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 7);
+    assert_eq!(summary.synced_manifest_count, 8);
     assert_eq!(summary.active_manifest_count, 6);
-    assert_eq!(summary.contract_count, 7);
+    assert_eq!(summary.contract_count, 8);
 
     let active_manifests =
         load_active_manifests_for_namespace(database.pool(), "basenames").await?;
@@ -1664,6 +2084,9 @@ async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_
     }));
     assert!(active_manifests.iter().any(|manifest| {
         manifest.source_family == "basenames_execution" && manifest.manifest_version == 2
+    }));
+    assert!(active_manifests.iter().any(|manifest| {
+        manifest.source_family == "basenames_base_registry" && manifest.manifest_version == 2
     }));
 
     let shared_l1_resolver = normalize_address("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31");

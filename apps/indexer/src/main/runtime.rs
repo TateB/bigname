@@ -381,7 +381,7 @@ pub(crate) fn log_ens_v1_subregistry_discovery_sync_summary(
     info!(
         service = "indexer",
         chain,
-        discovery_source = "ens_v1_registry_new_owner",
+        discovery_source_family = "ens_v1_registry",
         discovery_scanned_log_count = summary.scanned_log_count,
         discovery_matched_log_count = summary.matched_log_count,
         discovery_active_observation_count = summary.active_observation_count,
@@ -389,7 +389,7 @@ pub(crate) fn log_ens_v1_subregistry_discovery_sync_summary(
         discovery_admitted_edge_count = summary.admitted_edge_count,
         discovery_inserted_edge_count = summary.inserted_edge_count,
         discovery_deactivated_edge_count = summary.deactivated_edge_count,
-        "ENSv1 subregistry discovery synced from stored raw logs"
+        "ENSv1 registry discovery synced from stored raw logs"
     );
 }
 
@@ -831,7 +831,7 @@ pub(crate) async fn refresh_runtime_state_from_storage_discovery(
             .await
             .with_context(|| {
                 format!(
-                    "failed to sync ENSv1 subregistry discovery from stored raw logs for chain {}",
+                    "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
                     chain.chain
                 )
             })?;

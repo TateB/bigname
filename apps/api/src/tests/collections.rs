@@ -2243,7 +2243,7 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
 }
 
 #[tokio::test]
-async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_without_exact_name_support()
+async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_with_exact_name_support()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:bob.alice.eth";
@@ -2317,11 +2317,11 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
     );
     name_row.binding_kind = Some(bigname_storage::SurfaceBindingKind::LinkedSubregistryPath);
     name_row.coverage = json!({
-        "status": "unsupported",
-        "exhaustiveness": "not_applicable",
-        "source_classes_considered": ["ensv2_registry_resource_surface"],
-        "unsupported_reason": "ensv2 sepolia-dev exact-name profile is shadow-only",
-        "enumeration_basis": "exact_name",
+        "status": "full",
+        "exhaustiveness": "authoritative",
+        "source_classes_considered": ["ens_v2_registry_l1", "ens_v2_registrar_l1"],
+        "unsupported_reason": null,
+        "enumeration_basis": "exact_name_profile",
     });
     name_row.provenance = json!({
         "normalized_event_ids": [204, 205, 206],
@@ -2340,7 +2340,7 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
         "derivation_kind": "name_current_rebuild",
     });
     name_row.chain_positions = json!({
-        "ethereum": {
+        "ethereum-sepolia": {
             "chain_id": "ethereum-sepolia",
             "block_number": 206,
             "block_hash": "0xensv2-regen",
@@ -2495,7 +2495,7 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
                 "enumeration_basis": "resolver_target",
             }),
             chain_positions: json!({
-                "ethereum": {
+                "ethereum-sepolia": {
                     "chain_id": "ethereum-sepolia",
                     "block_number": 210,
                     "block_hash": "0xensv2resolver",

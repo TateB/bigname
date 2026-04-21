@@ -9,6 +9,8 @@ use crate::{
     ZERO_ADDRESS, ensure_contract_instance_address_seed, normalize_address,
     reconcile_active_contract_instance_addresses, resolve_contract_instance_by_address,
 };
+
+const TRANSITIVE_DISCOVERY_EDGE_KIND: &str = "subregistry";
 pub struct DiscoveryAdmissionState {
     pub active_manifest_count: usize,
     pub active_root_count: usize,
@@ -197,8 +199,9 @@ pub async fn persist_discovery_observation(
         .context("failed to check for an existing discovery edge")?;
 
         if !exists {
-            let provenance = serde_json::to_string(&with_propagated_role(
+            let provenance = serde_json::to_string(&discovery_edge_provenance(
                 &observation.provenance,
+                &admitted_edge.edge_kind,
                 &admitted_edge.from_role,
             )?)
             .context("failed to serialize discovery-edge provenance")?;
@@ -292,19 +295,26 @@ fn is_zero_address(value: &str) -> bool {
     normalize_address(value) == ZERO_ADDRESS
 }
 
-fn with_propagated_role(
+fn discovery_edge_provenance(
     provenance: &serde_json::Value,
+    edge_kind: &str,
     from_role: &str,
 ) -> Result<serde_json::Value> {
     let mut provenance = provenance.clone();
     let Some(object) = provenance.as_object_mut() else {
         bail!("discovery observation provenance must be a JSON object");
     };
-    object.insert(
-        PROPAGATED_ROLE_PROVENANCE_FIELD.to_owned(),
-        serde_json::Value::String(from_role.to_owned()),
-    );
+    if discovery_edge_propagates_role(edge_kind) {
+        object.insert(
+            PROPAGATED_ROLE_PROVENANCE_FIELD.to_owned(),
+            serde_json::Value::String(from_role.to_owned()),
+        );
+    }
     Ok(provenance)
+}
+
+fn discovery_edge_propagates_role(edge_kind: &str) -> bool {
+    edge_kind == TRANSITIVE_DISCOVERY_EDGE_KIND
 }
 
 fn cascade_deactivation_terminal_states(
@@ -654,8 +664,11 @@ async fn resolve_reconciled_discovery_edge_specs(
                 )
                 .await?;
 
-                let provenance =
-                    with_propagated_role(&observation.provenance, &admitted_edge.from_role)?;
+                let provenance = discovery_edge_provenance(
+                    &observation.provenance,
+                    &admitted_edge.edge_kind,
+                    &admitted_edge.from_role,
+                )?;
                 let desired_edge = ReconciledDiscoveryEdgeSpec {
                     observation_key: observation_key.clone(),
                     chain: admitted_edge.chain.clone(),
@@ -673,7 +686,9 @@ async fn resolve_reconciled_discovery_edge_specs(
                 changed |= desired_edges.insert(desired_edge);
                 changed |= admitted_edges.insert(admitted_edge.clone());
 
-                if admitted_edge.admission == REACHABLE_FROM_ROOT_ADMISSION {
+                if admitted_edge.admission == REACHABLE_FROM_ROOT_ADMISSION
+                    && discovery_edge_propagates_role(&admitted_edge.edge_kind)
+                {
                     let derived_contract = StoredActiveContract {
                         manifest_id: admitted_edge.source_manifest_id,
                         chain: admitted_edge.chain.clone(),
@@ -931,7 +946,7 @@ async fn load_discovery_admission_state_with_excluded_source(
          AND cia.deactivated_at IS NULL
         WHERE mv.rollout_status = 'active'
           AND de.deactivated_at IS NULL
-          AND de.edge_kind <> 'migration'
+          AND de.edge_kind = $4
           AND de.admission = $1
           AND de.provenance ? $2
           AND ($3::TEXT IS NULL OR de.discovery_source <> $3)
@@ -940,6 +955,7 @@ async fn load_discovery_admission_state_with_excluded_source(
     .bind(REACHABLE_FROM_ROOT_ADMISSION)
     .bind(PROPAGATED_ROLE_PROVENANCE_FIELD)
     .bind(excluded_discovery_source)
+    .bind(TRANSITIVE_DISCOVERY_EDGE_KIND)
     .fetch_all(pool)
     .await
     .context("failed to load active transitive discovery parents")?;

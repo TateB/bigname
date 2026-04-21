@@ -6,7 +6,7 @@ namespace = "ens"
 source_family = "ens_v2_registrar_l1"
 chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_dev"
-rollout_status = "active"
+rollout_status = "deprecated"
 normalizer_version = "uts46-v1"
 discovery_rules = []
 

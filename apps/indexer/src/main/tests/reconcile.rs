@@ -52,10 +52,19 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         Some("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
         40,
     );
-    let (provider, server) = bundle_provider(vec![
-        canonical_head.clone(),
-        safe_head.clone(),
-        finalized_head.clone(),
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            logs: vec![rpc_current_name_wrapped_log_payload(&canonical_head)],
+            block: canonical_head.clone(),
+        },
+        ProviderBlockFixture {
+            logs: vec![rpc_current_name_wrapped_log_payload(&safe_head)],
+            block: safe_head.clone(),
+        },
+        ProviderBlockFixture {
+            logs: vec![rpc_current_name_wrapped_log_payload(&finalized_head)],
+            block: finalized_head.clone(),
+        },
     ])
     .await?;
 
@@ -2517,4 +2526,21 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
     server.abort();
     database.cleanup().await?;
     Ok(())
+}
+
+fn rpc_current_name_wrapped_log_payload(block: &ProviderBlock) -> Value {
+    let dns_name = dns_encoded_test_name();
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": "0x0",
+        "address": "0x0000000000000000000000000000000000000001",
+        "topics": [
+            keccak256_hex(b"NameWrapped(bytes32,bytes,address,uint32,uint64)"),
+            namehash_for_dns_name(&dns_name)
+        ],
+        "data": encode_name_wrapped_log_data(&dns_name)
+    })
 }

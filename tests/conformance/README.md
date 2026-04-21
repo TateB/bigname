@@ -186,10 +186,9 @@ Execution notes:
   uses the same normalized-event history route with the shipped `namespace=ens`,
   `relation=registrant`, `relation=effective_controller`, and replay-stable paging behavior. The
   route contract and row shape remain unchanged with empty `declared_state`; this does not claim
-  public exact-name support, manifest capability graduation, verified execution, universal
-  resolver support, an ENSv2-specific history ledger, or execution-trace history. The ENSv2
-  `sepolia-dev` exact-name profile remains shadow-only with
-  `unsupported_reason="ensv2 sepolia-dev exact-name profile is shadow-only"`
+  history support, verified execution, universal resolver support, an ENSv2-specific history
+  ledger, or execution-trace history. ENSv2 `sepolia-dev` exact-name profile support is covered
+  only by the separate exact-name contract and remains scoped to admitted exact-name reads
 - the Basenames history readback contract seeds canonical Basenames rows and asserts they read
   back through the existing shared history envelopes for
   `GET /v1/history/names/{namespace}/{name}`,

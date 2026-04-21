@@ -14,6 +14,17 @@ struct RecordedRpcRequest {
     params: Vec<Value>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FocusedSourceFamilyFixture {
+    namespace: &'static str,
+    chain: &'static str,
+    source_family: &'static str,
+    contract_instance_id: Uuid,
+    address: &'static str,
+    block_number: i64,
+    block_hash: &'static str,
+}
+
 #[tokio::test]
 async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing_checkpoints()
 -> Result<()> {
@@ -328,6 +339,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
     insert_watched_manifest_contract(
         database.pool(),
         11,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registry_l1",
         registry_contract_instance_id,
@@ -337,6 +349,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
     insert_watched_manifest_contract(
         database.pool(),
         12,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registrar_l1",
         registrar_contract_instance_id,
@@ -492,6 +505,186 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
 }
 
 #[tokio::test]
+async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_identity()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let fixtures = focused_source_family_fixtures();
+
+    for (index, fixture) in fixtures.iter().enumerate() {
+        insert_watched_manifest_contract(
+            database.pool(),
+            30 + i64::try_from(index).context("fixture index must fit i64")?,
+            fixture.namespace,
+            fixture.chain,
+            fixture.source_family,
+            fixture.contract_instance_id,
+            fixture.address,
+        )
+        .await?;
+    }
+
+    let provider_fixtures = fixtures
+        .iter()
+        .enumerate()
+        .map(|(index, fixture)| {
+            let block = provider_block(
+                fixture.block_hash,
+                Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+                fixture.block_number,
+            );
+            ProviderBlockFixture {
+                block: block.clone(),
+                logs: vec![rpc_log_payload_at_address(
+                    &block,
+                    fixture.address,
+                    index as i64,
+                )],
+            }
+        })
+        .collect::<Vec<_>>();
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) =
+        number_resolving_provider_with_fixtures(provider_fixtures, Arc::clone(&requests)).await?;
+
+    for fixture in fixtures {
+        let range = BackfillBlockRange::new(fixture.block_number, fixture.block_number)?;
+        let source_plan = load_watched_source_selector_plan(
+            database.pool(),
+            fixture.chain,
+            WatchedSourceSelector::SourceFamily(fixture.source_family.to_owned()),
+            range.from_block,
+            range.to_block,
+        )
+        .await?;
+        assert_eq!(source_plan.selected_targets.len(), 1);
+        let selected_target = &source_plan.selected_targets[0];
+        assert_eq!(selected_target.source_family, fixture.source_family);
+        assert_eq!(
+            selected_target.contract_instance_id,
+            fixture.contract_instance_id
+        );
+        assert_eq!(selected_target.address, fixture.address);
+        assert_eq!(selected_target.effective_from_block, fixture.block_number);
+        assert_eq!(selected_target.effective_to_block, fixture.block_number);
+
+        let idempotency_key = format!("focused-source-family-{}", fixture.source_family);
+        let first_lease = format!("lease-{}-first", fixture.source_family);
+        let outcome = run_resumable_hash_pinned_backfill_job(
+            database.pool(),
+            &source_plan,
+            &provider,
+            backfill_job_config(range, &idempotency_key, &first_lease)?,
+        )
+        .await?;
+        assert_eq!(outcome.raw_log_count, 1);
+        assert_eq!(outcome.raw_code_hash_count, 1);
+
+        let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+            .await?
+            .expect("focused source-family backfill job must exist");
+        let expected_source_identity_hash = source_plan.source_identity_hash();
+        assert_eq!(job.source_identity, source_plan.source_identity_payload());
+        assert_eq!(
+            job.source_identity
+                .get("source_identity_hash")
+                .and_then(Value::as_str),
+            Some(expected_source_identity_hash.as_str())
+        );
+        assert_eq!(
+            job.source_identity
+                .get("selected_targets")
+                .and_then(Value::as_array)
+                .and_then(|targets| targets.first())
+                .and_then(|target| target.get("source_family"))
+                .and_then(Value::as_str),
+            Some(fixture.source_family)
+        );
+
+        let repeat_lease = format!("lease-{}-repeat", fixture.source_family);
+        let rerun = run_resumable_hash_pinned_backfill_job(
+            database.pool(),
+            &source_plan,
+            &provider,
+            backfill_job_config(range, &idempotency_key, &repeat_lease)?,
+        )
+        .await?;
+        assert_eq!(rerun.backfill_job_id, outcome.backfill_job_id);
+        assert_eq!(rerun.reserved_range_count, 0);
+        assert_eq!(rerun.completed_range_count, 0);
+        assert_eq!(rerun.resolved_block_count, 0);
+    }
+
+    let compat = focused_source_family_fixture("basenames_l1_compat");
+    let execution = focused_source_family_fixture("basenames_execution");
+    assert_eq!(compat.address, execution.address);
+    assert_ne!(compat.contract_instance_id, execution.contract_instance_id);
+
+    let conflict_range = BackfillBlockRange::new(compat.block_number, compat.block_number)?;
+    let compat_plan = load_watched_source_selector_plan(
+        database.pool(),
+        compat.chain,
+        WatchedSourceSelector::SourceFamily(compat.source_family.to_owned()),
+        conflict_range.from_block,
+        conflict_range.to_block,
+    )
+    .await?;
+    let execution_plan = load_watched_source_selector_plan(
+        database.pool(),
+        execution.chain,
+        WatchedSourceSelector::SourceFamily(execution.source_family.to_owned()),
+        conflict_range.from_block,
+        conflict_range.to_block,
+    )
+    .await?;
+    let l1_lock = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &compat_plan,
+        &provider,
+        backfill_job_config(
+            conflict_range,
+            "basenames-l1-same-address-lock",
+            "lease-l1-lock",
+        )?,
+    )
+    .await?;
+    let conflict = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &execution_plan,
+        &provider,
+        backfill_job_config(
+            conflict_range,
+            "basenames-l1-same-address-lock",
+            "lease-l1-lock-conflict",
+        )?,
+    )
+    .await
+    .expect_err("same idempotency key must not collapse same-address source families");
+    assert!(
+        conflict
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected same-address source-family conflict: {conflict:#}"
+    );
+    let l1_lock_job = load_backfill_job(database.pool(), l1_lock.backfill_job_id)
+        .await?
+        .expect("same-address source-family lock job must exist");
+    assert_eq!(
+        l1_lock_job
+            .source_identity
+            .get("source_family")
+            .and_then(Value::as_str),
+        Some("basenames_l1_compat")
+    );
+
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 4);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 4);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during_intake()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -502,6 +695,7 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
     insert_watched_manifest_contract(
         database.pool(),
         101,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registry_l1",
         contract_instance_id,
@@ -614,6 +808,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
     insert_watched_manifest_contract(
         database.pool(),
         121,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registry_l1",
         selected_contract_instance_id,
@@ -623,6 +818,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
     insert_watched_manifest_contract(
         database.pool(),
         122,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registrar_l1",
         unselected_contract_instance_id,
@@ -713,6 +909,7 @@ async fn explicit_watched_targets_are_sorted_idempotent_and_validated() -> Resul
     insert_watched_manifest_contract(
         database.pool(),
         21,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registry_l1",
         registry_contract_instance_id,
@@ -722,6 +919,7 @@ async fn explicit_watched_targets_are_sorted_idempotent_and_validated() -> Resul
     insert_watched_manifest_contract(
         database.pool(),
         22,
+        "ens",
         "ethereum-mainnet",
         "ens_v2_registrar_l1",
         registrar_contract_instance_id,
@@ -1212,6 +1410,7 @@ async fn insert_raw_name_wrapped_log_at_address(
 async fn insert_manifest_version_with_source_family(
     pool: &PgPool,
     manifest_id: i64,
+    namespace: &str,
     chain: &str,
     source_family: &str,
 ) -> Result<()> {
@@ -1224,10 +1423,11 @@ async fn insert_manifest_version_with_source_family(
                 chain,
                 rollout_status
             )
-            VALUES ($1, 'ens', $2, $3, 'active')
+            VALUES ($1, $2, $3, $4, 'active')
             "#,
     )
     .bind(manifest_id)
+    .bind(namespace)
     .bind(source_family)
     .bind(chain)
     .execute(pool)
@@ -1242,12 +1442,14 @@ async fn insert_manifest_version_with_source_family(
 async fn insert_watched_manifest_contract(
     pool: &PgPool,
     manifest_id: i64,
+    namespace: &str,
     chain: &str,
     source_family: &str,
     contract_instance_id: Uuid,
     address: &str,
 ) -> Result<()> {
-    insert_manifest_version_with_source_family(pool, manifest_id, chain, source_family).await?;
+    insert_manifest_version_with_source_family(pool, manifest_id, namespace, chain, source_family)
+        .await?;
     insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
     insert_active_contract_instance_address(
         pool,
@@ -1268,6 +1470,54 @@ async fn insert_watched_manifest_contract(
         None,
     )
     .await
+}
+
+fn focused_source_family_fixtures() -> [FocusedSourceFamilyFixture; 4] {
+    [
+        FocusedSourceFamilyFixture {
+            namespace: "ens",
+            chain: "ethereum-mainnet",
+            source_family: "ens_v1_wrapper_l1",
+            contract_instance_id: Uuid::from_u128(3_001),
+            address: "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+            block_number: 42,
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        FocusedSourceFamilyFixture {
+            namespace: "ens",
+            chain: "ethereum-mainnet",
+            source_family: "ens_v1_resolver_l1",
+            contract_instance_id: Uuid::from_u128(3_002),
+            address: "0xf29100983e058b709f3d539b0c765937b804ac15",
+            block_number: 43,
+            block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+        FocusedSourceFamilyFixture {
+            namespace: "basenames",
+            chain: "ethereum-mainnet",
+            source_family: "basenames_l1_compat",
+            contract_instance_id: Uuid::from_u128(3_003),
+            address: "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
+            block_number: 44,
+            block_hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        },
+        FocusedSourceFamilyFixture {
+            namespace: "basenames",
+            chain: "ethereum-mainnet",
+            source_family: "basenames_execution",
+            contract_instance_id: Uuid::from_u128(3_004),
+            address: "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
+            block_number: 45,
+            block_hash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        },
+    ]
+}
+
+fn focused_source_family_fixture(source_family: &str) -> FocusedSourceFamilyFixture {
+    focused_source_family_fixtures()
+        .into_iter()
+        .find(|fixture| fixture.source_family == source_family)
+        .expect("focused source-family fixture must exist")
 }
 
 async fn set_contract_instance_address_range(

@@ -1,11 +1,15 @@
-# Bootstrap seed for the canonical Basenames registry on Base mainnet.
-# Address confirmed from the upstream base/basenames deployment metadata.
-manifest_version = 1
+# Bootstrap seed for the canonical Basenames registry on Base mainnet with
+# registry-observed resolver discovery admission.
+# Registry deployment and resolver-setting surface:
+# (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
+manifest_version = 2
 namespace = "basenames"
 source_family = "basenames_base_registry"
 chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
-rollout_status = "deprecated"
+rollout_status = "active"
 normalizer_version = "uts46-v1"
 
 [capability_flags]
@@ -22,5 +26,10 @@ proxy_kind = "none"
 
 [[discovery_rules]]
 edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"

@@ -4,7 +4,7 @@ namespace = "ens"
 source_family = "ens_v1_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
-rollout_status = "active"
+rollout_status = "deprecated"
 normalizer_version = "uts46-v1"
 
 [capability_flags]
