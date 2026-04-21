@@ -57,6 +57,7 @@ struct Cli {
 enum Command {
     Run(RunArgs),
     Backfill(BackfillArgs),
+    Replay(ReplayArgs),
 }
 
 #[derive(Args, Debug)]
@@ -125,6 +126,33 @@ struct BackfillArgs {
     lease_duration_secs: u64,
 }
 
+#[derive(Args, Debug)]
+struct ReplayArgs {
+    #[command(subcommand)]
+    command: ReplayCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ReplayCommand {
+    NormalizedEvents(ReplayNormalizedEventsArgs),
+}
+
+#[derive(Args, Debug)]
+struct ReplayNormalizedEventsArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
+    deployment_profile: String,
+    #[arg(long)]
+    chain: String,
+    #[arg(long, requires = "to_block", conflicts_with = "block_hashes")]
+    from_block: Option<i64>,
+    #[arg(long, requires = "from_block", conflicts_with = "block_hashes")]
+    to_block: Option<i64>,
+    #[arg(long = "block-hash", value_name = "BLOCK_HASH")]
+    block_hashes: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-indexer");
@@ -132,6 +160,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Backfill(args) => run_backfill(args).await,
+        Command::Replay(args) => run_replay(args).await,
     }
 }
 
@@ -288,6 +317,50 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
 
     run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
     Ok(())
+}
+
+async fn run_replay(args: ReplayArgs) -> Result<()> {
+    match args.command {
+        ReplayCommand::NormalizedEvents(args) => run_replay_normalized_events(args).await,
+    }
+}
+
+async fn run_replay_normalized_events(args: ReplayNormalizedEventsArgs) -> Result<()> {
+    let selection = replay_normalized_events_selection(&args)?;
+    let pool = bigname_storage::connect(&args.database).await?;
+    let outcome = replay_raw_fact_normalized_events(
+        &pool,
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: args.deployment_profile,
+            chain: args.chain,
+            selection,
+        },
+    )
+    .await?;
+
+    log_raw_fact_normalized_event_replay_outcome(&outcome);
+    Ok(())
+}
+
+fn replay_normalized_events_selection(
+    args: &ReplayNormalizedEventsArgs,
+) -> Result<RawFactNormalizedEventReplaySelection> {
+    if !args.block_hashes.is_empty() {
+        return Ok(RawFactNormalizedEventReplaySelection::BlockHashes(
+            args.block_hashes.clone(),
+        ));
+    }
+
+    let from_block = args
+        .from_block
+        .context("--from-block is required when --block-hash is not supplied")?;
+    let to_block = args
+        .to_block
+        .context("--to-block is required when --block-hash is not supplied")?;
+    Ok(RawFactNormalizedEventReplaySelection::BlockRange {
+        from_block,
+        to_block,
+    })
 }
 
 fn backfill_source_selector(args: &BackfillArgs) -> Result<WatchedSourceSelector> {

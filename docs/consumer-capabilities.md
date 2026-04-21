@@ -29,6 +29,7 @@ This document is the checked-in replacement contract for first-party consumers u
 - `Resolution` is one mixed route: `record_inventory` defines the known record-selector space, `record_cache` is the declared last-known-value view over that same selector space, and `verified_queries` is the explicit request-bound execution answer set
 - `PrimaryName` is one mixed route: `claimed_primary_name` is the declared claim candidate and `verified_primary_name` is the execution-derived verification result
 - both mixed routes reuse the same `ResultStatus` vocabulary: `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, `execution_failed`
+- source-family backfill conformance proves only that completed source-family job lifecycle state can coexist with replayed existing shipped consumer-capability responses. It does not prove that synthetic jobs admitted route data, add a capability group, graduate unsupported coverage, promote ENSv2 exact-name support, claim wrapper/migration history support, change manifest capabilities, add public API routes, or change consumer-replacement meaning.
 - when the apps monorepo is imported, add app-by-app call-site mappings rather than replacing this table
 - any capability required by a first-party consumer that is not covered here must be added here before code claims parity
 

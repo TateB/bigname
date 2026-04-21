@@ -61,6 +61,9 @@ pub struct CanonicalityInspection {
     pub normalized_event_count: u64,
 }
 
+/// Stored lineage row for bounded read-only range inspection.
+pub type StoredLineageRangeBlock = ChainLineageBlock;
+
 /// Inspect one block by hash-first identity without mutating storage.
 pub async fn inspect_block_canonicality(
     pool: &PgPool,
@@ -123,6 +126,51 @@ pub async fn inspect_canonicality_range(
     }
 
     Ok(inspections)
+}
+
+/// List only stored lineage rows in a bounded block-number range. The helper
+/// does not infer missing heights, gaps, range completeness, or span-wide
+/// canonicality.
+pub async fn list_stored_lineage_range(
+    pool: &PgPool,
+    chain_id: &str,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+) -> Result<Vec<StoredLineageRangeBlock>> {
+    validate_range(chain_id, range_start_block_number, range_end_block_number)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            chain_id,
+            block_hash,
+            parent_hash,
+            block_number,
+            block_timestamp,
+            logs_bloom,
+            transactions_root,
+            receipts_root,
+            state_root,
+            canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number >= $2
+          AND block_number <= $3
+        ORDER BY block_number, block_hash
+        "#,
+    )
+    .bind(chain_id)
+    .bind(range_start_block_number)
+    .bind(range_end_block_number)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to list stored lineage rows for chain {chain_id} range {range_start_block_number}..={range_end_block_number}"
+        )
+    })?;
+
+    rows.into_iter().map(decode_stored_lineage_block).collect()
 }
 
 fn build_inspection(
@@ -208,6 +256,32 @@ async fn load_normalized_event_count(
     })?;
 
     decode_count(&row, "normalized_event_count")
+}
+
+fn decode_stored_lineage_block(row: sqlx::postgres::PgRow) -> Result<StoredLineageRangeBlock> {
+    Ok(ChainLineageBlock {
+        chain_id: row.try_get("chain_id").context("missing chain_id")?,
+        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        parent_hash: row.try_get("parent_hash").context("missing parent_hash")?,
+        block_number: row
+            .try_get("block_number")
+            .context("missing block_number")?,
+        block_timestamp: row
+            .try_get("block_timestamp")
+            .context("missing block_timestamp")?,
+        logs_bloom: row.try_get("logs_bloom").context("missing logs_bloom")?,
+        transactions_root: row
+            .try_get("transactions_root")
+            .context("missing transactions_root")?,
+        receipts_root: row
+            .try_get("receipts_root")
+            .context("missing receipts_root")?,
+        state_root: row.try_get("state_root").context("missing state_root")?,
+        canonicality_state: CanonicalityState::parse(
+            &row.try_get::<String, _>("canonicality_state")
+                .context("missing canonicality_state")?,
+        )?,
+    })
 }
 
 fn decode_count(row: &sqlx::postgres::PgRow, column_name: &str) -> Result<u64> {

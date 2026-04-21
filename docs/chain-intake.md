@@ -232,7 +232,15 @@ Execution-cache invalidation emitted by reorg repair is hash-scoped. It invalida
 
 Cache dependencies must be tied to explicit block-hash-bearing chain positions or boundaries before a verified outcome can be treated as reorg-safe. Number-only, tag-only, or dependency-free verified resolution and verified primary-name rows fail closed and cannot be served from cache after a reorg check; rows for request types explicitly documented outside this Phase 9 invalidation surface remain out of scope. This reorg/replay foundation does not promote ENSv2 exact-name support or any manifest capability.
 
-## 12. Atomicity Boundary
+## 12. Raw-Fact Normalized-Event Replay Runner
+
+Raw-fact normalized-event replay is bounded operational tooling over already persisted canonical raw facts. A replay request selects a finite deployment profile, chain, and block range or explicit block-hash set. For selected blocks, canonical raw facts are rows whose block identity is `canonical`, `safe`, or `finalized`; `observed` and `orphaned` facts are excluded unless a later audit-only contract explicitly admits them.
+
+The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It must not perform RPC fetches, re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
+
+Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing normalized-event identities can only be refreshed through the storage upsert canonicality path; stale conflicting payloads remain a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage remain immutable, projection rebuild remains downstream worker-owned, and API responses continue to read projections and execution output rather than the replay runner.
+
+## 13. Atomicity Boundary
 
 The raw admission transaction boundary is one block.
 
@@ -248,7 +256,7 @@ The canonical head pointer is written last inside that admission unit.
 
 Projection workers remain downstream and asynchronous, but they must consume deterministic block-scoped invalidation and replay inputs so that reorg repair is reproducible.
 
-## 13. Traces, Pending, And Other Optional Capabilities
+## 14. Traces, Pending, And Other Optional Capabilities
 
 Pending and mempool indexing are a separate product surface.
 
@@ -260,7 +268,7 @@ Rules:
 - if traces are enabled later, they persist as their own raw facts with the same block-hash anchoring and reorg semantics
 - intake planning must not assume all providers expose the same trace APIs
 
-## 14. Observability And Test Requirements
+## 15. Observability And Test Requirements
 
 Minimum chain-intake metrics:
 
@@ -272,6 +280,7 @@ Minimum chain-intake metrics:
 - recent-window cache hit and miss rate
 - backlog depth
 - replay and rewrite duration
+- raw-fact normalized-event replay duration and selected canonical block count
 
 Required failure drills:
 
@@ -281,9 +290,10 @@ Required failure drills:
 - partial batch failures
 - crash and resume from a persisted checkpoint
 - crash and resume from a persisted backfill job range checkpoint
+- raw-fact normalized-event replay restart over the same bounded canonical selection as an upsert-only adapter resync without RPC fetch or checkpoint promotion
 - safe or finalized promotion lagging canonical intake
 
-## 15. Acceptance Rules
+## 16. Acceptance Rules
 
 The intake contract is acceptable for the first implementation milestone only if:
 
@@ -292,3 +302,4 @@ The intake contract is acceptable for the first implementation milestone only if
 - block-scoped data ingestion never depends on ambiguous number-only reads when a hash-scoped primitive exists
 - raw facts are sufficient to rebuild canonical declared state after a reorg or decoder rewrite
 - backfill reuses the same downstream semantics as live ingestion
+- raw-fact normalized-event replay upserts normalized events only from persisted canonical raw facts without payload replacement, stale-row purge, RPC fetch, projection rebuild, public API exposure, or chain/backfill checkpoint mutation

@@ -388,6 +388,8 @@ async fn load_authority_raw_logs(
     pool: &PgPool,
     chain: &str,
     active_emitters: &[ActiveEmitter],
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
 ) -> Result<Vec<AuthorityRawLogRow>> {
     let emitters_by_address = active_emitters
         .iter()
@@ -416,6 +418,7 @@ async fn load_authority_raw_logs(
          AND rb.block_hash = rl.block_hash
         WHERE rl.chain_id = $1
           AND lower(rl.emitting_address) = ANY($2::TEXT[])
+          AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -426,6 +429,8 @@ async fn load_authority_raw_logs(
     )
     .bind(chain)
     .bind(&watched_addresses)
+    .bind(restrict_to_block_hashes)
+    .bind(block_hashes)
     .fetch_all(pool)
     .await
     .with_context(|| {

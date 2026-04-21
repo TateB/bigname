@@ -45,6 +45,16 @@ pub struct EnsV2ResolverKindSyncSummary {
     pub inserted_count: usize,
 }
 
+impl EnsV2ResolverSyncSummary {
+    pub async fn sync_for_block_hashes(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+    ) -> Result<Self> {
+        sync_ens_v2_resolver_with_scope(pool, chain, true, block_hashes).await
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveEmitter {
     address: String,
@@ -142,12 +152,28 @@ enum ResolverObservation {
 }
 
 pub async fn sync_ens_v2_resolver(pool: &PgPool, chain: &str) -> Result<EnsV2ResolverSyncSummary> {
+    sync_ens_v2_resolver_with_scope(pool, chain, false, &[]).await
+}
+
+async fn sync_ens_v2_resolver_with_scope(
+    pool: &PgPool,
+    chain: &str,
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
+) -> Result<EnsV2ResolverSyncSummary> {
     let active_emitters = load_active_emitters(pool, chain).await?;
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
 
-    let raw_logs = load_resolver_raw_logs(pool, chain, &active_emitters).await?;
+    let raw_logs = load_resolver_raw_logs(
+        pool,
+        chain,
+        &active_emitters,
+        restrict_to_block_hashes,
+        block_hashes,
+    )
+    .await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
         return Ok(empty_summary(scanned_log_count));
@@ -820,6 +846,8 @@ async fn load_resolver_raw_logs(
     pool: &PgPool,
     chain: &str,
     emitters: &[ActiveEmitter],
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
 ) -> Result<Vec<ResolverRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -855,6 +883,7 @@ async fn load_resolver_raw_logs(
          AND rb.block_hash = rl.block_hash
         WHERE rl.chain_id = $1
           AND lower(rl.emitting_address) = ANY($2::TEXT[])
+          AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -865,6 +894,8 @@ async fn load_resolver_raw_logs(
     )
     .bind(chain)
     .bind(&watched_addresses)
+    .bind(restrict_to_block_hashes)
+    .bind(block_hashes)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load ENSv2 resolver raw logs for chain {chain}"))?;

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
     CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, RawFactAuditCounts,
+    StoredLineageRangeBlock,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -19,6 +20,8 @@ pub(crate) enum InspectCommand {
     BackfillJob(InspectBackfillJobArgs),
     #[command(about = "Inspect canonicality and block-scoped audit counts for one block hash")]
     Canonicality(InspectCanonicalityArgs),
+    #[command(about = "List stored lineage rows for a bounded chain block range")]
+    StoredLineageRange(InspectStoredLineageRangeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -39,10 +42,23 @@ pub(crate) struct InspectCanonicalityArgs {
     pub(crate) block_hash: String,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct InspectStoredLineageRangeArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) chain_id: String,
+    #[arg(long)]
+    pub(crate) range_start_block_number: i64,
+    #[arg(long)]
+    pub(crate) range_end_block_number: i64,
+}
+
 pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
     match args.command {
         InspectCommand::BackfillJob(args) => inspect_backfill_job(args).await,
         InspectCommand::Canonicality(args) => inspect_canonicality(args).await,
+        InspectCommand::StoredLineageRange(args) => inspect_stored_lineage_range(args).await,
     }
 }
 
@@ -61,6 +77,20 @@ async fn inspect_canonicality(args: InspectCanonicalityArgs) -> Result<()> {
             .await?;
 
     println!("{}", render_canonicality_inspection(&inspection));
+    Ok(())
+}
+
+async fn inspect_stored_lineage_range(args: InspectStoredLineageRangeArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let blocks = bigname_storage::list_stored_lineage_range(
+        &pool,
+        &args.chain_id,
+        args.range_start_block_number,
+        args.range_end_block_number,
+    )
+    .await?;
+
+    println!("{}", render_stored_lineage_range_inspection(&blocks));
     Ok(())
 }
 
@@ -195,6 +225,30 @@ fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value 
     })
 }
 
+fn render_stored_lineage_range_inspection(blocks: &[StoredLineageRangeBlock]) -> Value {
+    json!({
+        "blocks": blocks
+            .iter()
+            .map(render_stored_lineage_block)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn render_stored_lineage_block(block: &StoredLineageRangeBlock) -> Value {
+    json!({
+        "chain_id": block.chain_id.as_str(),
+        "block_number": block.block_number,
+        "block_hash": block.block_hash.as_str(),
+        "parent_hash": block.parent_hash.as_deref(),
+        "canonicality_state": canonicality_state_label(block.canonicality_state),
+        "timestamp": format_timestamp(block.block_timestamp),
+        "logs_bloom": block.logs_bloom.as_ref().map(|bytes| format_bytes_hex(bytes)),
+        "transactions_root": block.transactions_root.as_deref(),
+        "receipts_root": block.receipts_root.as_deref(),
+        "state_root": block.state_root.as_deref(),
+    })
+}
+
 fn format_timestamp(value: OffsetDateTime) -> String {
     let value = value.to_offset(UtcOffset::UTC);
     format!(
@@ -206,6 +260,24 @@ fn format_timestamp(value: OffsetDateTime) -> String {
         value.minute(),
         value.second()
     )
+}
+
+fn format_bytes_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(2 + bytes.len() * 2);
+    encoded.push_str("0x");
+    for byte in bytes {
+        encoded.push(hex_digit(byte >> 4));
+        encoded.push(hex_digit(byte & 0x0f));
+    }
+    encoded
+}
+
+const fn hex_digit(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + (value - 10)) as char,
+        _ => '?',
+    }
 }
 
 fn render_raw_fact_counts(counts: &RawFactAuditCounts) -> Value {
@@ -246,7 +318,9 @@ const fn canonicality_state_label(state: CanonicalityState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bigname_storage::{BackfillJobCreate, BackfillRangeSpec};
+    use bigname_storage::{
+        BackfillJobCreate, BackfillRangeSpec, ChainLineageBlock, upsert_chain_lineage_blocks,
+    };
     use serde_json::json;
     use sqlx::{
         ConnectOptions,
@@ -375,6 +449,45 @@ mod tests {
     fn lease_deadline() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
             .expect("lease deadline must be valid")
+    }
+
+    fn lineage_block(
+        block_hash: &str,
+        parent_hash: Option<&str>,
+        block_number: i64,
+        canonicality_state: CanonicalityState,
+    ) -> ChainLineageBlock {
+        ChainLineageBlock {
+            chain_id: "eth-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: parent_hash.map(str::to_owned),
+            block_number,
+            block_timestamp: timestamp(1_700_000_000 + block_number),
+            logs_bloom: Some(vec![block_number as u8]),
+            transactions_root: Some(format!("0xtxroot{block_number:02x}")),
+            receipts_root: Some(format!("0xrcroot{block_number:02x}")),
+            state_root: Some(format!("0xstroot{block_number:02x}")),
+            canonicality_state,
+        }
+    }
+
+    fn lineage_block_with_nullable_fields(
+        block_hash: &str,
+        block_number: i64,
+        canonicality_state: CanonicalityState,
+    ) -> ChainLineageBlock {
+        ChainLineageBlock {
+            chain_id: "eth-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number,
+            block_timestamp: timestamp(1_700_000_000 + block_number),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state,
+        }
     }
 
     #[test]
@@ -563,6 +676,97 @@ mod tests {
         assert_eq!(rendered["states"]["orphaned"], false);
     }
 
+    #[test]
+    fn renders_stored_lineage_range_json() {
+        let blocks = vec![
+            lineage_block("0x010", None, 10, CanonicalityState::Canonical),
+            lineage_block_with_nullable_fields("0x012", 12, CanonicalityState::Observed),
+        ];
+
+        let rendered = render_stored_lineage_range_inspection(&blocks);
+
+        assert_eq!(
+            rendered["blocks"]
+                .as_array()
+                .expect("blocks must be an array")
+                .len(),
+            2
+        );
+        assert_eq!(rendered["blocks"][0]["chain_id"], "eth-mainnet");
+        assert_eq!(rendered["blocks"][0]["block_number"], 10);
+        assert_eq!(rendered["blocks"][0]["block_hash"], "0x010");
+        assert!(rendered["blocks"][0]["parent_hash"].is_null());
+        assert_eq!(rendered["blocks"][0]["canonicality_state"], "canonical");
+        assert_eq!(rendered["blocks"][0]["timestamp"], "2023-11-14T22:13:30Z");
+        assert_eq!(rendered["blocks"][0]["logs_bloom"], "0x0a");
+        assert_eq!(rendered["blocks"][0]["transactions_root"], "0xtxroot0a");
+        assert_eq!(rendered["blocks"][0]["receipts_root"], "0xrcroot0a");
+        assert_eq!(rendered["blocks"][0]["state_root"], "0xstroot0a");
+
+        assert_eq!(rendered["blocks"][1]["canonicality_state"], "observed");
+        assert!(rendered["blocks"][1]["parent_hash"].is_null());
+        assert!(rendered["blocks"][1]["logs_bloom"].is_null());
+        assert!(rendered["blocks"][1]["transactions_root"].is_null());
+        assert!(rendered["blocks"][1]["receipts_root"].is_null());
+        assert!(rendered["blocks"][1]["state_root"].is_null());
+    }
+
+    #[tokio::test]
+    async fn inspect_stored_lineage_range_orders_and_bounds_stored_rows() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        upsert_chain_lineage_blocks(
+            database.pool(),
+            &[
+                lineage_block("0x012b", Some("0x010"), 12, CanonicalityState::Safe),
+                lineage_block("0x009", None, 9, CanonicalityState::Canonical),
+                lineage_block("0x010", None, 10, CanonicalityState::Canonical),
+                lineage_block("0x013", Some("0x012b"), 13, CanonicalityState::Finalized),
+                lineage_block("0x012a", Some("0x010"), 12, CanonicalityState::Orphaned),
+                ChainLineageBlock {
+                    chain_id: "base-mainnet".to_owned(),
+                    ..lineage_block(
+                        "0x011-base",
+                        Some("0x010"),
+                        11,
+                        CanonicalityState::Canonical,
+                    )
+                },
+            ],
+        )
+        .await?;
+
+        let blocks =
+            bigname_storage::list_stored_lineage_range(database.pool(), "eth-mainnet", 10, 12)
+                .await?;
+        let rendered = render_stored_lineage_range_inspection(&blocks);
+
+        assert_eq!(
+            rendered["blocks"]
+                .as_array()
+                .expect("blocks must be an array")
+                .iter()
+                .map(|block| {
+                    (
+                        block["block_number"].as_i64().expect("block number"),
+                        block["block_hash"].as_str().expect("block hash").to_owned(),
+                        block["canonicality_state"]
+                            .as_str()
+                            .expect("canonicality state")
+                            .to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (10, "0x010".to_owned(), "canonical".to_owned()),
+                (12, "0x012a".to_owned(), "orphaned".to_owned()),
+                (12, "0x012b".to_owned(), "safe".to_owned()),
+            ]
+        );
+
+        database.cleanup().await
+    }
+
     #[tokio::test]
     async fn inspect_backfill_job_missing_job_returns_error() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -620,5 +824,86 @@ mod tests {
         assert_eq!(after, before);
 
         database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn inspect_stored_lineage_range_does_not_mutate_lineage_or_checkpoints() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        upsert_chain_lineage_blocks(
+            database.pool(),
+            &[
+                lineage_block("0x010", None, 10, CanonicalityState::Canonical),
+                lineage_block("0x011", Some("0x010"), 11, CanonicalityState::Safe),
+            ],
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO chain_checkpoints (
+                chain_id,
+                canonical_block_hash,
+                canonical_block_number,
+                safe_block_hash,
+                safe_block_number
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind("eth-mainnet")
+        .bind("0x010")
+        .bind(10_i64)
+        .bind("0x011")
+        .bind(11_i64)
+        .execute(database.pool())
+        .await?;
+
+        let before_lineage =
+            bigname_storage::list_stored_lineage_range(database.pool(), "eth-mainnet", 10, 11)
+                .await?;
+        let before_checkpoints =
+            load_chain_checkpoint_snapshot(database.pool(), "eth-mainnet").await?;
+
+        inspect_stored_lineage_range(InspectStoredLineageRangeArgs {
+            database: database.database_config(),
+            chain_id: "eth-mainnet".to_owned(),
+            range_start_block_number: 10,
+            range_end_block_number: 11,
+        })
+        .await?;
+
+        let after_lineage =
+            bigname_storage::list_stored_lineage_range(database.pool(), "eth-mainnet", 10, 11)
+                .await?;
+        let after_checkpoints =
+            load_chain_checkpoint_snapshot(database.pool(), "eth-mainnet").await?;
+
+        assert_eq!(after_lineage, before_lineage);
+        assert_eq!(after_checkpoints, before_checkpoints);
+
+        database.cleanup().await
+    }
+
+    async fn load_chain_checkpoint_snapshot(
+        pool: &sqlx::PgPool,
+        chain_id: &str,
+    ) -> Result<Option<(Option<String>, Option<i64>, Option<String>, Option<i64>)>> {
+        let snapshot =
+            sqlx::query_as::<_, (Option<String>, Option<i64>, Option<String>, Option<i64>)>(
+                r#"
+            SELECT
+                canonical_block_hash,
+                canonical_block_number,
+                safe_block_hash,
+                safe_block_number
+            FROM chain_checkpoints
+            WHERE chain_id = $1
+            "#,
+            )
+            .bind(chain_id)
+            .fetch_optional(pool)
+            .await?;
+
+        Ok(snapshot)
     }
 }

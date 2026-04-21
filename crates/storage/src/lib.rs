@@ -33,7 +33,8 @@ pub use address_names::{
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, RawFactAuditCounts,
-    inspect_block_canonicality, inspect_canonicality_range,
+    StoredLineageRangeBlock, inspect_block_canonicality, inspect_canonicality_range,
+    list_stored_lineage_range,
 };
 pub use backfill_jobs::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
@@ -107,8 +108,9 @@ pub use primary_name::{
     upsert_primary_name_current_snapshots, verified_primary_name_claim_hooks,
 };
 pub use raw::{
-    RawBlock, load_raw_block, load_raw_blocks_by_hashes, mark_raw_block_range_orphaned,
-    upsert_raw_blocks,
+    RawBlock, RawLogReplayInput, list_canonical_raw_log_replay_inputs,
+    list_canonical_raw_log_replay_inputs_for_block_hashes, load_raw_block,
+    load_raw_blocks_by_hashes, mark_raw_block_range_orphaned, upsert_raw_blocks,
 };
 pub use raw_calls::{
     RawCallSnapshot, load_raw_call_snapshots_by_block_hash, upsert_raw_call_snapshots,

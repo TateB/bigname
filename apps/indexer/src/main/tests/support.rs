@@ -1025,6 +1025,59 @@ async fn insert_raw_reverse_claimed_log(
     Ok(())
 }
 
+async fn insert_chain_lineage_for_block(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_chain_lineage_blocks(
+        pool,
+        &[provider_block_to_lineage(chain, block, canonicality_state)],
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_raw_name_wrapped_log(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[provider_block_to_raw_block(
+            chain,
+            block,
+            canonicality_state,
+        )],
+    )
+    .await?;
+    let dns_name = dns_encoded_test_name();
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics: vec![name_wrapped_topic0(), namehash_for_dns_name(&dns_name)],
+            data: decode_hex_string(&encode_name_wrapped_log_data(&dns_name)),
+            canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn insert_contract_instance(
     pool: &PgPool,
     contract_instance_id: Uuid,

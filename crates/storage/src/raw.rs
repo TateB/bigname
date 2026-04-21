@@ -19,6 +19,25 @@ pub struct RawBlock {
     pub canonicality_state: CanonicalityState,
 }
 
+/// Canonical raw log input for adapter-owned normalized-event replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawLogReplayInput {
+    pub raw_log_id: i64,
+    pub chain_id: String,
+    pub block_hash: String,
+    pub block_number: i64,
+    pub parent_hash: Option<String>,
+    pub block_timestamp: OffsetDateTime,
+    pub lineage_canonicality_state: CanonicalityState,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
+    pub log_index: i64,
+    pub emitting_address: String,
+    pub topics: Vec<String>,
+    pub data: Vec<u8>,
+    pub raw_canonicality_state: CanonicalityState,
+}
+
 /// Load one raw block fact by hash-first identity.
 pub async fn load_raw_block(
     pool: &PgPool,
@@ -39,6 +58,131 @@ pub async fn load_raw_blocks_by_hashes(
     }
 
     load_raw_block_snapshots_for_hashes(pool, chain_id, block_hashes).await
+}
+
+/// List canonical persisted raw logs in a finite range for later adapter-owned
+/// normalized-event replay. This is read-only: it performs no RPC fetch,
+/// checkpoint mutation, projection rebuild, or normalized-event write.
+pub async fn list_canonical_raw_log_replay_inputs(
+    pool: &PgPool,
+    chain_id: &str,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+) -> Result<Vec<RawLogReplayInput>> {
+    validate_replay_range(chain_id, range_start_block_number, range_end_block_number)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            logs.raw_log_id,
+            logs.chain_id,
+            logs.block_hash,
+            logs.block_number,
+            lineage.parent_hash,
+            lineage.block_timestamp,
+            lineage.canonicality_state::TEXT AS lineage_canonicality_state,
+            logs.transaction_hash,
+            logs.transaction_index,
+            logs.log_index,
+            logs.emitting_address,
+            logs.topics,
+            logs.data,
+            logs.canonicality_state::TEXT AS raw_canonicality_state
+        FROM raw_logs AS logs
+        JOIN chain_lineage AS lineage
+          ON lineage.chain_id = logs.chain_id
+         AND lineage.block_hash = logs.block_hash
+        WHERE logs.chain_id = $1
+          AND logs.block_number >= $2
+          AND logs.block_number <= $3
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND logs.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY logs.block_number, logs.block_hash, logs.transaction_index, logs.log_index, logs.raw_log_id
+        "#,
+    )
+    .bind(chain_id)
+    .bind(range_start_block_number)
+    .bind(range_end_block_number)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to list canonical raw log replay inputs for chain {chain_id} range {range_start_block_number}..={range_end_block_number}"
+        )
+    })?;
+
+    rows.into_iter().map(decode_raw_log_replay_input).collect()
+}
+
+/// List canonical persisted raw logs for an explicit stored block-hash set.
+/// Duplicate input hashes collapse to stored raw log rows in stable block/log
+/// order; missing, observed, and orphaned block identities are not inferred.
+pub async fn list_canonical_raw_log_replay_inputs_for_block_hashes(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hashes: &[String],
+) -> Result<Vec<RawLogReplayInput>> {
+    validate_replay_hashes(chain_id, block_hashes)?;
+    if block_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            logs.raw_log_id,
+            logs.chain_id,
+            logs.block_hash,
+            logs.block_number,
+            lineage.parent_hash,
+            lineage.block_timestamp,
+            lineage.canonicality_state::TEXT AS lineage_canonicality_state,
+            logs.transaction_hash,
+            logs.transaction_index,
+            logs.log_index,
+            logs.emitting_address,
+            logs.topics,
+            logs.data,
+            logs.canonicality_state::TEXT AS raw_canonicality_state
+        FROM raw_logs AS logs
+        JOIN chain_lineage AS lineage
+          ON lineage.chain_id = logs.chain_id
+         AND lineage.block_hash = logs.block_hash
+        WHERE logs.chain_id = $1
+          AND logs.block_hash = ANY($2::TEXT[])
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND logs.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY logs.block_number, logs.block_hash, logs.transaction_index, logs.log_index, logs.raw_log_id
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hashes)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to list canonical raw log replay inputs for chain {chain_id} across {} block hashes",
+            block_hashes.len()
+        )
+    })?;
+
+    rows.into_iter().map(decode_raw_log_replay_input).collect()
 }
 
 /// Insert missing raw block facts or refresh canonicality when the same block is
@@ -379,6 +523,31 @@ fn validate_raw_block(block: &RawBlock) -> Result<()> {
     Ok(())
 }
 
+fn validate_replay_range(chain_id: &str, start: i64, end: i64) -> Result<()> {
+    if chain_id.trim().is_empty() {
+        bail!("chain_id must not be empty");
+    }
+    if start < 0 {
+        bail!("raw log replay range start {start} is negative");
+    }
+    if end < start {
+        bail!("raw log replay range end {end} is before start {start}");
+    }
+    Ok(())
+}
+
+fn validate_replay_hashes(chain_id: &str, block_hashes: &[String]) -> Result<()> {
+    if chain_id.trim().is_empty() {
+        bail!("chain_id must not be empty");
+    }
+    for block_hash in block_hashes {
+        if block_hash.trim().is_empty() {
+            bail!("raw log replay block hash set contains an empty block hash");
+        }
+    }
+    Ok(())
+}
+
 fn ensure_raw_identity_matches(existing: &RawBlock, incoming: &RawBlock) -> Result<()> {
     if existing.parent_hash != incoming.parent_hash
         || existing.block_number != incoming.block_number
@@ -396,6 +565,41 @@ fn ensure_raw_identity_matches(existing: &RawBlock, incoming: &RawBlock) -> Resu
     }
 
     Ok(())
+}
+
+fn decode_raw_log_replay_input(row: PgRow) -> Result<RawLogReplayInput> {
+    Ok(RawLogReplayInput {
+        raw_log_id: row.try_get("raw_log_id").context("missing raw_log_id")?,
+        chain_id: row.try_get("chain_id").context("missing chain_id")?,
+        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        block_number: row
+            .try_get("block_number")
+            .context("missing block_number")?,
+        parent_hash: row.try_get("parent_hash").context("missing parent_hash")?,
+        block_timestamp: row
+            .try_get("block_timestamp")
+            .context("missing block_timestamp")?,
+        lineage_canonicality_state: CanonicalityState::parse(
+            &row.try_get::<String, _>("lineage_canonicality_state")
+                .context("missing lineage_canonicality_state")?,
+        )?,
+        transaction_hash: row
+            .try_get("transaction_hash")
+            .context("missing transaction_hash")?,
+        transaction_index: row
+            .try_get("transaction_index")
+            .context("missing transaction_index")?,
+        log_index: row.try_get("log_index").context("missing log_index")?,
+        emitting_address: row
+            .try_get("emitting_address")
+            .context("missing emitting_address")?,
+        topics: row.try_get("topics").context("missing topics")?,
+        data: row.try_get("data").context("missing data")?,
+        raw_canonicality_state: CanonicalityState::parse(
+            &row.try_get::<String, _>("raw_canonicality_state")
+                .context("missing raw_canonicality_state")?,
+        )?,
+    })
 }
 
 fn merge_canonicality(

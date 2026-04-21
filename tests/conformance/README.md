@@ -36,6 +36,12 @@ Focused backfilled-data consumer conformance job, from the repository root:
 cargo test --manifest-path tests/conformance/Cargo.toml backfill
 ```
 
+Focused source-family backfill conformance lock, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml backfill_source_family
+```
+
 Execution notes:
 
 - uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set
@@ -238,3 +244,21 @@ Execution notes:
   replay negative checks for losing-branch address-name, address-history, and resolver answers, so
   backfilled data is validated against canonical current projection behavior without widening the
   shipped route contracts
+- `backfill_source_family_conformance_lock` is the source-family backfill conformance lock. It is
+  focused with `cargo test --manifest-path tests/conformance/Cargo.toml backfill_source_family`
+  and, in the worker run that introduced the lock, passed as one selected test with 73 tests
+  filtered out. The test uses the same local Postgres and per-test temporary database expectations
+  as the rest of the harness, seeds synthetic/local completed source-family jobs, and exercises no
+  live RPC or chain intake. It persists one synthetic completed job record for each source family
+  currently locked by the conformance slice: ENSv1 `ens_v1_registry_l1`, `ens_v1_registrar_l1`, and
+  `ens_v1_reverse_l1`; ENSv2 shadow `ens_v2_root_l1`, `ens_v2_registry_l1`,
+  `ens_v2_registrar_l1`, and `ens_v2_resolver_l1`; and Basenames
+  `basenames_base_registry`, `basenames_base_registrar`, `basenames_base_resolver`, and
+  `basenames_base_primary`. Each job persists `selector_kind=source_family`, one synthetic
+  selected target, `scan_mode=hash_pinned_block`, and two completed child ranges alongside the
+  separately seeded shipped route inputs; replay then rebuilds existing current projections before
+  the harness asserts the already shipped route responses and losing-branch negative checks. This
+  proves completed source-family job lifecycle state can coexist with replayed existing
+  consumer-capability responses; it does not prove those synthetic jobs admitted the route data or
+  graduate unsupported coverage, ENSv2 exact-name support, wrapper/migration history, manifest
+  capabilities, public API routes, or consumer-replacement semantics

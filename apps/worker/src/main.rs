@@ -804,12 +804,13 @@ impl Cli {
     fn writes_machine_json(&self) -> bool {
         matches!(
             &self.command,
-            Command::Replay(ReplayArgs {
-                command: ReplayCommand::AllCurrentProjections(AllCurrentProjectionsArgs {
-                    json: true,
-                    ..
+            Command::Inspect(_)
+                | Command::Replay(ReplayArgs {
+                    command: ReplayCommand::AllCurrentProjections(AllCurrentProjectionsArgs {
+                        json: true,
+                        ..
+                    })
                 })
-            })
         )
     }
 }
@@ -896,6 +897,7 @@ mod tests {
             "--block-hash",
             "0xabc",
         ]);
+        assert!(cli.writes_machine_json());
 
         match cli.command {
             Command::Inspect(args) => match args.command {
@@ -918,6 +920,7 @@ mod tests {
             "--backfill-job-id",
             "42",
         ]);
+        assert!(cli.writes_machine_json());
 
         match cli.command {
             Command::Inspect(args) => match args.command {
@@ -925,6 +928,34 @@ mod tests {
                     assert_eq!(args.backfill_job_id, 42);
                 }
                 other => panic!("expected backfill job inspect command, got {other:?}"),
+            },
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_stored_lineage_range_cli_is_available() {
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "inspect",
+            "stored-lineage-range",
+            "--chain-id",
+            "eth-mainnet",
+            "--range-start-block-number",
+            "10",
+            "--range-end-block-number",
+            "12",
+        ]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::Inspect(args) => match args.command {
+                inspect::InspectCommand::StoredLineageRange(args) => {
+                    assert_eq!(args.chain_id, "eth-mainnet");
+                    assert_eq!(args.range_start_block_number, 10);
+                    assert_eq!(args.range_end_block_number, 12);
+                }
+                other => panic!("expected stored lineage range inspect command, got {other:?}"),
             },
             other => panic!("expected inspect command, got {other:?}"),
         }

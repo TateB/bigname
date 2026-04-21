@@ -22,6 +22,8 @@ mod shipped_api {
         include!("conformance/replay.rs");
 
         include!("conformance/backfill.rs");
+
+        include!("conformance/backfill_sources.rs");
     }
 }
 
@@ -35,4 +37,10 @@ async fn replay_capability_conformance() -> anyhow::Result<()> {
 #[tokio::test]
 async fn backfilled_data_consumer_conformance_job() -> anyhow::Result<()> {
     shipped_api::conformance::run_backfilled_data_consumer_conformance_job().await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn backfill_source_family_existing_response_lock() -> anyhow::Result<()> {
+    shipped_api::conformance::run_backfill_source_family_existing_response_lock().await
 }

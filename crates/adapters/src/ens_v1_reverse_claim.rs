@@ -31,6 +31,16 @@ pub struct EnsV1ReverseClaimKindSyncSummary {
     pub inserted_count: usize,
 }
 
+impl EnsV1ReverseClaimSyncSummary {
+    pub async fn sync_for_block_hashes(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+    ) -> Result<Self> {
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes).await
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ReverseRawLogRow {
     chain_id: String,
@@ -73,6 +83,15 @@ pub async fn sync_ens_v1_reverse_claim(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[]).await
+}
+
+async fn sync_ens_v1_reverse_claim_with_scope(
+    pool: &PgPool,
+    chain: &str,
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
+) -> Result<EnsV1ReverseClaimSyncSummary> {
     let active_emitters = load_active_emitters(pool, chain).await?;
     if active_emitters.is_empty() {
         return Ok(EnsV1ReverseClaimSyncSummary {
@@ -84,7 +103,14 @@ pub async fn sync_ens_v1_reverse_claim(
         });
     }
 
-    let raw_logs = load_reverse_raw_logs(pool, chain, &active_emitters).await?;
+    let raw_logs = load_reverse_raw_logs(
+        pool,
+        chain,
+        &active_emitters,
+        restrict_to_block_hashes,
+        block_hashes,
+    )
+    .await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
         return Ok(EnsV1ReverseClaimSyncSummary {
@@ -252,6 +278,8 @@ async fn load_reverse_raw_logs(
     pool: &PgPool,
     chain: &str,
     active_emitters: &[ActiveEmitter],
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
 ) -> Result<Vec<ReverseRawLogRow>> {
     let emitters_by_address = active_emitters
         .iter()
@@ -275,6 +303,7 @@ async fn load_reverse_raw_logs(
         FROM raw_logs rl
         WHERE rl.chain_id = $1
           AND lower(rl.emitting_address) = ANY($2::TEXT[])
+          AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -285,6 +314,8 @@ async fn load_reverse_raw_logs(
     )
     .bind(chain)
     .bind(&watched_addresses)
+    .bind(restrict_to_block_hashes)
+    .bind(block_hashes)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load ENSv1 reverse raw logs for chain {chain}"))?;

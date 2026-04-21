@@ -15,9 +15,10 @@ use sqlx::{
 use super::*;
 use crate::{
     NormalizedEvent, RawBlock, RawCallSnapshot, RawCodeHash, RawLog, RawReceipt, RawTransaction,
-    default_database_url, upsert_chain_lineage_blocks, upsert_normalized_events, upsert_raw_blocks,
-    upsert_raw_call_snapshots, upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_receipts,
-    upsert_raw_transactions,
+    default_database_url, list_canonical_raw_log_replay_inputs,
+    list_canonical_raw_log_replay_inputs_for_block_hashes, upsert_chain_lineage_blocks,
+    upsert_normalized_events, upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
+    upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -164,6 +165,20 @@ fn raw_receipt(block_hash: &str, block_number: i64) -> RawReceipt {
 }
 
 fn raw_log(block_hash: &str, block_number: i64, log_index: i64) -> RawLog {
+    raw_log_with_state(
+        block_hash,
+        block_number,
+        log_index,
+        CanonicalityState::Canonical,
+    )
+}
+
+fn raw_log_with_state(
+    block_hash: &str,
+    block_number: i64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> RawLog {
     RawLog {
         chain_id: "eth-mainnet".to_owned(),
         block_hash: block_hash.to_owned(),
@@ -174,7 +189,7 @@ fn raw_log(block_hash: &str, block_number: i64, log_index: i64) -> RawLog {
         emitting_address: "0x0000000000000000000000000000000000000003".to_owned(),
         topics: vec!["0xtopic0".to_owned()],
         data: vec![0xde, 0xad],
-        canonicality_state: CanonicalityState::Canonical,
+        canonicality_state,
     }
 }
 
@@ -327,6 +342,127 @@ async fn audit_range_reports_stored_lineage_order_and_orphaned_status() -> Resul
             ("0x011", CanonicalityInspectionStatus::Orphaned, Some(11)),
             ("0x012", CanonicalityInspectionStatus::Safe, Some(12)),
         ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stored_lineage_range_lists_only_stored_rows_in_stable_order() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0x012b", Some("0x010"), 12, CanonicalityState::Safe),
+            lineage_block("0x010", None, 10, CanonicalityState::Canonical),
+            lineage_block("0x012a", Some("0x010"), 12, CanonicalityState::Orphaned),
+        ],
+    )
+    .await?;
+
+    let rows = list_stored_lineage_range(database.pool(), "eth-mainnet", 10, 12).await?;
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| (
+                row.block_number,
+                row.block_hash.as_str(),
+                row.parent_hash.as_deref(),
+                row.canonicality_state
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (10, "0x010", None, CanonicalityState::Canonical),
+            (12, "0x012a", Some("0x010"), CanonicalityState::Orphaned),
+            (12, "0x012b", Some("0x010"), CanonicalityState::Safe),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_log_replay_inputs_include_only_canonical_persisted_facts() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0x100", None, 100, CanonicalityState::Canonical),
+            lineage_block("0x101", Some("0x100"), 101, CanonicalityState::Safe),
+            lineage_block("0x102", Some("0x101"), 102, CanonicalityState::Finalized),
+            lineage_block("0x103", Some("0x102"), 103, CanonicalityState::Observed),
+            lineage_block("0x104", Some("0x103"), 104, CanonicalityState::Orphaned),
+        ],
+    )
+    .await?;
+
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            raw_log("0x100", 100, 0),
+            raw_log("0x101", 101, 0),
+            raw_log("0x102", 102, 0),
+            raw_log("0x103", 103, 0),
+            raw_log("0x104", 104, 0),
+            raw_log_with_state("0x102", 102, 9, CanonicalityState::Orphaned),
+        ],
+    )
+    .await?;
+
+    let range_inputs =
+        list_canonical_raw_log_replay_inputs(database.pool(), "eth-mainnet", 100, 104).await?;
+
+    assert_eq!(
+        range_inputs
+            .iter()
+            .map(|input| (
+                input.block_hash.as_str(),
+                input.lineage_canonicality_state,
+                input.log_index,
+                input.raw_canonicality_state
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "0x100",
+                CanonicalityState::Canonical,
+                0,
+                CanonicalityState::Canonical
+            ),
+            (
+                "0x101",
+                CanonicalityState::Safe,
+                0,
+                CanonicalityState::Canonical
+            ),
+            (
+                "0x102",
+                CanonicalityState::Finalized,
+                0,
+                CanonicalityState::Canonical
+            ),
+        ]
+    );
+
+    let hash_inputs = list_canonical_raw_log_replay_inputs_for_block_hashes(
+        database.pool(),
+        "eth-mainnet",
+        &["0x102".to_owned(), "0x100".to_owned(), "0x103".to_owned()],
+    )
+    .await?;
+
+    assert_eq!(
+        hash_inputs
+            .iter()
+            .map(|input| (
+                input.block_number,
+                input.block_hash.as_str(),
+                input.log_index
+            ))
+            .collect::<Vec<_>>(),
+        vec![(100, "0x100", 0), (102, "0x102", 0)]
     );
 
     database.cleanup().await

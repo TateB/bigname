@@ -2,6 +2,25 @@ pub async fn sync_ens_v1_unwrapped_authority(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[]).await
+}
+
+impl EnsV1UnwrappedAuthoritySyncSummary {
+    pub async fn sync_for_block_hashes(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+    ) -> Result<Self> {
+        sync_ens_v1_unwrapped_authority_with_scope(pool, chain, true, block_hashes).await
+    }
+}
+
+async fn sync_ens_v1_unwrapped_authority_with_scope(
+    pool: &PgPool,
+    chain: &str,
+    restrict_to_block_hashes: bool,
+    block_hashes: &[String],
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let active_emitters = load_active_emitters(pool, chain).await?;
     if active_emitters.is_empty() {
         return Ok(EnsV1UnwrappedAuthoritySyncSummary {
@@ -32,7 +51,14 @@ pub async fn sync_ens_v1_unwrapped_authority(
         blocks: canonical_blocks,
     };
     let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
-    let raw_logs = load_authority_raw_logs(pool, chain, &active_emitters).await?;
+    let raw_logs = load_authority_raw_logs(
+        pool,
+        chain,
+        &active_emitters,
+        restrict_to_block_hashes,
+        block_hashes,
+    )
+    .await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
         return Ok(EnsV1UnwrappedAuthoritySyncSummary {
