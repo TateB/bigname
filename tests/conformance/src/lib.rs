@@ -20,6 +20,8 @@ mod shipped_api {
         include!("conformance/history.rs");
 
         include!("conformance/replay.rs");
+
+        include!("conformance/backfill.rs");
     }
 }
 
@@ -27,4 +29,10 @@ mod shipped_api {
 #[tokio::test]
 async fn replay_capability_conformance() -> anyhow::Result<()> {
     shipped_api::conformance::run_replay_capability_conformance().await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn backfilled_data_consumer_conformance_job() -> anyhow::Result<()> {
+    shipped_api::conformance::run_backfilled_data_consumer_conformance_job().await
 }

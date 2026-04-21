@@ -1008,6 +1008,105 @@
             Ok(())
         }
 
+        async fn seed_completed_backfill_job(
+            database: &HarnessDatabase,
+        ) -> Result<bigname_storage::BackfillJobRecord> {
+            let created = bigname_storage::create_backfill_job(
+                &database.pool,
+                &bigname_storage::BackfillJobCreate {
+                    deployment_profile: "conformance".to_owned(),
+                    chain_id: "base-mainnet".to_owned(),
+                    source_identity: json!({
+                        "source_family": "conformance_backfill",
+                        "fixture": "phase9-backfilled-data-consumer-conformance-job",
+                    }),
+                    scan_mode: "synthetic-local".to_owned(),
+                    range_start_block_number: 98,
+                    range_end_block_number: 261,
+                    idempotency_key: "conformance-backfilled-data-consumer-routes".to_owned(),
+                    ranges: vec![
+                        bigname_storage::BackfillRangeSpec {
+                            range_start_block_number: 98,
+                            range_end_block_number: 180,
+                        },
+                        bigname_storage::BackfillRangeSpec {
+                            range_start_block_number: 181,
+                            range_end_block_number: 261,
+                        },
+                    ],
+                },
+            )
+            .await
+            .context("failed to create completed backfill job for conformance")?;
+
+            for (index, range) in created.ranges.iter().enumerate() {
+                let lease_owner = "conformance-backfill";
+                let lease_token = format!("conformance-backfill-lease-{index}");
+                let lease_expires_at = OffsetDateTime::from_unix_timestamp(
+                    OffsetDateTime::now_utc().unix_timestamp() + 300,
+                )
+                .context("failed to build conformance backfill lease deadline")?;
+                let reserved = bigname_storage::reserve_backfill_range(
+                    &database.pool,
+                    created.job.backfill_job_id,
+                    lease_owner,
+                    &lease_token,
+                    lease_expires_at,
+                )
+                .await
+                .context("failed to reserve conformance backfill range")?
+                .context("conformance backfill range should be reservable")?;
+                anyhow::ensure!(
+                    reserved.backfill_range_id == range.backfill_range_id,
+                    "reserved unexpected backfill range {} instead of {}",
+                    reserved.backfill_range_id,
+                    range.backfill_range_id
+                );
+
+                bigname_storage::advance_backfill_range(
+                    &database.pool,
+                    range.backfill_range_id,
+                    &lease_token,
+                    range.range_end_block_number,
+                )
+                .await
+                .context("failed to advance conformance backfill range to completion")?;
+                bigname_storage::complete_backfill_range(
+                    &database.pool,
+                    range.backfill_range_id,
+                    &lease_token,
+                )
+                .await
+                .context("failed to complete conformance backfill range")?;
+            }
+
+            let job =
+                bigname_storage::load_backfill_job(&database.pool, created.job.backfill_job_id)
+                    .await
+                    .context("failed to load completed conformance backfill job")?
+                    .context("completed conformance backfill job must exist")?;
+            let ranges =
+                bigname_storage::load_backfill_ranges(&database.pool, created.job.backfill_job_id)
+                    .await
+                    .context("failed to load completed conformance backfill ranges")?;
+
+            anyhow::ensure!(
+                job.status == bigname_storage::BackfillLifecycleStatus::Completed,
+                "conformance backfill job should be completed, got {}",
+                job.status.as_str()
+            );
+            anyhow::ensure!(
+                ranges.iter().all(|range| {
+                    range.status == bigname_storage::BackfillLifecycleStatus::Completed
+                        && range.checkpoint_block_number == range.range_end_block_number
+                        && range.completed_at.is_some()
+                }),
+                "all conformance backfill ranges must be completed at their declared range end"
+            );
+
+            Ok(bigname_storage::BackfillJobRecord { job, ranges })
+        }
+
         async fn set_normalized_events_canonicality(
             database: &HarnessDatabase,
             event_identities: &[&str],

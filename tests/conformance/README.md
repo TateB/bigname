@@ -30,11 +30,21 @@ Run the full route set:
 cargo test
 ```
 
+Focused backfilled-data consumer conformance job, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml backfill
+```
+
 Execution notes:
 
-- uses `BIGNAME_DATABASE_URL` when set
+- uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set
 - otherwise falls back to the bootstrap default `postgres://bigname:bigname@127.0.0.1:5432/bigname`
 - each test creates, migrates, and drops its own temporary database
+- replay and backfill conformance jobs expect that configured Postgres server to be local and
+  reachable with privileges to create and drop per-test databases; when no local Postgres is
+  available, the standalone backfill job may be treated as a no-run fallback instead of a route
+  contract failure, and should be rerun in an environment with Postgres before relying on it
 - the child collection contract seeds `children_current` rows and covers both the base
   `GET /v1/names/{namespace}/{name}/children` response and the shipped `include=counts`
   variant; the harness also asserts that unsupported non-`declared` `surface_classes` are
@@ -220,3 +230,11 @@ Execution notes:
   rebuild behavior over the shipped route contracts only; it does not widen route support,
   coverage semantics, verified execution support, manifest capabilities, ENSv2 exact-name support,
   Basenames path classes, or consumer replacement
+- `backfilled_data_consumer_conformance_job` is the standalone backfilled-data consumer
+  conformance entry point. It seeds a synthetic local persisted backfill job with completed child
+  ranges, replays all current projections, and asserts the existing shipped consumer capability
+  route families for exact name, children, address names, name/resource/address history,
+  resolution, resource permissions, resolver overview, and primary name. The job also keeps the
+  replay negative checks for losing-branch address-name, address-history, and resolver answers, so
+  backfilled data is validated against canonical current projection behavior without widening the
+  shipped route contracts
