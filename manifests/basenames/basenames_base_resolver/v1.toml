@@ -1,5 +1,12 @@
-# Bootstrap seed for the canonical Basenames resolver on Base mainnet.
-# Address confirmed from the upstream base/basenames deployment metadata.
+# Bootstrap seed for the canonical Basenames L2Resolver on Base mainnet.
+# Address and L2Resolver profile / authorization surface:
+# (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc).
 manifest_version = 1
 namespace = "basenames"
 source_family = "basenames_base_resolver"

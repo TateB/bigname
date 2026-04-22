@@ -1937,28 +1937,58 @@ fn assert_profile_admission_rows(
     expected_matched_code_hash: Option<&str>,
     expected_matched_contract_instance_id: Option<Uuid>,
 ) {
+    assert_profile_admission_rows_for_profile(
+        admissions,
+        address,
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        "public_resolver_compatible",
+        BTreeSet::from([
+            "resolver_authorization",
+            "resolver_record",
+            "resolver_record_version",
+        ]),
+        expected_status,
+        expected_admission_basis,
+        expected_contract_instance_id,
+        expected_observed_code_hash,
+        expected_matched_code_hash,
+        expected_matched_contract_instance_id,
+    );
+}
+
+fn assert_profile_admission_rows_for_profile(
+    admissions: &[ResolverProfileAdmission],
+    address: &str,
+    expected_chain: &str,
+    expected_source_family: &str,
+    expected_profile: &str,
+    expected_fact_families: BTreeSet<&str>,
+    expected_status: &str,
+    expected_admission_basis: &str,
+    expected_contract_instance_id: Uuid,
+    expected_observed_code_hash: Option<&str>,
+    expected_matched_code_hash: Option<&str>,
+    expected_matched_contract_instance_id: Option<Uuid>,
+) {
     let address = normalize_address(address);
     let rows = admissions
         .iter()
         .filter(|admission| admission.address == address)
         .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), expected_fact_families.len());
     assert_eq!(
         rows.iter()
             .map(|admission| admission.fact_family.as_str())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "resolver_authorization",
-            "resolver_record",
-            "resolver_record_version",
-        ])
+        expected_fact_families
     );
 
     for row in rows {
-        assert_eq!(row.chain, "ethereum-mainnet");
-        assert_eq!(row.source_family, "ens_v1_resolver_l1");
+        assert_eq!(row.chain, expected_chain);
+        assert_eq!(row.source_family, expected_source_family);
         assert_eq!(row.contract_instance_id, expected_contract_instance_id);
-        assert_eq!(row.profile, "public_resolver_compatible");
+        assert_eq!(row.profile, expected_profile);
         assert_eq!(row.status, expected_status);
         assert_eq!(row.admission_basis, expected_admission_basis);
         assert_eq!(
@@ -1971,6 +2001,275 @@ fn assert_profile_admission_rows(
             expected_matched_contract_instance_id
         );
     }
+}
+
+#[tokio::test]
+async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let registry_manifest =
+        checked_in_manifest_contents("basenames", "basenames_base_registry", "v2")?;
+    let resolver_manifest =
+        checked_in_manifest_contents("basenames", "basenames_base_resolver", "v1")?;
+
+    for citation in [
+        "(upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)",
+        "(upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)",
+    ] {
+        assert!(
+            resolver_manifest.contains(citation),
+            "Basenames resolver manifest is missing upstream citation {citation}"
+        );
+    }
+    assert!(!resolver_manifest.contains("ResolverBase"));
+    assert!(!resolver_manifest.contains("record-version"));
+
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_base_registry",
+        "v2",
+        &registry_manifest,
+    )?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_base_resolver",
+        "v1",
+        &resolver_manifest,
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+    let summary = sync_repository(database.pool(), &repository).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.active_manifest_count, 2);
+
+    let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
+    let l2_resolver_seed_address = "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD";
+    let supported_resolver_address = "0x0000000000000000000000000000000000000301";
+    let pending_resolver_address = "0x0000000000000000000000000000000000000302";
+    let unsupported_resolver_address = "0x0000000000000000000000000000000000000303";
+    let l2_resolver_code_hash = "keccak256:basenames-l2-resolver-compatible";
+    let unsupported_code_hash = "keccak256:basenames-unknown-resolver";
+
+    let seed_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "base-mainnet",
+        l2_resolver_seed_address,
+    )
+    .await?;
+
+    let supported_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "base-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: supported_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(100),
+            active_from_block_hash: Some(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "l2-resolver-code-hash-match",
+            }),
+        },
+    )
+    .await?;
+    let pending_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "base-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: pending_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(110),
+            active_from_block_hash: Some(
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "pending-code-hash",
+            }),
+        },
+    )
+    .await?;
+    let unsupported_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "base-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: unsupported_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(120),
+            active_from_block_hash: Some(
+                "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "unsupported-code-hash",
+            }),
+        },
+    )
+    .await?;
+
+    assert_eq!(supported_summary.admitted_edge_count, 1);
+    assert_eq!(pending_summary.admitted_edge_count, 1);
+    assert_eq!(unsupported_summary.admitted_edge_count, 1);
+    let supported_contract_instance_id = supported_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("supported resolver discovery must admit a target");
+    let pending_contract_instance_id = pending_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("pending resolver discovery must admit a target");
+    let unsupported_contract_instance_id = unsupported_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("unsupported resolver discovery must admit a target");
+
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "base-mainnet",
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        100,
+        l2_resolver_seed_address,
+        l2_resolver_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "base-mainnet",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        110,
+        supported_resolver_address,
+        l2_resolver_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "base-mainnet",
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        120,
+        unsupported_resolver_address,
+        unsupported_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    for (address, contract_instance_id) in [
+        (supported_resolver_address, supported_contract_instance_id),
+        (pending_resolver_address, pending_contract_instance_id),
+        (
+            unsupported_resolver_address,
+            unsupported_contract_instance_id,
+        ),
+    ] {
+        let address = normalize_address(address);
+        assert!(
+            watched_contracts.iter().any(|contract| {
+                contract.source_family == "basenames_base_resolver"
+                    && contract.address == address
+                    && contract.contract_instance_id == contract_instance_id
+                    && contract.source == WatchedContractSource::DiscoveryEdge
+            }),
+            "dynamic Basenames resolver {address} must remain an admitted watch target"
+        );
+    }
+
+    let admissions = load_basenames_l2_resolver_profile_admissions(database.pool()).await?;
+    assert_eq!(admissions.len(), 8);
+    assert!(
+        admissions
+            .iter()
+            .all(|admission| admission.profile != "public_resolver_compatible")
+    );
+    assert!(
+        admissions
+            .iter()
+            .all(|admission| admission.fact_family != "resolver_record_version")
+    );
+    let fact_families = BTreeSet::from(["resolver_authorization", "resolver_record"]);
+
+    assert_profile_admission_rows_for_profile(
+        &admissions,
+        l2_resolver_seed_address,
+        "base-mainnet",
+        "basenames_base_resolver",
+        "l2_resolver_compatible",
+        fact_families.clone(),
+        "supported",
+        "manifest_l2_resolver_seed",
+        seed_contract_instance_id,
+        Some(l2_resolver_code_hash),
+        Some(l2_resolver_code_hash),
+        Some(seed_contract_instance_id),
+    );
+    assert_profile_admission_rows_for_profile(
+        &admissions,
+        supported_resolver_address,
+        "base-mainnet",
+        "basenames_base_resolver",
+        "l2_resolver_compatible",
+        fact_families.clone(),
+        "supported",
+        "code_hash_match",
+        supported_contract_instance_id,
+        Some(l2_resolver_code_hash),
+        Some(l2_resolver_code_hash),
+        Some(seed_contract_instance_id),
+    );
+    assert_profile_admission_rows_for_profile(
+        &admissions,
+        pending_resolver_address,
+        "base-mainnet",
+        "basenames_base_resolver",
+        "l2_resolver_compatible",
+        fact_families.clone(),
+        "pending",
+        "code_hash_pending",
+        pending_contract_instance_id,
+        None,
+        None,
+        None,
+    );
+    assert_profile_admission_rows_for_profile(
+        &admissions,
+        unsupported_resolver_address,
+        "base-mainnet",
+        "basenames_base_resolver",
+        "l2_resolver_compatible",
+        fact_families,
+        "unsupported",
+        "code_hash_mismatch",
+        unsupported_contract_instance_id,
+        Some(unsupported_code_hash),
+        None,
+        None,
+    );
+
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]
