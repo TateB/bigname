@@ -265,7 +265,7 @@ async fn insert_active_discovery_edge_with_range(
                 chain_id,
                 edge_kind,
                 from_contract_instance_id,
-                to_contract_instance_id: contract_instance_id,
+                to_contract_instance_id,
                 discovery_source,
                 source_manifest_id,
                 admission,
