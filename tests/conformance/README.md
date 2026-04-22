@@ -53,7 +53,7 @@ cargo test --manifest-path tests/conformance/Cargo.toml backfill
 Focused source-family backfill conformance lock, from the repository root:
 
 ```sh
-cargo test --manifest-path tests/conformance/Cargo.toml backfill_source_family
+cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_source_family
 ```
 
 Focused reorg chaos drill conformance job, from the repository root:
@@ -66,6 +66,12 @@ Focused dynamic resolver profile conformance coverage, from the repository root:
 
 ```sh
 cargo test --manifest-path tests/conformance/Cargo.toml dynamic_resolver_profile -- --nocapture
+```
+
+Focused primary-name route contract coverage, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml primary_names_contract -- --nocapture
 ```
 
 Execution notes:
@@ -126,6 +132,17 @@ Execution notes:
   `unsupported` because values are not retained in normalized events, missing `contenthash`
   returns `not_found`, unsupported `pubkey` stays `unsupported`, and this does not imply
   verified resolution or universal resolver execution support
+- the dynamic resolver profile lock is focused with
+  `cargo test --manifest-path tests/conformance/Cargo.toml dynamic_resolver_profile -- --nocapture`.
+  It uses the same local configured Postgres and per-test temporary database expectations as the
+  rest of the route harness, with no live RPC or chain intake. The profile covers the local
+  positive readback lane whose fixture is labeled Basenames `L2Resolver`-compatible for supported
+  resolver-profile answers, with the fixture label anchored to upstream `L2Resolver`
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L23 @ basenames@1809bbc). Pending or
+  unsupported dynamic resolver targets remain explicit as `resolver_family_pending`; the lock does
+  not widen resolver support, route coverage semantics, Basenames path classes, manifest
+  capabilities, verified execution support, or consumer replacement
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
@@ -175,7 +192,10 @@ Execution notes:
   `unsupported_reason="primary-name coverage is not yet supported"`), empty `chain_positions`,
   `consistency=head`, and a UTC `last_updated` timestamp; persisted verified readback keeps that
   same route-level coverage and `derivation_kind`, while swapping in the persisted
-  `manifest_versions`, `execution_trace_id`, and execution `finished_at` as `last_updated`
+  `manifest_versions`, `execution_trace_id`, and execution `finished_at` as `last_updated`.
+  The focused `primary_names_contract` filter is the practical lock for this route: it covers
+  local exact-tuple primary-name route readback for ENS and Basenames persisted fixtures. This is
+  local route coverage only, not external app parity or first-party app replacement
 - the resource-permissions contract seeds `permissions_current` rows and covers both the base
   `GET /v1/resources/{resource_id}/permissions` collection response and the shipped `subject` and
   `scope` query filters. Standalone ENSv2 readback coverage includes resource-scope and
@@ -257,7 +277,10 @@ Execution notes:
   fixtures, snapshots exact-name, child and address-name collection, name/resource/address
   history, resolution, resource-permissions, resolver-overview, and primary-name route payloads,
   runs `bigname-worker replay all-current-projections` against that same database, and asserts the
-  route payloads remain byte-for-byte JSON stable. Reorg/current-answer replay coverage also
+  route payloads remain byte-for-byte JSON stable. The focused filter is `replay`; current replay
+  coverage includes resolver-profile-gated answers in the supported-read corpus, so the lock
+  proves those local answers survive all-current projection replay. Reorg/current-answer replay
+  coverage also
   seeds stale losing-branch current projections, marks the losing-branch `normalized_events` and
   `raw_blocks` source rows `orphaned`, inserts canonical winning-branch source rows, proves stale
   current answers exist before replay, runs `bigname-worker replay all-current-projections`, and
@@ -274,8 +297,8 @@ Execution notes:
   replay negative checks for losing-branch address-name, address-history, and resolver answers, so
   backfilled data is validated against canonical current projection behavior without widening the
   shipped route contracts
-- `backfill_source_family_conformance_lock` is the source-family backfill conformance lock. It is
-  focused with `cargo test --manifest-path tests/conformance/Cargo.toml backfill_source_family`
+- the source-family backfill conformance lock is focused with
+  `cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_source_family`
   and, in the worker run that introduced the lock, passed as one selected test with 73 tests
   filtered out. The test uses the same local Postgres and per-test temporary database expectations
   as the rest of the harness, seeds synthetic/local completed source-family jobs, and exercises no
@@ -287,9 +310,11 @@ Execution notes:
   `basenames_base_primary`. Each job persists `selector_kind=source_family`, one synthetic
   selected target, `scan_mode=hash_pinned_block`, and two completed child ranges alongside the
   separately seeded shipped route inputs; replay then rebuilds existing current projections before
-  the harness asserts the already shipped route responses and losing-branch negative checks. This
-  proves completed source-family job lifecycle state can coexist with replayed existing
-  consumer-capability responses; it does not prove those synthetic jobs admitted the route data or
+  the harness asserts the already shipped route responses, resolver-profile-gated answers, and
+  losing-branch negative checks. This proves completed source-family job lifecycle state can
+  coexist with replayed existing consumer-capability responses, including the local supported
+  resolver-profile answers, after source-family backfill; it does not prove those synthetic jobs
+  admitted the route data or
   graduate unsupported coverage, ENSv2 exact-name support, wrapper/migration history, manifest
   capabilities, public API routes, or consumer-replacement semantics
 - `reorg_chaos_drill_conformance_job` is the standalone reorg chaos drill conformance entry

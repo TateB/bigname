@@ -1,3 +1,29 @@
+fn primary_name_supported_coverage(namespace: &str) -> Value {
+    let source_classes_considered = match namespace {
+        "ens" => json!(["ens_v1_reverse_l1", "ens_execution"]),
+        "basenames" => json!(["basenames_base_primary", "basenames_execution"]),
+        other => panic!("unsupported test namespace {other}"),
+    };
+
+    json!({
+        "status": "partial",
+        "exhaustiveness": "non_enumerable",
+        "source_classes_considered": source_classes_considered,
+        "enumeration_basis": "primary_name_lookup",
+        "unsupported_reason": null,
+    })
+}
+
+fn primary_name_unsupported_coverage() -> Value {
+    json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_applicable",
+        "source_classes_considered": [],
+        "enumeration_basis": "primary_name_lookup",
+        "unsupported_reason": "primary-name exact-tuple persisted readback is not supported for the requested tuple",
+    })
+}
+
 #[tokio::test]
 async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
     let database = TestDatabase::new(false).await?;
@@ -96,16 +122,7 @@ async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
         }))
     );
     assert_eq!(both_payload.verified_state, verified_payload.verified_state);
-    assert_eq!(
-        default_payload.coverage,
-        json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": [],
-            "enumeration_basis": "primary_name_lookup",
-            "unsupported_reason": "primary-name coverage is not yet supported",
-        })
-    );
+    assert_eq!(default_payload.coverage, primary_name_unsupported_coverage());
     assert_eq!(
         default_payload.provenance.get("derivation_kind"),
         Some(&json!("primary_name_route_bootstrap"))
@@ -189,6 +206,7 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
         payload.provenance.get("execution_trace_id"),
         Some(&Value::Null)
     );
+    assert_eq!(payload.coverage, primary_name_unsupported_coverage());
 
     database.cleanup().await?;
     Ok(())
@@ -574,6 +592,7 @@ async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -
             }
         }))
     );
+    assert_eq!(payload.coverage, primary_name_unsupported_coverage());
 
     database.cleanup().await?;
     Ok(())
@@ -860,16 +879,7 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
             .and_then(|provenance| provenance.get("manifest_versions")),
         verified_payload.provenance.get("manifest_versions"),
     );
-    assert_eq!(
-        verified_payload.coverage,
-        json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": [],
-            "enumeration_basis": "primary_name_lookup",
-            "unsupported_reason": "primary-name coverage is not yet supported",
-        })
-    );
+    assert_eq!(verified_payload.coverage, primary_name_supported_coverage("ens"));
     assert_eq!(both_payload.coverage, verified_payload.coverage);
     assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:01Z");
     assert_eq!(both_payload.last_updated, "2024-05-31T16:20:01Z");
@@ -1029,13 +1039,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
     assert_eq!(both_payload.provenance, verified_payload.provenance);
     assert_eq!(
         verified_payload.coverage,
-        json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": [],
-            "enumeration_basis": "primary_name_lookup",
-            "unsupported_reason": "primary-name coverage is not yet supported",
-        })
+        primary_name_supported_coverage("basenames")
     );
     assert_eq!(both_payload.coverage, verified_payload.coverage);
     assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:10Z");
@@ -1160,13 +1164,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
     assert_eq!(both_payload.provenance, verified_payload.provenance);
     assert_eq!(
         verified_payload.coverage,
-        json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": [],
-            "enumeration_basis": "primary_name_lookup",
-            "unsupported_reason": "primary-name coverage is not yet supported",
-        })
+        primary_name_supported_coverage("basenames")
     );
     assert_eq!(both_payload.coverage, verified_payload.coverage);
     assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:11Z");
@@ -1304,13 +1302,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
     assert_eq!(both_payload.provenance, verified_payload.provenance);
     assert_eq!(
         verified_payload.coverage,
-        json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": [],
-            "enumeration_basis": "primary_name_lookup",
-            "unsupported_reason": "primary-name coverage is not yet supported",
-        })
+        primary_name_supported_coverage("basenames")
     );
     assert_eq!(both_payload.coverage, verified_payload.coverage);
     assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:12Z");
@@ -1445,6 +1437,8 @@ async fn get_primary_names_reads_persisted_verified_primary_name_mismatch_for_ex
             .and_then(|provenance| provenance.get("manifest_versions")),
         verified_payload.provenance.get("manifest_versions"),
     );
+    assert_eq!(verified_payload.coverage, primary_name_supported_coverage("ens"));
+    assert_eq!(both_payload.coverage, verified_payload.coverage);
 
     database.cleanup().await?;
     Ok(())

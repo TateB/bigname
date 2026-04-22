@@ -88,7 +88,7 @@
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -172,7 +172,7 @@
             );
 
             for payload in [&declared_payload, &both_payload] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -401,7 +401,7 @@
                 &sibling_declared_payload,
                 &sibling_both_payload,
             ] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -489,7 +489,7 @@
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -615,7 +615,7 @@
             );
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -785,13 +785,13 @@
             assert_eq!(both_payload.declared_state, declared_payload.declared_state);
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_bootstrap_invariants(&declared_payload);
-            assert_primary_name_persisted_readback_invariants(
+            assert_primary_name_unsupported_bootstrap_invariants(&declared_payload);
+            assert_primary_name_supported_persisted_readback_invariants(
                 &verified_payload,
                 execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_persisted_readback_invariants(
+            assert_primary_name_supported_persisted_readback_invariants(
                 &both_payload,
                 execution_trace_id,
                 finished_at,
@@ -927,13 +927,13 @@
             );
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &verified_payload,
                 "basenames",
                 execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &both_payload,
                 "basenames",
                 execution_trace_id,
@@ -1059,13 +1059,13 @@
             );
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &verified_payload,
                 "basenames",
                 execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &both_payload,
                 "basenames",
                 execution_trace_id,
@@ -1203,13 +1203,13 @@
                 "invalid_name readback must not backfill claimed_primary_name.name"
             );
 
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &verified_payload,
                 "basenames",
                 execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
                 &both_payload,
                 "basenames",
                 execution_trace_id,
@@ -1228,14 +1228,14 @@
                 PersistedPrimaryNameInvalidation::Topology,
                 PersistedPrimaryNameInvalidation::Record,
             ] {
-                run_primary_name_execution_invalidation_case(invalidation).await?;
+                run_primary_name_execution_invalidation_coverage_case(invalidation).await?;
             }
 
             Ok(())
         }
 
         #[tokio::test]
-        async fn primary_names_contract_keeps_verified_bootstrap_fallback_for_tuple_present()
+        async fn primary_names_contract_reports_unsupported_coverage_for_out_of_class_tuple_present()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000abc";
@@ -1324,8 +1324,352 @@
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_bootstrap_invariants(payload);
             }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        fn primary_name_supported_exact_tuple_coverage(namespace: &str) -> Value {
+            let source_classes_considered = match namespace {
+                "ens" => json!(["ens_v1_reverse_l1", "ens_execution"]),
+                "basenames" => json!(["basenames_base_primary", "basenames_execution"]),
+                other => panic!("unsupported primary-name coverage namespace {other}"),
+            };
+
+            json!({
+                "status": "partial",
+                "exhaustiveness": "non_enumerable",
+                "source_classes_considered": source_classes_considered,
+                "enumeration_basis": "primary_name_lookup",
+                "unsupported_reason": null,
+            })
+        }
+
+        fn primary_name_unsupported_exact_tuple_coverage() -> Value {
+            json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_applicable",
+                "source_classes_considered": [],
+                "enumeration_basis": "primary_name_lookup",
+                "unsupported_reason": "primary-name exact-tuple persisted readback is not supported for the requested tuple",
+            })
+        }
+
+        fn assert_primary_name_route_common_invariants_with_coverage(
+            payload: &PrimaryNameResponse,
+            expected_coverage: Value,
+        ) {
+            assert_eq!(payload.coverage, expected_coverage);
+            assert_eq!(payload.chain_positions, json!({}));
+            assert_eq!(payload.consistency, "head");
+        }
+
+        fn assert_primary_name_bootstrap_invariants_with_coverage(
+            payload: &PrimaryNameResponse,
+            expected_coverage: Value,
+        ) {
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": [],
+                    "raw_fact_refs": [],
+                    "manifest_versions": [],
+                    "execution_trace_id": null,
+                    "derivation_kind": "primary_name_route_bootstrap",
+                })
+            );
+            assert_primary_name_route_common_invariants_with_coverage(
+                payload,
+                expected_coverage,
+            );
+            assert!(payload.last_updated.ends_with('Z'));
+        }
+
+        fn assert_primary_name_unsupported_bootstrap_invariants(
+            payload: &PrimaryNameResponse,
+        ) {
+            assert_primary_name_bootstrap_invariants_with_coverage(
+                payload,
+                primary_name_unsupported_exact_tuple_coverage(),
+            );
+        }
+
+        fn assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            payload: &PrimaryNameResponse,
+            namespace: &str,
+            execution_trace_id: Uuid,
+            finished_at: OffsetDateTime,
+        ) {
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": [],
+                    "raw_fact_refs": [],
+                    "manifest_versions": primary_name_execution_manifest_versions_for_namespace(namespace),
+                    "execution_trace_id": execution_trace_id.to_string(),
+                    "derivation_kind": "primary_name_route_bootstrap",
+                })
+            );
+            assert_primary_name_route_common_invariants_with_coverage(
+                payload,
+                primary_name_supported_exact_tuple_coverage(namespace),
+            );
+            assert_eq!(payload.last_updated, format_timestamp(finished_at));
+        }
+
+        fn assert_primary_name_supported_persisted_readback_invariants(
+            payload: &PrimaryNameResponse,
+            execution_trace_id: Uuid,
+            finished_at: OffsetDateTime,
+        ) {
+            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+                payload,
+                "ens",
+                execution_trace_id,
+                finished_at,
+            );
+        }
+
+        async fn run_primary_name_execution_invalidation_coverage_case(
+            invalidation: PersistedPrimaryNameInvalidation,
+        ) -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture =
+                seed_persisted_primary_name_execution_fixture(&database, invalidation).await?;
+            let expected_data = json!({
+                "address": fixture.address,
+                "namespace": "ens",
+                "coin_type": "60",
+            });
+
+            let verified_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "verified primary-name request failed before {}",
+                        invalidation.label()
+                    )
+                })?;
+            let both_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=both",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "mixed primary-name request failed before {}",
+                        invalidation.label()
+                    )
+                })?;
+
+            assert_eq!(verified_before_response.status(), StatusCode::OK);
+            assert_eq!(both_before_response.status(), StatusCode::OK);
+
+            let verified_before_payload: PrimaryNameResponse =
+                read_json(verified_before_response).await?;
+            let both_before_payload: PrimaryNameResponse = read_json(both_before_response).await?;
+            let mut expected_target_verified_primary_name =
+                fixture.target_verified_primary_name.clone();
+            expected_target_verified_primary_name
+                .as_object_mut()
+                .expect("target verified primary-name fixture must be an object")
+                .insert(
+                    "provenance".to_owned(),
+                    json!({
+                        "manifest_versions": primary_name_execution_manifest_versions(),
+                        "execution_trace_id": fixture.target_execution_trace_id.to_string(),
+                    }),
+                );
+
+            assert_eq!(verified_before_payload.data, expected_data);
+            assert_eq!(both_before_payload.data, expected_data);
+            assert_eq!(verified_before_payload.declared_state, None);
+            assert_eq!(
+                verified_before_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": expected_target_verified_primary_name,
+                }))
+            );
+            assert_eq!(
+                both_before_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "not_found",
+                        "provenance": seeded_primary_name_claim_provenance(),
+                    }
+                }))
+            );
+            assert_eq!(
+                both_before_payload.verified_state,
+                verified_before_payload.verified_state
+            );
+            assert_primary_name_supported_persisted_readback_invariants(
+                &verified_before_payload,
+                fixture.target_execution_trace_id,
+                fixture.target_finished_at,
+            );
+            assert_primary_name_supported_persisted_readback_invariants(
+                &both_before_payload,
+                fixture.target_execution_trace_id,
+                fixture.target_finished_at,
+            );
+
+            invalidate_persisted_primary_name_execution(
+                &database,
+                &fixture.target_cache_key,
+                invalidation,
+            )
+            .await?;
+
+            assert_eq!(
+                load_execution_outcome(&database.pool, &fixture.target_cache_key).await?,
+                None
+            );
+            assert!(
+                load_execution_trace(&database.pool, fixture.target_execution_trace_id)
+                    .await?
+                    .is_some(),
+                "execution traces stay durable after verified-primary cache invalidation",
+            );
+            assert!(
+                load_execution_outcome(&database.pool, &fixture.sibling_cache_key)
+                    .await?
+                    .is_some(),
+                "exact-tuple invalidation must keep sibling tuple outcomes",
+            );
+
+            let verified_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "verified primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+            let both_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=both",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "mixed primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+            let sibling_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=61&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "sibling primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+
+            assert_eq!(verified_after_response.status(), StatusCode::OK);
+            assert_eq!(both_after_response.status(), StatusCode::OK);
+            assert_eq!(sibling_response.status(), StatusCode::OK);
+
+            let verified_after_payload: PrimaryNameResponse =
+                read_json(verified_after_response).await?;
+            let both_after_payload: PrimaryNameResponse = read_json(both_after_response).await?;
+            let sibling_payload: PrimaryNameResponse = read_json(sibling_response).await?;
+
+            assert_eq!(verified_after_payload.data, expected_data);
+            assert_eq!(both_after_payload.data, expected_data);
+            assert_eq!(verified_after_payload.declared_state, None);
+            assert_eq!(
+                verified_after_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(
+                both_after_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "not_found",
+                        "provenance": seeded_primary_name_claim_provenance(),
+                    }
+                }))
+            );
+            assert_eq!(
+                both_after_payload.verified_state,
+                verified_after_payload.verified_state
+            );
+            assert_primary_name_unsupported_bootstrap_invariants(&verified_after_payload);
+            assert_primary_name_unsupported_bootstrap_invariants(&both_after_payload);
+
+            let mut expected_sibling_verified_primary_name =
+                fixture.sibling_verified_primary_name.clone();
+            expected_sibling_verified_primary_name
+                .as_object_mut()
+                .expect("sibling verified primary-name fixture must be an object")
+                .insert(
+                    "provenance".to_owned(),
+                    json!({
+                        "manifest_versions": primary_name_execution_manifest_versions(),
+                        "execution_trace_id": invalidation
+                            .sibling_execution_trace_id()
+                            .to_string(),
+                    }),
+                );
+
+            assert_eq!(
+                sibling_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": expected_sibling_verified_primary_name,
+                }))
+            );
+            assert_primary_name_supported_persisted_readback_invariants(
+                &sibling_payload,
+                invalidation.sibling_execution_trace_id(),
+                fixture.sibling_finished_at,
+            );
 
             database.cleanup().await?;
             Ok(())

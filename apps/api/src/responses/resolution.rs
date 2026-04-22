@@ -126,7 +126,7 @@ fn build_primary_name_response(
         declared_state,
         verified_state,
         provenance: primary_name_route_provenance(lookup_state.persisted_verified.as_ref()),
-        coverage: primary_name_bootstrap_coverage(),
+        coverage: primary_name_route_coverage(&namespace, lookup_state),
         chain_positions: empty_object(),
         consistency: "head".to_owned(),
         last_updated: primary_name_last_updated(lookup_state.persisted_verified.as_ref()),
@@ -360,13 +360,47 @@ fn primary_name_verified_readback_provenance(
     Ok(provenance)
 }
 
-fn primary_name_bootstrap_coverage() -> JsonValue {
+fn primary_name_route_coverage(namespace: &str, lookup_state: &PrimaryNameLookupState) -> JsonValue {
+    if matches!(lookup_state.tuple_state, PrimaryNameTupleState::TuplePresent(_))
+        && lookup_state.persisted_verified.is_some()
+    {
+        match namespace {
+            "ens" => {
+                return primary_name_exact_tuple_coverage(&[
+                    "ens_v1_reverse_l1",
+                    "ens_execution",
+                ]);
+            }
+            "basenames" => {
+                return primary_name_exact_tuple_coverage(&[
+                    "basenames_base_primary",
+                    "basenames_execution",
+                ]);
+            }
+            _ => {}
+        }
+    }
+
+    primary_name_unsupported_exact_tuple_coverage()
+}
+
+fn primary_name_exact_tuple_coverage(source_classes: &[&str]) -> JsonValue {
+    json!({
+        "status": "partial",
+        "exhaustiveness": "non_enumerable",
+        "source_classes_considered": source_classes,
+        "enumeration_basis": "primary_name_lookup",
+        "unsupported_reason": null,
+    })
+}
+
+fn primary_name_unsupported_exact_tuple_coverage() -> JsonValue {
     json!({
         "status": "unsupported",
         "exhaustiveness": "not_applicable",
         "source_classes_considered": [],
         "enumeration_basis": "primary_name_lookup",
-        "unsupported_reason": "primary-name coverage is not yet supported",
+        "unsupported_reason": "primary-name exact-tuple persisted readback is not supported for the requested tuple",
     })
 }
 
@@ -377,4 +411,3 @@ fn primary_name_last_updated(
         .map(|persisted_verified| format_timestamp(persisted_verified.finished_at))
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
 }
-
