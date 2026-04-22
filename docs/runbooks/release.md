@@ -3,8 +3,9 @@
 Use the release smoke gate before promoting a release candidate and as the CI
 release safety check. The gate is local: it validates the checked-out revision,
 the configured PostgreSQL database, generated OpenAPI artifact consistency, and
-the API process readiness endpoint. It does not deploy, contact external RPC
-providers, contact GitHub or Fly, or validate a remote production target.
+the conformance ownership table for published OpenAPI paths, and the API process
+readiness endpoint. It does not deploy, contact external RPC providers, contact
+GitHub or Fly, or validate a remote production target.
 
 ## Command
 
@@ -48,9 +49,13 @@ The script loads `.env` when it exists, then uses the environment values above.
 1. Validates no-network constraints when `--no-network` is passed.
 2. Runs `cargo run --locked -p bigname-api -- print-openapi` and compares the
    result to `docs/api-v1.openapi.json`.
-3. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
+3. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
+   openapi` as the OpenAPI conformance-owner smoke guard. This guard reads only
+   the checked-in `docs/api-v1.openapi.json` artifact and the conformance owner
+   table in the conformance harness; it is no-network and no-Postgres.
+4. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
    database.
-4. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
+5. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` and probes `/healthz` until it returns
    `200` with `"status":"ready"`.
 
@@ -66,6 +71,8 @@ A passing gate means:
 
 - the checked-in OpenAPI JSON matches the API generator output for this
   revision;
+- every published OpenAPI public path has an explicit conformance harness owner
+  or an explicit private/out-of-scope reason in the conformance owner table;
 - the checked-in migrations apply to the configured local database;
 - the API process can start from this revision; and
 - the private readiness endpoint reports ready against that database.
@@ -77,6 +84,11 @@ Any non-zero exit blocks the release candidate until triaged.
 - OpenAPI drift failure: the generated artifact and checked-in artifact disagree.
   Do not promote the candidate until the API contract and checked-in artifact are
   intentionally reconciled.
+- OpenAPI conformance-owner failure: a published public path in
+  `docs/api-v1.openapi.json` lacks a conformance harness owner, an owner entry is
+  blank, or an out-of-scope entry lacks an explicit reason. Do not promote until
+  the route has an owning conformance harness or a deliberate private/out-of-scope
+  reason.
 - Migration failure: the configured database cannot apply the checked-in
   migrations. Do not promote until the migration or database precondition is
   fixed.
@@ -112,7 +124,8 @@ CI runs this gate as `release smoke gate (no network)` with:
 ```
 
 The CI no-network subset preserves the existing OpenAPI drift and migration
-checks while adding local API readiness. It uses loopback-only smoke URLs and
-offline Cargo execution. A CI failure has the same release-blocking meaning as a
-local non-zero exit, except that missing cached dependencies are a CI
-environment issue rather than a product regression.
+checks while adding the no-Postgres OpenAPI conformance-owner guard and local API
+readiness. It uses loopback-only smoke URLs and offline Cargo execution. A CI
+failure has the same release-blocking meaning as a local non-zero exit, except
+that missing cached dependencies are a CI environment issue rather than a product
+regression.

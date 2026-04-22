@@ -11,6 +11,7 @@ Usage: scripts/release-smoke [--no-network]
 Runs the local release smoke gate:
   - no-network sanity, when requested
   - checked-in OpenAPI artifact drift
+  - conformance owner OpenAPI smoke guard
   - checked-in database migrations
   - local API /healthz readiness
 
@@ -108,6 +109,11 @@ run_openapi_drift_check() {
   diff -u docs/api-v1.openapi.json "$openapi_tmp"
 }
 
+run_conformance_owner_smoke_gate() {
+  log "checking conformance owner OpenAPI smoke guard"
+  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml openapi
+}
+
 run_migrations() {
   log "applying checked-in migrations"
   cargo run "${cargo_args[@]}" -p bigname-worker -- migrate
@@ -153,6 +159,7 @@ require_command diff
 require_command seq
 assert_no_network_mode
 run_openapi_drift_check
+run_conformance_owner_smoke_gate
 run_migrations
 run_readiness_check
 log "release smoke gate passed"

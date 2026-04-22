@@ -3,9 +3,10 @@
 Use the rollback smoke gate when preparing or validating a rollback candidate.
 The gate is local: it validates the checked-out rollback revision, the
 configured PostgreSQL database, generated OpenAPI artifact consistency,
-migration idempotence, and the API process readiness endpoint. It does not
-perform the production rollback, deploy, contact external RPC providers, contact
-GitHub or Fly, or validate a remote production target.
+migration idempotence, the conformance ownership table for published OpenAPI
+paths, and the API process readiness endpoint. It does not perform the
+production rollback, deploy, contact external RPC providers, contact GitHub or
+Fly, or validate a remote production target.
 
 ## Command
 
@@ -53,7 +54,11 @@ The script loads `.env` when it exists, then uses the environment values above.
    migration behavior in the rollback checkout.
 4. Runs `cargo run --locked -p bigname-api -- print-openapi` and compares the
    result to `docs/api-v1.openapi.json`.
-5. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
+5. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
+   openapi` as the OpenAPI conformance-owner smoke guard. This guard reads only
+   the checked-in `docs/api-v1.openapi.json` artifact and the conformance owner
+   table in the conformance harness; it is no-network and no-Postgres.
+6. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` and probes `/healthz` until it returns
    `200` with `"status":"ready"`.
 
@@ -71,6 +76,8 @@ A passing gate means:
   configured local database without failing;
 - the checked-in OpenAPI JSON matches the rollback checkout's API generator
   output;
+- every published OpenAPI public path has an explicit conformance harness owner
+  or an explicit private/out-of-scope reason in the conformance owner table;
 - the API process can start from the rollback checkout; and
 - the private readiness endpoint reports ready against that database.
 
@@ -87,6 +94,11 @@ Any non-zero exit blocks automatic rollback promotion until triaged.
 - OpenAPI drift failure: the generated artifact and checked-in artifact disagree
   in the rollback checkout. Do not promote that checkout until the artifact and
   contract state are reconciled.
+- OpenAPI conformance-owner failure: a published public path in
+  `docs/api-v1.openapi.json` lacks a conformance harness owner, an owner entry is
+  blank, or an out-of-scope entry lacks an explicit reason. Do not promote the
+  rollback checkout until the route has an owning conformance harness or a
+  deliberate private/out-of-scope reason.
 - Readiness failure: the rollback API did not stay up or `/healthz` did not
   report ready. Do not treat the rollback as service-restoring until the API
   logs and database reachability explain the failure.
@@ -123,8 +135,8 @@ CI runs this gate as `rollback smoke gate (no network)` with:
 ```
 
 The CI no-network subset preserves the existing OpenAPI drift and migration
-checks while adding the double migration idempotence check and local API
-readiness. It uses loopback-only smoke URLs and offline Cargo execution. A CI
-failure has the same rollback-blocking meaning as a local non-zero exit, except
-that missing cached dependencies are a CI environment issue rather than a
-product regression.
+checks while adding the double migration idempotence check, the no-Postgres
+OpenAPI conformance-owner guard, and local API readiness. It uses loopback-only
+smoke URLs and offline Cargo execution. A CI failure has the same
+rollback-blocking meaning as a local non-zero exit, except that missing cached
+dependencies are a CI environment issue rather than a product regression.
