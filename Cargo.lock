@@ -264,6 +264,7 @@ dependencies = [
  "anyhow",
  "bigname-domain",
  "bigname-execution",
+ "bigname-manifests",
  "bigname-storage",
  "clap",
  "serde_json",

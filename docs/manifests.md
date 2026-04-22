@@ -253,6 +253,8 @@ Rules:
 - watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root -> discovery edge(s) -> contract_instance_id`
 - address-only watch state is derived and may be rebuilt from manifests, contract-instance address attributes, and active discovery edges
 
+Read-only runtime watch-plan inspection is operational JSON over existing admitted watch-plan state through `bigname-worker inspect watch-plan --json`. The inspection surface exposes active watched contracts / watch-plan entries with their source kind (`manifest_root`, `manifest_contract`, or `discovery_edge`), source families, contract instance IDs, chain addresses, source manifest IDs when available, and active block ranges. It uses existing manifest/discovery state only and must not perform fresh chain comparison, admit contracts, mutate discovery edges, change capability flags, update watch-plan inputs, write projections, expose a public `v1` route, or claim consumer replacement.
+
 ## 9. Capability Policy
 
 Capabilities gate behavior, not public-contract existence.

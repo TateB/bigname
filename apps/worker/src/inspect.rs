@@ -1,4 +1,9 @@
 use anyhow::{Context, Result};
+use bigname_manifests::{
+    WatchedChainPlan, WatchedContract, WatchedContractChainSummary, WatchedContractSource,
+    WatchedContractSummary, load_watched_contracts, plan_watched_contracts,
+    summarize_watched_contracts,
+};
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
     CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, ExecutionTraceInspection,
@@ -7,7 +12,9 @@ use bigname_storage::{
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Args, Debug)]
@@ -28,6 +35,8 @@ pub(crate) enum InspectCommand {
     ManifestDrift(InspectManifestDriftArgs),
     #[command(about = "List stored lineage rows for a bounded chain block range")]
     StoredLineageRange(InspectStoredLineageRangeArgs),
+    #[command(about = "Inspect the read-only runtime watch plan derived from active manifests")]
+    WatchPlan(InspectWatchPlanArgs),
 }
 
 #[derive(Args, Debug)]
@@ -78,6 +87,14 @@ pub(crate) struct InspectStoredLineageRangeArgs {
     pub(crate) range_end_block_number: i64,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct InspectWatchPlanArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
 pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
     match args.command {
         InspectCommand::BackfillJob(args) => inspect_backfill_job(args).await,
@@ -85,6 +102,7 @@ pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
         InspectCommand::ExecutionTrace(args) => inspect_execution_trace(args).await,
         InspectCommand::ManifestDrift(args) => inspect_manifest_drift(args).await,
         InspectCommand::StoredLineageRange(args) => inspect_stored_lineage_range(args).await,
+        InspectCommand::WatchPlan(args) => inspect_watch_plan(args).await,
     }
 }
 
@@ -139,6 +157,37 @@ async fn inspect_stored_lineage_range(args: InspectStoredLineageRangeArgs) -> Re
 
     println!("{}", render_stored_lineage_range_inspection(&blocks));
     Ok(())
+}
+
+async fn inspect_watch_plan(args: InspectWatchPlanArgs) -> Result<()> {
+    let _emit_json = args.json;
+    let pool = connect_read_only(&args.database).await?;
+    let watched_contracts = load_watched_contracts(&pool).await?;
+    let summary = summarize_watched_contracts(&watched_contracts);
+    let watch_plan = plan_watched_contracts(&watched_contracts);
+
+    println!(
+        "{}",
+        render_watch_plan_inspection(&watched_contracts, &summary, &watch_plan)
+    );
+    Ok(())
+}
+
+async fn connect_read_only(config: &DatabaseConfig) -> Result<sqlx::PgPool> {
+    let database_url = config
+        .database_url
+        .clone()
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .unwrap_or_else(|| bigname_storage::default_database_url().to_owned());
+    let options = PgConnectOptions::from_str(&database_url)
+        .context("failed to parse PostgreSQL URL for read-only inspect connection")?
+        .options([("default_transaction_read_only", "on")]);
+
+    PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .connect_with(options)
+        .await
+        .context("failed to connect to PostgreSQL for read-only inspect")
 }
 
 async fn load_backfill_job_inspection(
@@ -478,6 +527,94 @@ fn alert_remediation(alert: &ManifestDriftAlertObservation) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn render_watch_plan_inspection(
+    watched_contracts: &[WatchedContract],
+    summary: &WatchedContractSummary,
+    watch_plan: &[WatchedChainPlan],
+) -> Value {
+    json!({
+        "command": "inspect watch-plan",
+        "read_only": true,
+        "counts": {
+            "unique_contracts": summary.unique_contract_count,
+            "source_entries": summary.source_entry_count,
+            "manifest_roots": summary.manifest_root_count,
+            "manifest_contracts": summary.manifest_contract_count,
+            "discovery_edges": summary.discovery_edge_count,
+            "chains": summary.chains.len(),
+        },
+        "summary": {
+            "unique_contract_count": summary.unique_contract_count,
+            "source_entry_count": summary.source_entry_count,
+            "manifest_root_count": summary.manifest_root_count,
+            "manifest_contract_count": summary.manifest_contract_count,
+            "discovery_edge_count": summary.discovery_edge_count,
+            "chains": summary
+                .chains
+                .iter()
+                .map(render_watched_contract_chain_summary)
+                .collect::<Vec<_>>(),
+        },
+        "watch_plan": watch_plan
+            .iter()
+            .map(render_watched_chain_plan)
+            .collect::<Vec<_>>(),
+        "watched_contracts": watched_contracts
+            .iter()
+            .map(render_watched_contract)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn render_watched_contract_chain_summary(summary: &WatchedContractChainSummary) -> Value {
+    json!({
+        "chain": summary.chain.as_str(),
+        "unique_contract_count": summary.unique_contract_count,
+        "manifest_root_count": summary.manifest_root_count,
+        "manifest_contract_count": summary.manifest_contract_count,
+        "discovery_edge_count": summary.discovery_edge_count,
+    })
+}
+
+fn render_watched_chain_plan(plan: &WatchedChainPlan) -> Value {
+    json!({
+        "chain": plan.chain.as_str(),
+        "addresses": plan.addresses.clone(),
+        "counts": {
+            "unique_contracts": plan.addresses.len(),
+            "source_entries": plan.manifest_root_entry_count
+                + plan.manifest_contract_entry_count
+                + plan.discovery_edge_entry_count,
+            "manifest_roots": plan.manifest_root_entry_count,
+            "manifest_contracts": plan.manifest_contract_entry_count,
+            "discovery_edges": plan.discovery_edge_entry_count,
+        },
+    })
+}
+
+fn render_watched_contract(contract: &WatchedContract) -> Value {
+    json!({
+        "chain": contract.chain.as_str(),
+        "source_family": contract.source_family.as_str(),
+        "contract_instance_id": contract.contract_instance_id.to_string(),
+        "address": contract.address.as_str(),
+        "source": watched_contract_source_label(contract.source),
+        "source_manifest_id": contract.source_manifest_id,
+        "active_block_range": {
+            "from_block_number": contract.active_from_block_number,
+            "to_block_number": contract.active_to_block_number,
+        },
+    })
+}
+
+const fn watched_contract_source_label(source: WatchedContractSource) -> &'static str {
+    match source {
+        WatchedContractSource::ManifestRoot => "manifest_root",
+        WatchedContractSource::ManifestContract => "manifest_contract",
+        WatchedContractSource::DiscoveryEdge => "discovery_edge",
+    }
+}
+
 fn render_stored_lineage_range_inspection(blocks: &[StoredLineageRangeBlock]) -> Value {
     json!({
         "blocks": blocks
@@ -601,6 +738,7 @@ const fn canonicality_state_label(state: CanonicalityState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bigname_manifests::{load_repository, sync_repository};
     use bigname_storage::{
         BackfillJobCreate, BackfillRangeSpec, ChainLineageBlock, ExecutionCacheKey,
         ExecutionOutcome, ExecutionTrace, ExecutionTraceInspection, ExecutionTraceStep,
@@ -612,6 +750,7 @@ mod tests {
         postgres::{PgConnectOptions, PgPoolOptions},
     };
     use std::{
+        path::PathBuf,
         str::FromStr,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -773,6 +912,18 @@ mod tests {
             state_root: None,
             canonicality_state,
         }
+    }
+
+    fn checked_in_manifest_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("manifests")
+    }
+
+    fn render_current_watch_plan(watched_contracts: &[WatchedContract]) -> Value {
+        let summary = summarize_watched_contracts(watched_contracts);
+        let watch_plan = plan_watched_contracts(watched_contracts);
+        render_watch_plan_inspection(watched_contracts, &summary, &watch_plan)
     }
 
     fn execution_trace() -> ExecutionTrace {
@@ -1481,6 +1632,113 @@ mod tests {
         assert!(proxy_alert["remediation"].is_null());
     }
 
+    #[test]
+    fn renders_inspect_watch_plan_json_shape() {
+        let watched_contracts = vec![
+            WatchedContract {
+                chain: "base-mainnet".to_owned(),
+                source_family: "basenames_base_registry".to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                contract_instance_id: Uuid::from_u128(0x0e7ec7ace00000000000000000000101),
+                source: WatchedContractSource::ManifestRoot,
+                source_manifest_id: Some(11),
+                active_from_block_number: Some(100),
+                active_to_block_number: None,
+            },
+            WatchedContract {
+                chain: "base-mainnet".to_owned(),
+                source_family: "basenames_base_registry".to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                contract_instance_id: Uuid::from_u128(0x0e7ec7ace00000000000000000000102),
+                source: WatchedContractSource::ManifestContract,
+                source_manifest_id: Some(11),
+                active_from_block_number: Some(100),
+                active_to_block_number: Some(200),
+            },
+            WatchedContract {
+                chain: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                address: "0x0000000000000000000000000000000000000002".to_owned(),
+                contract_instance_id: Uuid::from_u128(0x0e7ec7ace00000000000000000000103),
+                source: WatchedContractSource::DiscoveryEdge,
+                source_manifest_id: None,
+                active_from_block_number: None,
+                active_to_block_number: None,
+            },
+        ];
+        let rendered = render_current_watch_plan(&watched_contracts);
+
+        assert_eq!(rendered["command"], "inspect watch-plan");
+        assert_eq!(rendered["read_only"], true);
+        assert_eq!(rendered["counts"]["unique_contracts"], 2);
+        assert_eq!(rendered["counts"]["source_entries"], 3);
+        assert_eq!(rendered["counts"]["manifest_roots"], 1);
+        assert_eq!(rendered["counts"]["manifest_contracts"], 1);
+        assert_eq!(rendered["counts"]["discovery_edges"], 1);
+        assert_eq!(rendered["counts"]["chains"], 2);
+
+        assert_eq!(rendered["summary"]["unique_contract_count"], 2);
+        assert_eq!(rendered["summary"]["source_entry_count"], 3);
+        assert_eq!(rendered["summary"]["chains"][0]["chain"], "base-mainnet");
+        assert_eq!(rendered["summary"]["chains"][0]["unique_contract_count"], 1);
+        assert_eq!(rendered["summary"]["chains"][0]["manifest_root_count"], 1);
+        assert_eq!(
+            rendered["summary"]["chains"][0]["manifest_contract_count"],
+            1
+        );
+        assert_eq!(rendered["summary"]["chains"][0]["discovery_edge_count"], 0);
+        assert_eq!(
+            rendered["summary"]["chains"][1]["chain"],
+            "ethereum-mainnet"
+        );
+        assert_eq!(rendered["summary"]["chains"][1]["discovery_edge_count"], 1);
+
+        let base_plan = &rendered["watch_plan"][0];
+        assert_eq!(base_plan["chain"], "base-mainnet");
+        assert_eq!(
+            base_plan["addresses"],
+            json!(["0x0000000000000000000000000000000000000001"])
+        );
+        assert_eq!(base_plan["counts"]["unique_contracts"], 1);
+        assert_eq!(base_plan["counts"]["source_entries"], 2);
+        assert_eq!(base_plan["counts"]["manifest_roots"], 1);
+        assert_eq!(base_plan["counts"]["manifest_contracts"], 1);
+        assert_eq!(base_plan["counts"]["discovery_edges"], 0);
+
+        let root_contract = &rendered["watched_contracts"][0];
+        assert_eq!(root_contract["chain"], "base-mainnet");
+        assert_eq!(root_contract["source_family"], "basenames_base_registry");
+        assert_eq!(
+            root_contract["contract_instance_id"],
+            "0e7ec7ac-e000-0000-0000-000000000101"
+        );
+        assert_eq!(
+            root_contract["address"],
+            "0x0000000000000000000000000000000000000001"
+        );
+        assert_eq!(root_contract["source"], "manifest_root");
+        assert_eq!(root_contract["source_manifest_id"], 11);
+        assert_eq!(
+            root_contract["active_block_range"]["from_block_number"],
+            100
+        );
+        assert!(root_contract["active_block_range"]["to_block_number"].is_null());
+
+        let manifest_contract = &rendered["watched_contracts"][1];
+        assert_eq!(manifest_contract["source"], "manifest_contract");
+        assert_eq!(
+            manifest_contract["active_block_range"]["to_block_number"],
+            200
+        );
+
+        let discovery_contract = &rendered["watched_contracts"][2];
+        assert_eq!(discovery_contract["chain"], "ethereum-mainnet");
+        assert_eq!(discovery_contract["source"], "discovery_edge");
+        assert!(discovery_contract["source_manifest_id"].is_null());
+        assert!(discovery_contract["active_block_range"]["from_block_number"].is_null());
+        assert!(discovery_contract["active_block_range"]["to_block_number"].is_null());
+    }
+
     #[tokio::test]
     async fn inspect_stored_lineage_range_orders_and_bounds_stored_rows() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -1533,6 +1791,30 @@ mod tests {
                 (12, "0x012b".to_owned(), "safe".to_owned()),
             ]
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn inspect_watch_plan_does_not_mutate_watched_contract_state() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let repository = load_repository(checked_in_manifest_root())?;
+        let sync_summary = sync_repository(database.pool(), &repository).await?;
+        assert!(sync_summary.active_manifest_count > 0);
+
+        let before_contracts = load_watched_contracts(database.pool()).await?;
+        assert!(!before_contracts.is_empty());
+        let before = render_current_watch_plan(&before_contracts);
+
+        inspect_watch_plan(InspectWatchPlanArgs {
+            database: database.database_config(),
+            json: true,
+        })
+        .await?;
+
+        let after_contracts = load_watched_contracts(database.pool()).await?;
+        let after = render_current_watch_plan(&after_contracts);
+        assert_eq!(after, before);
 
         database.cleanup().await
     }
