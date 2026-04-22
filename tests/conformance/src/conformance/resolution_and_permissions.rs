@@ -2384,6 +2384,120 @@
             })
         }
 
+        fn assert_basenames_execution_v2_provenance(provenance: &Value, label: &str) {
+            let manifest_versions = provenance
+                .get("manifest_versions")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!("basenames execution v2 provenance must be present for {label}")
+                });
+            assert!(
+                manifest_versions.iter().any(|item| {
+                    item.get("source_family").and_then(Value::as_str)
+                        == Some("basenames_execution")
+                        && item.get("manifest_version").and_then(Value::as_i64) == Some(2)
+                        && item.get("chain").and_then(Value::as_str) == Some("ethereum-mainnet")
+                        && item.get("deployment_epoch").and_then(Value::as_str)
+                            == Some("basenames_v1")
+                }),
+                "active basenames_execution v2 provenance must be retained for {label}"
+            );
+        }
+
+        fn assert_basenames_exact_transport_direct_topology(
+            topology: &Value,
+            logical_name_id: &str,
+            label: &str,
+        ) {
+            assert_eq!(
+                topology.pointer("/resolver_path/0/logical_name_id"),
+                Some(&json!(logical_name_id)),
+                "{label} must stay exact-surface"
+            );
+            assert_eq!(
+                topology.pointer("/wildcard/source"),
+                Some(&Value::Null),
+                "{label} must not be wildcard-derived"
+            );
+            assert_eq!(
+                topology.pointer("/wildcard/matched_labels"),
+                Some(&json!([])),
+                "{label} must not carry wildcard labels"
+            );
+            assert_eq!(
+                topology.pointer("/alias/final_target"),
+                Some(&Value::Null),
+                "{label} must not participate in alias resolution"
+            );
+            assert_eq!(
+                topology.pointer("/alias/hops"),
+                Some(&json!([])),
+                "{label} must not carry alias hops"
+            );
+            assert_eq!(
+                topology.get("subregistry_path"),
+                Some(&json!([])),
+                "{label} must not use a linked subregistry"
+            );
+            assert_eq!(
+                topology.pointer("/transport/source_chain_id"),
+                Some(&json!("base-mainnet")),
+                "{label} must keep the Base source transport"
+            );
+            assert_eq!(
+                topology.pointer("/transport/target_chain_id"),
+                Some(&json!("ethereum-mainnet")),
+                "{label} must keep the Ethereum target transport"
+            );
+            assert_eq!(
+                topology.pointer("/transport/contract_address"),
+                Some(&json!("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31")),
+                "{label} must use the frozen L1 Resolver transport address"
+            );
+            assert!(
+                topology.pointer("/transport/gateway").is_none(),
+                "{label} must not promote reserved offchain gateway topology"
+            );
+        }
+
+        fn assert_basenames_execution_entrypoint(execution: &Value, label: &str) {
+            assert_eq!(
+                execution.pointer("/selected_entrypoint/source_family"),
+                Some(&json!("basenames_execution")),
+                "{label} must keep execution ownership under basenames_execution"
+            );
+            assert_eq!(
+                execution.pointer("/selected_entrypoint/role"),
+                Some(&json!("l1_resolver")),
+                "{label} must use the L1 Resolver execution role"
+            );
+            assert_eq!(
+                execution.pointer("/selected_entrypoint/chain_id"),
+                Some(&json!("ethereum-mainnet")),
+                "{label} must execute on Ethereum Mainnet"
+            );
+            assert_eq!(
+                execution.pointer("/selected_entrypoint/contract_address"),
+                Some(&json!("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31")),
+                "{label} must use the frozen Basenames L1 Resolver"
+            );
+            assert_eq!(
+                execution.pointer("/wildcard/source"),
+                Some(&Value::Null),
+                "{label} explain output must not surface wildcard execution"
+            );
+            assert_eq!(
+                execution.pointer("/alias/final_target"),
+                Some(&Value::Null),
+                "{label} explain output must not surface alias execution"
+            );
+            assert_eq!(
+                execution.get("transport"),
+                None,
+                "{label} must not collapse basenames_l1_compat transport into execution output"
+            );
+        }
+
         fn basenames_deferred_verified_path_topology(
             case: BasenamesDeferredVerifiedPathCase,
             logical_name_id: &str,
@@ -2529,15 +2643,39 @@
             let requested_chain_positions =
                 requested_chain_positions_from_name_current(&name_row.chain_positions);
 
+            let execution_trace = basenames_resolution_execution_trace(
+                execution_trace_id,
+                &request_key,
+                &["text:com.twitter", "addr:60"],
+                requested_chain_positions.clone(),
+                persisted_verified_queries.clone(),
+            );
+            assert_eq!(
+                execution_trace
+                    .manifest_context
+                    .pointer("/manifest_versions/0/source_family"),
+                Some(&json!("basenames_execution")),
+                "case {} must seed active basenames_execution evidence",
+                case.label()
+            );
+            assert_eq!(
+                execution_trace
+                    .manifest_context
+                    .pointer("/manifest_versions/0/manifest_version"),
+                Some(&json!(2)),
+                "case {} must seed v2 execution evidence",
+                case.label()
+            );
+            assert_eq!(
+                execution_trace.request_metadata.get("entrypoint"),
+                Some(&json!("l1_resolver")),
+                "case {} must seed the Basenames L1 Resolver entrypoint",
+                case.label()
+            );
+
             upsert_execution_trace(
                 &database.pool,
-                &basenames_resolution_execution_trace(
-                    execution_trace_id,
-                    &request_key,
-                    &["text:com.twitter", "addr:60"],
-                    requested_chain_positions.clone(),
-                    persisted_verified_queries.clone(),
-                ),
+                &execution_trace,
             )
             .await?;
             upsert_execution_outcome(
@@ -2623,6 +2761,7 @@
                 "case {}",
                 case.label()
             );
+            assert_basenames_execution_v2_provenance(&payload.provenance, case.label());
 
             let explain_payload: ErrorResponse = read_json(explain_response).await?;
             assert_eq!(
@@ -2805,8 +2944,26 @@
                 .declared_state
                 .as_ref()
                 .context("basenames mixed resolution must include declared_state")?;
+            let explain_verified_state = explain_payload
+                .verified_state
+                .as_ref()
+                .context("basenames explain response must include verified_state")?;
+            let explain_execution = explain_verified_state
+                .get("execution")
+                .context("basenames explain response must include execution summary")?;
 
             assert_eq!(declared_state.get("topology"), Some(&topology));
+            assert_eq!(
+                payload.data.get("logical_name_id"),
+                Some(&json!(logical_name_id))
+            );
+            assert_basenames_exact_transport_direct_topology(
+                declared_state
+                    .get("topology")
+                    .expect("declared_state must include topology"),
+                logical_name_id,
+                "supported basenames mixed route",
+            );
             assert_eq!(
                 declared_state.get("record_inventory"),
                 Some(&json!({
@@ -2833,8 +2990,7 @@
                             "record_key": "addr:60",
                             "record_family": "addr",
                             "selector_key": "60",
-                            "status": "unsupported",
-                            "unsupported_reason": "value_not_retained_in_normalized_events",
+                            "status": "not_found",
                         }
                     ],
                 }))
@@ -2869,9 +3025,17 @@
                 payload.provenance.get("execution_trace_id"),
                 Some(&Value::String(execution_trace_id.to_string()))
             );
+            assert_basenames_execution_v2_provenance(
+                &payload.provenance,
+                "supported basenames mixed route",
+            );
             assert_eq!(
                 payload.provenance.get("manifest_versions"),
                 name_row.provenance.get("manifest_versions")
+            );
+            assert_basenames_execution_entrypoint(
+                explain_execution,
+                "supported basenames execution explain route",
             );
             assert_eq!(
                 explain_payload.verified_state,

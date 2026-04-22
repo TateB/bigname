@@ -142,12 +142,20 @@ Execution notes:
   direct-path and `resolver_alias_path` alias-only cases on the mixed route, and persisted ENS
   wildcard-derived `addr:60` readback on `mode=both` with projected wildcard topology while
   declared `record_inventory` / `record_cache` remain unsupported for that lane, plus the
-  Basenames deferred-path lock: shipped direct transport-assisted Basenames readback remains
-  supported, while alias-participating, wildcard-derived, linked-subregistry, transport-free,
-  and reserved offchain-gateway Basenames path classes stay selector-local `unsupported` with
-  `provenance.execution_trace_id=null` on the mixed route; beyond those shipped lanes, other
-  transport-assisted, other non-alias ancestor-selected, and broader non-wildcard non-direct
-  verified support remain out of scope. The inferred convenience route
+  Basenames promoted exact-surface transport-assisted direct-path lock: active
+  `basenames_execution` v2 supports only the direct class whose persisted topology keeps the
+  resolver path on the route surface, has no wildcard source, alias hops, or linked subregistry,
+  and uses the Base-to-Ethereum L1 resolver transport
+  (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
+  (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc).
+  The alias-participating, wildcard-derived, linked-subregistry, transport-free, and
+  offchain-gateway Basenames path classes stay explicitly deferred as selector-local
+  `unsupported` with `provenance.execution_trace_id=null` on the mixed route; beyond those shipped
+  lanes, other transport-assisted, other non-alias ancestor-selected, and broader non-wildcard
+  non-direct verified support remain out of scope. The inferred convenience route
   `GET /v1/resolve/{name}` is locked to the canonical resolution envelope for `base.eth` as ENS
   and `alice.base.eth` as Basenames, including shared `mode` / `records` semantics and the
   Basenames verified unsupported selector-local behavior even when an ENS row for the same name
@@ -287,14 +295,15 @@ Execution notes:
   set, shipped persisted verified `avatar` explain-route readback only for ENS exact-surface
   direct-path and `resolver_alias_path` alias-only cases, persisted ENS wildcard-derived
   `addr:60` explain-route readback with the same envelope plus a persisted execution summary, and
-  shipped direct transport-assisted Basenames explain-route readback; beyond those shipped lanes,
+  shipped direct transport-assisted Basenames explain-route readback for the same
+  `basenames_execution` exact-surface direct class described above; beyond those shipped lanes,
   other transport-assisted, other non-alias ancestor-selected, and broader non-wildcard
   non-direct lanes remain out of scope. It also asserts `404 not_found` when the current exact
   surface has no persisted answer for the requested selector set, that deferred transport-assisted
   and other non-alias ancestor-selected requests stay outside the shipped public explain surface
   even when persisted outcomes exist, and that the Basenames alias-participating,
-  wildcard-derived, linked-subregistry, transport-free, and reserved offchain-gateway deferred
-  path classes stay `404 not_found` on the execution explain route, then reuses the shipped
+  wildcard-derived, linked-subregistry, transport-free, and offchain-gateway deferred path classes
+  stay `404 not_found` on the execution explain route, then reuses the shipped
   execution-outcome invalidation APIs to assert that exact manifest,
   topology-boundary, and record-boundary
   invalidation evicts the persisted ENS verified-resolution answer from the mixed
