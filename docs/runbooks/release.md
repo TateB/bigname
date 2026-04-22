@@ -3,9 +3,10 @@
 Use the release smoke gate before promoting a release candidate and as the CI
 release safety check. The gate is local: it validates the checked-out revision,
 the configured PostgreSQL database, generated OpenAPI artifact consistency, and
-the conformance ownership table for published OpenAPI paths, and the API process
-readiness endpoint. It does not deploy, contact external RPC providers, contact
-GitHub or Fly, or validate a remote production target.
+the conformance ownership table for published OpenAPI paths, runs the live
+manifest-drift audit, and checks the API process readiness endpoint. It does not
+deploy, contact external RPC providers, contact GitHub or Fly, or validate a
+remote production target.
 
 ## Command
 
@@ -33,6 +34,9 @@ scripts/release-smoke --help
 - A PostgreSQL URL is available through `BIGNAME_DATABASE_URL` or
   `DATABASE_URL`. If neither is set, the script defaults to
   `postgres://bigname:bigname@127.0.0.1:5432/bigname`.
+  Point this at the local PostgreSQL database used for smoke checks; migrations,
+  the manifest-drift audit, and readiness all require that database even when
+  `--no-network` is passed.
 - The API bind address is free. Set `BIGNAME_SMOKE_API_BIND_ADDR` when
   `127.0.0.1:3000` is already in use.
 - `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
@@ -53,14 +57,21 @@ The script loads `.env` when it exists, then uses the environment values above.
    openapi` as the OpenAPI conformance-owner smoke guard. This guard reads only
    the checked-in `docs/api-v1.openapi.json` artifact and the conformance owner
    table in the conformance harness; it is no-network and no-Postgres.
-4. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
+4. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
+   capability_cutover_evidence` as the focused capability cutover evidence
+   guard.
+5. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
    database.
-5. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
+6. Runs `cargo run --locked -p bigname-worker -- manifest-drift audit --json`
+   against the configured database.
+7. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` and probes `/healthz` until it returns
    `200` with `"status":"ready"`.
 
 With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
-`--offline` to Cargo, and rejects non-loopback smoke bind or health URLs.
+`--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
+gate does not contact external network services or external RPC providers, but
+the configured local PostgreSQL database must still be available.
 
 ## Pass Criteria
 
@@ -73,7 +84,10 @@ A passing gate means:
   revision;
 - every published OpenAPI public path has an explicit conformance harness owner
   or an explicit private/out-of-scope reason in the conformance owner table;
+- the focused capability cutover evidence guard passes for this revision;
 - the checked-in migrations apply to the configured local database;
+- the manifest-drift audit command exits successfully against the configured
+  local database;
 - the API process can start from this revision; and
 - the private readiness endpoint reports ready against that database.
 
@@ -92,6 +106,10 @@ Any non-zero exit blocks the release candidate until triaged.
 - Migration failure: the configured database cannot apply the checked-in
   migrations. Do not promote until the migration or database precondition is
   fixed.
+- Manifest-drift audit failure: the audit command returned non-zero against the
+  configured local database. Do not promote until the local manifest/discovery
+  state, audit inputs, or database precondition is triaged. This is not
+  production monitoring or external RPC coverage.
 - Readiness failure: the API did not stay up or `/healthz` did not report
   ready. Do not promote until the API logs and database reachability explain the
   failure.
@@ -124,8 +142,10 @@ CI runs this gate as `release smoke gate (no network)` with:
 ```
 
 The CI no-network subset preserves the existing OpenAPI drift and migration
-checks while adding the no-Postgres OpenAPI conformance-owner guard and local API
-readiness. It uses loopback-only smoke URLs and offline Cargo execution. A CI
-failure has the same release-blocking meaning as a local non-zero exit, except
-that missing cached dependencies are a CI environment issue rather than a product
-regression.
+checks while adding the no-Postgres OpenAPI conformance-owner guard, focused
+capability cutover evidence guard, live manifest-drift audit, and local API
+readiness. It uses loopback-only smoke URLs, offline Cargo execution, and the
+configured local PostgreSQL database for migrations, manifest-drift audit, and
+readiness. A CI failure has the same release-blocking meaning as a local
+non-zero exit, except that missing cached dependencies are a CI environment issue
+rather than a product regression.

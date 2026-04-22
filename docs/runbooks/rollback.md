@@ -4,9 +4,9 @@ Use the rollback smoke gate when preparing or validating a rollback candidate.
 The gate is local: it validates the checked-out rollback revision, the
 configured PostgreSQL database, generated OpenAPI artifact consistency,
 migration idempotence, the conformance ownership table for published OpenAPI
-paths, and the API process readiness endpoint. It does not perform the
-production rollback, deploy, contact external RPC providers, contact GitHub or
-Fly, or validate a remote production target.
+paths, runs the live manifest-drift audit, and checks the API process readiness
+endpoint. It does not perform the production rollback, deploy, contact external
+RPC providers, contact GitHub or Fly, or validate a remote production target.
 
 ## Command
 
@@ -34,6 +34,9 @@ scripts/rollback-smoke --help
 - A PostgreSQL URL is available through `BIGNAME_DATABASE_URL` or
   `DATABASE_URL`. If neither is set, the script defaults to
   `postgres://bigname:bigname@127.0.0.1:5432/bigname`.
+  Point this at the local PostgreSQL database used for smoke checks; migrations,
+  the manifest-drift audit, and readiness all require that database even when
+  `--no-network` is passed.
 - The API bind address is free. Set `BIGNAME_SMOKE_API_BIND_ADDR` when
   `127.0.0.1:3000` is already in use.
 - `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
@@ -58,12 +61,19 @@ The script loads `.env` when it exists, then uses the environment values above.
    openapi` as the OpenAPI conformance-owner smoke guard. This guard reads only
    the checked-in `docs/api-v1.openapi.json` artifact and the conformance owner
    table in the conformance harness; it is no-network and no-Postgres.
-6. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
+6. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
+   capability_cutover_evidence` as the focused capability cutover evidence
+   guard.
+7. Runs `cargo run --locked -p bigname-worker -- manifest-drift audit --json`
+   against the configured database.
+8. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` and probes `/healthz` until it returns
    `200` with `"status":"ready"`.
 
 With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
-`--offline` to Cargo, and rejects non-loopback smoke bind or health URLs.
+`--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
+gate does not contact external network services or external RPC providers, but
+the configured local PostgreSQL database must still be available.
 
 ## Pass Criteria
 
@@ -78,6 +88,10 @@ A passing gate means:
   output;
 - every published OpenAPI public path has an explicit conformance harness owner
   or an explicit private/out-of-scope reason in the conformance owner table;
+- the focused capability cutover evidence guard passes for the rollback
+  checkout;
+- the manifest-drift audit command exits successfully against the configured
+  local database;
 - the API process can start from the rollback checkout; and
 - the private readiness endpoint reports ready against that database.
 
@@ -99,6 +113,10 @@ Any non-zero exit blocks automatic rollback promotion until triaged.
   blank, or an out-of-scope entry lacks an explicit reason. Do not promote the
   rollback checkout until the route has an owning conformance harness or a
   deliberate private/out-of-scope reason.
+- Manifest-drift audit failure: the audit command returned non-zero against the
+  configured local database. Do not promote the rollback checkout until the
+  local manifest/discovery state, audit inputs, or database precondition is
+  triaged. This is not production monitoring or external RPC coverage.
 - Readiness failure: the rollback API did not stay up or `/healthz` did not
   report ready. Do not treat the rollback as service-restoring until the API
   logs and database reachability explain the failure.
@@ -120,7 +138,8 @@ automatic promotion and escalate to the owning engineer.
 After the operational rollback, rerun the gate against the revision and database
 state that represent the rolled-back service when local access is available. A
 passing local gate is not a substitute for production health checks; it confirms
-only the local migration, artifact, and readiness behaviors covered above.
+only the local migration, artifact, conformance-owner, capability-cutover,
+manifest-drift audit, and readiness behaviors covered above.
 
 Do not use this gate as proof of external integration health. It intentionally
 does not exercise deploy commands, external RPC, GitHub, Fly, or remote
@@ -136,7 +155,9 @@ CI runs this gate as `rollback smoke gate (no network)` with:
 
 The CI no-network subset preserves the existing OpenAPI drift and migration
 checks while adding the double migration idempotence check, the no-Postgres
-OpenAPI conformance-owner guard, and local API readiness. It uses loopback-only
-smoke URLs and offline Cargo execution. A CI failure has the same
+OpenAPI conformance-owner guard, focused capability cutover evidence guard, live
+manifest-drift audit, and local API readiness. It uses loopback-only smoke URLs,
+offline Cargo execution, and the configured local PostgreSQL database for
+migrations, manifest-drift audit, and readiness. A CI failure has the same
 rollback-blocking meaning as a local non-zero exit, except that missing cached
 dependencies are a CI environment issue rather than a product regression.
