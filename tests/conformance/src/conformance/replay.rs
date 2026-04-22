@@ -23,6 +23,19 @@
             uri: String,
         }
 
+        const REPLAY_PROFILE_SEED_RESOLVER_ADDRESS: &str =
+            "0x0000000000000000000000000000000000000f00";
+        const REPLAY_PROFILE_PENDING_ROUTE_NAME: &str = "pending-profile.base.eth";
+        const REPLAY_PROFILE_PENDING_LOGICAL_NAME_ID: &str =
+            "basenames:pending-profile.base.eth";
+        const REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS: &str =
+            "0x0000000000000000000000000000000000000f01";
+        const REPLAY_PROFILE_UNSUPPORTED_ROUTE_NAME: &str = "unsupported-profile.base.eth";
+        const REPLAY_PROFILE_UNSUPPORTED_LOGICAL_NAME_ID: &str =
+            "basenames:unsupported-profile.base.eth";
+        const REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS: &str =
+            "0x0000000000000000000000000000000000000f02";
+
         pub(crate) async fn run_replay_capability_conformance() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let corpus = seed_replay_supported_read_corpus(&database).await?;
@@ -658,6 +671,7 @@
             database: &HarnessDatabase,
             corpus: &ReplayCorpus,
         ) -> Result<()> {
+            seed_replay_basenames_resolver_profile_gate(database, corpus).await?;
             bigname_storage::upsert_raw_blocks(
                 &database.pool,
                 &[
@@ -700,6 +714,61 @@
             )
             .await
             .context("failed to upsert replay winning branch raw blocks")?;
+            bigname_storage::upsert_raw_logs(
+                &database.pool,
+                &[
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-resolver",
+                        103,
+                        "0xtxreplaywinningresolver",
+                        1,
+                        corpus.winning_resolver_address,
+                    ),
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-resolver",
+                        103,
+                        "0xtxreplaywinningresolver",
+                        2,
+                        corpus.winning_resolver_address,
+                    ),
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-resolver",
+                        103,
+                        "0xtxreplaywinningresolver",
+                        3,
+                        corpus.winning_resolver_address,
+                    ),
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-permission-2",
+                        107,
+                        "0xtxreplaywinningpermission2",
+                        1,
+                        corpus.winning_resolver_address,
+                    ),
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-permission-2",
+                        107,
+                        "0xtxreplaywinningpermission2",
+                        2,
+                        corpus.winning_resolver_address,
+                    ),
+                    replay_raw_log(
+                        "base-mainnet",
+                        "0xreplay-winning-permission-2",
+                        107,
+                        "0xtxreplaywinningpermission2",
+                        3,
+                        corpus.winning_resolver_address,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert replay winning branch resolver raw logs")?;
 
             bigname_storage::upsert_normalized_events(
                 &database.pool,
@@ -767,7 +836,7 @@
                         logical_name_id: Some(corpus.logical_name_id.to_owned()),
                         resource_id: Some(corpus.resource_id),
                         event_kind: "ResolverChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
                         manifest_version: 4,
                         source_manifest_id: None,
                         chain_id: Some("base-mainnet".to_owned()),
@@ -895,6 +964,94 @@
                             "resolver_address": corpus.winning_resolver_address,
                         }),
                     ),
+                    NormalizedEvent {
+                        event_identity:
+                            "conformance:replay:winning:basenames:record-version-current"
+                                .to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(corpus.logical_name_id.to_owned()),
+                        resource_id: Some(corpus.resource_id),
+                        event_kind: "RecordVersionChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 6,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(107),
+                        block_hash: Some("0xreplay-winning-permission-2".to_owned()),
+                        transaction_hash: Some("0xtxreplaywinningpermission2".to_owned()),
+                        log_index: Some(1),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "branch": "winning",
+                            "event_identity": "conformance:replay:winning:basenames:record-version-current",
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "record_version": 7,
+                        }),
+                        after_state: json!({
+                            "record_version": 8,
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:replay:winning:basenames:addr-current"
+                            .to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(corpus.logical_name_id.to_owned()),
+                        resource_id: Some(corpus.resource_id),
+                        event_kind: "RecordChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 6,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(107),
+                        block_hash: Some("0xreplay-winning-permission-2".to_owned()),
+                        transaction_hash: Some("0xtxreplaywinningpermission2".to_owned()),
+                        log_index: Some(2),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "branch": "winning",
+                            "event_identity": "conformance:replay:winning:basenames:addr-current",
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:replay:winning:basenames:text-current"
+                            .to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(corpus.logical_name_id.to_owned()),
+                        resource_id: Some(corpus.resource_id),
+                        event_kind: "RecordChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 6,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(107),
+                        block_hash: Some("0xreplay-winning-permission-2".to_owned()),
+                        transaction_hash: Some("0xtxreplaywinningpermission2".to_owned()),
+                        log_index: Some(3),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "branch": "winning",
+                            "event_identity": "conformance:replay:winning:basenames:text-current",
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                        }),
+                    },
                 ],
             )
             .await
@@ -910,6 +1067,298 @@
                 CanonicalityState::Canonical,
             )
             .await?;
+
+            seed_replay_profile_gated_resolver_branches(database).await?;
+
+            Ok(())
+        }
+
+        async fn seed_replay_basenames_resolver_profile_gate(
+            database: &HarnessDatabase,
+            corpus: &ReplayCorpus,
+        ) -> Result<()> {
+            seed_basenames_l2_resolver_profile_gate(
+                database,
+                Uuid::from_u128(0xc950),
+                REPLAY_PROFILE_SEED_RESOLVER_ADDRESS,
+                &[
+                    (Uuid::from_u128(0xc951), corpus.winning_resolver_address),
+                    (
+                        Uuid::from_u128(0xc952),
+                        REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS,
+                    ),
+                    (
+                        Uuid::from_u128(0xc953),
+                        REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS,
+                    ),
+                ],
+                &[corpus.winning_resolver_address],
+                &[REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS],
+            )
+            .await
+            .context("failed to seed replay Basenames L2 resolver profile gate")
+        }
+
+        async fn seed_replay_profile_gated_resolver_branches(
+            database: &HarnessDatabase,
+        ) -> Result<()> {
+            seed_replay_profile_gated_resolver_branch(
+                database,
+                "pending",
+                REPLAY_PROFILE_PENDING_LOGICAL_NAME_ID,
+                REPLAY_PROFILE_PENDING_ROUTE_NAME,
+                Uuid::from_u128(0xc940),
+                Uuid::from_u128(0xc941),
+                Uuid::from_u128(0xc942),
+                REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS,
+                270,
+            )
+            .await?;
+            seed_replay_profile_gated_resolver_branch(
+                database,
+                "unsupported",
+                REPLAY_PROFILE_UNSUPPORTED_LOGICAL_NAME_ID,
+                REPLAY_PROFILE_UNSUPPORTED_ROUTE_NAME,
+                Uuid::from_u128(0xc943),
+                Uuid::from_u128(0xc944),
+                Uuid::from_u128(0xc945),
+                REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS,
+                280,
+            )
+            .await?;
+
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn seed_replay_profile_gated_resolver_branch(
+            database: &HarnessDatabase,
+            branch: &str,
+            logical_name_id: &str,
+            route_name: &str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+            resolver_address: &str,
+            block_base: i64,
+        ) -> Result<()> {
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-surface"),
+                        None,
+                        block_base,
+                        1_717_192_000 + block_base,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-resource"),
+                        None,
+                        block_base + 1,
+                        1_717_192_001 + block_base,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-binding"),
+                        None,
+                        block_base + 2,
+                        1_717_192_002 + block_base,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-grant"),
+                        None,
+                        block_base + 3,
+                        1_717_192_003 + block_base,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-authority"),
+                        None,
+                        block_base + 4,
+                        1_717_192_004 + block_base,
+                    ),
+                    raw_block(
+                        "base-mainnet",
+                        &format!("0xreplay-profile-{branch}-resolver"),
+                        None,
+                        block_base + 5,
+                        1_717_192_005 + block_base,
+                    ),
+                ],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} raw blocks")
+            })?;
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[NameSurface {
+                    logical_name_id: logical_name_id.to_owned(),
+                    namespace: "basenames".to_owned(),
+                    input_name: route_name.to_owned(),
+                    canonical_display_name: route_name.to_owned(),
+                    normalized_name: route_name.to_owned(),
+                    dns_encoded_name: route_name.as_bytes().to_vec(),
+                    namehash: format!("namehash:{route_name}"),
+                    labelhashes: vec![format!("labelhash:{route_name}")],
+                    normalizer_version: "ensip15@2026-04-16".to_owned(),
+                    normalization_warnings: json!([]),
+                    normalization_errors: json!([]),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: format!("0xreplay-profile-{branch}-surface"),
+                    block_number: block_base,
+                    provenance: json!({"seed": "replay_profile_gated_surface"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} name surface")
+            })?;
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[TokenLineage {
+                    token_lineage_id,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: format!("0xreplay-profile-{branch}-resource"),
+                    block_number: block_base + 1,
+                    provenance: json!({"seed": "replay_profile_gated_token_lineage"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} token lineage")
+            })?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[Resource {
+                    resource_id,
+                    token_lineage_id: Some(token_lineage_id),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: format!("0xreplay-profile-{branch}-resource"),
+                    block_number: block_base + 1,
+                    provenance: json!({"seed": "replay_profile_gated_resource"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} resource")
+            })?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[SurfaceBinding {
+                    surface_binding_id,
+                    logical_name_id: logical_name_id.to_owned(),
+                    resource_id,
+                    binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                    active_from: timestamp(1_717_192_002 + block_base),
+                    active_to: None,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: format!("0xreplay-profile-{branch}-binding"),
+                    block_number: block_base + 2,
+                    provenance: json!({"seed": "replay_profile_gated_binding"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} surface binding")
+            })?;
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    NormalizedEvent {
+                        event_identity: format!("conformance:replay:profile:{branch}:grant"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RegistrationGranted".to_owned(),
+                        source_family: "basenames_base_registrar".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(block_base + 3),
+                        block_hash: Some(format!("0xreplay-profile-{branch}-grant")),
+                        transaction_hash: Some(format!("0xtxreplayprofile{branch}grant")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "event_identity": format!("conformance:replay:profile:{branch}:grant"),
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "authority_kind": "registrar",
+                            "authority_key": format!("registrar:base-mainnet:{route_name}"),
+                            "registrant": "0x0000000000000000000000000000000000000f10",
+                            "expiry": 1_900_000_000_i64,
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: format!("conformance:replay:profile:{branch}:authority"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(block_base + 4),
+                        block_hash: Some(format!("0xreplay-profile-{branch}-authority")),
+                        transaction_hash: Some(format!("0xtxreplayprofile{branch}authority")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "event_identity": format!("conformance:replay:profile:{branch}:authority"),
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "owner": "0x0000000000000000000000000000000000000f11",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: format!("conformance:replay:profile:{branch}:resolver"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "ResolverChanged".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(block_base + 5),
+                        block_hash: Some(format!("0xreplay-profile-{branch}-resolver")),
+                        transaction_hash: Some(format!("0xtxreplayprofile{branch}resolver")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "event_identity": format!("conformance:replay:profile:{branch}:resolver"),
+                        }),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "resolver": resolver_address,
+                            "namehash": format!("namehash:{route_name}"),
+                        }),
+                    },
+                ],
+            )
+            .await
+            .with_context(|| {
+                format!("failed to upsert replay profile-gated {branch} normalized events")
+            })?;
 
             Ok(())
         }
@@ -968,6 +1417,28 @@
                     "inheritance_path": [],
                     "transfer_behavior": {},
                 }),
+            }
+        }
+
+        fn replay_raw_log(
+            chain_id: &str,
+            block_hash: &str,
+            block_number: i64,
+            transaction_hash: &str,
+            log_index: i64,
+            emitting_address: &str,
+        ) -> bigname_storage::RawLog {
+            bigname_storage::RawLog {
+                chain_id: chain_id.to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index,
+                emitting_address: emitting_address.to_ascii_lowercase(),
+                topics: Vec::new(),
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Canonical,
             }
         }
 
@@ -1231,6 +1702,28 @@
                 corpus.winning_resolver_address,
                 "resolver route should expose the canonical winning resolver after replay",
             );
+            assert_supported_profile_gated_resolution(resolution, corpus);
+            assert_supported_profile_gated_resolver(resolver, corpus);
+            assert_profile_gated_resolution_stays_explicit(
+                replay_route_payload(snapshots, "pending-profile-resolution"),
+                REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS,
+                "pending",
+            );
+            assert_profile_gated_resolver_stays_explicit(
+                replay_route_payload(snapshots, "pending-profile-resolver"),
+                REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS,
+                "pending",
+            );
+            assert_profile_gated_resolution_stays_explicit(
+                replay_route_payload(snapshots, "unsupported-profile-resolution"),
+                REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS,
+                "unsupported",
+            );
+            assert_profile_gated_resolver_stays_explicit(
+                replay_route_payload(snapshots, "unsupported-profile-resolver"),
+                REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS,
+                "unsupported",
+            );
 
             let primary_name = replay_route_payload(snapshots, "primary-name");
             assert_primary_name_claim(primary_name, corpus.winning_primary_name);
@@ -1260,6 +1753,187 @@
                     );
                 }
             }
+        }
+
+        fn assert_supported_profile_gated_resolution(payload: &Value, corpus: &ReplayCorpus) {
+            assert_eq!(
+                payload.pointer("/declared_state/topology/resolver_path/0/address"),
+                Some(&json!(corpus.winning_resolver_address))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_inventory/selectors"),
+                Some(&json!([
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "cacheable": true,
+                    },
+                    {
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                        "cacheable": true,
+                    }
+                ]))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_inventory/unsupported_families"),
+                Some(&json!([]))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_cache/entries"),
+                Some(&json!([
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events",
+                    },
+                    {
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events",
+                    }
+                ]))
+            );
+            assert_json_not_contains(
+                payload,
+                "resolver_family_pending",
+                "supported profile-gated resolution must not expose pending resolver-family state",
+            );
+        }
+
+        fn assert_supported_profile_gated_resolver(payload: &Value, corpus: &ReplayCorpus) {
+            assert_eq!(
+                payload.pointer("/data/resolver_address"),
+                Some(&json!(corpus.winning_resolver_address))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/bindings/status"),
+                Some(&json!("supported"))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/bindings/count"),
+                Some(&json!(1))
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/bindings/items/0/logical_name_id"),
+                Some(&json!(corpus.logical_name_id))
+            );
+            assert_eq!(
+                payload.pointer("/coverage/unsupported_reason"),
+                Some(&Value::Null)
+            );
+            assert_json_not_contains(
+                payload,
+                "resolver_family_pending",
+                "supported profile-gated resolver overview must not expose pending sections",
+            );
+        }
+
+        fn assert_profile_gated_resolution_stays_explicit(
+            payload: &Value,
+            resolver_address: &str,
+            case_label: &str,
+        ) {
+            assert_eq!(
+                payload.pointer("/declared_state/topology/resolver_path/0/address"),
+                Some(&json!(resolver_address)),
+                "case {case_label}"
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_inventory/selectors"),
+                Some(&json!([])),
+                "case {case_label}"
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_inventory/unsupported_families"),
+                Some(&json!([
+                    {
+                        "record_family": "addr",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_family": "text",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ])),
+                "case {case_label}"
+            );
+            assert_eq!(
+                payload.pointer("/declared_state/record_cache/entries"),
+                Some(&json!([
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
+                    }
+                ])),
+                "case {case_label}"
+            );
+            assert_json_contains(
+                payload,
+                "resolver_family_pending",
+                &format!(
+                    "{case_label} profile-gated resolution must keep pending resolver-family state explicit"
+                ),
+            );
+        }
+
+        fn assert_profile_gated_resolver_stays_explicit(
+            payload: &Value,
+            resolver_address: &str,
+            case_label: &str,
+        ) {
+            assert_eq!(
+                payload.pointer("/data/resolver_address"),
+                Some(&json!(resolver_address)),
+                "case {case_label}"
+            );
+            for section in [
+                "bindings",
+                "aliases",
+                "permissions",
+                "role_holders",
+                "event_summary",
+            ] {
+                assert_eq!(
+                    payload.pointer(&format!("/declared_state/{section}/status")),
+                    Some(&json!("unsupported")),
+                    "case {case_label} section {section}"
+                );
+                assert_eq!(
+                    payload.pointer(&format!(
+                        "/declared_state/{section}/unsupported_reason"
+                    )),
+                    Some(&json!("resolver_family_pending")),
+                    "case {case_label} section {section}"
+                );
+            }
+            assert_eq!(
+                payload.pointer("/coverage/unsupported_reason"),
+                Some(&json!("resolver_family_pending")),
+                "case {case_label}"
+            );
         }
 
         fn assert_ensv2_sepolia_dev_exact_name_replay_payloads(
@@ -1568,6 +2242,34 @@
                     uri: format!(
                         "/v1/resolvers/{}/{}",
                         corpus.resolver_chain_id, corpus.winning_resolver_address
+                    ),
+                },
+                ReplayRoute {
+                    label: "pending-profile-resolution",
+                    uri: format!(
+                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text,contenthash",
+                        REPLAY_PROFILE_PENDING_ROUTE_NAME
+                    ),
+                },
+                ReplayRoute {
+                    label: "pending-profile-resolver",
+                    uri: format!(
+                        "/v1/resolvers/{}/{}",
+                        corpus.resolver_chain_id, REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS
+                    ),
+                },
+                ReplayRoute {
+                    label: "unsupported-profile-resolution",
+                    uri: format!(
+                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text,contenthash",
+                        REPLAY_PROFILE_UNSUPPORTED_ROUTE_NAME
+                    ),
+                },
+                ReplayRoute {
+                    label: "unsupported-profile-resolver",
+                    uri: format!(
+                        "/v1/resolvers/{}/{}",
+                        corpus.resolver_chain_id, REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS
                     ),
                 },
                 ReplayRoute {

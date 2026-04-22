@@ -746,12 +746,30 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     let resolver_manifest_id = config.manifest_id_base + 3;
     let reverse_contract_instance_id = Uuid::from_u128(config.uuid_base + 1);
     let registry_contract_instance_id = Uuid::from_u128(config.uuid_base + 2);
-    let resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 3);
+    let seed_resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 3);
+    let supported_resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 4);
+    let pending_resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 5);
+    let unsupported_resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 6);
     let reverse_address = "0x00000000000000000000000000000000000000ad";
     let registry_address = "0x00000000000000000000000000000000000000bb";
-    let resolver_address = "0x00000000000000000000000000000000000000cc";
+    let seed_resolver_address = "0x00000000000000000000000000000000000000c0";
+    let supported_resolver_address = "0x00000000000000000000000000000000000000c1";
+    let pending_resolver_address = "0x00000000000000000000000000000000000000c2";
+    let unsupported_resolver_address = "0x00000000000000000000000000000000000000c3";
     let unadmitted_resolver_address = "0x00000000000000000000000000000000000000dd";
     let claimed_address = "0x0000000000000000000000000000000000001234";
+    let resolver_seed_role = if config.resolver_source_family == "ens_v1_resolver_l1" {
+        "public_resolver"
+    } else {
+        "resolver"
+    };
+    let supported_profile_code_hash = if config.resolver_source_family == "ens_v1_resolver_l1" {
+        "0x1111111111111111111111111111111111111111111111111111111111111111"
+    } else {
+        "0x2222222222222222222222222222222222222222222222222222222222222222"
+    };
+    let unsupported_profile_code_hash =
+        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let reverse_node = reverse_node_for_address(claimed_address);
     let block_50 = provider_block(
         "0x5050505050505050505050505050505050505050505050505050505050505050",
@@ -807,32 +825,67 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         config.deployment_epoch,
     )
     .await?;
-    insert_contract_instance(
+    for (contract_instance_id, address, source_manifest_id) in [
+        (
+            seed_resolver_contract_instance_id,
+            seed_resolver_address,
+            Some(resolver_manifest_id),
+        ),
+        (
+            supported_resolver_contract_instance_id,
+            supported_resolver_address,
+            None,
+        ),
+        (
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+            None,
+        ),
+        (
+            unsupported_resolver_contract_instance_id,
+            unsupported_resolver_address,
+            None,
+        ),
+    ] {
+        insert_contract_instance(database.pool(), contract_instance_id, config.chain, "contract")
+            .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            config.chain,
+            address,
+            source_manifest_id,
+        )
+        .await?;
+    }
+    insert_manifest_contract_instance(
         database.pool(),
-        resolver_contract_instance_id,
-        config.chain,
-        "contract",
-    )
-    .await?;
-    insert_active_contract_instance_address(
-        database.pool(),
-        resolver_contract_instance_id,
-        config.chain,
-        resolver_address,
+        resolver_manifest_id,
+        resolver_seed_role,
+        seed_resolver_contract_instance_id,
+        seed_resolver_address,
+        "none",
+        None,
         None,
     )
     .await?;
-    insert_active_discovery_edge_with_range(
-        database.pool(),
-        config.chain,
-        "resolver",
-        registry_contract_instance_id,
-        resolver_contract_instance_id,
-        Some(registry_manifest_id),
-        Some(50),
-        Some(51),
-    )
-    .await?;
+    for contract_instance_id in [
+        supported_resolver_contract_instance_id,
+        pending_resolver_contract_instance_id,
+        unsupported_resolver_contract_instance_id,
+    ] {
+        insert_active_discovery_edge_with_range(
+            database.pool(),
+            config.chain,
+            "resolver",
+            registry_contract_instance_id,
+            contract_instance_id,
+            Some(registry_manifest_id),
+            Some(50),
+            Some(51),
+        )
+        .await?;
+    }
 
     for (block, canonicality_state) in [
         (&block_50, CanonicalityState::Canonical),
@@ -843,6 +896,39 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         insert_chain_lineage_for_block(database.pool(), config.chain, block, canonicality_state)
             .await?;
     }
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            RawCodeHash {
+                chain_id: config.chain.to_owned(),
+                block_hash: block_50.block_hash.clone(),
+                block_number: block_50.block_number,
+                contract_address: seed_resolver_address.to_owned(),
+                code_hash: supported_profile_code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawCodeHash {
+                chain_id: config.chain.to_owned(),
+                block_hash: block_50.block_hash.clone(),
+                block_number: block_50.block_number,
+                contract_address: supported_resolver_address.to_owned(),
+                code_hash: supported_profile_code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawCodeHash {
+                chain_id: config.chain.to_owned(),
+                block_hash: block_50.block_hash.clone(),
+                block_number: block_50.block_number,
+                contract_address: unsupported_resolver_address.to_owned(),
+                code_hash: unsupported_profile_code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
     insert_raw_reverse_claimed_log(
         database.pool(),
         config.chain,
@@ -852,13 +938,36 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         CanonicalityState::Canonical,
     )
     .await?;
-    insert_raw_new_resolver_log_for_node(
+    insert_raw_new_resolver_log_for_node_at_index(
         database.pool(),
         config.chain,
         &block_50,
         registry_address,
-        resolver_address,
+        supported_resolver_address,
         &reverse_node,
+        1,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_resolver_log_for_node_at_index(
+        database.pool(),
+        config.chain,
+        &block_50,
+        registry_address,
+        pending_resolver_address,
+        &reverse_node,
+        5,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_resolver_log_for_node_at_index(
+        database.pool(),
+        config.chain,
+        &block_50,
+        registry_address,
+        unsupported_resolver_address,
+        &reverse_node,
+        8,
         CanonicalityState::Canonical,
     )
     .await?;
@@ -866,7 +975,7 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         database.pool(),
         config.chain,
         &block_50,
-        resolver_address,
+        supported_resolver_address,
         &reverse_node,
         config.in_range_raw_name,
         2,
@@ -880,6 +989,39 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         unadmitted_resolver_address,
         &reverse_node,
         "unadmitted.example",
+        4,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_name_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        pending_resolver_address,
+        &reverse_node,
+        "pending.example",
+        6,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_name_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        unsupported_resolver_address,
+        &reverse_node,
+        "unsupported.example",
+        9,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_version_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        supported_resolver_address,
+        &reverse_node,
+        7,
         3,
         CanonicalityState::Canonical,
     )
@@ -887,11 +1029,22 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     insert_raw_resolver_version_changed_log_for_node(
         database.pool(),
         config.chain,
-        &block_51,
-        resolver_address,
+        &block_50,
+        pending_resolver_address,
         &reverse_node,
+        8,
         7,
-        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_version_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_51,
+        unsupported_resolver_address,
+        &reverse_node,
+        9,
+        2,
         CanonicalityState::Canonical,
     )
     .await?;
@@ -899,7 +1052,7 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         database.pool(),
         config.chain,
         &block_52,
-        resolver_address,
+        supported_resolver_address,
         &reverse_node,
         config.closed_raw_name,
         0,
@@ -910,7 +1063,7 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         database.pool(),
         config.chain,
         &orphaned_block_51,
-        resolver_address,
+        supported_resolver_address,
         &reverse_node,
         99,
         0,
@@ -932,7 +1085,7 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     .await?;
 
     assert_eq!(outcome.selected_block_count, 3);
-    assert_eq!(outcome.canonical_raw_log_count, 6);
+    assert_eq!(outcome.canonical_raw_log_count, 12);
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
             r#"
@@ -985,6 +1138,35 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         .await?,
         0
     );
+    for gated_address in [pending_resolver_address, unsupported_resolver_address] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')"
+            )
+            .bind(gated_address)
+            .fetch_one(database.pool())
+            .await?,
+            0,
+            "{gated_address} resolver-local facts must stay gated from replay output"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(after_state->>'raw_name' ORDER BY after_state->>'raw_name'),
+                ARRAY[]::TEXT[]
+            )
+            FROM normalized_events
+            WHERE event_kind = 'RecordChanged'
+              AND after_state->>'raw_name' IN ('pending.example', 'unsupported.example', $1)
+            "#
+        )
+        .bind(config.closed_raw_name)
+        .fetch_one(database.pool())
+        .await?,
+        Vec::<String>::new()
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
@@ -1009,11 +1191,94 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        3
+    );
+    let admissions = if config.resolver_source_family == "ens_v1_resolver_l1" {
+        bigname_manifests::load_ens_v1_public_resolver_profile_admissions(database.pool()).await?
+    } else {
+        bigname_manifests::load_basenames_l2_resolver_profile_admissions(database.pool()).await?
+    };
+    let profile_statuses = admissions
+        .iter()
+        .filter(|admission| admission.fact_family == "resolver_record")
+        .filter(|admission| {
+            [
+                supported_resolver_address,
+                pending_resolver_address,
+                unsupported_resolver_address,
+            ]
+            .contains(&admission.address.as_str())
+        })
+        .map(|admission| {
+            (
+                admission.address.as_str(),
+                admission.status.as_str(),
+                admission.admission_basis.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        profile_statuses,
+        vec![
+            (
+                supported_resolver_address,
+                "supported",
+                "code_hash_match"
+            ),
+            (
+                pending_resolver_address,
+                "pending",
+                "code_hash_pending"
+            ),
+            (
+                unsupported_resolver_address,
+                "unsupported",
+                "code_hash_mismatch"
+            )
+        ]
     );
     assert_no_duplicate_normalized_event_identities(database.pool()).await?;
 
     database.cleanup().await
+}
+
+async fn insert_raw_new_resolver_log_for_node_at_index(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    resolver: &str,
+    node: &str,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[provider_block_to_raw_block(
+            chain,
+            block,
+            canonicality_state,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics: vec![registry_new_resolver_topic0(), node.to_owned()],
+            data: decode_hex_string(&encode_registry_new_resolver_log_data(resolver)),
+            canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
 }
 
 async fn insert_stale_name_wrapped_preimage_event(

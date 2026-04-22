@@ -12,6 +12,10 @@
             "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678";
         const RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC: &str =
             "0xab5f3e28c9cfb162e62c91f566751059da9be419f5cbd10d0645d765c061d0e3";
+        const BASENAMES_L2_RESOLVER_PROFILE_CODE_HASH: &str =
+            "0x1111111111111111111111111111111111111111111111111111111111111111";
+        const BASENAMES_UNSUPPORTED_RESOLVER_PROFILE_CODE_HASH: &str =
+            "0x2222222222222222222222222222222222222222222222222222222222222222";
 
         #[derive(Clone, Copy)]
         enum BasenamesControlVectorScenario {
@@ -1230,6 +1234,220 @@
             .context("failed to seed chaos replay active contract address")?;
 
             Ok(())
+        }
+
+        async fn seed_basenames_l2_resolver_profile_gate(
+            database: &HarnessDatabase,
+            seed_contract_instance_id: Uuid,
+            seed_address: &str,
+            dynamic_resolvers: &[(Uuid, &str)],
+            supported_resolver_addresses: &[&str],
+            unsupported_resolver_addresses: &[&str],
+        ) -> Result<()> {
+            let resolver_manifest_id = database
+                .insert_manifest(
+                    "basenames",
+                    "basenames_base_resolver",
+                    "base-mainnet",
+                    "basenames_v1",
+                    71,
+                    "active",
+                    "ensip15@2026-04-16",
+                )
+                .await?;
+            let registry_manifest_id = database
+                .insert_manifest(
+                    "basenames",
+                    "basenames_base_registry",
+                    "base-mainnet",
+                    "basenames_v1",
+                    72,
+                    "active",
+                    "ensip15@2026-04-16",
+                )
+                .await?;
+            let registry_contract_instance_id = Uuid::from_u128(0xc95f);
+
+            insert_basenames_resolver_profile_contract(
+                database,
+                seed_contract_instance_id,
+                seed_address,
+                resolver_manifest_id,
+                "contract",
+            )
+            .await?;
+            insert_basenames_resolver_profile_manifest_contract(
+                database,
+                resolver_manifest_id,
+                "resolver",
+                seed_contract_instance_id,
+                seed_address,
+            )
+            .await?;
+            insert_basenames_resolver_profile_contract(
+                database,
+                registry_contract_instance_id,
+                "0x000000000000000000000000000000000000c95f",
+                registry_manifest_id,
+                "root",
+            )
+            .await?;
+
+            for (contract_instance_id, address) in dynamic_resolvers {
+                insert_basenames_resolver_profile_contract(
+                    database,
+                    *contract_instance_id,
+                    address,
+                    resolver_manifest_id,
+                    "contract",
+                )
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO discovery_edges (
+                        chain_id,
+                        edge_kind,
+                        from_contract_instance_id,
+                        to_contract_instance_id,
+                        discovery_source,
+                        source_manifest_id,
+                        admission,
+                        provenance
+                    )
+                    VALUES (
+                        'base-mainnet',
+                        'resolver',
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        'conformance',
+                        '{}'::jsonb
+                    )
+                    "#,
+                )
+                .bind(registry_contract_instance_id)
+                .bind(contract_instance_id)
+                .bind(format!("conformance:basenames-dynamic-resolver:{address}"))
+                .bind(registry_manifest_id)
+                .execute(&database.pool)
+                .await
+                .context("failed to seed Basenames dynamic resolver discovery edge")?;
+            }
+
+            let mut code_hashes = vec![basenames_resolver_profile_code_hash(
+                seed_address,
+                BASENAMES_L2_RESOLVER_PROFILE_CODE_HASH,
+            )];
+            code_hashes.extend(supported_resolver_addresses.iter().map(|address| {
+                basenames_resolver_profile_code_hash(
+                    address,
+                    BASENAMES_L2_RESOLVER_PROFILE_CODE_HASH,
+                )
+            }));
+            code_hashes.extend(unsupported_resolver_addresses.iter().map(|address| {
+                basenames_resolver_profile_code_hash(
+                    address,
+                    BASENAMES_UNSUPPORTED_RESOLVER_PROFILE_CODE_HASH,
+                )
+            }));
+            bigname_storage::upsert_raw_code_hashes(&database.pool, &code_hashes)
+                .await
+                .context("failed to seed Basenames resolver profile code hashes")?;
+
+            Ok(())
+        }
+
+        async fn insert_basenames_resolver_profile_contract(
+            database: &HarnessDatabase,
+            contract_instance_id: Uuid,
+            address: &str,
+            source_manifest_id: i64,
+            contract_kind: &str,
+        ) -> Result<()> {
+            sqlx::query(
+                r#"
+                INSERT INTO contract_instances (
+                    contract_instance_id,
+                    chain_id,
+                    contract_kind,
+                    provenance
+                )
+                VALUES ($1, 'base-mainnet', $2, '{}'::jsonb)
+                "#,
+            )
+            .bind(contract_instance_id)
+            .bind(contract_kind)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed Basenames resolver profile contract instance")?;
+            sqlx::query(
+                r#"
+                INSERT INTO contract_instance_addresses (
+                    contract_instance_id,
+                    chain_id,
+                    address,
+                    source_manifest_id,
+                    provenance
+                )
+                VALUES ($1, 'base-mainnet', lower($2), $3, '{}'::jsonb)
+                "#,
+            )
+            .bind(contract_instance_id)
+            .bind(address)
+            .bind(source_manifest_id)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed Basenames resolver profile contract address")?;
+
+            Ok(())
+        }
+
+        async fn insert_basenames_resolver_profile_manifest_contract(
+            database: &HarnessDatabase,
+            manifest_id: i64,
+            role: &str,
+            contract_instance_id: Uuid,
+            address: &str,
+        ) -> Result<()> {
+            sqlx::query(
+                r#"
+                INSERT INTO manifest_contract_instances (
+                    manifest_id,
+                    declaration_kind,
+                    declaration_name,
+                    contract_instance_id,
+                    declared_address,
+                    role,
+                    proxy_kind
+                )
+                VALUES ($1, 'contract', $2, $3, lower($4), $2, 'none')
+                "#,
+            )
+            .bind(manifest_id)
+            .bind(role)
+            .bind(contract_instance_id)
+            .bind(address)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed Basenames resolver profile manifest contract")?;
+
+            Ok(())
+        }
+
+        fn basenames_resolver_profile_code_hash(
+            address: &str,
+            code_hash: &str,
+        ) -> bigname_storage::RawCodeHash {
+            bigname_storage::RawCodeHash {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: "0xreplay-basenames-resolver-profile-code-hash".to_owned(),
+                block_number: 41,
+                contract_address: address.to_ascii_lowercase(),
+                code_hash: code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Finalized,
+            }
         }
 
         async fn seed_completed_backfill_job(
