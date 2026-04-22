@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.env.*
+.git
+.github
+.refs
+.agents
+.claude
+.codex
+target
+
+docs
+tests
+docker-compose*.yml
+README.md

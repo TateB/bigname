@@ -51,6 +51,26 @@ The API process also exposes a private, non-`/v1` readiness check at
 `http://127.0.0.1:3000/healthz` by default; see `docs/development.md` for
 the operator response contract.
 
+## Container Deployment
+
+The production image is published as `ghcr.io/tateb/bigname`. It contains the
+API, indexer, and worker binaries and can run each process by command:
+
+- `docker run ghcr.io/tateb/bigname:latest api`
+- `docker run ghcr.io/tateb/bigname:latest indexer`
+- `docker run ghcr.io/tateb/bigname:latest worker`
+- `docker run ghcr.io/tateb/bigname:latest migrate`
+
+For a fresh server, copy `.env.server.example` to `.env.server`, update the
+secrets, then run:
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml up -d
+```
+
+See `docs/deployment.md` for image tags, service configuration, and manual GHCR
+publish commands.
+
 ## Guardrails
 
 - treat the Phase 0 docs as the interface freeze
