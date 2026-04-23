@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use bigname_manifests::{
     WatchedSourceSelector, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
@@ -12,6 +15,8 @@ include!("support.rs");
 struct RecordedRpcRequest {
     method: String,
     params: Vec<Value>,
+    http_request_id: u64,
+    batch_size: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,7 +244,46 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
     assert_eq!(
         table_count(database.pool(), "raw_payload_cache_metadata").await?,
-        6
+        4
+    );
+    let payload_cache_summary =
+        sqlx::query_as::<_, (String, i64, i64, i64, Vec<String>, Vec<String>)>(
+            r#"
+            SELECT
+                payload_kind,
+                COUNT(*)::BIGINT,
+                COUNT(retained_digest)::BIGINT,
+                COUNT(DISTINCT retained_digest)::BIGINT,
+                ARRAY_AGG(DISTINCT cache_metadata->>'method' ORDER BY cache_metadata->>'method')::TEXT[],
+                ARRAY_AGG(DISTINCT cache_metadata->>'fetch_mode' ORDER BY cache_metadata->>'fetch_mode')::TEXT[]
+            FROM raw_payload_cache_metadata
+            GROUP BY payload_kind
+            ORDER BY payload_kind
+            "#,
+        )
+        .fetch_all(database.pool())
+        .await?;
+    assert_eq!(
+        payload_cache_summary,
+        vec![
+            (
+                provider::RAW_PAYLOAD_KIND_BLOCK_RECEIPTS.to_owned(),
+                2,
+                2,
+                2,
+                vec!["eth_getBlockReceipts".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+            (
+                provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+                2,
+                2,
+                2,
+                vec!["eth_getBlockByHash".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+        ],
+        "range-fetched logs must not fake hash-scoped block_logs retained payload metadata"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -296,20 +340,99 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 10);
+    assert_eq!(requests.len(), 11);
+    let block_number_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getBlockByNumber")
+        .collect::<Vec<_>>();
+    assert_eq!(block_number_requests.len(), 4);
+    assert_eq!(
+        block_number_requests
+            .iter()
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("0x2a"), Some("0x2b"), Some("0x2a"), Some("0x2b")]
+    );
+    for batch in block_number_requests.chunks(2) {
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].batch_size, 2);
+        assert!(
+            batch.iter().all(
+                |request| request.http_request_id == batch[0].http_request_id
+                    && request.batch_size == 2
+            ),
+            "42..43 block-number resolution and post-log validation must use JSON-RPC batch HTTP requests"
+        );
+    }
+    assert_ne!(
+        block_number_requests[0].http_request_id, block_number_requests[2].http_request_id,
+        "post-log hash validation must re-fetch block numbers after the range log request"
+    );
     assert_eq!(requests[0].method, "eth_getBlockByNumber");
     assert_eq!(
         requests[0].params.first().and_then(Value::as_str),
         Some("0x2a")
     );
-    assert_eq!(requests[1].method, "eth_getBlockByHash");
+    assert_eq!(requests[1].method, "eth_getBlockByNumber");
     assert_eq!(
         requests[1].params.first().and_then(Value::as_str),
+        Some("0x2b")
+    );
+    let log_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(log_requests.len(), 1);
+    assert_eq!(log_requests[0].batch_size, 1);
+    let log_filter = log_requests[0]
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("log request must include a filter object");
+    assert_eq!(
+        log_filter.get("fromBlock").and_then(Value::as_str),
+        Some("0x2a")
+    );
+    assert_eq!(
+        log_filter.get("toBlock").and_then(Value::as_str),
+        Some("0x2b")
+    );
+    assert!(
+        !log_filter.contains_key("blockHash"),
+        "multi-block backfill logs must use block ranges instead of per-block blockHash filters"
+    );
+    assert_eq!(
+        log_filter.get("address").and_then(Value::as_array),
+        Some(&vec![Value::String(
+            "0x0000000000000000000000000000000000000001".to_owned()
+        )]),
+        "backfill log range must be scoped to the selected address set"
+    );
+    assert_eq!(requests[5].method, "eth_getBlockByHash");
+    assert_eq!(
+        requests[5].params.first().and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
     );
-    assert_eq!(requests[4].method, "eth_getCode");
+    assert_eq!(requests[7].method, "eth_getBlockByHash");
     assert_eq!(
-        requests[4]
+        requests[7].params.first().and_then(Value::as_str),
+        Some(block_43.block_hash.as_str())
+    );
+    let code_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .collect::<Vec<_>>();
+    assert_eq!(code_requests.len(), 2);
+    assert_eq!(code_requests[0].batch_size, 2);
+    assert!(
+        code_requests.iter().all(|request| request.http_request_id
+            == code_requests[0].http_request_id
+            && request.batch_size == 2),
+        "hash-pinned code observations must share one JSON-RPC batch HTTP request"
+    );
+    assert_eq!(requests[9].method, "eth_getCode");
+    assert_eq!(
+        requests[9]
             .params
             .get(1)
             .and_then(Value::as_object)
@@ -317,19 +440,9 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
     );
-    assert_eq!(requests[5].method, "eth_getBlockByNumber");
+    assert_eq!(requests[10].method, "eth_getCode");
     assert_eq!(
-        requests[5].params.first().and_then(Value::as_str),
-        Some("0x2b")
-    );
-    assert_eq!(requests[6].method, "eth_getBlockByHash");
-    assert_eq!(
-        requests[6].params.first().and_then(Value::as_str),
-        Some(block_43.block_hash.as_str())
-    );
-    assert_eq!(requests[9].method, "eth_getCode");
-    assert_eq!(
-        requests[9]
+        requests[10]
             .params
             .get(1)
             .and_then(Value::as_object)
@@ -419,6 +532,53 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
     assert_eq!(
         table_count(database.pool(), "raw_payload_cache_metadata").await?,
         3
+    );
+    let exact_payload_cache_summary =
+        sqlx::query_as::<_, (String, i64, i64, i64, Vec<String>, Vec<String>)>(
+            r#"
+            SELECT
+                payload_kind,
+                COUNT(*)::BIGINT,
+                COUNT(retained_digest)::BIGINT,
+                COUNT(DISTINCT retained_digest)::BIGINT,
+                ARRAY_AGG(DISTINCT cache_metadata->>'method' ORDER BY cache_metadata->>'method')::TEXT[],
+                ARRAY_AGG(DISTINCT cache_metadata->>'fetch_mode' ORDER BY cache_metadata->>'fetch_mode')::TEXT[]
+            FROM raw_payload_cache_metadata
+            GROUP BY payload_kind
+            ORDER BY payload_kind
+            "#,
+        )
+        .fetch_all(database.pool())
+        .await?;
+    assert_eq!(
+        exact_payload_cache_summary,
+        vec![
+            (
+                provider::RAW_PAYLOAD_KIND_BLOCK_LOGS.to_owned(),
+                1,
+                1,
+                1,
+                vec!["eth_getLogs".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+            (
+                provider::RAW_PAYLOAD_KIND_BLOCK_RECEIPTS.to_owned(),
+                1,
+                1,
+                1,
+                vec!["eth_getBlockReceipts".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+            (
+                provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+                1,
+                1,
+                1,
+                vec!["eth_getBlockByHash".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+        ],
+        "single-block retained log fetches remain hash-scoped while block and receipt metadata stay hash-scoped"
     );
 
     let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
@@ -743,8 +903,10 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
-    let contract_instance_id = Uuid::from_u128(1_101);
-    let watched_address = "0x0000000000000000000000000000000000000011";
+    let first_contract_instance_id = Uuid::from_u128(1_101);
+    let second_contract_instance_id = Uuid::from_u128(1_102);
+    let first_address = "0x0000000000000000000000000000000000000011";
+    let second_address = "0x0000000000000000000000000000000000000012";
 
     insert_watched_manifest_contract(
         database.pool(),
@@ -752,12 +914,50 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         "ens",
         "ethereum-mainnet",
         "ens_v2_registry_l1",
-        contract_instance_id,
-        watched_address,
+        first_contract_instance_id,
+        first_address,
     )
     .await?;
-    set_contract_instance_address_range(database.pool(), contract_instance_id, Some(43), Some(43))
-        .await?;
+    insert_contract_instance(
+        database.pool(),
+        second_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        second_contract_instance_id,
+        "ethereum-mainnet",
+        second_address,
+        Some(101),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        101,
+        "registry",
+        second_contract_instance_id,
+        second_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    set_contract_instance_address_range(
+        database.pool(),
+        first_contract_instance_id,
+        Some(42),
+        Some(42),
+    )
+    .await?;
+    set_contract_instance_address_range(
+        database.pool(),
+        second_contract_instance_id,
+        Some(43),
+        Some(43),
+    )
+    .await?;
 
     let range = BackfillBlockRange::new(42, 43)?;
     let source_plan = load_watched_source_selector_plan(
@@ -768,9 +968,21 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         range.to_block,
     )
     .await?;
-    assert_eq!(source_plan.selected_targets.len(), 1);
-    assert_eq!(source_plan.selected_targets[0].effective_from_block, 43);
-    assert_eq!(source_plan.selected_targets[0].effective_to_block, 43);
+    assert_eq!(source_plan.selected_targets.len(), 2);
+    assert_eq!(
+        source_plan
+            .selected_targets
+            .iter()
+            .map(|target| (
+                target.address.as_str(),
+                target.effective_from_block,
+                target.effective_to_block
+            ))
+            .collect::<BTreeSet<_>>(),
+        [(first_address, 42, 42), (second_address, 43, 43)]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
 
     let block_42 = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -787,11 +999,17 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         vec![
             ProviderBlockFixture {
                 block: block_42.clone(),
-                logs: vec![rpc_log_payload_at_address(&block_42, watched_address, 0)],
+                logs: vec![
+                    rpc_log_payload_at_address(&block_42, first_address, 0),
+                    rpc_log_payload_at_address(&block_42, second_address, 1),
+                ],
             },
             ProviderBlockFixture {
                 block: block_43.clone(),
-                logs: vec![rpc_log_payload_at_address(&block_43, watched_address, 0)],
+                logs: vec![
+                    rpc_log_payload_at_address(&block_43, first_address, 0),
+                    rpc_log_payload_at_address(&block_43, second_address, 1),
+                ],
             },
         ],
         Arc::clone(&requests),
@@ -805,23 +1023,79 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         backfill_job_config(range, "source-effective-ranges", "lease-effective")?,
     )
     .await?;
-    assert_eq!(outcome.raw_log_count, 1);
-    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 2);
     assert_eq!(
-        sqlx::query_scalar::<_, Vec<i64>>(
-            "SELECT ARRAY_AGG(block_number ORDER BY block_number) FROM raw_logs"
+        sqlx::query_as::<_, (Vec<i64>, Vec<String>)>(
+            "SELECT ARRAY_AGG(block_number ORDER BY block_number), ARRAY_AGG(emitting_address ORDER BY block_number) FROM raw_logs"
         )
         .fetch_one(database.pool())
         .await?,
-        vec![43]
+        (
+            vec![42, 43],
+            vec![first_address.to_owned(), second_address.to_owned()]
+        )
     );
     assert_eq!(
-        sqlx::query_scalar::<_, Vec<i64>>(
-            "SELECT ARRAY_AGG(block_number ORDER BY block_number) FROM raw_code_hashes"
+        sqlx::query_as::<_, (Vec<i64>, Vec<String>)>(
+            "SELECT ARRAY_AGG(block_number ORDER BY block_number), ARRAY_AGG(contract_address ORDER BY block_number) FROM raw_code_hashes"
         )
         .fetch_one(database.pool())
         .await?,
-        vec![43]
+        (
+            vec![42, 43],
+            vec![first_address.to_owned(), second_address.to_owned()]
+        )
+    );
+
+    let recorded_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = recorded_requests
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        log_requests.len(),
+        2,
+        "selected address changes must split log ranges rather than widening the address set"
+    );
+    let log_filters = log_requests
+        .iter()
+        .map(|request| {
+            assert_eq!(request.batch_size, 1);
+            request
+                .params
+                .first()
+                .and_then(Value::as_object)
+                .expect("log request must include a filter object")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        log_filters
+            .iter()
+            .map(|filter| (
+                filter.get("fromBlock").and_then(Value::as_str),
+                filter.get("toBlock").and_then(Value::as_str),
+                filter.get("address").and_then(Value::as_array),
+                filter.get("blockHash").and_then(Value::as_str),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Some("0x2a"),
+                Some("0x2a"),
+                Some(&vec![Value::String(first_address.to_owned())]),
+                None,
+            ),
+            (
+                Some("0x2b"),
+                Some("0x2b"),
+                Some(&vec![Value::String(second_address.to_owned())]),
+                None,
+            ),
+        ]
     );
 
     let code_requests = requests
@@ -831,19 +1105,30 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         .filter(|request| request.method == "eth_getCode")
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(code_requests.len(), 1);
+    assert_eq!(code_requests.len(), 2);
     assert_eq!(
-        code_requests[0].params.first().and_then(Value::as_str),
-        Some(watched_address)
+        code_requests
+            .iter()
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some(first_address), Some(second_address)]
     );
     assert_eq!(
-        code_requests[0]
-            .params
-            .get(1)
-            .and_then(Value::as_object)
-            .and_then(|selection| selection.get("blockHash"))
-            .and_then(Value::as_str),
-        Some(block_43.block_hash.as_str())
+        code_requests
+            .iter()
+            .map(|request| {
+                request
+                    .params
+                    .get(1)
+                    .and_then(Value::as_object)
+                    .and_then(|selection| selection.get("blockHash"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            Some(block_42.block_hash.as_str()),
+            Some(block_43.block_hash.as_str())
+        ]
     );
 
     server.abort();
@@ -1171,6 +1456,8 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
             .push(RecordedRpcRequest {
                 method: method.to_owned(),
                 params: params.clone(),
+                http_request_id: json_rpc_test_http_request_id(&body),
+                batch_size: json_rpc_test_batch_size(&body),
             });
 
         let result = match method {
@@ -1338,6 +1625,8 @@ async fn number_resolving_provider_with_fixtures(
             .push(RecordedRpcRequest {
                 method: method.to_owned(),
                 params: params.clone(),
+                http_request_id: json_rpc_test_http_request_id(&body),
+                batch_size: json_rpc_test_batch_size(&body),
             });
 
         let result = match method {
@@ -1369,17 +1658,11 @@ async fn number_resolving_provider_with_fixtures(
                 rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getLogs" => {
-                let block_hash = params
+                let filter = params
                     .first()
                     .and_then(Value::as_object)
-                    .and_then(|filter| filter.get("blockHash"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let fixture = fixtures_by_hash
-                    .get(&block_hash)
-                    .unwrap_or_else(|| panic!("unexpected log request: {body}"));
-                Value::Array(fixture.logs.clone())
+                    .expect("log request must include a filter object");
+                logs_for_backfill_filter(filter, &fixtures_by_hash, &hashes_by_number)
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params
@@ -1418,6 +1701,88 @@ async fn number_resolving_provider_with_fixtures(
     .await?;
 
     Ok((provider::JsonRpcProvider::new(&url)?, server))
+}
+
+fn logs_for_backfill_filter(
+    filter: &serde_json::Map<String, Value>,
+    fixtures_by_hash: &BTreeMap<String, ProviderBlockFixture>,
+    hashes_by_number: &BTreeMap<i64, String>,
+) -> Value {
+    let address_filter = log_filter_addresses(filter);
+    let mut logs = Vec::new();
+
+    if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
+        let fixture = fixtures_by_hash
+            .get(&block_hash.to_ascii_lowercase())
+            .unwrap_or_else(|| panic!("unexpected log blockHash filter: {filter:?}"));
+        logs.extend(filtered_fixture_logs(fixture, address_filter.as_ref()));
+    } else {
+        let from_block = filter
+            .get("fromBlock")
+            .and_then(Value::as_str)
+            .map(parse_rpc_block_number)
+            .expect("range log filter must include fromBlock");
+        let to_block = filter
+            .get("toBlock")
+            .and_then(Value::as_str)
+            .map(parse_rpc_block_number)
+            .expect("range log filter must include toBlock");
+        assert!(
+            from_block <= to_block,
+            "range log filter start must not exceed end: {filter:?}"
+        );
+
+        for block_number in from_block..=to_block {
+            let block_hash = hashes_by_number
+                .get(&block_number)
+                .unwrap_or_else(|| panic!("unexpected log range block: {filter:?}"));
+            let fixture = fixtures_by_hash
+                .get(block_hash)
+                .expect("number index must point at a fixture block");
+            logs.extend(filtered_fixture_logs(fixture, address_filter.as_ref()));
+        }
+    }
+
+    Value::Array(logs)
+}
+
+fn log_filter_addresses(filter: &serde_json::Map<String, Value>) -> Option<BTreeSet<String>> {
+    let addresses = filter.get("address")?;
+    let addresses = match addresses {
+        Value::String(address) => vec![address.to_ascii_lowercase()],
+        Value::Array(addresses) => addresses
+            .iter()
+            .map(|address| {
+                address
+                    .as_str()
+                    .expect("log address filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        value => panic!("unexpected log address filter: {value:?}"),
+    };
+
+    Some(addresses.into_iter().collect())
+}
+
+fn filtered_fixture_logs(
+    fixture: &ProviderBlockFixture,
+    address_filter: Option<&BTreeSet<String>>,
+) -> Vec<Value> {
+    fixture
+        .logs
+        .iter()
+        .filter(|log| {
+            let Some(address_filter) = address_filter else {
+                return true;
+            };
+            log.get("address")
+                .and_then(Value::as_str)
+                .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn rpc_log_payload_at_address(block: &ProviderBlock, address: &str, log_index: i64) -> Value {
@@ -2192,9 +2557,48 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         );
     }
 
-    let code_requests = requests
+    let recorded_requests = requests
         .lock()
         .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = recorded_requests
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        log_requests.len(),
+        1,
+        "only the contiguous selected resolver target range should fetch logs"
+    );
+    assert_eq!(log_requests[0].batch_size, 1);
+    let log_filter = log_requests[0]
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("log request must include a filter object");
+    assert_eq!(
+        log_filter.get("fromBlock").and_then(Value::as_str),
+        Some("0x2a")
+    );
+    assert_eq!(
+        log_filter.get("toBlock").and_then(Value::as_str),
+        Some("0x2b")
+    );
+    assert!(
+        !log_filter.contains_key("blockHash"),
+        "selected resolver log lookup should use one safe range instead of per-block blockHash filters"
+    );
+    assert_eq!(
+        log_filter.get("address").and_then(Value::as_array),
+        Some(&vec![
+            Value::String(selected_resolver_address.to_owned()),
+            Value::String(pending_resolver_address.to_owned()),
+            Value::String(unsupported_resolver_address.to_owned()),
+        ]),
+        "log range must include only resolver targets effective for every block in the range"
+    );
+
+    let code_requests = recorded_requests
         .iter()
         .filter(|request| request.method == "eth_getCode")
         .cloned()

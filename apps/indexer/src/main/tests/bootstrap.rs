@@ -504,8 +504,12 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     let manifest_root = PathBuf::from("manifests-sepolia-dev");
     let eligible_contract_instance_id = Uuid::from_u128(9_001);
     let unknown_start_contract_instance_id = Uuid::from_u128(9_002);
+    let grouped_contract_instance_id = Uuid::from_u128(9_003);
+    let future_contract_instance_id = Uuid::from_u128(9_004);
     let eligible_address = "0x0000000000000000000000000000000000000901";
     let unknown_start_address = "0x0000000000000000000000000000000000000902";
+    let grouped_address = "0x0000000000000000000000000000000000000903";
+    let future_address = "0x0000000000000000000000000000000000000904";
 
     insert_bootstrap_manifest_version(
         database.pool(),
@@ -519,6 +523,16 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
                     "role": "registry",
                     "address": eligible_address,
                     "start_block": 42
+                },
+                {
+                    "role": "registrar",
+                    "address": grouped_address,
+                    "start_block": 42
+                },
+                {
+                    "role": "future",
+                    "address": future_address,
+                    "start_block": 44
                 }
             ],
             "roots": []
@@ -546,6 +560,58 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         "registry",
         eligible_contract_instance_id,
         eligible_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        grouped_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        grouped_contract_instance_id,
+        "ethereum-mainnet",
+        grouped_address,
+        Some(901),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        901,
+        "registrar",
+        grouped_contract_instance_id,
+        grouped_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        future_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        future_contract_instance_id,
+        "ethereum-mainnet",
+        future_address,
+        Some(901),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        901,
+        "future",
+        future_contract_instance_id,
+        future_address,
         "none",
         None,
         None,
@@ -640,19 +706,19 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         vec![
             ProviderBlockFixture {
                 block: block_42.clone(),
-                logs: vec![bootstrap_rpc_log_payload_at_address(
-                    &block_42,
-                    eligible_address,
-                    0,
-                )],
+                logs: vec![
+                    bootstrap_rpc_log_payload_at_address(&block_42, eligible_address, 0),
+                    bootstrap_rpc_log_payload_at_address(&block_42, grouped_address, 1),
+                    bootstrap_rpc_log_payload_at_address(&block_42, future_address, 2),
+                ],
             },
             ProviderBlockFixture {
                 block: block_43.clone(),
-                logs: vec![bootstrap_rpc_log_payload_at_address(
-                    &block_43,
-                    eligible_address,
-                    0,
-                )],
+                logs: vec![
+                    bootstrap_rpc_log_payload_at_address(&block_43, eligible_address, 0),
+                    bootstrap_rpc_log_payload_at_address(&block_43, grouped_address, 1),
+                    bootstrap_rpc_log_payload_at_address(&block_43, future_address, 2),
+                ],
             },
         ],
         Arc::clone(&requests),
@@ -671,7 +737,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert_eq!(outcome.active_chain_count, 2);
     assert_eq!(outcome.provider_configured_chain_count, 1);
     assert_eq!(outcome.missing_provider_chain_count, 1);
-    assert_eq!(outcome.eligible_target_count, 1);
+    assert_eq!(outcome.eligible_target_count, 3);
     assert_eq!(outcome.skipped_unknown_start_target_count, 1);
     assert_eq!(outcome.skipped_unknown_start_targets.len(), 1);
     assert_eq!(
@@ -691,11 +757,12 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         "unknown_start"
     );
     assert_eq!(outcome.drained_job_count, 1);
+    assert_eq!(outcome.skipped_future_target_count, 1);
     assert_eq!(outcome.reserved_range_count, 1);
     assert_eq!(outcome.completed_range_count, 1);
     assert_eq!(outcome.resolved_block_count, 2);
-    assert_eq!(outcome.raw_log_count, 2);
-    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(outcome.raw_log_count, 4);
+    assert_eq!(outcome.raw_code_hash_count, 4);
 
     let jobs = sqlx::query_as::<_, (i64, String, String, i64, i64, String, Value)>(
         r#"
@@ -739,16 +806,29 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             .get("requested_watched_targets")
             .and_then(Value::as_array)
             .map(Vec::len),
-        Some(1)
+        Some(2)
     );
+    let selected_target_ids = source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)
+        .expect("selected targets must be persisted")
+        .iter()
+        .map(|target| {
+            target
+                .get("contract_instance_id")
+                .and_then(Value::as_str)
+                .expect("selected target must include contract_instance_id")
+                .to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        source_identity
-            .get("selected_targets")
-            .and_then(Value::as_array)
-            .and_then(|targets| targets.first())
-            .and_then(|target| target.get("contract_instance_id"))
-            .and_then(Value::as_str),
-        Some(eligible_contract_instance_id.to_string().as_str())
+        selected_target_ids,
+        [
+            eligible_contract_instance_id.to_string(),
+            grouped_contract_instance_id.to_string()
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
     );
     let source_identity_hash = source_identity
         .get("source_identity_hash")
@@ -765,6 +845,20 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(grouped_address)
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(future_address)
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
             .bind(unknown_start_address)
             .fetch_one(database.pool())
             .await?,
@@ -775,6 +869,15 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = $1"
         )
         .bind(unknown_start_address)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(future_address)
         .fetch_one(database.pool())
         .await?,
         0
@@ -852,8 +955,94 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         requests
             .iter()
             .filter(|request| request.method == "eth_getCode")
-            .all(|request| request.params.first().and_then(Value::as_str) == Some(eligible_address)),
-        "unknown-start targets must not be code-fetched by automatic bootstrap"
+            .all(|request| request.params.first().and_then(Value::as_str) == Some(eligible_address)
+                || request.params.first().and_then(Value::as_str) == Some(grouped_address)),
+        "unknown-start and future targets must not be code-fetched by automatic bootstrap"
+    );
+    let code_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .collect::<Vec<_>>();
+    assert_eq!(code_requests.len(), 4);
+    assert_eq!(code_requests[0].batch_size, 4);
+    assert!(
+        code_requests
+            .iter()
+            .all(|request| request.http_request_id == code_requests[0].http_request_id
+                && request.batch_size == 4),
+        "grouped bootstrap code lookups should use one JSON-RPC batch HTTP request"
+    );
+    let block_number_requests = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.method == "eth_getBlockByNumber"
+            && request
+                .params
+                .first()
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("0x")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        block_number_requests.len(),
+        4,
+        "grouped bootstrap should resolve and revalidate the two selected target blocks"
+    );
+    let resolved_block_params = block_number_requests[..2]
+        .iter()
+        .map(|(_, request)| request.params.first().and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let revalidated_block_params = block_number_requests[2..]
+        .iter()
+        .map(|(_, request)| request.params.first().and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved_block_params, revalidated_block_params,
+        "grouped bootstrap should revalidate the same block hashes after fetching logs"
+    );
+    let log_requests = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        log_requests.len(),
+        1,
+        "grouped bootstrap should fetch one safe log range for a stable target set"
+    );
+    assert!(
+        block_number_requests[1].0 < log_requests[0].0
+            && log_requests[0].0 < block_number_requests[2].0,
+        "grouped bootstrap should fetch logs between range resolution and revalidation"
+    );
+    for batch in [&block_number_requests[..2], &block_number_requests[2..]] {
+        assert_eq!(batch[0].1.batch_size, 2);
+        assert!(
+            batch.iter().all(|(_, request)| {
+                request.http_request_id == batch[0].1.http_request_id && request.batch_size == 2
+            }),
+            "grouped bootstrap block lookups should use two-call JSON-RPC batch HTTP requests"
+        );
+    }
+    assert_eq!(log_requests[0].1.batch_size, 1);
+    let filter = log_requests[0]
+        .1
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("log request must include a filter object");
+    assert_eq!(filter.get("fromBlock").and_then(Value::as_str), Some("0x2a"));
+    assert_eq!(filter.get("toBlock").and_then(Value::as_str), Some("0x2b"));
+    assert!(
+        !filter.contains_key("blockHash"),
+        "bootstrap backfill logs must use the selected target range instead of per-block blockHash filters"
+    );
+    assert_eq!(
+        filter.get("address").and_then(Value::as_array),
+        Some(&vec![
+            Value::String(eligible_address.to_owned()),
+            Value::String(grouped_address.to_owned()),
+        ]),
+        "bootstrap log range must include grouped eligible addresses only"
     );
 
     server.abort();
@@ -864,6 +1053,8 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
 struct BootstrapRpcRequest {
     method: String,
     params: Vec<Value>,
+    http_request_id: u64,
+    batch_size: usize,
 }
 
 async fn insert_bootstrap_manifest_version(
@@ -939,6 +1130,8 @@ async fn bootstrap_auto_backfill_provider(
             .push(BootstrapRpcRequest {
                 method: method.to_owned(),
                 params: params.clone(),
+                http_request_id: json_rpc_test_http_request_id(&body),
+                batch_size: json_rpc_test_batch_size(&body),
             });
 
         let result = match method {
@@ -974,17 +1167,11 @@ async fn bootstrap_auto_backfill_provider(
                 rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getLogs" => {
-                let block_hash = params
+                let filter = params
                     .first()
                     .and_then(Value::as_object)
-                    .and_then(|filter| filter.get("blockHash"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let fixture = fixtures_by_hash
-                    .get(&block_hash)
-                    .unwrap_or_else(|| panic!("unexpected log request: {body}"));
-                Value::Array(fixture.logs.clone())
+                    .expect("log request must include a filter object");
+                bootstrap_logs_for_filter(filter, &fixtures_by_hash, &hashes_by_number)
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params
@@ -1008,6 +1195,96 @@ async fn bootstrap_auto_backfill_provider(
         })
     }))
     .await
+}
+
+fn bootstrap_logs_for_filter(
+    filter: &serde_json::Map<String, Value>,
+    fixtures_by_hash: &std::collections::BTreeMap<String, ProviderBlockFixture>,
+    hashes_by_number: &std::collections::BTreeMap<i64, String>,
+) -> Value {
+    let address_filter = bootstrap_log_filter_addresses(filter);
+    let mut logs = Vec::new();
+
+    if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
+        let fixture = fixtures_by_hash
+            .get(&block_hash.to_ascii_lowercase())
+            .unwrap_or_else(|| panic!("unexpected bootstrap log blockHash filter: {filter:?}"));
+        logs.extend(bootstrap_filtered_fixture_logs(
+            fixture,
+            address_filter.as_ref(),
+        ));
+    } else {
+        let from_block = filter
+            .get("fromBlock")
+            .and_then(Value::as_str)
+            .map(parse_bootstrap_rpc_block_number)
+            .expect("bootstrap range log filter must include fromBlock");
+        let to_block = filter
+            .get("toBlock")
+            .and_then(Value::as_str)
+            .map(parse_bootstrap_rpc_block_number)
+            .expect("bootstrap range log filter must include toBlock");
+        assert!(
+            from_block <= to_block,
+            "bootstrap range log filter start must not exceed end: {filter:?}"
+        );
+
+        for block_number in from_block..=to_block {
+            let block_hash = hashes_by_number
+                .get(&block_number)
+                .unwrap_or_else(|| panic!("unexpected bootstrap log range block: {filter:?}"));
+            let fixture = fixtures_by_hash
+                .get(block_hash)
+                .expect("number index must point at a fixture block");
+            logs.extend(bootstrap_filtered_fixture_logs(
+                fixture,
+                address_filter.as_ref(),
+            ));
+        }
+    }
+
+    Value::Array(logs)
+}
+
+fn bootstrap_log_filter_addresses(
+    filter: &serde_json::Map<String, Value>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let addresses = filter.get("address")?;
+    let addresses = match addresses {
+        Value::String(address) => vec![address.to_ascii_lowercase()],
+        Value::Array(addresses) => addresses
+            .iter()
+            .map(|address| {
+                address
+                    .as_str()
+                    .expect("bootstrap log address filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        value => panic!("unexpected bootstrap log address filter: {value:?}"),
+    };
+
+    Some(addresses.into_iter().collect())
+}
+
+fn bootstrap_filtered_fixture_logs(
+    fixture: &ProviderBlockFixture,
+    address_filter: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<Value> {
+    fixture
+        .logs
+        .iter()
+        .filter(|log| {
+            let Some(address_filter) = address_filter else {
+                return true;
+            };
+            log.get("address")
+                .and_then(Value::as_str)
+                .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn bootstrap_rpc_log_payload_at_address(

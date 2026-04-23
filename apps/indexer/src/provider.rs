@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use sha3::{Digest, Keccak256};
 
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const PROVIDER_BATCH_ITEM_LIMIT: usize = 32;
 const MAX_TRANSACTION_RECEIPT_FALLBACK: usize = 128;
 pub(crate) const RAW_PAYLOAD_KIND_FULL_BLOCK: &str = "full_block";
 pub(crate) const RAW_PAYLOAD_KIND_BLOCK_LOGS: &str = "block_logs";
@@ -71,6 +72,31 @@ pub struct ProviderBlockBundle {
     pub logs: Vec<ProviderLog>,
     pub receipts: Vec<ProviderReceipt>,
     pub raw_payloads: Vec<ProviderRawPayloadCacheMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderResolvedBlock {
+    pub block_number: i64,
+    pub block_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBlockCodeObservationRequest {
+    pub block_hash: String,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBlockLogRequest {
+    pub block_number: i64,
+    pub block_hash: String,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBlockCodeObservations {
+    pub block_hash: String,
+    pub observations: Vec<ProviderCodeObservation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -258,6 +284,49 @@ impl JsonRpcProvider {
         Ok(block.block_hash)
     }
 
+    pub async fn fetch_block_hashes_by_numbers(
+        &self,
+        block_numbers: &[i64],
+    ) -> Result<Vec<ProviderResolvedBlock>> {
+        let mut resolved = Vec::with_capacity(block_numbers.len());
+
+        for chunk in block_numbers.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            let calls = chunk
+                .iter()
+                .map(|block_number| {
+                    Ok(JsonRpcBatchCall {
+                        method: "eth_getBlockByNumber",
+                        params: vec![
+                            ProviderBlockSelection::Number(*block_number).json_rpc_parameter()?,
+                            Value::Bool(false),
+                        ],
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+
+            for (block_number, result) in chunk.iter().zip(results) {
+                let block = result
+                    .with_context(|| format!("provider did not return block number {block_number}"))
+                    .and_then(ProviderBlock::from_value)?;
+                if block.block_number != *block_number {
+                    bail!(
+                        "provider returned block {} for requested number {} with mismatched block number {}",
+                        block.block_hash,
+                        block_number,
+                        block.block_number
+                    );
+                }
+                resolved.push(ProviderResolvedBlock {
+                    block_number: *block_number,
+                    block_hash: block.block_hash,
+                });
+            }
+        }
+
+        Ok(resolved)
+    }
+
     pub async fn fetch_block_by_hash(&self, block_hash: &str) -> Result<ProviderBlock> {
         let block_hash = normalize_hash(block_hash);
         let block = self
@@ -279,9 +348,75 @@ impl JsonRpcProvider {
         Ok(block)
     }
 
+    pub async fn fetch_block_bundles_by_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlockBundle>> {
+        let mut bundles = Vec::with_capacity(resolved_blocks.len());
+
+        // Keep retained payload fetches single-response scoped: cache-fill verifies the stored
+        // digest against the same full block/log/receipt JSON-RPC response body.
+        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            for resolved_block in chunk {
+                let bundle = self
+                    .fetch_block_bundle_by_hash(&resolved_block.block_hash)
+                    .await?;
+                if bundle.block.block_number != resolved_block.block_number {
+                    bail!(
+                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+                        resolved_block.block_number,
+                        resolved_block.block_hash,
+                        bundle.block.block_number
+                    );
+                }
+                bundles.push(bundle);
+            }
+        }
+
+        Ok(bundles)
+    }
+
+    pub async fn fetch_block_bundles_without_logs_by_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlockBundle>> {
+        let mut bundles = Vec::with_capacity(resolved_blocks.len());
+
+        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            for resolved_block in chunk {
+                let bundle = self
+                    .fetch_block_bundle_by_hash_with_log_fetch(
+                        &resolved_block.block_hash,
+                        ProviderBlockLogFetch::Skip,
+                    )
+                    .await?;
+                if bundle.block.block_number != resolved_block.block_number {
+                    bail!(
+                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+                        resolved_block.block_number,
+                        resolved_block.block_hash,
+                        bundle.block.block_number
+                    );
+                }
+                bundles.push(bundle);
+            }
+        }
+
+        Ok(bundles)
+    }
+
     pub async fn fetch_block_bundle_by_hash(
         &self,
         block_hash: &str,
+    ) -> Result<ProviderBlockBundle> {
+        self.fetch_block_bundle_by_hash_with_log_fetch(block_hash, ProviderBlockLogFetch::Fetch)
+            .await
+    }
+
+    async fn fetch_block_bundle_by_hash_with_log_fetch(
+        &self,
+        block_hash: &str,
+        log_fetch: ProviderBlockLogFetch,
     ) -> Result<ProviderBlockBundle> {
         let block_hash = normalize_hash(block_hash);
         let block_payload = self
@@ -328,11 +463,13 @@ impl JsonRpcProvider {
             }
         }
 
-        let logs = self
-            .fetch_logs_by_block_hash(&block_hash, bundle.block.block_number)
-            .await?;
-        bundle.raw_payloads.push(logs.cache_metadata);
-        bundle.logs = logs.logs;
+        if log_fetch == ProviderBlockLogFetch::Fetch {
+            let logs = self
+                .fetch_logs_by_block_hash(&block_hash, bundle.block.block_number)
+                .await?;
+            bundle.raw_payloads.push(logs.cache_metadata);
+            bundle.logs = logs.logs;
+        }
 
         let receipts = self
             .fetch_receipts_by_block_hash(
@@ -345,6 +482,253 @@ impl JsonRpcProvider {
         bundle.receipts = receipts.receipts;
 
         Ok(bundle)
+    }
+
+    pub async fn fetch_logs_by_block_hashes(
+        &self,
+        requests: &[ProviderBlockLogRequest],
+    ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+        let mut logs_by_block_number = BTreeMap::<i64, Vec<ProviderLog>>::new();
+        let requests = requests
+            .iter()
+            .map(|request| ProviderBlockLogRequest {
+                block_number: request.block_number,
+                block_hash: normalize_hash(&request.block_hash),
+                addresses: request
+                    .addresses
+                    .iter()
+                    .map(|address| normalize_address(address))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+
+        for request in &requests {
+            if logs_by_block_number
+                .insert(request.block_number, Vec::new())
+                .is_some()
+            {
+                bail!(
+                    "provider log batch requested duplicate block number {}",
+                    request.block_number
+                );
+            }
+        }
+
+        let fetch_requests = requests
+            .iter()
+            .filter(|request| !request.addresses.is_empty())
+            .collect::<Vec<_>>();
+
+        for chunk in fetch_requests.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            let calls = chunk
+                .iter()
+                .map(|request| {
+                    let mut filter = serde_json::Map::new();
+                    filter.insert(
+                        "blockHash".to_owned(),
+                        Value::String(request.block_hash.clone()),
+                    );
+                    filter.insert(
+                        "address".to_owned(),
+                        Value::Array(
+                            request
+                                .addresses
+                                .iter()
+                                .map(|address| Value::String(address.clone()))
+                                .collect(),
+                        ),
+                    );
+
+                    JsonRpcBatchCall {
+                        method: "eth_getLogs",
+                        params: vec![Value::Object(filter)],
+                    }
+                })
+                .collect::<Vec<_>>();
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+
+            for (request, result) in chunk.iter().zip(results) {
+                let logs = result.with_context(|| {
+                    format!(
+                        "provider returned null logs for exact block hash lookup {}",
+                        request.block_hash
+                    )
+                })?;
+                let logs = logs
+                    .as_array()
+                    .context("expected logs array in JSON-RPC result")?;
+                let logs = logs
+                    .iter()
+                    .map(|value| {
+                        ProviderLog::from_value(value, &request.block_hash, request.block_number)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                logs_by_block_number.insert(request.block_number, logs);
+            }
+        }
+
+        Ok(logs_by_block_number)
+    }
+
+    pub async fn fetch_logs_by_block_range(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+        addresses: &[String],
+    ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+        let mut logs_by_block_number = BTreeMap::<i64, Vec<ProviderLog>>::new();
+        let mut block_hash_by_number = BTreeMap::<i64, String>::new();
+        let mut previous_block_number: Option<i64> = None;
+
+        for resolved_block in resolved_blocks {
+            if resolved_block.block_number < 0 {
+                bail!(
+                    "provider log range requested negative block number {}",
+                    resolved_block.block_number
+                );
+            }
+
+            let block_hash = normalize_hash(&resolved_block.block_hash);
+            if block_hash.is_empty() {
+                bail!(
+                    "provider log range requested block number {} with empty block hash",
+                    resolved_block.block_number
+                );
+            }
+
+            if block_hash_by_number
+                .insert(resolved_block.block_number, block_hash)
+                .is_some()
+            {
+                bail!(
+                    "provider log range requested duplicate block number {}",
+                    resolved_block.block_number
+                );
+            }
+            logs_by_block_number.insert(resolved_block.block_number, Vec::new());
+
+            if let Some(previous_block_number) = previous_block_number {
+                let expected_block_number =
+                    previous_block_number.checked_add(1).with_context(|| {
+                        format!(
+                            "provider log range requested malformed block number after {previous_block_number}"
+                        )
+                    })?;
+                if resolved_block.block_number != expected_block_number {
+                    bail!(
+                        "provider log range requested non-contiguous block numbers: expected {} after {}, got {}",
+                        expected_block_number,
+                        previous_block_number,
+                        resolved_block.block_number
+                    );
+                }
+            }
+
+            previous_block_number = Some(resolved_block.block_number);
+        }
+
+        if resolved_blocks.is_empty() {
+            return Ok(logs_by_block_number);
+        }
+
+        let addresses = addresses
+            .iter()
+            .map(|address| normalize_address(address))
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            return Ok(logs_by_block_number);
+        }
+
+        let from_block = resolved_blocks
+            .first()
+            .expect("resolved block range must be non-empty after validation")
+            .block_number;
+        let to_block = resolved_blocks
+            .last()
+            .expect("resolved block range must be non-empty after validation")
+            .block_number;
+        let mut filter = serde_json::Map::new();
+        filter.insert(
+            "fromBlock".to_owned(),
+            ProviderBlockSelection::Number(from_block).json_rpc_parameter()?,
+        );
+        filter.insert(
+            "toBlock".to_owned(),
+            ProviderBlockSelection::Number(to_block).json_rpc_parameter()?,
+        );
+        filter.insert(
+            "address".to_owned(),
+            Value::Array(addresses.into_iter().map(Value::String).collect::<Vec<_>>()),
+        );
+
+        let logs = self
+            .fetch_json_rpc_result("eth_getLogs", vec![Value::Object(filter)])
+            .await?
+            .context("provider returned null logs for block range lookup")?;
+        let logs = logs
+            .as_array()
+            .context("expected logs array in JSON-RPC result")?;
+
+        for (log_position, value) in logs.iter().enumerate() {
+            let block_number = ProviderLog::block_number_from_value(value)?;
+            let block_hash = block_hash_by_number.get(&block_number).with_context(|| {
+                format!(
+                    "provider returned log {log_position} for unrequested block number {block_number}"
+                )
+            })?;
+            let log = ProviderLog::from_value(value, block_hash, block_number)?;
+            logs_by_block_number
+                .get_mut(&block_number)
+                .expect("validated log block number must have an output group")
+                .push(log);
+        }
+
+        self.revalidate_range_log_block_hashes(resolved_blocks)
+            .await?;
+
+        Ok(logs_by_block_number)
+    }
+
+    async fn revalidate_range_log_block_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<()> {
+        let block_numbers = resolved_blocks
+            .iter()
+            .map(|resolved_block| resolved_block.block_number)
+            .collect::<Vec<_>>();
+        let revalidated_blocks = self
+            .fetch_block_hashes_by_numbers(&block_numbers)
+            .await
+            .context("provider failed to revalidate block hashes after range log lookup")?;
+
+        if revalidated_blocks.len() != resolved_blocks.len() {
+            bail!(
+                "provider revalidated {} blocks after range log lookup for {} requested blocks",
+                revalidated_blocks.len(),
+                resolved_blocks.len()
+            );
+        }
+
+        for (expected, actual) in resolved_blocks.iter().zip(revalidated_blocks) {
+            let expected_hash = normalize_hash(&expected.block_hash);
+            if actual.block_number != expected.block_number {
+                bail!(
+                    "provider revalidated block number {} after range log lookup, but received block number {}",
+                    expected.block_number,
+                    actual.block_number
+                );
+            }
+            if actual.block_hash != expected_hash {
+                bail!(
+                    "provider block hash changed after range log lookup for block number {}: expected {}, got {}",
+                    expected.block_number,
+                    expected_hash,
+                    actual.block_hash
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn cache_fill_full_block_by_hash(
@@ -433,6 +817,85 @@ impl JsonRpcProvider {
             };
             cached_observations.insert(address, observation.clone());
             observations.push(observation);
+        }
+
+        Ok(observations)
+    }
+
+    pub async fn fetch_code_observations_at_block_hashes(
+        &self,
+        requests: &[ProviderBlockCodeObservationRequest],
+    ) -> Result<Vec<ProviderBlockCodeObservations>> {
+        let mut normalized_requests = Vec::with_capacity(requests.len());
+        let mut seen_call_keys = BTreeMap::<(String, String), ()>::new();
+        let mut call_keys = Vec::<(String, String, Value)>::new();
+
+        for request in requests {
+            let block_hash = normalize_hash(&request.block_hash);
+            let block_parameter =
+                ProviderBlockSelection::Hash(block_hash.clone()).json_rpc_parameter()?;
+            let addresses = request
+                .addresses
+                .iter()
+                .map(|address| normalize_address(address))
+                .collect::<Vec<_>>();
+
+            for address in &addresses {
+                let key = (block_hash.clone(), address.clone());
+                if seen_call_keys.insert(key.clone(), ()).is_none() {
+                    call_keys.push((block_hash.clone(), address.clone(), block_parameter.clone()));
+                }
+            }
+
+            normalized_requests.push((block_hash, addresses));
+        }
+
+        let mut code_by_key = BTreeMap::<(String, String), Vec<u8>>::new();
+        for chunk in call_keys.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            let calls = chunk
+                .iter()
+                .map(|(_, address, block_parameter)| JsonRpcBatchCall {
+                    method: "eth_getCode",
+                    params: vec![Value::String(address.clone()), block_parameter.clone()],
+                })
+                .collect::<Vec<_>>();
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+
+            for ((block_hash, address, _), result) in chunk.iter().zip(results) {
+                let code = result.with_context(|| {
+                    format!(
+                        "provider did not return code for address {address} at block hash {block_hash}"
+                    )
+                })?;
+                let code = code
+                    .as_str()
+                    .context("expected code string in JSON-RPC result")?;
+                code_by_key.insert(
+                    (block_hash.clone(), address.clone()),
+                    parse_hex_bytes(code)?,
+                );
+            }
+        }
+
+        let mut observations = Vec::with_capacity(normalized_requests.len());
+        for (block_hash, addresses) in normalized_requests {
+            let mut block_observations = Vec::with_capacity(addresses.len());
+            for address in addresses {
+                let code = code_by_key
+                    .get(&(block_hash.clone(), address.clone()))
+                    .with_context(|| {
+                        format!(
+                            "provider batch omitted code for address {address} at block hash {block_hash}"
+                        )
+                    })?
+                    .clone();
+                block_observations.push(ProviderCodeObservation { address, code });
+            }
+
+            observations.push(ProviderBlockCodeObservations {
+                block_hash,
+                observations: block_observations,
+            });
         }
 
         Ok(observations)
@@ -734,27 +1197,7 @@ impl JsonRpcProvider {
             "method": method,
             "params": params,
         });
-        let request = Request::post(self.endpoint.clone())
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(payload.to_string())))
-            .context("failed to build JSON-RPC request")?;
-        let response = self
-            .client
-            .request(request)
-            .await
-            .with_context(|| format!("failed to send JSON-RPC request for {method}"))?;
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to read JSON-RPC response body")?
-            .to_bytes();
-
-        if !status.is_success() {
-            let response_body = String::from_utf8_lossy(&body);
-            bail!("provider request for {method} failed with HTTP {status}: {response_body}");
-        }
+        let body = self.send_json_rpc_payload(method, payload).await?;
 
         let fingerprint = JsonRpcPayloadFingerprint::for_body(&body)?;
         let response = serde_json::from_slice::<JsonRpcResponse>(&body)
@@ -772,6 +1215,140 @@ impl JsonRpcProvider {
             fingerprint,
         })
     }
+
+    async fn fetch_json_rpc_batch_results(
+        &self,
+        calls: Vec<JsonRpcBatchCall>,
+    ) -> Result<Vec<Option<Value>>> {
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        match self.try_fetch_json_rpc_batch_results(&calls).await {
+            Ok(results) => Ok(results),
+            Err(batch_error) => {
+                let mut results = Vec::with_capacity(calls.len());
+                for call in calls {
+                    let method = call.method;
+                    let result = self
+                        .fetch_json_rpc_result(method, call.params)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "provider JSON-RPC batch failed ({batch_error}); individual retry for {} also failed",
+                                method
+                            )
+                        })?;
+                    results.push(result);
+                }
+                Ok(results)
+            }
+        }
+    }
+
+    async fn try_fetch_json_rpc_batch_results(
+        &self,
+        calls: &[JsonRpcBatchCall],
+    ) -> Result<Vec<Option<Value>>> {
+        let payload = Value::Array(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": index + 1,
+                        "method": call.method,
+                        "params": call.params.clone(),
+                    })
+                })
+                .collect(),
+        );
+        let body = self.send_json_rpc_payload("batch", payload).await?;
+        let response_value = serde_json::from_slice::<Value>(&body)
+            .context("failed to decode JSON-RPC batch response")?;
+        let response_values = response_value
+            .as_array()
+            .context("expected JSON-RPC batch response array")?;
+        let expected_methods = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| ((index + 1) as i64, call.method))
+            .collect::<BTreeMap<_, _>>();
+        let mut results_by_id = BTreeMap::<i64, Option<Value>>::new();
+
+        for response_value in response_values {
+            let response = serde_json::from_value::<JsonRpcResponse>(response_value.clone())
+                .context("failed to decode JSON-RPC batch response item")?;
+            let id = response.response_id()?;
+            let method = expected_methods
+                .get(&id)
+                .with_context(|| format!("provider returned unexpected JSON-RPC batch id {id}"))?;
+            if let Some(error) = response.error {
+                bail!(
+                    "provider returned JSON-RPC error for batched {method} id {id}: {}: {}",
+                    error.code,
+                    error.message
+                );
+            }
+            if results_by_id.insert(id, response.result).is_some() {
+                bail!("provider returned duplicate JSON-RPC batch response id {id}");
+            }
+        }
+
+        let mut results = Vec::with_capacity(calls.len());
+        for id in 1..=calls.len() as i64 {
+            results.push(
+                results_by_id
+                    .remove(&id)
+                    .with_context(|| format!("provider omitted JSON-RPC batch response id {id}"))?,
+            );
+        }
+        if !results_by_id.is_empty() {
+            bail!("provider returned extra JSON-RPC batch responses");
+        }
+
+        Ok(results)
+    }
+
+    async fn send_json_rpc_payload(&self, request_context: &str, payload: Value) -> Result<Bytes> {
+        let request = Request::post(self.endpoint.clone())
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(payload.to_string())))
+            .context("failed to build JSON-RPC request")?;
+        let response =
+            self.client.request(request).await.with_context(|| {
+                format!("failed to send JSON-RPC request for {request_context}")
+            })?;
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .context("failed to read JSON-RPC response body")?
+            .to_bytes();
+
+        if !status.is_success() {
+            let response_body = String::from_utf8_lossy(&body);
+            bail!(
+                "provider request for {request_context} failed with HTTP {status}: {response_body}"
+            );
+        }
+
+        Ok(body)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JsonRpcBatchCall {
+    method: &'static str,
+    params: Vec<Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderBlockLogFetch {
+    Fetch,
+    Skip,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1141,6 +1718,19 @@ impl ProviderLog {
             data: data.to_owned(),
         })
     }
+
+    fn block_number_from_value(value: &Value) -> Result<i64> {
+        let object = value
+            .as_object()
+            .context("expected log object in JSON-RPC result")?;
+
+        parse_hex_i64(
+            object
+                .get("blockNumber")
+                .and_then(Value::as_str)
+                .context("missing log block number in JSON-RPC result")?,
+        )
+    }
 }
 
 fn block_hash_from_value(value: &Value) -> Result<String> {
@@ -1214,8 +1804,18 @@ fn normalize_address(value: &str) -> String {
 
 #[derive(Debug)]
 struct JsonRpcResponse {
+    id: Option<Value>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
+}
+
+impl JsonRpcResponse {
+    fn response_id(&self) -> Result<i64> {
+        self.id
+            .as_ref()
+            .and_then(Value::as_i64)
+            .context("missing or non-integer JSON-RPC response id")
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
@@ -1225,12 +1825,14 @@ impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
     {
         #[derive(serde::Deserialize)]
         struct RawJsonRpcResponse {
+            id: Option<Value>,
             result: Option<Value>,
             error: Option<JsonRpcError>,
         }
 
         let raw = RawJsonRpcResponse::deserialize(deserializer)?;
         Ok(Self {
+            id: raw.id,
             result: raw.result,
             error: raw.error,
         })
@@ -1669,6 +2271,632 @@ mod tests {
                 "0xcccccccccccccccccccccccccccccccccccccccc".to_owned(),
                 "finalized".to_owned(),
             )]
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_retries_batched_code_items_after_item_error() -> Result<()> {
+        let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let address_one = "0x1111111111111111111111111111111111111111";
+        let address_two = "0x2222222222222222222222222222222222222222";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            if let Some(batch) = body.as_array() {
+                request_log
+                    .lock()
+                    .expect("request log must not be poisoned")
+                    .push(("batch".to_owned(), batch.len(), Vec::new()));
+                assert_eq!(batch.len(), 2);
+                return json!([
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "error": {
+                            "code": -32000,
+                            "message": "temporary upstream item failure"
+                        }
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": "0xffff"
+                    }
+                ]);
+            }
+
+            let method = body
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let params = body
+                .get("params")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push((method.to_owned(), 1, params.clone()));
+
+            let result = match (method, params.first().and_then(Value::as_str)) {
+                ("eth_getCode", Some(address)) if address == address_one => {
+                    Value::String("0x6001".to_owned())
+                }
+                ("eth_getCode", Some(address)) if address == address_two => {
+                    Value::String("0x6002".to_owned())
+                }
+                _ => panic!("unexpected RPC request: {body}"),
+            };
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": result
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+
+        let observations = provider
+            .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+                block_hash: block_hash.to_owned(),
+                addresses: vec![address_one.to_owned(), address_two.to_owned()],
+            }])
+            .await?;
+
+        assert_eq!(
+            observations,
+            vec![ProviderBlockCodeObservations {
+                block_hash: block_hash.to_owned(),
+                observations: vec![
+                    ProviderCodeObservation {
+                        address: address_one.to_owned(),
+                        code: vec![0x60, 0x01],
+                    },
+                    ProviderCodeObservation {
+                        address: address_two.to_owned(),
+                        code: vec![0x60, 0x02],
+                    },
+                ],
+            }]
+        );
+
+        let requests = requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .clone();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0, "batch");
+        assert_eq!(requests[0].1, 2);
+        assert_eq!(requests[1].0, "eth_getCode");
+        assert_eq!(
+            requests[1].2.first().and_then(Value::as_str),
+            Some(address_one)
+        );
+        assert_eq!(requests[2].0, "eth_getCode");
+        assert_eq!(
+            requests[2].2.first().and_then(Value::as_str),
+            Some(address_two)
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_fetches_logs_by_block_range() -> Result<()> {
+        let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let address_one = "0x1111111111111111111111111111111111111111";
+        let address_two = "0x2222222222222222222222222222222222222222";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            if let Some(response) =
+                rpc_block_number_batch_response(&body, &[(42, block_hash_42), (43, block_hash_43)])
+            {
+                request_log
+                    .lock()
+                    .expect("request log must not be poisoned")
+                    .push(body.clone());
+                return response;
+            }
+
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push(body.clone());
+            assert_eq!(
+                body.get("method").and_then(Value::as_str),
+                Some("eth_getLogs")
+            );
+            let filter = body
+                .get("params")
+                .and_then(Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(Value::as_object)
+                .expect("range log request must include a filter object");
+            assert_eq!(
+                filter.get("fromBlock").and_then(Value::as_str),
+                Some("0x2a")
+            );
+            assert_eq!(filter.get("toBlock").and_then(Value::as_str), Some("0x2b"));
+            assert_eq!(
+                filter.get("address").and_then(Value::as_array),
+                Some(&vec![
+                    Value::String(address_one.to_owned()),
+                    Value::String(address_two.to_owned())
+                ])
+            );
+            assert!(!filter.contains_key("blockHash"));
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    rpc_log_payload(
+                        "0x3333333333333333333333333333333333333333333333333333333333333333",
+                        block_hash_43,
+                        43,
+                        1,
+                        4,
+                        address_two,
+                        "0x4444444444444444444444444444444444444444444444444444444444444444",
+                    ),
+                    rpc_log_payload(
+                        "0x5555555555555555555555555555555555555555555555555555555555555555",
+                        block_hash_42,
+                        42,
+                        0,
+                        2,
+                        address_one,
+                        "0x6666666666666666666666666666666666666666666666666666666666666666",
+                    )
+                ]
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+        let resolved_blocks = vec![
+            ProviderResolvedBlock {
+                block_number: 42,
+                block_hash: block_hash_42.to_ascii_uppercase(),
+            },
+            ProviderResolvedBlock {
+                block_number: 43,
+                block_hash: block_hash_43.to_owned(),
+            },
+        ];
+        let addresses = vec![address_one.to_owned(), address_two.to_ascii_uppercase()];
+
+        let logs_by_block_number = provider
+            .fetch_logs_by_block_range(&resolved_blocks, &addresses)
+            .await?;
+
+        assert_eq!(logs_by_block_number.len(), 2);
+        assert_eq!(logs_by_block_number.get(&42).expect("block 42").len(), 1);
+        assert_eq!(logs_by_block_number.get(&43).expect("block 43").len(), 1);
+        assert_eq!(
+            logs_by_block_number.get(&42).expect("block 42")[0].block_hash,
+            block_hash_42
+        );
+        assert_eq!(
+            logs_by_block_number.get(&43).expect("block 43")[0].address,
+            address_two
+        );
+        let requests = requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].get("method").and_then(Value::as_str),
+            Some("eth_getLogs")
+        );
+        let revalidation_batch = requests[1]
+            .as_array()
+            .expect("post-range hash revalidation must be batched");
+        assert_eq!(revalidation_batch.len(), 2);
+        assert_eq!(
+            revalidation_batch
+                .iter()
+                .map(|request| {
+                    request
+                        .get("params")
+                        .and_then(Value::as_array)
+                        .and_then(|params| params.first())
+                        .and_then(Value::as_str)
+                })
+                .collect::<Vec<_>>(),
+            vec![Some("0x2a"), Some("0x2b")]
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_rejects_empty_range_when_post_range_block_hash_drifts() -> Result<()>
+    {
+        let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let drifted_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let address = "0x1111111111111111111111111111111111111111";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push(body.clone());
+
+            if let Some(response) =
+                rpc_block_number_batch_response(&body, &[(42, drifted_hash), (43, block_hash_43)])
+            {
+                return response;
+            }
+
+            assert_eq!(
+                body.get("method").and_then(Value::as_str),
+                Some("eth_getLogs")
+            );
+            let filter = body
+                .get("params")
+                .and_then(Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(Value::as_object)
+                .expect("range log request must include a filter object");
+            assert_eq!(
+                filter.get("fromBlock").and_then(Value::as_str),
+                Some("0x2a")
+            );
+            assert_eq!(filter.get("toBlock").and_then(Value::as_str), Some("0x2b"));
+            assert!(!filter.contains_key("blockHash"));
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": []
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+        let resolved_blocks = vec![
+            ProviderResolvedBlock {
+                block_number: 42,
+                block_hash: block_hash_42.to_owned(),
+            },
+            ProviderResolvedBlock {
+                block_number: 43,
+                block_hash: block_hash_43.to_owned(),
+            },
+        ];
+        let addresses = vec![address.to_owned()];
+
+        let error = provider
+            .fetch_logs_by_block_range(&resolved_blocks, &addresses)
+            .await
+            .expect_err("empty drifted range must fail post-range block hash validation");
+
+        assert!(
+            error.to_string().contains(
+                "provider block hash changed after range log lookup for block number 42: expected 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got 0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request log must not be poisoned")
+                .len(),
+            2
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_rejects_mismatched_range_log_block_hash() -> Result<()> {
+        let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let wrong_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let address = "0x1111111111111111111111111111111111111111";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push(body.clone());
+            assert_eq!(
+                body.get("method").and_then(Value::as_str),
+                Some("eth_getLogs")
+            );
+            let filter = body
+                .get("params")
+                .and_then(Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(Value::as_object)
+                .expect("range log request must include a filter object");
+            assert_eq!(
+                filter.get("fromBlock").and_then(Value::as_str),
+                Some("0x2a")
+            );
+            assert_eq!(filter.get("toBlock").and_then(Value::as_str), Some("0x2b"));
+            assert!(!filter.contains_key("blockHash"));
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [rpc_log_payload(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    wrong_hash,
+                    43,
+                    0,
+                    0,
+                    address,
+                    "0x4444444444444444444444444444444444444444444444444444444444444444",
+                )]
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+        let resolved_blocks = vec![
+            ProviderResolvedBlock {
+                block_number: 42,
+                block_hash: block_hash_42.to_owned(),
+            },
+            ProviderResolvedBlock {
+                block_number: 43,
+                block_hash: block_hash_43.to_owned(),
+            },
+        ];
+        let addresses = vec![address.to_owned()];
+
+        let error = provider
+            .fetch_logs_by_block_range(&resolved_blocks, &addresses)
+            .await
+            .expect_err("mismatched range log block hash must fail");
+
+        assert!(
+            error.to_string().contains(
+                "provider returned log 0 for block 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb with mismatched block hash 0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request log must not be poisoned")
+                .len(),
+            1
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_rejects_range_logs_for_unrequested_block_numbers() -> Result<()> {
+        let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let block_hash_44 = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let address = "0x1111111111111111111111111111111111111111";
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            assert_eq!(
+                body.get("method").and_then(Value::as_str),
+                Some("eth_getLogs")
+            );
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [rpc_log_payload(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    block_hash_44,
+                    44,
+                    0,
+                    0,
+                    address,
+                    "0x4444444444444444444444444444444444444444444444444444444444444444",
+                )]
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+        let resolved_blocks = vec![
+            ProviderResolvedBlock {
+                block_number: 42,
+                block_hash: block_hash_42.to_owned(),
+            },
+            ProviderResolvedBlock {
+                block_number: 43,
+                block_hash: block_hash_43.to_owned(),
+            },
+        ];
+        let addresses = vec![address.to_owned()];
+
+        let error = provider
+            .fetch_logs_by_block_range(&resolved_blocks, &addresses)
+            .await
+            .expect_err("range logs from unrequested blocks must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("provider returned log 0 for unrequested block number 44"),
+            "unexpected error: {error:#}"
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_rejects_invalid_log_range_requests() -> Result<()> {
+        let provider = JsonRpcProvider::new("http://127.0.0.1:1")?;
+        let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let addresses = vec!["0x1111111111111111111111111111111111111111".to_owned()];
+
+        let error = provider
+            .fetch_logs_by_block_range(
+                &[
+                    ProviderResolvedBlock {
+                        block_number: 42,
+                        block_hash: block_hash.to_owned(),
+                    },
+                    ProviderResolvedBlock {
+                        block_number: 42,
+                        block_hash: block_hash.to_owned(),
+                    },
+                ],
+                &addresses,
+            )
+            .await
+            .expect_err("duplicate range block numbers must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("provider log range requested duplicate block number 42"),
+            "unexpected error: {error:#}"
+        );
+
+        let error = provider
+            .fetch_logs_by_block_range(
+                &[
+                    ProviderResolvedBlock {
+                        block_number: 42,
+                        block_hash: block_hash.to_owned(),
+                    },
+                    ProviderResolvedBlock {
+                        block_number: 44,
+                        block_hash: block_hash.to_owned(),
+                    },
+                ],
+                &addresses,
+            )
+            .await
+            .expect_err("non-contiguous range block numbers must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("provider log range requested non-contiguous block numbers"),
+            "unexpected error: {error:#}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_rejects_mismatched_batched_exact_log_block_hash() -> Result<()> {
+        let block_hash_one = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let block_hash_two = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let wrong_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            let batch = body.as_array().expect("logs must be requested as a batch");
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push(batch.clone());
+            assert_eq!(batch.len(), 2);
+            for (request, (expected_hash, expected_address)) in batch.iter().zip([
+                (block_hash_one, "0x1111111111111111111111111111111111111111"),
+                (block_hash_two, "0x3333333333333333333333333333333333333333"),
+            ]) {
+                assert_eq!(
+                    request.get("method").and_then(Value::as_str),
+                    Some("eth_getLogs")
+                );
+                let filter = request
+                    .get("params")
+                    .and_then(Value::as_array)
+                    .and_then(|params| params.first())
+                    .and_then(Value::as_object)
+                    .expect("batched log request must include a filter object");
+                assert_eq!(
+                    filter.get("blockHash").and_then(Value::as_str),
+                    Some(expected_hash)
+                );
+                assert_eq!(
+                    filter.get("address").and_then(Value::as_array),
+                    Some(&vec![Value::String(expected_address.to_owned())])
+                );
+                assert!(!filter.contains_key("fromBlock"));
+                assert!(!filter.contains_key("toBlock"));
+            }
+
+            json!([
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [rpc_log_payload(
+                        "0x1111111111111111111111111111111111111111111111111111111111111111",
+                        block_hash_one,
+                        42,
+                        0,
+                        0,
+                        "0x1111111111111111111111111111111111111111",
+                        "0x2222222222222222222222222222222222222222222222222222222222222222",
+                    )]
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": [rpc_log_payload(
+                        "0x3333333333333333333333333333333333333333333333333333333333333333",
+                        wrong_hash,
+                        43,
+                        0,
+                        0,
+                        "0x3333333333333333333333333333333333333333",
+                        "0x4444444444444444444444444444444444444444444444444444444444444444",
+                    )]
+                }
+            ])
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+
+        let error = provider
+            .fetch_logs_by_block_hashes(&[
+                ProviderBlockLogRequest {
+                    block_number: 42,
+                    block_hash: block_hash_one.to_owned(),
+                    addresses: vec!["0x1111111111111111111111111111111111111111".to_owned()],
+                },
+                ProviderBlockLogRequest {
+                    block_number: 43,
+                    block_hash: block_hash_two.to_owned(),
+                    addresses: vec!["0x3333333333333333333333333333333333333333".to_owned()],
+                },
+            ])
+            .await
+            .expect_err("mismatched batched log block hash must fail");
+        assert!(
+            error.to_string().contains(
+                "provider returned log 0 for block 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb with mismatched block hash 0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request log must not be poisoned")
+                .len(),
+            1
         );
 
         server.abort();
@@ -2195,6 +3423,47 @@ mod tests {
             "transactionHash": transaction_hash,
             "transactionIndex": format!("0x{transaction_index:x}"),
         })
+    }
+
+    fn rpc_block_number_batch_response(body: &Value, blocks: &[(i64, &str)]) -> Option<Value> {
+        let batch = body.as_array()?;
+        Some(Value::Array(
+            batch
+                .iter()
+                .map(|request| {
+                    assert_eq!(
+                        request.get("method").and_then(Value::as_str),
+                        Some("eth_getBlockByNumber")
+                    );
+                    let params = request
+                        .get("params")
+                        .and_then(Value::as_array)
+                        .expect("block-number request must include params");
+                    assert_eq!(params.get(1), Some(&Value::Bool(false)));
+                    let block_number = parse_hex_i64(
+                        params
+                            .first()
+                            .and_then(Value::as_str)
+                            .expect("block-number request must include a number"),
+                    )
+                    .expect("block-number request must include valid hex");
+                    let block_hash = blocks
+                        .iter()
+                        .find_map(|(candidate_number, candidate_hash)| {
+                            (*candidate_number == block_number).then_some(*candidate_hash)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("unexpected block-number revalidation request: {request}")
+                        });
+
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").cloned().unwrap_or(Value::Null),
+                        "result": rpc_block_payload(block_hash, ZERO_HASH, block_number, None),
+                    })
+                })
+                .collect(),
+        ))
     }
 
     async fn spawn_json_rpc_server(

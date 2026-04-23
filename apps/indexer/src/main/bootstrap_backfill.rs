@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
@@ -37,6 +37,18 @@ pub(crate) struct BootstrapBackfillOutcome {
     pub(crate) raw_receipt_count: usize,
     pub(crate) raw_log_count: usize,
     pub(crate) raw_code_hash_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BootstrapBackfillTargetRange {
+    target: ManifestBootstrapTarget,
+    range: BackfillBlockRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BootstrapBackfillSegment {
+    range: BackfillBlockRange,
+    targets: Vec<ManifestBootstrapTarget>,
 }
 
 impl BootstrapBackfillOutcome {
@@ -122,6 +134,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             "manifest-declared bootstrap targets loaded"
         );
 
+        let mut target_ranges = Vec::new();
         for target in bootstrap_targets {
             let Some(range) = bootstrap_target_range(&target, provider_head_block)? else {
                 outcome.skipped_future_target_count += 1;
@@ -141,23 +154,33 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 continue;
             };
 
+            target_ranges.push(BootstrapBackfillTargetRange { target, range });
+        }
+
+        for segment in plan_bootstrap_backfill_segments(target_ranges)? {
             let source_plan = load_watched_source_selector_plan(
                 pool,
                 &task.chain,
-                WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
-                    contract_instance_id: target.contract_instance_id,
-                }]),
-                range.from_block,
-                range.to_block,
+                WatchedSourceSelector::WatchedTargetSet(
+                    segment
+                        .targets
+                        .iter()
+                        .map(|target| WatchedTargetIdentity {
+                            contract_instance_id: target.contract_instance_id,
+                        })
+                        .collect(),
+                ),
+                segment.range.from_block,
+                segment.range.to_block,
             )
             .await
             .with_context(|| {
                 format!(
-                    "failed to build bootstrap watched-target source plan for chain {} contract_instance_id {}",
-                    task.chain, target.contract_instance_id
+                    "failed to build bootstrap watched-target source plan for chain {} range {}..={}",
+                    task.chain, segment.range.from_block, segment.range.to_block
                 )
             })?;
-            ensure_manifest_bootstrap_source_plan(&source_plan, &target, range)?;
+            ensure_manifest_bootstrap_source_plan(&source_plan, &segment.targets, segment.range)?;
 
             let source_identity_hash = source_plan.source_identity_hash();
             let idempotency_key = bootstrap_backfill_idempotency_key(
@@ -165,12 +188,12 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 manifests_root,
                 &task.chain,
                 &source_identity_hash,
-                range,
+                segment.range,
             );
             let config = crate::backfill::BackfillJobRunConfig {
                 deployment_profile: deployment_profile.clone(),
                 idempotency_key,
-                range,
+                range: segment.range,
                 lease_owner: lease_owner.clone(),
                 lease_token: generated_backfill_lease_token()?,
                 lease_expires_at: backfill_lease_expires_at(
@@ -240,38 +263,119 @@ fn bootstrap_target_range(
     BackfillBlockRange::new(target.effective_from_block, finite_end_block).map(Some)
 }
 
+fn plan_bootstrap_backfill_segments(
+    target_ranges: Vec<BootstrapBackfillTargetRange>,
+) -> Result<Vec<BootstrapBackfillSegment>> {
+    let Some(max_end_block) = target_ranges
+        .iter()
+        .map(|target_range| target_range.range.to_block)
+        .max()
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut boundaries = BTreeSet::new();
+    for target_range in &target_ranges {
+        boundaries.insert(target_range.range.from_block);
+        if target_range.range.to_block < i64::MAX {
+            boundaries.insert(
+                target_range
+                    .range
+                    .to_block
+                    .checked_add(1)
+                    .with_context(|| {
+                        format!(
+                            "bootstrap target range end {} overflowed while planning segments",
+                            target_range.range.to_block
+                        )
+                    })?,
+            );
+        }
+    }
+
+    let boundaries = boundaries.into_iter().collect::<Vec<_>>();
+    let mut segments = Vec::new();
+    for (index, segment_start) in boundaries.iter().copied().enumerate() {
+        if segment_start > max_end_block {
+            break;
+        }
+
+        let segment_end = boundaries
+            .get(index + 1)
+            .map(|next_start| *next_start - 1)
+            .unwrap_or(max_end_block)
+            .min(max_end_block);
+        if segment_start > segment_end {
+            continue;
+        }
+
+        let targets = target_ranges
+            .iter()
+            .filter(|target_range| {
+                target_range.range.from_block <= segment_start
+                    && segment_end <= target_range.range.to_block
+            })
+            .map(|target_range| target_range.target.clone())
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            continue;
+        }
+
+        segments.push(BootstrapBackfillSegment {
+            range: BackfillBlockRange::new(segment_start, segment_end)?,
+            targets,
+        });
+    }
+
+    Ok(segments)
+}
+
 fn ensure_manifest_bootstrap_source_plan(
     source_plan: &WatchedSourceSelectorPlan,
-    target: &ManifestBootstrapTarget,
+    targets: &[ManifestBootstrapTarget],
     range: BackfillBlockRange,
 ) -> Result<()> {
     if source_plan.selector_kind != WatchedSourceSelectorKind::WatchedTargetSet {
         bail!(
-            "bootstrap source plan for contract_instance_id {} used selector kind {} instead of watched_target_set",
-            target.contract_instance_id,
+            "bootstrap source plan for range {}..={} used selector kind {} instead of watched_target_set",
+            range.from_block,
+            range.to_block,
             source_plan.selector_kind.as_str()
         );
     }
 
-    if source_plan.selected_targets.len() != 1 {
+    if source_plan.selected_targets.len() != targets.len() {
         bail!(
-            "bootstrap source plan for contract_instance_id {} selected {} targets instead of one",
-            target.contract_instance_id,
-            source_plan.selected_targets.len()
+            "bootstrap source plan for range {}..={} selected {} targets instead of {}",
+            range.from_block,
+            range.to_block,
+            source_plan.selected_targets.len(),
+            targets.len()
         );
     }
 
-    let selected_target = &source_plan.selected_targets[0];
-    if selected_target.source_family != target.source_family
-        || selected_target.contract_instance_id != target.contract_instance_id
-        || selected_target.address != target.address
-        || selected_target.effective_from_block != range.from_block
-        || selected_target.effective_to_block != range.to_block
-    {
-        bail!(
-            "bootstrap source plan for contract_instance_id {} does not match the manifest-declared effective range",
-            target.contract_instance_id
-        );
+    for target in targets {
+        let Some(selected_target) = source_plan.selected_targets.iter().find(|selected_target| {
+            selected_target.source_family == target.source_family
+                && selected_target.contract_instance_id == target.contract_instance_id
+        }) else {
+            bail!(
+                "bootstrap source plan for range {}..={} did not select manifest-declared contract_instance_id {}",
+                range.from_block,
+                range.to_block,
+                target.contract_instance_id
+            );
+        };
+
+        if selected_target.address != target.address
+            || selected_target.effective_from_block != range.from_block
+            || selected_target.effective_to_block != range.to_block
+        {
+            bail!(
+                "bootstrap source plan for contract_instance_id {} does not match the segmented manifest-declared effective range",
+                target.contract_instance_id
+            );
+        }
     }
 
     Ok(())

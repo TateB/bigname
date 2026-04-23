@@ -1529,6 +1529,12 @@ async fn bundle_provider_with_fixtures(
             .map(|fixture| (fixture.block.block_hash.clone(), fixture))
             .collect::<std::collections::BTreeMap<_, _>>(),
     );
+    let hashes_by_number = Arc::new(
+        blocks
+            .values()
+            .map(|fixture| (fixture.block.block_number, fixture.block.block_hash.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    );
 
     let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
         let method = body
@@ -1542,6 +1548,21 @@ async fn bundle_provider_with_fixtures(
             .unwrap_or_default();
 
         let result = match method {
+            "eth_getBlockByNumber" => {
+                assert_eq!(params.get(1), Some(&Value::Bool(false)));
+                let block_number = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .map(support_parse_rpc_block_number)
+                    .expect("block number parameter must be present");
+                let block_hash = hashes_by_number
+                    .get(&block_number)
+                    .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
+                let fixture = blocks
+                    .get(block_hash)
+                    .expect("number index must point at a fixture block");
+                rpc_block_bundle_payload(&fixture.block)
+            }
             "eth_getBlockByHash" => {
                 let block_hash = params
                     .first()
@@ -1554,17 +1575,11 @@ async fn bundle_provider_with_fixtures(
                 rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getLogs" => {
-                let block_hash = params
+                let filter = params
                     .first()
                     .and_then(Value::as_object)
-                    .and_then(|filter| filter.get("blockHash"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let fixture = blocks
-                    .get(&block_hash)
-                    .unwrap_or_else(|| panic!("unexpected log request: {body}"));
-                Value::Array(fixture.logs.clone())
+                    .expect("log request must include a filter object");
+                support_logs_for_filter(filter, &blocks, &hashes_by_number)
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params
@@ -1602,6 +1617,101 @@ async fn bundle_provider_with_fixtures(
     .await?;
 
     Ok((provider::JsonRpcProvider::new(&url)?, server))
+}
+
+fn support_logs_for_filter(
+    filter: &serde_json::Map<String, Value>,
+    fixtures_by_hash: &std::collections::BTreeMap<String, ProviderBlockFixture>,
+    hashes_by_number: &std::collections::BTreeMap<i64, String>,
+) -> Value {
+    let address_filter = support_log_filter_addresses(filter);
+    let mut logs = Vec::new();
+
+    if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
+        let fixture = fixtures_by_hash
+            .get(&block_hash.to_ascii_lowercase())
+            .unwrap_or_else(|| panic!("unexpected log blockHash filter: {filter:?}"));
+        logs.extend(support_filtered_fixture_logs(
+            fixture,
+            address_filter.as_ref(),
+        ));
+    } else {
+        let from_block = filter
+            .get("fromBlock")
+            .and_then(Value::as_str)
+            .map(support_parse_rpc_block_number)
+            .expect("range log filter must include fromBlock");
+        let to_block = filter
+            .get("toBlock")
+            .and_then(Value::as_str)
+            .map(support_parse_rpc_block_number)
+            .expect("range log filter must include toBlock");
+        assert!(
+            from_block <= to_block,
+            "range log filter start must not exceed end: {filter:?}"
+        );
+
+        for block_number in from_block..=to_block {
+            let block_hash = hashes_by_number
+                .get(&block_number)
+                .unwrap_or_else(|| panic!("unexpected log range block: {filter:?}"));
+            let fixture = fixtures_by_hash
+                .get(block_hash)
+                .expect("number index must point at a fixture block");
+            logs.extend(support_filtered_fixture_logs(
+                fixture,
+                address_filter.as_ref(),
+            ));
+        }
+    }
+
+    Value::Array(logs)
+}
+
+fn support_log_filter_addresses(
+    filter: &serde_json::Map<String, Value>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let addresses = filter.get("address")?;
+    let addresses = match addresses {
+        Value::String(address) => vec![address.to_ascii_lowercase()],
+        Value::Array(addresses) => addresses
+            .iter()
+            .map(|address| {
+                address
+                    .as_str()
+                    .expect("log address filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        value => panic!("unexpected log address filter: {value:?}"),
+    };
+
+    Some(addresses.into_iter().collect())
+}
+
+fn support_filtered_fixture_logs(
+    fixture: &ProviderBlockFixture,
+    address_filter: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<Value> {
+    fixture
+        .logs
+        .iter()
+        .filter(|log| {
+            let Some(address_filter) = address_filter else {
+                return true;
+            };
+            log.get("address")
+                .and_then(Value::as_str)
+                .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+fn support_parse_rpc_block_number(value: &str) -> i64 {
+    i64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16)
+        .expect("test RPC block number must be valid hex")
 }
 
 fn transaction_hash_for_block(block: &ProviderBlock) -> String {
@@ -2255,6 +2365,7 @@ async fn spawn_json_rpc_server(
         .local_addr()
         .context("failed to read JSON-RPC test server address")?;
     let url = format!("http://{address}");
+    let next_http_request_id = Arc::new(AtomicU64::new(0));
 
     let server = tokio::spawn(async move {
         loop {
@@ -2262,6 +2373,7 @@ async fn spawn_json_rpc_server(
                 break;
             };
             let handler = Arc::clone(&handler);
+            let next_http_request_id = Arc::clone(&next_http_request_id);
             tokio::spawn(async move {
                 let mut buffer = Vec::new();
                 let mut chunk = [0_u8; 4096];
@@ -2306,7 +2418,10 @@ async fn spawn_json_rpc_server(
 
                 let request_body = serde_json::from_slice::<Value>(&body)
                     .expect("JSON-RPC test request body must decode");
-                let response_body = handler(request_body).to_string();
+                let http_request_id = next_http_request_id.fetch_add(1, Ordering::Relaxed);
+                let response_body =
+                    json_rpc_test_response_body(request_body, http_request_id, &handler)
+                        .to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     response_body.len(),
@@ -2320,4 +2435,57 @@ async fn spawn_json_rpc_server(
     });
 
     Ok((url, server))
+}
+
+fn json_rpc_test_response_body(
+    request_body: Value,
+    http_request_id: u64,
+    handler: &Arc<dyn Fn(Value) -> Value + Send + Sync>,
+) -> Value {
+    match request_body {
+        Value::Array(requests) => {
+            let batch_size = requests.len();
+            Value::Array(
+                requests
+                    .into_iter()
+                    .map(|request| {
+                        json_rpc_test_response_item(request, http_request_id, batch_size, handler)
+                    })
+                    .collect(),
+            )
+        }
+        request => json_rpc_test_response_item(request, http_request_id, 1, handler),
+    }
+}
+
+fn json_rpc_test_response_item(
+    mut request: Value,
+    http_request_id: u64,
+    batch_size: usize,
+    handler: &Arc<dyn Fn(Value) -> Value + Send + Sync>,
+) -> Value {
+    let request_id = request.get("id").cloned().unwrap_or(Value::Null);
+    if let Some(object) = request.as_object_mut() {
+        object.insert("_test_http_request_id".to_owned(), json!(http_request_id));
+        object.insert("_test_batch_size".to_owned(), json!(batch_size));
+    }
+
+    let mut response = handler(request);
+    if let Some(object) = response.as_object_mut() {
+        object.insert("id".to_owned(), request_id);
+    }
+    response
+}
+
+fn json_rpc_test_http_request_id(body: &Value) -> u64 {
+    body.get("_test_http_request_id")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn json_rpc_test_batch_size(body: &Value) -> usize {
+    body.get("_test_batch_size")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(1)
 }

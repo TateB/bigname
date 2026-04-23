@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
@@ -15,7 +15,9 @@ use sqlx::types::time::OffsetDateTime;
 use tracing::{error, info};
 
 use crate::{
-    provider::{JsonRpcProvider, ProviderBlockSelection},
+    provider::{
+        JsonRpcProvider, ProviderBlockCodeObservationRequest, ProviderLog, ProviderResolvedBlock,
+    },
     reconciliation::{
         ensure_provider_bundle_matches_raw_block, provider_block_to_raw_block,
         provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
@@ -27,7 +29,15 @@ use crate::{
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
+const HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 32;
 const MAX_FAILURE_ERROR_CHARS: usize = 2048;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackfillLogRangeRequest {
+    start_index: usize,
+    end_index: usize,
+    addresses: Vec<String>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillBlockRange {
@@ -134,12 +144,6 @@ impl BackfillJobRunOutcome {
         self.raw_log_count += outcome.raw_log_count;
         self.raw_code_hash_count += outcome.raw_code_hash_count;
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedBackfillBlock {
-    block_number: i64,
-    block_hash: String,
 }
 
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
@@ -252,25 +256,43 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         .iter()
         .map(|block| block.block_hash.clone())
         .collect::<Vec<_>>();
+    let fetch_logs_by_safe_ranges = resolved_blocks.len() > 1;
+    let mut ranged_logs_by_block = if fetch_logs_by_safe_ranges {
+        fetch_backfill_logs_by_safe_ranges(provider, source_plan, &resolved_blocks, range).await?
+    } else {
+        BTreeMap::new()
+    };
+    let single_block_selected_addresses = resolved_blocks
+        .first()
+        .map(|block| selected_target_addresses_at_block(source_plan, block.block_number))
+        .unwrap_or_default();
+    let bundles = if fetch_logs_by_safe_ranges || single_block_selected_addresses.is_empty() {
+        provider
+            .fetch_block_bundles_without_logs_by_hashes(&resolved_blocks)
+            .await
+    } else {
+        provider
+            .fetch_block_bundles_by_hashes(&resolved_blocks)
+            .await
+    }
+    .with_context(|| {
+        format!(
+            "failed to fetch hash-pinned payload batch for chain {} range {}..={}",
+            watched_chain.chain, range.from_block, range.to_block
+        )
+    })?;
     let mut raw_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut transactions = Vec::<RawTransaction>::new();
     let mut receipts = Vec::<RawReceipt>::new();
     let mut logs = Vec::<RawLog>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
+    let mut raw_blocks_by_hash = BTreeMap::new();
+    let mut code_observation_requests = Vec::new();
 
-    for resolved_block in &resolved_blocks {
+    for (resolved_block, bundle) in resolved_blocks.iter().zip(bundles.iter()) {
         let selected_addresses =
             selected_target_addresses_at_block(source_plan, resolved_block.block_number);
-        let bundle = provider
-            .fetch_block_bundle_by_hash(&resolved_block.block_hash)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to fetch hash-pinned payload for chain {} block {} hash {}",
-                    watched_chain.chain, resolved_block.block_number, resolved_block.block_hash
-                )
-            })?;
         if bundle.block.block_number != resolved_block.block_number {
             bail!(
                 "provider resolved chain {} block number {} to hash {}, but hash-scoped fetch returned block number {}",
@@ -293,10 +315,17 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             &raw_block,
             &bundle.raw_payloads,
         ));
+        let block_logs = if fetch_logs_by_safe_ranges {
+            ranged_logs_by_block
+                .remove(&resolved_block.block_number)
+                .unwrap_or_default()
+        } else {
+            bundle.logs.clone()
+        };
         let selected_logs = provider_logs_to_selected_raw_logs(
             &watched_chain.chain,
             &raw_block,
-            &bundle.logs,
+            &block_logs,
             &selected_addresses,
         )?;
         let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
@@ -315,34 +344,48 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         logs.extend(selected_logs);
 
         if !selected_addresses.is_empty() {
-            let selected_addresses = selected_addresses.into_iter().collect::<Vec<_>>();
-            let observations = provider
-                .fetch_code_observations_at_block(
-                    &selected_addresses,
-                    ProviderBlockSelection::Hash(raw_block.block_hash.clone()),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to fetch hash-pinned code observations for chain {} block {} hash {}",
-                        watched_chain.chain, raw_block.block_number, raw_block.block_hash
-                    )
-                })?;
-            code_hashes.extend(
-                observations
-                    .iter()
-                    .map(|observation| {
-                        provider_code_observation_to_raw_code_hash(
-                            &watched_chain.chain,
-                            &raw_block,
-                            observation,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            );
+            code_observation_requests.push(ProviderBlockCodeObservationRequest {
+                block_hash: raw_block.block_hash.clone(),
+                addresses: selected_addresses.iter().cloned().collect(),
+            });
+            raw_blocks_by_hash.insert(raw_block.block_hash.clone(), raw_block.clone());
         }
 
         raw_blocks.push(raw_block);
+    }
+    if !ranged_logs_by_block.is_empty() {
+        bail!("provider returned range logs for unprocessed backfill blocks");
+    }
+
+    let code_observation_batches = provider
+        .fetch_code_observations_at_block_hashes(&code_observation_requests)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to fetch hash-pinned code observation batch for chain {} range {}..={}",
+                watched_chain.chain, range.from_block, range.to_block
+            )
+        })?;
+    for batch in code_observation_batches {
+        let raw_block = raw_blocks_by_hash.get(&batch.block_hash).with_context(|| {
+            format!(
+                "provider returned code observations for unrequested block hash {}",
+                batch.block_hash
+            )
+        })?;
+        code_hashes.extend(
+            batch
+                .observations
+                .iter()
+                .map(|observation| {
+                    provider_code_observation_to_raw_code_hash(
+                        &watched_chain.chain,
+                        raw_block,
+                        observation,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
     }
 
     upsert_raw_blocks(pool, &raw_blocks).await?;
@@ -404,9 +447,13 @@ async fn run_reserved_hash_pinned_backfill_range(
     let mut active_range = reserved_range.clone();
     let mut block_number = active_range.checkpoint_block_number;
     while block_number <= active_range.range_end_block_number {
-        let block_range = BackfillBlockRange::new(block_number, block_number)?;
-        let block_outcome =
-            match run_hash_pinned_backfill_range(pool, source_plan, provider, block_range).await {
+        let chunk_end = block_number
+            .checked_add(HASH_PINNED_BACKFILL_CHUNK_BLOCKS - 1)
+            .unwrap_or(active_range.range_end_block_number)
+            .min(active_range.range_end_block_number);
+        let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
+        let chunk_outcome =
+            match run_hash_pinned_backfill_range(pool, source_plan, provider, chunk_range).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     return Err(record_reserved_range_failure(
@@ -415,19 +462,20 @@ async fn run_reserved_hash_pinned_backfill_range(
                         config,
                         "hash-pinned backfill failed",
                         Some(block_number),
+                        Some(chunk_range),
                         "hash_pinned_intake",
                         error,
                     )
                     .await);
                 }
             };
-        aggregate.add_range_outcome(&block_outcome);
+        aggregate.add_range_outcome(&chunk_outcome);
 
         active_range = match advance_backfill_range(
             pool,
             active_range.backfill_range_id,
             &config.lease_token,
-            block_number,
+            chunk_end,
         )
         .await
         {
@@ -439,6 +487,7 @@ async fn run_reserved_hash_pinned_backfill_range(
                     config,
                     "backfill checkpoint advance failed",
                     Some(block_number),
+                    Some(chunk_range),
                     "checkpoint_advance",
                     error,
                 )
@@ -446,7 +495,10 @@ async fn run_reserved_hash_pinned_backfill_range(
             }
         };
 
-        block_number = block_number
+        if chunk_end == active_range.range_end_block_number {
+            break;
+        }
+        block_number = chunk_end
             .checked_add(1)
             .context("backfill block number overflowed while advancing range")?;
     }
@@ -460,6 +512,7 @@ async fn run_reserved_hash_pinned_backfill_range(
             config,
             "backfill range completion failed",
             None,
+            None,
             "range_completion",
             error,
         )
@@ -467,6 +520,96 @@ async fn run_reserved_hash_pinned_backfill_range(
     }
 
     Ok(())
+}
+
+async fn fetch_backfill_logs_by_safe_ranges(
+    provider: &JsonRpcProvider,
+    source_plan: &WatchedSourceSelectorPlan,
+    resolved_blocks: &[ProviderResolvedBlock],
+    range: BackfillBlockRange,
+) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+    let mut logs_by_block = BTreeMap::new();
+    for request in selected_log_range_requests(source_plan, resolved_blocks) {
+        let request_blocks = &resolved_blocks[request.start_index..request.end_index];
+        let from_block = request_blocks
+            .first()
+            .expect("selected log range request must contain at least one block")
+            .block_number;
+        let to_block = request_blocks
+            .last()
+            .expect("selected log range request must contain at least one block")
+            .block_number;
+        let group_logs = provider
+            .fetch_logs_by_block_range(request_blocks, &request.addresses)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch hash-pinned log range {}..={} inside backfill range {}..={}",
+                    from_block, to_block, range.from_block, range.to_block
+                )
+            })?;
+
+        for (block_number, logs) in group_logs {
+            if logs_by_block.insert(block_number, logs).is_some() {
+                bail!("provider returned duplicate range logs for backfill block {block_number}");
+            }
+        }
+    }
+
+    Ok(logs_by_block)
+}
+
+fn selected_log_range_requests(
+    source_plan: &WatchedSourceSelectorPlan,
+    resolved_blocks: &[ProviderResolvedBlock],
+) -> Vec<BackfillLogRangeRequest> {
+    let mut requests = Vec::new();
+    let mut active_start = None;
+    let mut active_addresses = BTreeSet::<String>::new();
+
+    for (index, block) in resolved_blocks.iter().enumerate() {
+        let addresses = selected_target_addresses_at_block(source_plan, block.block_number);
+        if addresses.is_empty() {
+            if let Some(start_index) = active_start.take() {
+                requests.push(BackfillLogRangeRequest {
+                    start_index,
+                    end_index: index,
+                    addresses: active_addresses.iter().cloned().collect(),
+                });
+                active_addresses.clear();
+            }
+            continue;
+        }
+
+        match active_start {
+            Some(start_index) if active_addresses == addresses => {
+                active_start = Some(start_index);
+            }
+            Some(start_index) => {
+                requests.push(BackfillLogRangeRequest {
+                    start_index,
+                    end_index: index,
+                    addresses: active_addresses.iter().cloned().collect(),
+                });
+                active_start = Some(index);
+                active_addresses = addresses;
+            }
+            None => {
+                active_start = Some(index);
+                active_addresses = addresses;
+            }
+        }
+    }
+
+    if let Some(start_index) = active_start {
+        requests.push(BackfillLogRangeRequest {
+            start_index,
+            end_index: resolved_blocks.len(),
+            addresses: active_addresses.into_iter().collect(),
+        });
+    }
+
+    requests
 }
 
 fn selected_target_addresses_at_block(
@@ -506,12 +649,15 @@ async fn record_reserved_range_failure(
     config: &BackfillJobRunConfig,
     failure_reason: &str,
     block_number: Option<i64>,
+    attempted_range: Option<BackfillBlockRange>,
     phase: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
     let failure_metadata = json!({
         "phase": phase,
         "block_number": block_number,
+        "attempted_range_start_block_number": attempted_range.map(|range| range.from_block),
+        "attempted_range_end_block_number": attempted_range.map(|range| range.to_block),
         "range_start_block_number": reserved_range.range_start_block_number,
         "range_end_block_number": reserved_range.range_end_block_number,
         "checkpoint_block_number": reserved_range.checkpoint_block_number,
@@ -558,17 +704,25 @@ fn truncate_failure_error(error: &str) -> String {
 async fn resolve_backfill_range(
     provider: &JsonRpcProvider,
     range: BackfillBlockRange,
-) -> Result<Vec<ResolvedBackfillBlock>> {
-    let mut resolved_blocks = Vec::with_capacity(range.block_count()?);
-    for block_number in range.from_block..=range.to_block {
-        let block_hash = provider
-            .fetch_block_hash_by_number(block_number)
-            .await
-            .with_context(|| format!("failed to resolve backfill block number {block_number}"))?;
-        resolved_blocks.push(ResolvedBackfillBlock {
-            block_number,
-            block_hash,
-        });
+) -> Result<Vec<ProviderResolvedBlock>> {
+    let block_numbers = (range.from_block..=range.to_block).collect::<Vec<_>>();
+    let resolved_blocks = provider
+        .fetch_block_hashes_by_numbers(&block_numbers)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to resolve backfill block numbers {}..={}",
+                range.from_block, range.to_block
+            )
+        })?;
+    if resolved_blocks.len() != range.block_count()? {
+        bail!(
+            "provider resolved {} backfill blocks for range {}..={} but expected {}",
+            resolved_blocks.len(),
+            range.from_block,
+            range.to_block,
+            range.block_count()?
+        );
     }
 
     Ok(resolved_blocks)
