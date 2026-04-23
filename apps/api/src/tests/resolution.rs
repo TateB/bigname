@@ -263,33 +263,23 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
             }
         }
     ]);
-    let alias_target = json!({
-        "logical_name_id": "ens:profile.alice.eth",
-        "namespace": "ens",
-        "normalized_name": "profile.alice.eth",
-        "canonical_display_name": "Profile.alice.eth",
-        "namehash": "namehash:profile.alice.eth",
-        "resource_id": resource_id.to_string(),
-        "binding_kind": "resolver_alias_path"
-    });
-
-    database
-        .seed_name_current_binding_migrated(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-    let mut row = exact_name_row(
+    seed_supported_alias_only_rebuild_inputs(
+        &database,
         logical_name_id,
-        surface_binding_id,
         resource_id,
         token_lineage_id,
-    );
-    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ResolverAliasPath);
-    database.insert_name_current_row(row).await?;
+        surface_binding_id,
+    )
+    .await?;
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("alias-only execution explain test requires rebuilt name_current row")?;
+    let projected_topology = projected_resolution_topology(&name_row)?;
+    let alias_target = projected_topology
+        .pointer("/alias/final_target")
+        .cloned()
+        .context("alias-only projected topology must include final_target")?;
+    let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
     database
         .insert_record_inventory_current_row(record_inventory_current_row(
             logical_name_id,
@@ -313,13 +303,23 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
             "hops": [alias_target.clone()]
         }
     });
-    let outcome = resolution_execution_outcome(
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions_from_name_current(&name_row.chain_positions),
+    });
+    let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
         persisted_verified_queries,
-        logical_name_id,
-        resource_id,
+        topology_boundary,
+        record_boundary,
     );
+    outcome.cache_key.requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
 
@@ -400,18 +400,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
                     "chain_id": "ethereum-mainnet",
                     "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
                 },
-                "resolver_discovery_path": [
-                    {
-                        "logical_name_id": "ens:alice.eth",
-                        "namespace": "ens",
-                        "normalized_name": "alice.eth",
-                        "canonical_display_name": "Alice.eth",
-                        "resource_id": resource_id.to_string(),
-                        "chain_id": "ethereum-mainnet",
-                        "address": "0x0000000000000000000000000000000000000abc",
-                        "latest_event_kind": "ResolverChanged"
-                    }
-                ],
+                "resolver_discovery_path": projected_topology.get("resolver_path").cloned().expect("projected topology must include resolver_path"),
                 "wildcard": {
                     "source": null,
                     "matched_labels": []
@@ -482,7 +471,10 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
 }
 
 fn basenames_resolution_request_key(records: &[&str]) -> String {
-    let mut records = records.iter().map(|record| (*record).to_owned()).collect::<Vec<_>>();
+    let mut records = records
+        .iter()
+        .map(|record| (*record).to_owned())
+        .collect::<Vec<_>>();
     records.sort_unstable();
     format!("basenames:alice.base.eth:{}", records.join(","))
 }
@@ -553,6 +545,682 @@ fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::
             "timestamp": "2026-04-17T00:01:40Z",
         }),
     );
+}
+
+fn projected_resolution_topology(row: &bigname_storage::NameCurrentRow) -> Result<Value> {
+    row.declared_summary
+        .get("topology")
+        .cloned()
+        .context("rebuilt name_current row must project supported topology")
+}
+
+fn projected_resolution_boundaries(
+    row: &bigname_storage::NameCurrentRow,
+) -> Result<(Value, Value)> {
+    let topology = projected_resolution_topology(row)?;
+    let version_boundaries = topology
+        .get("version_boundaries")
+        .and_then(Value::as_object)
+        .context("projected topology must include version_boundaries")?;
+    Ok((
+        version_boundaries
+            .get("topology_version_boundary")
+            .cloned()
+            .context("projected topology must include topology_version_boundary")?,
+        version_boundaries
+            .get("record_version_boundary")
+            .cloned()
+            .context("projected topology must include record_version_boundary")?,
+    ))
+}
+
+async fn seed_supported_alias_only_rebuild_inputs(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+) -> Result<()> {
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
+            raw_block("ethereum-mainnet", "0xresource", None, 99, 1_717_171_699),
+            raw_block("ethereum-mainnet", "0xresolver", None, 101, 1_717_171_701),
+            raw_block("ethereum-mainnet", "0xalias", None, 102, 1_717_171_702),
+            raw_block(
+                "ethereum-mainnet",
+                "0xbinding-alias",
+                None,
+                103,
+                1_717_171_703,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            token_lineage_id,
+            "0xresource",
+            99,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource_id,
+            Some(token_lineage_id),
+            "0xresource",
+            99,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: logical_name_id.to_owned(),
+            resource_id,
+            binding_kind: SurfaceBindingKind::ResolverAliasPath,
+            active_from: timestamp(1_717_171_703),
+            active_to: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xbinding-alias".to_owned(),
+            block_number: 103,
+            provenance: json!({"seed": "supported_alias_binding"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            NormalizedEvent {
+                event_identity: "api-test:alias-resolver".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "ResolverChanged".to_owned(),
+                source_family: "ens_v1_unwrapped_authority".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(101),
+                block_hash: Some("0xresolver".to_owned()),
+                transaction_hash: Some("0xtxresolver".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:alias-resolver"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "resolver": "0x0000000000000000000000000000000000000abc",
+                    "namehash": "namehash:alice.eth",
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:alias-changed".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "AliasChanged".to_owned(),
+                source_family: "ens_v2_resolver".to_owned(),
+                manifest_version: 5,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(102),
+                block_hash: Some("0xalias".to_owned()),
+                transaction_hash: Some("0xtxalias".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:alias-changed"}),
+                derivation_kind: "ens_v2_resolver".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "active": true,
+                    "alias_state": "active",
+                    "to_name": "profile.alice.eth",
+                    "to_logical_name_id": "ens:profile.alice.eth",
+                    "to_normalized_name": "profile.alice.eth",
+                    "to_canonical_display_name": "Profile.alice.eth",
+                    "to_namehash": "namehash:profile.alice.eth",
+                    "to_resource_id": resource_id.to_string(),
+                }),
+            },
+        ],
+    )
+    .await?;
+    database.rebuild_name_current(logical_name_id).await
+}
+
+async fn seed_supported_wildcard_rebuild_inputs(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+    wildcard_source_resource_id: Uuid,
+) -> Result<()> {
+    let wildcard_source_token_lineage_id = Uuid::from_u128(0x4401);
+    let wildcard_source_binding_id = Uuid::from_u128(0x4402);
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block(
+                "ethereum-mainnet",
+                "0xsource-surface",
+                None,
+                96,
+                1_717_171_696,
+            ),
+            raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
+            raw_block("ethereum-mainnet", "0xresource", None, 99, 1_717_171_699),
+            raw_block(
+                "ethereum-mainnet",
+                "0xsource-resource",
+                None,
+                100,
+                1_717_171_700,
+            ),
+            raw_block("ethereum-mainnet", "0xresolver", None, 101, 1_717_171_701),
+            raw_block(
+                "ethereum-mainnet",
+                "0xsource-record-version",
+                None,
+                102,
+                1_717_171_702,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xbinding-wildcard",
+                None,
+                103,
+                1_717_171_703,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            name_surface(logical_name_id),
+            NameSurface {
+                logical_name_id: "ens:eth".to_owned(),
+                namespace: "ens".to_owned(),
+                input_name: "eth".to_owned(),
+                canonical_display_name: "Eth".to_owned(),
+                normalized_name: "eth".to_owned(),
+                dns_encoded_name: vec![3, b'e', b't', b'h'],
+                namehash: "namehash:eth".to_owned(),
+                labelhashes: vec!["labelhash:eth".to_owned()],
+                normalizer_version: "uts46-v1".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xsource-surface".to_owned(),
+                block_number: 96,
+                provenance: json!({"seed": "supported_wildcard_source_surface"}),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[
+            address_name_token_lineage(token_lineage_id, "0xresource", 99),
+            address_name_token_lineage(wildcard_source_token_lineage_id, "0xsource-resource", 100),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[
+            address_name_resource(resource_id, Some(token_lineage_id), "0xresource", 99),
+            address_name_resource(
+                wildcard_source_resource_id,
+                Some(wildcard_source_token_lineage_id),
+                "0xsource-resource",
+                100,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[
+            SurfaceBinding {
+                surface_binding_id: wildcard_source_binding_id,
+                logical_name_id: "ens:eth".to_owned(),
+                resource_id: wildcard_source_resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: timestamp(1_717_171_700),
+                active_to: None,
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xsource-resource".to_owned(),
+                block_number: 100,
+                provenance: json!({"seed": "supported_wildcard_source_binding"}),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::ObservedWildcardPath,
+                active_from: timestamp(1_717_171_703),
+                active_to: None,
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xbinding-wildcard".to_owned(),
+                block_number: 103,
+                provenance: json!({"seed": "supported_wildcard_binding"}),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            NormalizedEvent {
+                event_identity: "api-test:wildcard-source-resolver".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some("ens:eth".to_owned()),
+                resource_id: Some(wildcard_source_resource_id),
+                event_kind: "ResolverChanged".to_owned(),
+                source_family: "ens_v1_unwrapped_authority".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(101),
+                block_hash: Some("0xresolver".to_owned()),
+                transaction_hash: Some("0xtxwildcardsourceresolver".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:wildcard-source-resolver"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "resolver": "0x0000000000000000000000000000000000000def",
+                    "namehash": "namehash:eth",
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:wildcard-source-record-version".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some("ens:eth".to_owned()),
+                resource_id: Some(wildcard_source_resource_id),
+                event_kind: "RecordVersionChanged".to_owned(),
+                source_family: "ens_v1_unwrapped_authority".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(102),
+                block_hash: Some("0xsource-record-version".to_owned()),
+                transaction_hash: Some("0xtxwildcardsourceversion".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:wildcard-source-record-version"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({"record_version": 6}),
+                after_state: json!({"record_version": 7}),
+            },
+        ],
+    )
+    .await?;
+    database.rebuild_name_current(logical_name_id).await
+}
+
+async fn seed_supported_basenames_rebuild_inputs(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+) -> Result<()> {
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("base-mainnet", "0xbase-surface", None, 98, 1_717_171_698),
+            raw_block("base-mainnet", "0xbase-resource", None, 99, 1_717_171_699),
+            raw_block("base-mainnet", "0xbase-grant", None, 101, 1_717_171_701),
+            raw_block("base-mainnet", "0xbase-authority", None, 102, 1_717_171_702),
+            raw_block("base-mainnet", "0xbase-resolver", None, 103, 1_717_171_703),
+            raw_block(
+                "base-mainnet",
+                "0xbase-binding-supported",
+                None,
+                104,
+                1_717_171_704,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xbasenamesl1",
+                None,
+                21_000_100,
+                1_776_387_700,
+            ),
+        ],
+    )
+    .await?;
+    insert_chain_checkpoint(database, "ethereum-mainnet", "0xbasenamesl1", 21_000_100).await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[NameSurface {
+            logical_name_id: logical_name_id.to_owned(),
+            namespace: "basenames".to_owned(),
+            input_name: "alice.base.eth".to_owned(),
+            canonical_display_name: "Alice.base.eth".to_owned(),
+            normalized_name: "alice.base.eth".to_owned(),
+            dns_encoded_name: b"alice.base.eth".to_vec(),
+            namehash: "namehash:alice.base.eth".to_owned(),
+            labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
+            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-surface".to_owned(),
+            block_number: 98,
+            provenance: json!({"seed": "supported_basenames_surface"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[TokenLineage {
+            token_lineage_id,
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-resource".to_owned(),
+            block_number: 99,
+            provenance: json!({"seed": "supported_basenames_token_lineage"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[Resource {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-resource".to_owned(),
+            block_number: 99,
+            provenance: json!({"seed": "supported_basenames_resource"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: logical_name_id.to_owned(),
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_171_704),
+            active_to: None,
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-binding-supported".to_owned(),
+            block_number: 104,
+            provenance: json!({"seed": "supported_basenames_binding"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:grant".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "RegistrationGranted".to_owned(),
+                source_family: "basenames_base_registrar".to_owned(),
+                manifest_version: 3,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(101),
+                block_hash: Some("0xbase-grant".to_owned()),
+                transaction_hash: Some("0xtxbasegrant".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:grant"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:base-mainnet:alice",
+                    "registrant": "0x00000000000000000000000000000000000000aa",
+                    "expiry": 1_900_000_000_i64,
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:authority".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "AuthorityTransferred".to_owned(),
+                source_family: "basenames_base_registry".to_owned(),
+                manifest_version: 3,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(102),
+                block_hash: Some("0xbase-authority".to_owned()),
+                transaction_hash: Some("0xtxbaseauthority".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:authority"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "owner": "0x00000000000000000000000000000000000000bb",
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:resolver".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "ResolverChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(103),
+                block_hash: Some("0xbase-resolver".to_owned()),
+                transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:resolver"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "resolver": "0x0000000000000000000000000000000000000abc",
+                    "namehash": "namehash:alice.base.eth",
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:record-version".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "RecordVersionChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(104),
+                block_hash: Some("0xbase-binding-supported".to_owned()),
+                transaction_hash: Some("0xtxbaserecordversion".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:record-version"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({
+                    "record_version": 6,
+                }),
+                after_state: json!({
+                    "record_version": 7,
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:addr".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "RecordChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(104),
+                block_hash: Some("0xbase-binding-supported".to_owned()),
+                transaction_hash: Some("0xtxbaseaddr".to_owned()),
+                log_index: Some(1),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:addr"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                }),
+            },
+            NormalizedEvent {
+                event_identity: "api-test:supported-basenames:text".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "RecordChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(104),
+                block_hash: Some("0xbase-binding-supported".to_owned()),
+                transaction_hash: Some("0xtxbasetext".to_owned()),
+                log_index: Some(2),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:text"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                }),
+            },
+        ],
+    )
+    .await?;
+    let manifest_id = database
+        .insert_manifest(
+            "basenames",
+            "basenames_execution",
+            "ethereum-mainnet",
+            "basenames_v1",
+            2,
+            "active",
+            "ensip15@2026-04-16",
+        )
+        .await?;
+    database
+        .insert_capability_flag(manifest_id, "verified_resolution", "supported", None)
+        .await?;
+    insert_basenames_execution_manifest_contract(database, manifest_id).await?;
+    database.rebuild_name_current(logical_name_id).await
+}
+
+async fn insert_chain_checkpoint(
+    database: &TestDatabase,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            finalized_block_hash,
+            finalized_block_number
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id)
+        DO UPDATE SET
+            finalized_block_hash = EXCLUDED.finalized_block_hash,
+            finalized_block_number = EXCLUDED.finalized_block_number
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(&database.pool)
+    .await
+    .with_context(|| format!("failed to insert chain checkpoint for {chain_id}"))?;
+
+    Ok(())
+}
+
+async fn insert_basenames_execution_manifest_contract(
+    database: &TestDatabase,
+    manifest_id: i64,
+) -> Result<()> {
+    let contract_instance_id = Uuid::from_u128(0x0b45_0000_0000_0000_0000_0000_0000_0002);
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, 'ethereum-mainnet', 'contract', $2::jsonb)
+        ON CONFLICT (contract_instance_id) DO NOTHING
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(json!({"seed": "api_resolution_basenames_execution"}))
+    .execute(&database.pool)
+    .await
+    .context("failed to insert Basenames execution contract_instance for API resolution test")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            role,
+            proxy_kind
+        )
+        VALUES (
+            $1,
+            'contract',
+            'l1_resolver',
+            $2,
+            '0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31',
+            'l1_resolver',
+            'none'
+        )
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(contract_instance_id)
+    .execute(&database.pool)
+    .await
+    .context(
+        "failed to insert Basenames execution manifest_contract_instance for API resolution test",
+    )?;
+
+    Ok(())
 }
 
 fn resolution_unsupported_verified_state(records: &[&str]) -> Value {
@@ -1380,7 +2048,9 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
         )
         .await?;
     database.rebuild_name_current(logical_name_id).await?;
-    database.rebuild_record_inventory_current(resource_id).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
 
     let declared_response = app_router(database.app_state())
         .oneshot(
@@ -1396,7 +2066,12 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
                 case.label()
             )
         })?;
-    assert_eq!(declared_response.status(), StatusCode::OK, "case {}", case.label());
+    assert_eq!(
+        declared_response.status(),
+        StatusCode::OK,
+        "case {}",
+        case.label()
+    );
 
     let declared_payload: ResolutionResponse = read_json(declared_response).await?;
     let record_inventory_boundary = declared_payload
@@ -1620,7 +2295,12 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     );
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
-    assert_eq!(explain_payload.error.code, "not_found", "case {}", case.label());
+    assert_eq!(
+        explain_payload.error.code,
+        "not_found",
+        "case {}",
+        case.label()
+    );
     assert_eq!(
         explain_payload.error.message,
         "persisted resolution execution explain was not found for name alice.base.eth in namespace basenames",
@@ -1633,8 +2313,8 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
 }
 
 #[tokio::test]
-async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_answers()
--> Result<()> {
+async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_answers() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x6200);
@@ -1664,96 +2344,31 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         }
     ]);
 
-    database
-        .seed_basenames_resolution_rebuild_inputs(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-    database.rebuild_name_current(logical_name_id).await?;
+    seed_supported_basenames_rebuild_inputs(
+        &database,
+        logical_name_id,
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
     database
         .rebuild_record_inventory_current(resource_id)
         .await?;
-    let declared_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("basenames declared resolution request failed before seeding execution")?;
-    assert_eq!(declared_response.status(), StatusCode::OK);
-    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
-    let record_inventory_boundary = declared_payload
-        .declared_state
-        .as_ref()
-        .and_then(|state| state.get("record_inventory"))
-        .and_then(|value| value.get("record_version_boundary"))
-        .cloned()
-        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames supported resolution test requires rebuilt name_current row")?;
+    let topology = projected_resolution_topology(&name_row)?;
+    let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
     let worker_row = bigname_storage::load_record_inventory_current(
         &database.pool,
         resource_id,
-        &record_inventory_boundary,
+        &record_boundary,
     )
     .await?
     .context("worker-produced basenames record_inventory_current row must exist")?;
-    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
-        .await?
-        .context("basenames supported resolution test requires name_current row")?;
-    let topology = json!({
-        "registry_path": [
-            {
-                "logical_name_id": logical_name_id,
-                "namespace": "basenames",
-                "normalized_name": "alice.base.eth",
-                "canonical_display_name": "Alice.base.eth",
-                "namehash": "namehash:alice.base.eth",
-                "resource_id": resource_id.to_string(),
-                "binding_kind": "declared_registry_path",
-            }
-        ],
-        "subregistry_path": [],
-        "resolver_path": [
-            {
-                "logical_name_id": logical_name_id,
-                "namespace": "basenames",
-                "normalized_name": "alice.base.eth",
-                "canonical_display_name": "Alice.base.eth",
-                "resource_id": resource_id.to_string(),
-                "chain_id": "base-mainnet",
-                "address": "0x0000000000000000000000000000000000000abc",
-                "latest_event_kind": "ResolverChanged",
-            }
-        ],
-        "wildcard": {
-            "source": null,
-            "matched_labels": [],
-        },
-        "alias": {
-            "final_target": null,
-            "hops": [],
-        },
-        "version_boundaries": {
-            "topology_version_boundary": worker_row.record_version_boundary.clone(),
-            "record_version_boundary": worker_row.record_version_boundary.clone(),
-        },
-        "transport": {
-            "source_chain_id": "base-mainnet",
-            "target_chain_id": "ethereum-mainnet",
-            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-            "latest_event_kind": null,
-        },
-    });
-    append_basenames_execution_manifest_version(&mut name_row);
-    insert_basenames_supported_ethereum_position(&mut name_row);
-    name_row.declared_summary["topology"] = topology.clone();
-    database.insert_name_current_row(name_row.clone()).await?;
-
-    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
     let mut trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
@@ -1784,12 +2399,7 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         "record_keys": ["text:com.twitter", "addr:60"],
         "entrypoint": "l1_resolver",
         "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-        "transport": {
-            "source_chain_id": "base-mainnet",
-            "target_chain_id": "ethereum-mainnet",
-            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-            "latest_event_kind": null
-        }
+        "transport": topology.get("transport").cloned().expect("projected topology must include transport")
     });
     trace.steps = vec![
         ExecutionTraceStep {
@@ -1868,8 +2478,8 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         execution_trace_id,
         &request_key,
         persisted_verified_queries.clone(),
-        worker_row.record_version_boundary.clone(),
-        worker_row.record_version_boundary.clone(),
+        topology_boundary,
+        record_boundary.clone(),
     );
     outcome.namespace = "basenames".to_owned();
     outcome.cache_key.requested_chain_positions = requested_chain_positions.clone();
@@ -2070,8 +2680,8 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
 }
 
 #[tokio::test]
-async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_position()
--> Result<()> {
+async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_position() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x6404);
@@ -2184,7 +2794,8 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     });
     database.insert_name_current_row(name_row.clone()).await?;
 
-    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
     let mut trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
@@ -2352,7 +2963,10 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
             ]
         }))
     );
-    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
     assert_eq!(explain_payload.error.code, "not_found");
@@ -2362,8 +2976,8 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
 }
 
 #[tokio::test]
-async fn get_resolution_keeps_basenames_transport_explicit_without_projected_topology()
--> Result<()> {
+async fn get_resolution_keeps_basenames_transport_explicit_without_projected_topology() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x6405);
@@ -2437,7 +3051,8 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     insert_basenames_supported_ethereum_position(&mut name_row);
     database.insert_name_current_row(name_row.clone()).await?;
 
-    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
     let mut trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
@@ -2605,7 +3220,10 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
             ]
         }))
     );
-    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
     assert_eq!(explain_payload.error.code, "not_found");
@@ -2615,8 +3233,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
 }
 
 #[tokio::test]
-async fn get_resolution_keeps_out_of_class_basenames_transport_explicit()
--> Result<()> {
+async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x6400);
@@ -2747,7 +3364,10 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit()
             ]
         }))
     );
-    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
     assert_eq!(explain_payload.error.code, "not_found");
@@ -3738,65 +4358,11 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
-    let wildcard_resource_id = Uuid::from_u128(0x4400);
+    let wildcard_source_resource_id = Uuid::from_u128(0x4400);
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000027);
     let request_key = resolution_execution_request_key(&["addr:60"]);
-    let wildcard_source = json!({
-        "logical_name_id": "ens:eth",
-        "namespace": "ens",
-        "normalized_name": "eth",
-        "canonical_display_name": "Eth",
-        "namehash": "namehash:eth",
-        "resource_id": wildcard_resource_id.to_string(),
-        "binding_kind": "observed_wildcard_path"
-    });
-    let wildcard_boundary = record_inventory_boundary("ens:eth", wildcard_resource_id);
-    let projected_topology = json!({
-        "registry_path": [
-            {
-                "logical_name_id": logical_name_id,
-                "namespace": "ens",
-                "normalized_name": "alice.eth",
-                "canonical_display_name": "Alice.eth",
-                "namehash": "namehash:alice.eth",
-                "resource_id": resource_id.to_string(),
-                "binding_kind": "observed_wildcard_path"
-            }
-        ],
-        "subregistry_path": [],
-        "resolver_path": [
-            {
-                "logical_name_id": "ens:eth",
-                "namespace": "ens",
-                "normalized_name": "eth",
-                "canonical_display_name": "Eth",
-                "resource_id": wildcard_resource_id.to_string(),
-                "chain_id": "ethereum-mainnet",
-                "address": "0x0000000000000000000000000000000000000def",
-                "latest_event_kind": "ResolverChanged"
-            }
-        ],
-        "wildcard": {
-            "source": wildcard_source.clone(),
-            "matched_labels": ["alice"]
-        },
-        "alias": {
-            "final_target": null,
-            "hops": []
-        },
-        "version_boundaries": {
-            "topology_version_boundary": wildcard_boundary.clone(),
-            "record_version_boundary": wildcard_boundary.clone()
-        },
-        "transport": {
-            "source_chain_id": null,
-            "target_chain_id": null,
-            "contract_address": null,
-            "latest_event_kind": null
-        }
-    });
     let persisted_verified_queries = json!([
         {
             "record_key": "addr:60",
@@ -3811,26 +4377,28 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
         }
     ]);
 
-    database
-        .seed_name_current_binding_migrated(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-    let mut row = exact_name_row(
+    seed_supported_wildcard_rebuild_inputs(
+        &database,
         logical_name_id,
-        surface_binding_id,
         resource_id,
         token_lineage_id,
-    );
-    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedWildcardPath);
-    row.declared_summary = json!({
-        "topology": projected_topology.clone()
-    });
-    database.insert_name_current_row(row).await?;
+        surface_binding_id,
+        wildcard_source_resource_id,
+    )
+    .await?;
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("wildcard execution explain test requires rebuilt name_current row")?;
+    let projected_topology = projected_resolution_topology(&name_row)?;
+    let wildcard_source = projected_topology
+        .pointer("/wildcard/source")
+        .cloned()
+        .context("wildcard projected topology must include source")?;
+    let wildcard_labels = projected_topology
+        .pointer("/wildcard/matched_labels")
+        .cloned()
+        .context("wildcard projected topology must include matched_labels")?;
+    let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
 
     let mut trace = resolution_execution_trace(
         execution_trace_id,
@@ -3845,16 +4413,26 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
         "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
         "wildcard": {
             "source": wildcard_source.clone(),
-            "matched_labels": ["alice"]
+            "matched_labels": wildcard_labels.clone()
         }
     });
-    let outcome = resolution_execution_outcome_with_boundaries(
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions_from_name_current(&name_row.chain_positions),
+    });
+    let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
         persisted_verified_queries,
-        wildcard_boundary.clone(),
-        wildcard_boundary,
+        topology_boundary,
+        record_boundary,
     );
+    outcome.cache_key.requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
 
@@ -3917,7 +4495,7 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
             .and_then(|execution| execution.get("wildcard")),
         Some(&json!({
             "source": wildcard_source,
-            "matched_labels": ["alice"]
+            "matched_labels": wildcard_labels
         }))
     );
 
@@ -5148,8 +5726,7 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
         Some(&json!(dynamic_resolver_address))
     );
     assert_eq!(
-        declared_state
-            .pointer("/topology/resolver_path/0/chain_id"),
+        declared_state.pointer("/topology/resolver_path/0/chain_id"),
         Some(&json!("ethereum-mainnet"))
     );
     assert_eq!(
@@ -5297,8 +5874,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
         Some(&json!(dynamic_resolver_address))
     );
     assert_eq!(
-        declared_state
-            .pointer("/topology/resolver_path/0/chain_id"),
+        declared_state.pointer("/topology/resolver_path/0/chain_id"),
         Some(&json!("ethereum-mainnet"))
     );
     assert_eq!(
@@ -5547,8 +6123,7 @@ async fn get_resolution_dynamic_resolver_l2resolver_profile_reads_supported_base
         Some(&json!(dynamic_resolver_address))
     );
     assert_eq!(
-        declared_state
-            .pointer("/topology/resolver_path/0/chain_id"),
+        declared_state.pointer("/topology/resolver_path/0/chain_id"),
         Some(&json!("base-mainnet"))
     );
     assert_eq!(
@@ -5652,11 +6227,10 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
         dynamic_resolver_address,
     ) in cases
     {
-        let inventory_row =
-            basenames_dynamic_resolver_pending_record_inventory_current_row(
-                logical_name_id,
-                resource_id,
-            );
+        let inventory_row = basenames_dynamic_resolver_pending_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        );
         let record_version_boundary = inventory_row.record_version_boundary.clone();
 
         database
@@ -5717,8 +6291,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
             Some(&json!(dynamic_resolver_address))
         );
         assert_eq!(
-            declared_state
-                .pointer("/topology/resolver_path/0/chain_id"),
+            declared_state.pointer("/topology/resolver_path/0/chain_id"),
             Some(&json!("base-mainnet"))
         );
         assert_eq!(

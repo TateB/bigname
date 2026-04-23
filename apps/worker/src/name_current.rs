@@ -9,7 +9,7 @@ use bigname_storage::{
     clear_name_current, delete_name_current, load_name_history_head,
     load_surface_bindings_by_logical_name_id, upsert_name_current_rows,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 #[cfg(test)]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
@@ -20,29 +20,42 @@ const BASENAMES_NAMESPACE: &str = "basenames";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
 const ENS_V2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 const ENS_V2_REGISTRAR_DERIVATION_KIND: &str = "ens_v2_registrar";
+const ENS_V2_RESOLVER_DERIVATION_KIND: &str = "ens_v2_resolver";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
+#[cfg(test)]
+const SOURCE_FAMILY_ENS_V2_RESOLVER: &str = "ens_v2_resolver";
 const SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH: &str = "ens_v2_sepolia_dev";
 #[cfg(test)]
 const EXACT_NAME_PROFILE_CAPABILITY: &str = "exact_name_profile";
 const CAPABILITY_STATUS_SUPPORTED: &str = "supported";
 const MANIFEST_ROLLOUT_STATUS_ACTIVE: &str = "active";
 const ETHEREUM_SEPOLIA_CHAIN_ID: &str = "ethereum-sepolia";
+const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
+const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
+const SOURCE_FAMILY_BASENAMES_EXECUTION: &str = "basenames_execution";
+const VERIFIED_RESOLUTION_CAPABILITY: &str = "verified_resolution";
+const BASENAMES_V1_DEPLOYMENT_EPOCH: &str = "basenames_v1";
+const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
 const NAME_CURRENT_DERIVATION_KIND: &str = "name_current_rebuild";
+const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
+const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
     "AuthorityTransferred",
+    EVENT_KIND_ALIAS_CHANGED,
     "ExpiryChanged",
     "RegistrationGranted",
     "RegistrationReleased",
     "RegistrationRenewed",
+    EVENT_KIND_RECORD_VERSION_CHANGED,
     EVENT_KIND_RESOLVER_CHANGED,
     "SurfaceBound",
     "SurfaceUnbound",
@@ -147,6 +160,49 @@ struct ChainPositionCandidate {
     timestamp: OffsetDateTime,
 }
 
+#[derive(Clone, Debug)]
+struct SupplementalChainObservation {
+    candidate: ChainPositionCandidate,
+    canonicality_state: CanonicalityState,
+}
+
+#[derive(Clone, Debug)]
+struct SupportedResolutionProjection {
+    topology: Value,
+    manifest_versions: Vec<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct BasenamesExecutionManifestVersion {
+    manifest_version: i64,
+    chain: String,
+    deployment_epoch: String,
+    contract_address: String,
+}
+
+#[derive(Clone, Debug)]
+struct WildcardSourceContext {
+    logical_name_id: String,
+    namespace: String,
+    normalized_name: String,
+    canonical_display_name: String,
+    namehash: String,
+    resource_id: Uuid,
+    resolver_event: RelevantEvent,
+    boundary_event: RelevantEvent,
+    matched_labels: Vec<String>,
+}
+
+impl WildcardSourceContext {
+    fn events(&self) -> impl Iterator<Item = &RelevantEvent> {
+        let mut events = vec![&self.resolver_event];
+        if self.boundary_event.normalized_event_id != self.resolver_event.normalized_event_id {
+            events.push(&self.boundary_event);
+        }
+        events.into_iter()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct HistoryHeads {
     surface_head: Option<HistoryEvent>,
@@ -244,20 +300,72 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
     let current_binding = load_current_binding_context(pool, &name.logical_name_id).await?;
     let events = load_relevant_events(pool, name).await?;
     let history_heads = load_history_heads(pool, &name.logical_name_id).await?;
+    let basenames_execution_manifest =
+        load_active_basenames_execution_manifest(pool, &name.namespace).await?;
+    let wildcard_source_context =
+        load_wildcard_source_context(pool, name, current_binding.as_ref()).await?;
+    let supplemental_chain_observations = load_supplemental_chain_observations(
+        pool,
+        name,
+        current_binding.as_ref(),
+        wildcard_source_context.as_ref(),
+        basenames_execution_manifest.as_ref(),
+    )
+    .await?;
     let facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
-    let chain_positions =
-        build_chain_positions(name, current_binding.as_ref(), &events, &history_heads);
-    let canonicality_summary =
-        build_canonicality_summary(name, current_binding.as_ref(), &events, &history_heads);
-    let provenance = build_provenance(&events, &history_heads)?;
+    let chain_positions = build_chain_positions(
+        name,
+        current_binding.as_ref(),
+        &events,
+        &history_heads,
+        &supplemental_chain_observations,
+    );
+    let supported_resolution_projection = build_supported_resolution_projection(
+        name,
+        current_binding.as_ref(),
+        &facts,
+        &events,
+        &chain_positions,
+        wildcard_source_context.as_ref(),
+        basenames_execution_manifest.as_ref(),
+    )?;
+    let canonicality_summary = build_canonicality_summary(
+        name,
+        current_binding.as_ref(),
+        &events,
+        &history_heads,
+        &supplemental_chain_observations,
+    );
+    let provenance = build_provenance(
+        &events,
+        &history_heads,
+        wildcard_source_context.as_ref(),
+        supported_resolution_projection
+            .as_ref()
+            .map(|projection| projection.manifest_versions.as_slice())
+            .unwrap_or(&[]),
+    )?;
     let manifest_version = events
         .iter()
         .map(|event| event.manifest_version)
+        .chain(
+            wildcard_source_context
+                .as_ref()
+                .into_iter()
+                .flat_map(WildcardSourceContext::events)
+                .map(|event| event.manifest_version),
+        )
         .chain(history_heads.iter().map(|event| event.manifest_version))
         .max()
         .unwrap_or(1);
-    let last_recomputed_at = max_timestamp(name, current_binding.as_ref(), &events, &history_heads)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let last_recomputed_at = max_timestamp(
+        name,
+        current_binding.as_ref(),
+        &events,
+        &history_heads,
+        &supplemental_chain_observations,
+    )
+    .unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
     Ok(NameCurrentRow {
         logical_name_id: name.logical_name_id.clone(),
@@ -273,7 +381,10 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
             .as_ref()
             .and_then(|binding| binding.token_lineage_id),
         binding_kind: current_binding.as_ref().map(|binding| binding.binding_kind),
-        declared_summary: build_declared_summary(facts),
+        declared_summary: build_declared_summary(
+            facts,
+            supported_resolution_projection.map(|projection| projection.topology),
+        ),
         provenance,
         coverage: build_exact_name_coverage(&name.namespace, &events),
         chain_positions,
@@ -283,7 +394,7 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
     })
 }
 
-fn build_declared_summary(facts: ProjectedFacts) -> Value {
+fn build_declared_summary(facts: ProjectedFacts, topology: Option<Value>) -> Value {
     let surface_head = facts
         .surface_head
         .as_ref()
@@ -295,8 +406,10 @@ fn build_declared_summary(facts: ProjectedFacts) -> Value {
         .map(history_pointer_json)
         .unwrap_or(Value::Null);
 
-    json!({
-        "registration": {
+    let mut summary = Map::new();
+    summary.insert(
+        "registration".to_owned(),
+        json!({
             "status": facts.registration_status,
             "authority_kind": facts.authority_kind,
             "authority_key": facts.authority_key,
@@ -304,36 +417,705 @@ fn build_declared_summary(facts: ProjectedFacts) -> Value {
             "expiry": facts.expiry,
             "released_at": facts.released_at,
             "latest_event_kind": facts.latest_registration_event_kind,
-        },
-        "control": {
+        }),
+    );
+    summary.insert(
+        "control".to_owned(),
+        json!({
             "status": facts.control_status_substrate,
             "expiry": format_unix_timestamp_value(facts.control_expiry_substrate),
             "registrant": facts.registrant,
             "registry_owner": facts.registry_owner,
             "latest_event_kind": facts.latest_control_event_kind,
-        },
-        "resolver": {
+        }),
+    );
+    summary.insert(
+        "resolver".to_owned(),
+        json!({
             "chain_id": facts.resolver_chain_id,
             "address": facts.resolver_address,
             "latest_event_kind": facts.latest_resolver_event_kind,
-        },
-        "record_inventory": {
+        }),
+    );
+    summary.insert(
+        "record_inventory".to_owned(),
+        json!({
             "status": "unsupported",
             "unsupported_reason": RECORD_INVENTORY_UNSUPPORTED_REASON,
-        },
-        "history": {
+        }),
+    );
+    summary.insert(
+        "history".to_owned(),
+        json!({
             "surface_head": surface_head,
             "resource_head": resource_head,
+        }),
+    );
+    if let Some(topology) = topology {
+        summary.insert("topology".to_owned(), topology);
+    }
+
+    Value::Object(summary)
+}
+
+async fn load_active_basenames_execution_manifest(
+    pool: &PgPool,
+    namespace: &str,
+) -> Result<Option<BasenamesExecutionManifestVersion>> {
+    if namespace != BASENAMES_NAMESPACE {
+        return Ok(None);
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            mv.manifest_version,
+            mv.chain,
+            mv.deployment_epoch,
+            mci.declared_address AS contract_address
+        FROM manifest_versions mv
+        JOIN manifest_capability_flags mcf
+          ON mcf.manifest_id = mv.manifest_id
+         AND mcf.capability_name = $1
+         AND mcf.status = 'supported'::capability_support_status
+        JOIN manifest_contract_instances mci
+          ON mci.manifest_id = mv.manifest_id
+         AND mci.declaration_kind = 'contract'
+         AND mci.role = 'l1_resolver'
+         AND lower(mci.declared_address) = lower($6)
+        WHERE mv.namespace = $2
+          AND mv.source_family = $3
+          AND mv.chain = $4
+          AND mv.deployment_epoch = $5
+          AND mv.rollout_status = 'active'::manifest_rollout_status
+        ORDER BY mv.manifest_version DESC, mv.manifest_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(VERIFIED_RESOLUTION_CAPABILITY)
+    .bind(BASENAMES_NAMESPACE)
+    .bind(SOURCE_FAMILY_BASENAMES_EXECUTION)
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(BASENAMES_V1_DEPLOYMENT_EPOCH)
+    .bind(BASENAMES_L1_RESOLVER_ADDRESS)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load active basenames_execution manifest metadata for name_current")?;
+
+    row.map(|row| {
+        Ok(BasenamesExecutionManifestVersion {
+            manifest_version: row
+                .try_get("manifest_version")
+                .context("missing basenames_execution manifest_version")?,
+            chain: row
+                .try_get("chain")
+                .context("missing basenames_execution chain")?,
+            deployment_epoch: row
+                .try_get("deployment_epoch")
+                .context("missing basenames_execution deployment_epoch")?,
+            contract_address: row
+                .try_get("contract_address")
+                .context("missing basenames_execution contract_address")?,
+        })
+    })
+    .transpose()
+}
+
+async fn load_supplemental_chain_observations(
+    pool: &PgPool,
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+    wildcard_source_context: Option<&WildcardSourceContext>,
+    basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
+) -> Result<Vec<SupplementalChainObservation>> {
+    let mut observations = Vec::new();
+
+    if let Some(context) = wildcard_source_context {
+        for event in context.events() {
+            if let Some(observation) = supplemental_chain_observation_from_event(event)? {
+                observations.push(observation);
+            }
+        }
+    }
+
+    if let Some(observation) = load_basenames_execution_target_checkpoint_observation(
+        pool,
+        name,
+        current_binding,
+        basenames_execution_manifest,
+    )
+    .await?
+    {
+        observations.push(observation);
+    }
+
+    Ok(observations)
+}
+
+fn supplemental_chain_observation_from_event(
+    event: &RelevantEvent,
+) -> Result<Option<SupplementalChainObservation>> {
+    let (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
+        event.chain_id.as_ref(),
+        event.block_number,
+        event.block_hash.as_ref(),
+        event.block_timestamp,
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(Some(SupplementalChainObservation {
+        candidate: ChainPositionCandidate {
+            slot: chain_slot(chain_id),
+            chain_id: chain_id.clone(),
+            block_number,
+            block_hash: block_hash.clone(),
+            timestamp,
         },
+        canonicality_state: event.canonicality_state,
+    }))
+}
+
+async fn load_basenames_execution_target_checkpoint_observation(
+    pool: &PgPool,
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+    basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
+) -> Result<Option<SupplementalChainObservation>> {
+    if name.namespace != BASENAMES_NAMESPACE || basenames_execution_manifest.is_none() {
+        return Ok(None);
+    }
+    if current_binding
+        .is_none_or(|binding| binding.binding_kind != SurfaceBindingKind::DeclaredRegistryPath)
+    {
+        return Ok(None);
+    }
+
+    let row = sqlx::query(&format!(
+        r#"
+        WITH selected_checkpoint AS (
+            SELECT
+                chain_id,
+                COALESCE(finalized_block_hash, safe_block_hash, canonical_block_hash) AS block_hash,
+                COALESCE(finalized_block_number, safe_block_number, canonical_block_number) AS block_number
+            FROM chain_checkpoints
+            WHERE chain_id = $1
+        )
+        SELECT
+            checkpoint.chain_id,
+            checkpoint.block_hash,
+            checkpoint.block_number,
+            rb.block_timestamp,
+            rb.canonicality_state::TEXT AS canonicality_state
+        FROM selected_checkpoint checkpoint
+        JOIN raw_blocks rb
+          ON rb.chain_id = checkpoint.chain_id
+         AND rb.block_hash = checkpoint.block_hash
+         AND rb.block_number = checkpoint.block_number
+        WHERE checkpoint.block_hash IS NOT NULL
+          AND checkpoint.block_number IS NOT NULL
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+        LIMIT 1
+        "#
+    ))
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load Basenames execution target checkpoint for name_current")?;
+
+    row.map(|row| {
+        let chain_id = row
+            .try_get::<String, _>("chain_id")
+            .context("missing Basenames checkpoint chain_id")?;
+        Ok(SupplementalChainObservation {
+            candidate: ChainPositionCandidate {
+                slot: chain_slot(&chain_id),
+                chain_id,
+                block_number: row
+                    .try_get("block_number")
+                    .context("missing Basenames checkpoint block_number")?,
+                block_hash: row
+                    .try_get("block_hash")
+                    .context("missing Basenames checkpoint block_hash")?,
+                timestamp: row
+                    .try_get("block_timestamp")
+                    .context("missing Basenames checkpoint block_timestamp")?,
+            },
+            canonicality_state: parse_canonicality_state(
+                &row.try_get::<String, _>("canonicality_state")
+                    .context("missing Basenames checkpoint canonicality_state")?,
+            )?,
+        })
+    })
+    .transpose()
+}
+
+fn build_supported_resolution_projection(
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+    facts: &ProjectedFacts,
+    events: &[RelevantEvent],
+    chain_positions: &Value,
+    wildcard_source_context: Option<&WildcardSourceContext>,
+    basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
+) -> Result<Option<SupportedResolutionProjection>> {
+    let Some(binding) = current_binding else {
+        return Ok(None);
+    };
+
+    match name.namespace.as_str() {
+        ENS_NAMESPACE => match binding.binding_kind {
+            SurfaceBindingKind::ResolverAliasPath => {
+                build_alias_only_supported_projection(name, binding, facts, events, chain_positions)
+            }
+            SurfaceBindingKind::ObservedWildcardPath => {
+                build_wildcard_supported_projection(name, binding, wildcard_source_context)
+            }
+            _ => Ok(None),
+        },
+        BASENAMES_NAMESPACE => build_basenames_supported_projection(
+            name,
+            binding,
+            facts,
+            events,
+            chain_positions,
+            basenames_execution_manifest,
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn build_alias_only_supported_projection(
+    name: &NameSurfaceSeed,
+    current_binding: &CurrentBindingContext,
+    facts: &ProjectedFacts,
+    events: &[RelevantEvent],
+    chain_positions: &Value,
+) -> Result<Option<SupportedResolutionProjection>> {
+    let Some(final_target) = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_kind == EVENT_KIND_ALIAS_CHANGED
+                && event.after_state.get("active").and_then(Value::as_bool) == Some(true)
+        })
+        .and_then(alias_final_target_ref)
+    else {
+        return Ok(None);
+    };
+    let Some(resolver_hop) = resolver_hop_from_facts(
+        &name.logical_name_id,
+        &name.namespace,
+        &name.normalized_name,
+        &name.canonical_display_name,
+        current_binding.resource_id,
+        facts,
+    ) else {
+        return Ok(None);
+    };
+    let Some(boundary) = build_supported_resolution_boundary_from_chain_positions(
+        chain_positions,
+        &name.logical_name_id,
+        current_binding.resource_id,
+        None,
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(Some(SupportedResolutionProjection {
+        topology: json!({
+            "registry_path": [name_ref(
+                &name.logical_name_id,
+                &name.namespace,
+                &name.normalized_name,
+                &name.canonical_display_name,
+                &name.namehash,
+                current_binding.resource_id,
+                SurfaceBindingKind::ResolverAliasPath,
+            )],
+            "subregistry_path": [],
+            "resolver_path": [resolver_hop],
+            "wildcard": empty_wildcard_detail(),
+            "alias": {
+                "final_target": final_target.clone(),
+                "hops": [final_target],
+            },
+            "version_boundaries": {
+                "topology_version_boundary": boundary.clone(),
+                "record_version_boundary": boundary,
+            },
+            "transport": empty_transport_detail(),
+        }),
+        manifest_versions: Vec::new(),
+    }))
+}
+
+fn build_wildcard_supported_projection(
+    name: &NameSurfaceSeed,
+    current_binding: &CurrentBindingContext,
+    wildcard_source_context: Option<&WildcardSourceContext>,
+) -> Result<Option<SupportedResolutionProjection>> {
+    let Some(source_context) = wildcard_source_context else {
+        return Ok(None);
+    };
+    let Some(boundary) = build_supported_resolution_boundary_from_event(
+        &source_context.logical_name_id,
+        source_context.resource_id,
+        &source_context.boundary_event,
+    ) else {
+        return Ok(None);
+    };
+    let Some(resolver_hop) = resolver_hop_from_event(source_context) else {
+        return Ok(None);
+    };
+    let source = wildcard_source_ref(source_context);
+    let matched_labels = source_context
+        .matched_labels
+        .iter()
+        .map(|label| Value::String(label.clone()))
+        .collect::<Vec<_>>();
+
+    Ok(Some(SupportedResolutionProjection {
+        topology: json!({
+            "registry_path": [name_ref(
+                &name.logical_name_id,
+                &name.namespace,
+                &name.normalized_name,
+                &name.canonical_display_name,
+                &name.namehash,
+                current_binding.resource_id,
+                SurfaceBindingKind::ObservedWildcardPath,
+            )],
+            "subregistry_path": [],
+            "resolver_path": [resolver_hop],
+            "wildcard": {
+                "source": source,
+                "matched_labels": matched_labels,
+            },
+            "alias": empty_alias_detail(),
+            "version_boundaries": {
+                "topology_version_boundary": boundary.clone(),
+                "record_version_boundary": boundary,
+            },
+            "transport": empty_transport_detail(),
+        }),
+        manifest_versions: Vec::new(),
+    }))
+}
+
+fn build_basenames_supported_projection(
+    name: &NameSurfaceSeed,
+    current_binding: &CurrentBindingContext,
+    facts: &ProjectedFacts,
+    events: &[RelevantEvent],
+    chain_positions: &Value,
+    basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
+) -> Result<Option<SupportedResolutionProjection>> {
+    if current_binding.binding_kind != SurfaceBindingKind::DeclaredRegistryPath {
+        return Ok(None);
+    }
+    let Some(manifest) = basenames_execution_manifest else {
+        return Ok(None);
+    };
+    if manifest.chain != ETHEREUM_MAINNET_CHAIN_ID
+        || !manifest
+            .contract_address
+            .eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS)
+        || !chain_positions_include_chain(chain_positions, BASE_MAINNET_CHAIN_ID)
+        || !chain_positions_include_chain(chain_positions, ETHEREUM_MAINNET_CHAIN_ID)
+    {
+        return Ok(None);
+    }
+    let Some(resolver_hop) = resolver_hop_from_facts(
+        &name.logical_name_id,
+        &name.namespace,
+        &name.normalized_name,
+        &name.canonical_display_name,
+        current_binding.resource_id,
+        facts,
+    ) else {
+        return Ok(None);
+    };
+    if facts.resolver_chain_id.as_deref() != Some(BASE_MAINNET_CHAIN_ID) {
+        return Ok(None);
+    }
+    let Some(boundary) = build_basenames_supported_boundary(
+        &name.logical_name_id,
+        current_binding.resource_id,
+        events,
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(Some(SupportedResolutionProjection {
+        topology: json!({
+            "registry_path": [name_ref(
+                &name.logical_name_id,
+                &name.namespace,
+                &name.normalized_name,
+                &name.canonical_display_name,
+                &name.namehash,
+                current_binding.resource_id,
+                SurfaceBindingKind::DeclaredRegistryPath,
+            )],
+            "subregistry_path": [],
+            "resolver_path": [resolver_hop],
+            "wildcard": empty_wildcard_detail(),
+            "alias": empty_alias_detail(),
+            "version_boundaries": {
+                "topology_version_boundary": boundary.clone(),
+                "record_version_boundary": boundary,
+            },
+            "transport": {
+                "source_chain_id": BASE_MAINNET_CHAIN_ID,
+                "target_chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": BASENAMES_L1_RESOLVER_ADDRESS,
+                "latest_event_kind": Value::Null,
+            },
+        }),
+        manifest_versions: vec![basenames_execution_manifest_value(manifest)],
+    }))
+}
+
+fn basenames_execution_manifest_value(manifest: &BasenamesExecutionManifestVersion) -> Value {
+    json!({
+        "source_family": SOURCE_FAMILY_BASENAMES_EXECUTION,
+        "manifest_version": manifest.manifest_version,
+        "chain": manifest.chain,
+        "deployment_epoch": manifest.deployment_epoch,
     })
 }
 
-fn build_provenance(events: &[RelevantEvent], history_heads: &HistoryHeads) -> Result<Value> {
+fn build_basenames_supported_boundary(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    events: &[RelevantEvent],
+) -> Option<Value> {
+    let boundary_anchor = events.iter().rev().find(|event| {
+        event.resource_id == Some(resource_id)
+            && event.chain_id.as_deref() == Some(BASE_MAINNET_CHAIN_ID)
+            && matches!(
+                event.event_kind.as_str(),
+                EVENT_KIND_RECORD_VERSION_CHANGED | EVENT_KIND_RESOLVER_CHANGED
+            )
+    })?;
+    let chain_position = relevant_event_chain_position(boundary_anchor)?;
+    let has_pointer = boundary_anchor.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED;
+
+    Some(json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": has_pointer.then_some(boundary_anchor.normalized_event_id),
+        "event_kind": has_pointer.then_some(boundary_anchor.event_kind.clone()),
+        "chain_position": chain_position,
+    }))
+}
+
+fn build_supported_resolution_boundary_from_chain_positions(
+    chain_positions: &Value,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    preferred_chain_id: Option<&str>,
+) -> Option<Value> {
+    let chain_position = preferred_chain_id
+        .and_then(|chain_id| chain_position_for_chain(chain_positions, chain_id))
+        .or_else(|| chain_position_slot(chain_positions, "ethereum"))
+        .or_else(|| only_chain_position(chain_positions))?;
+
+    Some(json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": Value::Null,
+        "event_kind": Value::Null,
+        "chain_position": chain_position,
+    }))
+}
+
+fn build_supported_resolution_boundary_from_event(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    event: &RelevantEvent,
+) -> Option<Value> {
+    let chain_position = relevant_event_chain_position(event)?;
+    let has_pointer = event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED;
+
+    Some(json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": has_pointer.then_some(event.normalized_event_id),
+        "event_kind": has_pointer.then_some(event.event_kind.clone()),
+        "chain_position": chain_position,
+    }))
+}
+
+fn alias_final_target_ref(event: &RelevantEvent) -> Option<Value> {
+    let logical_name_id = json_str(&event.after_state, &["to_logical_name_id"]).or_else(|| {
+        json_str(&event.after_state, &["to_name"])
+            .map(|name| format!("{ENS_NAMESPACE}:{}", name.to_ascii_lowercase()))
+    })?;
+    let normalized_name = json_str(&event.after_state, &["to_normalized_name"]).or_else(|| {
+        json_str(&event.after_state, &["to_name"]).map(|name| name.to_ascii_lowercase())
+    })?;
+    let canonical_display_name = json_str(&event.after_state, &["to_canonical_display_name"])
+        .or_else(|| json_str(&event.after_state, &["to_name"]))?;
+    let namehash = json_str(&event.after_state, &["to_namehash"])?;
+    let resource_id = json_str(&event.after_state, &["to_resource_id"])?;
+
+    Some(json!({
+        "logical_name_id": logical_name_id,
+        "namespace": ENS_NAMESPACE,
+        "normalized_name": normalized_name,
+        "canonical_display_name": canonical_display_name,
+        "namehash": namehash,
+        "resource_id": resource_id,
+        "binding_kind": SurfaceBindingKind::ResolverAliasPath.as_str(),
+    }))
+}
+
+fn wildcard_source_ref(source_context: &WildcardSourceContext) -> Value {
+    name_ref(
+        &source_context.logical_name_id,
+        &source_context.namespace,
+        &source_context.normalized_name,
+        &source_context.canonical_display_name,
+        &source_context.namehash,
+        source_context.resource_id,
+        SurfaceBindingKind::ObservedWildcardPath,
+    )
+}
+
+fn resolver_hop_from_event(source_context: &WildcardSourceContext) -> Option<Value> {
+    Some(json!({
+        "logical_name_id": source_context.logical_name_id,
+        "namespace": source_context.namespace,
+        "normalized_name": source_context.normalized_name,
+        "canonical_display_name": source_context.canonical_display_name,
+        "resource_id": source_context.resource_id.to_string(),
+        "chain_id": source_context.resolver_event.chain_id.as_ref()?,
+        "address": normalize_resolver_address(json_str(&source_context.resolver_event.after_state, &["resolver"]).as_deref())?,
+        "latest_event_kind": source_context.resolver_event.event_kind,
+    }))
+}
+
+fn resolver_hop_from_facts(
+    logical_name_id: &str,
+    namespace: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    facts: &ProjectedFacts,
+) -> Option<Value> {
+    Some(json!({
+        "logical_name_id": logical_name_id,
+        "namespace": namespace,
+        "normalized_name": normalized_name,
+        "canonical_display_name": canonical_display_name,
+        "resource_id": resource_id.to_string(),
+        "chain_id": facts.resolver_chain_id.as_ref()?,
+        "address": facts.resolver_address.as_ref()?,
+        "latest_event_kind": facts.latest_resolver_event_kind.clone(),
+    }))
+}
+
+fn name_ref(
+    logical_name_id: &str,
+    namespace: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    namehash: &str,
+    resource_id: Uuid,
+    binding_kind: SurfaceBindingKind,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "namespace": namespace,
+        "normalized_name": normalized_name,
+        "canonical_display_name": canonical_display_name,
+        "namehash": namehash,
+        "resource_id": resource_id.to_string(),
+        "binding_kind": binding_kind.as_str(),
+    })
+}
+
+fn empty_alias_detail() -> Value {
+    json!({
+        "final_target": Value::Null,
+        "hops": [],
+    })
+}
+
+fn empty_wildcard_detail() -> Value {
+    json!({
+        "source": Value::Null,
+        "matched_labels": [],
+    })
+}
+
+fn empty_transport_detail() -> Value {
+    json!({
+        "source_chain_id": Value::Null,
+        "target_chain_id": Value::Null,
+        "contract_address": Value::Null,
+        "latest_event_kind": Value::Null,
+    })
+}
+
+fn chain_positions_include_chain(chain_positions: &Value, chain_id: &str) -> bool {
+    chain_position_for_chain(chain_positions, chain_id).is_some()
+}
+
+fn chain_position_for_chain(chain_positions: &Value, chain_id: &str) -> Option<Value> {
+    chain_positions
+        .as_object()?
+        .values()
+        .find(|position| {
+            position
+                .get("chain_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == chain_id)
+        })
+        .cloned()
+}
+
+fn chain_position_slot(chain_positions: &Value, slot: &str) -> Option<Value> {
+    chain_positions.as_object()?.get(slot).cloned()
+}
+
+fn only_chain_position(chain_positions: &Value) -> Option<Value> {
+    let positions = chain_positions.as_object()?;
+    if positions.len() == 1 {
+        positions.values().next().cloned()
+    } else {
+        None
+    }
+}
+
+fn relevant_event_chain_position(event: &RelevantEvent) -> Option<Value> {
+    Some(json!({
+        "chain_id": event.chain_id.as_ref()?,
+        "block_number": event.block_number?,
+        "block_hash": event.block_hash.as_ref()?,
+        "timestamp": format_timestamp(event.block_timestamp?),
+    }))
+}
+
+fn build_provenance(
+    events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
+    wildcard_source_context: Option<&WildcardSourceContext>,
+    supplemental_manifest_versions: &[Value],
+) -> Result<Value> {
     let mut normalized_event_ids = Vec::new();
     let mut seen_normalized_event_ids = BTreeSet::new();
     for normalized_event_id in events
         .iter()
         .map(|event| event.normalized_event_id)
+        .chain(
+            wildcard_source_context
+                .into_iter()
+                .flat_map(WildcardSourceContext::events)
+                .map(|event| event.normalized_event_id),
+        )
         .chain(history_heads.iter().map(|event| event.normalized_event_id))
     {
         if seen_normalized_event_ids.insert(normalized_event_id) {
@@ -345,13 +1127,30 @@ fn build_provenance(events: &[RelevantEvent], history_heads: &HistoryHeads) -> R
         events
             .iter()
             .map(|event| event.raw_fact_ref.clone())
+            .chain(
+                wildcard_source_context
+                    .into_iter()
+                    .flat_map(WildcardSourceContext::events)
+                    .map(|event| event.raw_fact_ref.clone()),
+            )
             .chain(history_heads.iter().map(|event| event.raw_fact_ref.clone())),
     )?;
     let manifest_versions = dedupe_json_values(
         events
             .iter()
             .map(event_manifest_version)
+            .chain(
+                wildcard_source_context
+                    .into_iter()
+                    .flat_map(WildcardSourceContext::events)
+                    .map(event_manifest_version),
+            )
             .chain(history_heads.iter().map(history_manifest_version)),
+    )?;
+    let manifest_versions = dedupe_json_values(
+        manifest_versions
+            .into_iter()
+            .chain(supplemental_manifest_versions.iter().cloned()),
     )?;
 
     Ok(json!({
@@ -368,6 +1167,7 @@ fn build_chain_positions(
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
     history_heads: &HistoryHeads,
+    supplemental_chain_observations: &[SupplementalChainObservation],
 ) -> Value {
     let mut latest_positions = BTreeMap::<String, ChainPositionCandidate>::new();
 
@@ -441,6 +1241,10 @@ fn build_chain_positions(
         );
     }
 
+    for observation in supplemental_chain_observations {
+        push_chain_position(&mut latest_positions, observation.candidate.clone());
+    }
+
     Value::Object(
         latest_positions
             .into_iter()
@@ -481,6 +1285,7 @@ fn build_canonicality_summary(
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
     history_heads: &HistoryHeads,
+    supplemental_chain_observations: &[SupplementalChainObservation],
 ) -> Value {
     let mut states = vec![name.canonicality_state];
     let mut chain_states = BTreeMap::<String, CanonicalityState>::new();
@@ -513,6 +1318,15 @@ fn build_canonicality_summary(
         if let Some(chain_id) = event.chain_id.as_ref() {
             merge_chain_state(&mut chain_states, chain_id, event.canonicality_state);
         }
+    }
+
+    for observation in supplemental_chain_observations {
+        states.push(observation.canonicality_state);
+        merge_chain_state(
+            &mut chain_states,
+            &observation.candidate.chain_id,
+            observation.canonicality_state,
+        );
     }
 
     let status =
@@ -639,6 +1453,7 @@ fn max_timestamp(
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
     history_heads: &HistoryHeads,
+    supplemental_chain_observations: &[SupplementalChainObservation],
 ) -> Option<OffsetDateTime> {
     let mut timestamps = Vec::new();
     if let Some(timestamp) = name.block_timestamp {
@@ -654,6 +1469,11 @@ fn max_timestamp(
         history_heads
             .iter()
             .filter_map(|event| event.block_timestamp),
+    );
+    timestamps.extend(
+        supplemental_chain_observations
+            .iter()
+            .map(|observation| observation.candidate.timestamp),
     );
     timestamps.into_iter().max()
 }
@@ -813,6 +1633,193 @@ async fn load_current_binding_context(
     row.map(decode_current_binding_context).transpose()
 }
 
+async fn load_wildcard_source_context(
+    pool: &PgPool,
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+) -> Result<Option<WildcardSourceContext>> {
+    if name.namespace != ENS_NAMESPACE
+        || current_binding
+            .is_none_or(|binding| binding.binding_kind != SurfaceBindingKind::ObservedWildcardPath)
+    {
+        return Ok(None);
+    }
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            ns.logical_name_id,
+            ns.namespace,
+            ns.canonical_display_name,
+            ns.normalized_name,
+            ns.namehash,
+            sb.resource_id
+        FROM name_surfaces ns
+        JOIN surface_bindings sb
+          ON sb.logical_name_id = ns.logical_name_id
+         AND sb.active_to IS NULL
+         AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+        JOIN resources r
+          ON r.resource_id = sb.resource_id
+         AND r.canonicality_state {CANONICAL_STATE_FILTER}
+        WHERE ns.namespace = $1
+          AND ns.logical_name_id <> $2
+          AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+          AND $3 LIKE ('%.' || ns.normalized_name)
+        ORDER BY char_length(ns.normalized_name) DESC, sb.active_from DESC, sb.surface_binding_id DESC
+        LIMIT 8
+        "#
+    ))
+    .bind(&name.namespace)
+    .bind(&name.logical_name_id)
+    .bind(&name.normalized_name)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load wildcard source candidates for {}",
+            name.logical_name_id
+        )
+    })?;
+
+    for row in rows {
+        let source_normalized_name = row
+            .try_get::<String, _>("normalized_name")
+            .context("missing wildcard source normalized_name")?;
+        let Some(matched_labels) =
+            wildcard_matched_labels(&name.normalized_name, &source_normalized_name)
+        else {
+            continue;
+        };
+        let logical_name_id = row
+            .try_get::<String, _>("logical_name_id")
+            .context("missing wildcard source logical_name_id")?;
+        let resource_id = row
+            .try_get::<Uuid, _>("resource_id")
+            .context("missing wildcard source resource_id")?;
+        let Some((resolver_event, boundary_event)) =
+            load_wildcard_source_events(pool, &logical_name_id, resource_id).await?
+        else {
+            continue;
+        };
+
+        return Ok(Some(WildcardSourceContext {
+            logical_name_id,
+            namespace: row
+                .try_get("namespace")
+                .context("missing wildcard source namespace")?,
+            normalized_name: source_normalized_name,
+            canonical_display_name: row
+                .try_get("canonical_display_name")
+                .context("missing wildcard source canonical_display_name")?,
+            namehash: row
+                .try_get("namehash")
+                .context("missing wildcard source namehash")?,
+            resource_id,
+            resolver_event,
+            boundary_event,
+            matched_labels,
+        }));
+    }
+
+    Ok(None)
+}
+
+async fn load_wildcard_source_events(
+    pool: &PgPool,
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> Result<Option<(RelevantEvent, RelevantEvent)>> {
+    let event_kinds = vec![
+        EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+        EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
+    ];
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            ne.normalized_event_id,
+            ne.resource_id,
+            ne.event_kind,
+            ne.source_family,
+            ne.manifest_version,
+            ne.source_manifest_id,
+            mv.manifest_version AS source_manifest_version,
+            mv.namespace AS source_manifest_namespace,
+            mv.source_family AS source_manifest_source_family,
+            mv.chain AS source_manifest_chain,
+            mv.deployment_epoch AS source_manifest_deployment_epoch,
+            mv.rollout_status::TEXT AS source_manifest_rollout_status,
+            mcf.status::TEXT AS exact_name_profile_status,
+            ne.chain_id,
+            ne.block_number,
+            ne.block_hash,
+            rb.block_timestamp,
+            ne.raw_fact_ref,
+            ne.canonicality_state::TEXT AS canonicality_state,
+            ne.after_state
+        FROM normalized_events ne
+        LEFT JOIN raw_blocks rb
+          ON rb.chain_id = ne.chain_id
+         AND rb.block_hash = ne.block_hash
+        LEFT JOIN manifest_versions mv
+          ON mv.manifest_id = ne.source_manifest_id
+        LEFT JOIN manifest_capability_flags mcf
+          ON mcf.manifest_id = ne.source_manifest_id
+         AND mcf.capability_name = 'exact_name_profile'
+        WHERE ne.namespace = $1
+          AND ne.logical_name_id = $2
+          AND ne.resource_id = $3
+          AND ne.event_kind = ANY($4::TEXT[])
+          AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ORDER BY
+            ne.block_number DESC NULLS LAST,
+            COALESCE(ne.log_index, -1) DESC,
+            ne.normalized_event_id DESC
+        LIMIT 16
+        "#
+    ))
+    .bind(ENS_NAMESPACE)
+    .bind(logical_name_id)
+    .bind(resource_id)
+    .bind(&event_kinds)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load wildcard source events for logical_name_id {logical_name_id}")
+    })?;
+    let events = rows
+        .into_iter()
+        .map(decode_relevant_event)
+        .collect::<Result<Vec<_>>>()?;
+
+    let resolver_event = events
+        .iter()
+        .find(|event| {
+            event.event_kind == EVENT_KIND_RESOLVER_CHANGED
+                && normalize_resolver_address(
+                    json_str(&event.after_state, &["resolver"]).as_deref(),
+                )
+                .is_some()
+                && event.chain_id.is_some()
+        })
+        .cloned();
+    let boundary_event = events.iter().find(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            EVENT_KIND_RECORD_VERSION_CHANGED | EVENT_KIND_RESOLVER_CHANGED
+        ) && relevant_event_chain_position(event).is_some()
+    });
+
+    Ok(resolver_event.zip(boundary_event.cloned()))
+}
+
+fn wildcard_matched_labels(requested_name: &str, source_name: &str) -> Option<Vec<String>> {
+    let suffix = format!(".{source_name}");
+    let prefix = requested_name.strip_suffix(&suffix)?;
+    let labels = prefix.split('.').map(str::to_owned).collect::<Vec<_>>();
+    (!labels.is_empty() && labels.iter().all(|label| !label.is_empty())).then_some(labels)
+}
+
 async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<Vec<RelevantEvent>> {
     let event_kinds = RELEVANT_EVENT_KINDS
         .iter()
@@ -822,6 +1829,7 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
         ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
         ENS_V2_REGISTRY_DERIVATION_KIND.to_owned(),
         ENS_V2_REGISTRAR_DERIVATION_KIND.to_owned(),
+        ENS_V2_RESOLVER_DERIVATION_KIND.to_owned(),
     ];
     let rows = if name.namespace == BASENAMES_NAMESPACE {
         let source_families = [
@@ -943,9 +1951,12 @@ async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<V
 
 fn build_exact_name_coverage(namespace: &str, events: &[RelevantEvent]) -> Value {
     if namespace == ENS_NAMESPACE {
-        let has_ens_v2 = events
-            .iter()
-            .any(|event| event.source_family.starts_with("ens_v2_"));
+        let has_ens_v2 = events.iter().any(|event| {
+            matches!(
+                event.source_family.as_str(),
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1 | SOURCE_FAMILY_ENS_V2_REGISTRAR_L1
+            )
+        });
         let has_ens_v1 = events
             .iter()
             .any(|event| event.source_family.starts_with("ens_v1_"));
@@ -1336,7 +2347,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use bigname_storage::{
         NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, TokenLineage,
         default_database_url, load_name_current, upsert_name_current_rows, upsert_name_surfaces,
@@ -2370,6 +3381,288 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_projects_supported_alias_only_topology_from_alias_changed() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x3410, 0x3510, 0x3610);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xgrant", 230, 1_717_171_730),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresolver", 231, 1_717_171_731),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xalias", 232, 1_717_171_732),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbinding-alias",
+                    233,
+                    1_717_171_733,
+                ),
+            ],
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[token_lineage(binding.token_lineage_id, "0xgrant", 230)],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[resource(
+                binding.resource_id,
+                binding.token_lineage_id,
+                "0xgrant",
+                230,
+            )],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[name_surface(
+                &binding.logical_name_id,
+                &binding.display_name,
+                "0xgrant",
+                230,
+            )],
+        )
+        .await?;
+        let alias_binding_id = Uuid::from_u128(0x3611);
+        let mut alias_binding = surface_binding(
+            &IdentityBinding {
+                surface_binding_id: alias_binding_id,
+                ..binding.clone()
+            },
+            1_717_171_733,
+            None,
+            "0xbinding-alias",
+            233,
+        );
+        alias_binding.binding_kind = SurfaceBindingKind::ResolverAliasPath;
+        upsert_surface_bindings(database.pool(), &[alias_binding]).await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &binding,
+                    "grant-alias",
+                    "RegistrationGranted",
+                    "0xgrant",
+                    230,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:ethereum-mainnet:7:alice",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_800_000_000_i64,
+                    }),
+                ),
+                resolver_event(
+                    &binding,
+                    "alias-resolver",
+                    "0x0000000000000000000000000000000000000abc",
+                    "0xresolver",
+                    231,
+                    0,
+                ),
+                ens_v2_alias_event(
+                    &binding,
+                    "alias-project",
+                    "0xalias",
+                    232,
+                    0,
+                    json!({
+                        "active": true,
+                        "alias_state": "active",
+                        "to_name": "profile.alice.eth",
+                        "to_logical_name_id": "ens:profile.alice.eth",
+                        "to_normalized_name": "profile.alice.eth",
+                        "to_canonical_display_name": "Profile.alice.eth",
+                        "to_namehash": "namehash:profile.alice.eth",
+                        "to_resource_id": binding.resource_id.to_string(),
+                    }),
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt alias-only row must exist")?;
+        let topology = row
+            .declared_summary
+            .get("topology")
+            .context("supported alias-only row must project topology")?;
+        assert_eq!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::ResolverAliasPath)
+        );
+        assert_eq!(
+            topology["alias"]["final_target"]["logical_name_id"],
+            json!("ens:profile.alice.eth")
+        );
+        assert_eq!(
+            topology["resolver_path"][0]["logical_name_id"],
+            json!(binding.logical_name_id.clone())
+        );
+        assert_eq!(topology["wildcard"], empty_wildcard_detail());
+        assert_eq!(topology["transport"], empty_transport_detail());
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"]["chain_position"]["block_hash"],
+            json!("0xbinding-alias")
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_projects_supported_wildcard_topology_from_real_ancestor_inputs() -> Result<()>
+    {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x3420, 0x3520, 0x3620);
+        let wildcard_source = IdentityBinding::new("ens:eth", "eth", 0x4420, 0x4520, 0x4620);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xsource", 239, 1_717_171_739),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xgrant", 240, 1_717_171_740),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresolver", 241, 1_717_171_741),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbinding-wildcard",
+                    242,
+                    1_717_171_742,
+                ),
+            ],
+        )
+        .await?;
+        seed_identity(
+            database.pool(),
+            &wildcard_source,
+            "0xsource",
+            239,
+            1_717_171_739,
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[token_lineage(binding.token_lineage_id, "0xgrant", 240)],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[resource(
+                binding.resource_id,
+                binding.token_lineage_id,
+                "0xgrant",
+                240,
+            )],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[name_surface(
+                &binding.logical_name_id,
+                &binding.display_name,
+                "0xgrant",
+                240,
+            )],
+        )
+        .await?;
+        let wildcard_binding_id = Uuid::from_u128(0x3621);
+        let mut wildcard_binding = surface_binding(
+            &IdentityBinding {
+                surface_binding_id: wildcard_binding_id,
+                ..binding.clone()
+            },
+            1_717_171_742,
+            None,
+            "0xbinding-wildcard",
+            242,
+        );
+        wildcard_binding.binding_kind = SurfaceBindingKind::ObservedWildcardPath;
+        upsert_surface_bindings(database.pool(), &[wildcard_binding]).await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &binding,
+                    "grant-wildcard",
+                    "RegistrationGranted",
+                    "0xgrant",
+                    240,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:ethereum-mainnet:7:alice",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_800_000_000_i64,
+                    }),
+                ),
+                resolver_event(
+                    &wildcard_source,
+                    "wildcard-resolver",
+                    "0x0000000000000000000000000000000000000def",
+                    "0xresolver",
+                    241,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt wildcard-derived row must exist")?;
+        let topology = row
+            .declared_summary
+            .get("topology")
+            .context("supported wildcard-derived row must project topology")?;
+        assert_eq!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::ObservedWildcardPath)
+        );
+        assert_eq!(
+            topology["resolver_path"][0]["logical_name_id"],
+            json!("ens:eth")
+        );
+        assert_eq!(
+            topology["resolver_path"][0]["resource_id"],
+            json!(wildcard_source.resource_id.to_string())
+        );
+        assert_eq!(
+            topology["resolver_path"][0]["address"],
+            json!("0x0000000000000000000000000000000000000def")
+        );
+        assert_eq!(
+            topology["wildcard"]["source"]["logical_name_id"],
+            json!("ens:eth")
+        );
+        assert_eq!(
+            topology["wildcard"]["source"]["resource_id"],
+            json!(wildcard_source.resource_id.to_string())
+        );
+        assert_eq!(topology["wildcard"]["matched_labels"], json!(["alice"]));
+        assert_eq!(topology["alias"], empty_alias_detail());
+        assert_eq!(topology["transport"], empty_transport_detail());
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"]["logical_name_id"],
+            json!("ens:eth")
+        );
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"]["resource_id"],
+            json!(wildcard_source.resource_id.to_string())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn rebuild_projects_basenames_base_authority_into_name_current() -> Result<()> {
         let database = TestDatabase::new().await?;
         let binding = IdentityBinding::new(
@@ -2479,7 +3772,219 @@ mod tests {
             row.chain_positions["base"]["chain_id"],
             Value::String("base-mainnet".to_owned())
         );
+        assert!(row.declared_summary.get("topology").is_none());
         assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inputs()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new(
+            "basenames:alice.base.eth",
+            "alice.base.eth",
+            0x4411,
+            0x4412,
+            0x4413,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-surface", 500, 1_717_172_510),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-binding", 511, 1_717_172_511),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-resolver", 512, 1_717_172_512),
+                raw_block(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-record-version",
+                    513,
+                    1_717_172_513,
+                ),
+                raw_block(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-supported-binding",
+                    514,
+                    1_717_172_514,
+                ),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1",
+                    21_000_100,
+                    1_776_387_700,
+                ),
+            ],
+        )
+        .await?;
+        insert_chain_checkpoint(
+            database.pool(),
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xbasenamesl1",
+            21_000_100,
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[TokenLineage {
+                token_lineage_id: binding.token_lineage_id,
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-binding".to_owned(),
+                block_number: 511,
+                provenance: json!({"source": "worker_name_current_test", "kind": "token_lineage"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[Resource {
+                resource_id: binding.resource_id,
+                token_lineage_id: Some(binding.token_lineage_id),
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-binding".to_owned(),
+                block_number: 511,
+                provenance: json!({"source": "worker_name_current_test", "kind": "resource"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[NameSurface {
+                logical_name_id: binding.logical_name_id.clone(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                input_name: binding.display_name.clone(),
+                canonical_display_name: "Alice.base.eth".to_owned(),
+                normalized_name: binding.display_name.clone(),
+                dns_encoded_name: binding.display_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{}", binding.display_name),
+                labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-surface".to_owned(),
+                block_number: 500,
+                provenance: json!({"source": "worker_name_current_test", "kind": "name_surface"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        let basenames_binding = SurfaceBinding {
+            surface_binding_id: Uuid::from_u128(0x4414),
+            logical_name_id: binding.logical_name_id.clone(),
+            resource_id: binding.resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_172_514),
+            active_to: None,
+            chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+            block_hash: "0xbase-supported-binding".to_owned(),
+            block_number: 514,
+            provenance: json!({"source": "worker_name_current_test", "kind": "surface_binding"}),
+            canonicality_state: CanonicalityState::Finalized,
+        };
+        upsert_surface_bindings(database.pool(), &[basenames_binding.clone()]).await?;
+        insert_basenames_execution_manifest_version(
+            database.pool(),
+            2,
+            MANIFEST_ROLLOUT_STATUS_ACTIVE,
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                basenames_authority_event(
+                    &binding,
+                    "supported-base-grant",
+                    "RegistrationGranted",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xbase-binding",
+                    511,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:alice",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                ),
+                basenames_resolver_event(
+                    &binding,
+                    "supported-base-resolver",
+                    "0x0000000000000000000000000000000000000abc",
+                    "0xbase-resolver",
+                    512,
+                    0,
+                ),
+                basenames_record_version_event(
+                    &binding,
+                    "supported-base-record-version",
+                    "0xbase-record-version",
+                    513,
+                    0,
+                    7,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt supported basenames row must exist")?;
+        let topology = row
+            .declared_summary
+            .get("topology")
+            .context("supported basenames row must project topology")?;
+        assert_eq!(
+            topology["transport"],
+            json!({
+                "source_chain_id": BASE_MAINNET_CHAIN_ID,
+                "target_chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": BASENAMES_L1_RESOLVER_ADDRESS,
+                "latest_event_kind": Value::Null,
+            })
+        );
+        assert_eq!(
+            row.chain_positions["base"]["chain_id"],
+            json!(BASE_MAINNET_CHAIN_ID)
+        );
+        assert_eq!(
+            row.chain_positions["ethereum"]["block_hash"],
+            json!("0xbasenamesl1")
+        );
+        assert_eq!(
+            row.chain_positions["base"]["block_hash"],
+            json!("0xbase-supported-binding")
+        );
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"]["event_kind"],
+            json!(EVENT_KIND_RECORD_VERSION_CHANGED)
+        );
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"]["chain_position"]["block_hash"],
+            json!("0xbase-record-version")
+        );
+        assert!(
+            row.provenance["manifest_versions"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.get("source_family").and_then(Value::as_str)
+                        == Some(SOURCE_FAMILY_BASENAMES_EXECUTION)
+                        && item.get("manifest_version").and_then(Value::as_i64) == Some(2)
+                }))
+        );
+        assert_eq!(
+            row.canonicality_summary["chains"][BASE_MAINNET_CHAIN_ID],
+            json!("finalized")
+        );
+        assert_eq!(
+            row.canonicality_summary["chains"][ETHEREUM_MAINNET_CHAIN_ID],
+            json!("finalized")
+        );
 
         database.cleanup().await
     }
@@ -3514,6 +5019,36 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_chain_checkpoint(
+        pool: &PgPool,
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_checkpoints (
+                chain_id,
+                finalized_block_hash,
+                finalized_block_number
+            )
+            VALUES ($1, $2, $3)
+            ON CONFLICT (chain_id)
+            DO UPDATE SET
+                finalized_block_hash = EXCLUDED.finalized_block_hash,
+                finalized_block_number = EXCLUDED.finalized_block_number
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to insert chain checkpoint for {chain_id}"))?;
+
+        Ok(())
+    }
+
     async fn seed_ens_v2_exact_name_profile_manifests(pool: &PgPool) -> Result<(i64, i64)> {
         let registry_manifest_id = insert_manifest_version(
             pool,
@@ -3579,6 +5114,106 @@ mod tests {
         .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
         .try_get("manifest_id")
         .context("failed to read manifest_id")
+    }
+
+    async fn insert_basenames_execution_manifest_version(
+        pool: &PgPool,
+        manifest_version: i64,
+        rollout_status: &str,
+    ) -> Result<i64> {
+        let manifest_id = sqlx::query(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::manifest_rollout_status, $7, $8, $9::jsonb)
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(manifest_version)
+        .bind(BASENAMES_NAMESPACE)
+        .bind(SOURCE_FAMILY_BASENAMES_EXECUTION)
+        .bind(ETHEREUM_MAINNET_CHAIN_ID)
+        .bind(BASENAMES_V1_DEPLOYMENT_EPOCH)
+        .bind(rollout_status)
+        .bind("ensip15@2026-04-16")
+        .bind(format!(
+            "tests/{}/{}-v{manifest_version}.toml",
+            SOURCE_FAMILY_BASENAMES_EXECUTION, BASENAMES_V1_DEPLOYMENT_EPOCH
+        ))
+        .bind(json!({}))
+        .fetch_one(pool)
+        .await
+        .context("failed to insert basenames_execution manifest_version")?
+        .try_get("manifest_id")
+        .context("failed to read basenames_execution manifest_id")?;
+        insert_capability_flag(
+            pool,
+            manifest_id,
+            VERIFIED_RESOLUTION_CAPABILITY,
+            CAPABILITY_STATUS_SUPPORTED,
+        )
+        .await?;
+        insert_basenames_execution_manifest_contract(pool, manifest_id, manifest_version).await?;
+        Ok(manifest_id)
+    }
+
+    async fn insert_basenames_execution_manifest_contract(
+        pool: &PgPool,
+        manifest_id: i64,
+        manifest_version: i64,
+    ) -> Result<()> {
+        let contract_instance_id =
+            Uuid::from_u128(0x0b45_0000_0000_0000_0000_0000_0000_0000 + manifest_version as u128);
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1, $2, 'contract', $3::jsonb)
+            ON CONFLICT (contract_instance_id) DO NOTHING
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(ETHEREUM_MAINNET_CHAIN_ID)
+        .bind(json!({"seed": "worker_name_current_basenames_execution"}))
+        .execute(pool)
+        .await
+        .context("failed to insert basenames_execution contract_instance")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+                proxy_kind
+            )
+            VALUES ($1, 'contract', 'l1_resolver', $2, $3, 'l1_resolver', 'none')
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(contract_instance_id)
+        .bind(BASENAMES_L1_RESOLVER_ADDRESS.to_ascii_lowercase())
+        .execute(pool)
+        .await
+        .context("failed to insert basenames_execution manifest_contract_instance")?;
+
+        Ok(())
     }
 
     async fn insert_capability_flag(
@@ -3824,6 +5459,45 @@ mod tests {
         }
     }
 
+    fn ens_v2_alias_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: i64,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!(
+                "worker-test:ens-v2:{EVENT_KIND_ALIAS_CHANGED}:{identity_suffix}"
+            ),
+            namespace: ENS_NAMESPACE.to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: EVENT_KIND_ALIAS_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER.to_owned(),
+            manifest_version: 5,
+            source_manifest_id: None,
+            chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:ens-v2-alias:{identity_suffix}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:ens-v2-alias:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V2_RESOLVER_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state,
+        }
+    }
+
     fn with_source_manifest_id(
         mut event: NormalizedEvent,
         source_manifest_id: i64,
@@ -3994,6 +5668,49 @@ mod tests {
             after_state: json!({
                 "resolver": resolver_address,
                 "namehash": format!("namehash:{}", binding.display_name),
+            }),
+        }
+    }
+
+    fn basenames_record_version_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: i64,
+        record_version: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!(
+                "worker-test:{EVENT_KIND_RECORD_VERSION_CHANGED}:{identity_suffix}"
+            ),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+            manifest_version: 4,
+            source_manifest_id: None,
+            chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:{identity_suffix}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": BASE_MAINNET_CHAIN_ID,
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({
+                "record_version": record_version - 1,
+            }),
+            after_state: json!({
+                "record_version": record_version,
             }),
         }
     }

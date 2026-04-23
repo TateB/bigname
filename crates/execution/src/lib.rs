@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, NameCurrentRow, RawCallSnapshot,
     RecordInventoryCurrentRow, SurfaceBindingKind, load_primary_name_current,
-    upsert_execution_outcome_in_transaction,
-    upsert_execution_trace_in_transaction, upsert_raw_call_snapshots_in_transaction,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
+    upsert_raw_call_snapshots_in_transaction,
 };
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -750,7 +750,10 @@ async fn revalidate_supported_resolution_persistence_from_storage(
 ) -> Result<()> {
     let requested_selectors = extract_requested_selectors(&request.trace)?;
     let queries = extract_supported_verified_queries(&request.outcome)?;
-    let logical_name_id = format!("{}:{}", request.trace.namespace, requested_selectors.surface);
+    let logical_name_id = format!(
+        "{}:{}",
+        request.trace.namespace, requested_selectors.surface
+    );
     let context = match request.trace.namespace.as_str() {
         ENS_NAMESPACE => "ENS verified-resolution storage revalidation",
         BASENAMES_NAMESPACE => "Basenames verified-resolution storage revalidation",
@@ -760,9 +763,7 @@ async fn revalidate_supported_resolution_persistence_from_storage(
     let row = load_name_current_for_revalidation(transaction, &logical_name_id)
         .await?
         .with_context(|| {
-            format!(
-                "{context} requires name_current row for logical_name_id {logical_name_id}"
-            )
+            format!("{context} requires name_current row for logical_name_id {logical_name_id}")
         })?;
     let record_inventory_row =
         load_supported_record_inventory_current_for_revalidation(transaction, &row)
@@ -840,13 +841,12 @@ async fn load_supported_record_inventory_current_for_revalidation(
         return Ok(None);
     };
 
-    if let Some(record_inventory_row) =
-        load_record_inventory_current_for_revalidation(
-            transaction,
-            resource_id,
-            &record_version_boundary,
-        )
-        .await?
+    if let Some(record_inventory_row) = load_record_inventory_current_for_revalidation(
+        transaction,
+        resource_id,
+        &record_version_boundary,
+    )
+    .await?
     {
         return Ok(Some(record_inventory_row));
     }
@@ -855,13 +855,12 @@ async fn load_supported_record_inventory_current_for_revalidation(
         return Ok(None);
     }
 
-    let Some(persisted_boundary) =
-        find_supported_record_inventory_boundary_for_revalidation(
-            transaction,
-            resource_id,
-            &record_version_boundary,
-        )
-        .await?
+    let Some(persisted_boundary) = find_supported_record_inventory_boundary_for_revalidation(
+        transaction,
+        resource_id,
+        &record_version_boundary,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -897,19 +896,19 @@ fn record_inventory_lookup_key_for_revalidation(
 fn projected_record_inventory_lookup_key_for_revalidation(
     row: &NameCurrentRow,
 ) -> Result<Option<(Uuid, Value)>> {
-    let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary)
+    let Some(projected_topology) =
+        projected_resolution_topology_for_revalidation(&row.declared_summary)
     else {
         return Ok(None);
     };
 
-    let version_boundaries = json_field(&projected_topology, "version_boundaries").with_context(
-        || {
+    let version_boundaries =
+        json_field(&projected_topology, "version_boundaries").with_context(|| {
             format!(
                 "projected topology for logical_name_id {} must include version_boundaries",
                 row.logical_name_id
             )
-        },
-    )?;
+        })?;
     let record_version_boundary = json_field(version_boundaries, "record_version_boundary")
         .cloned()
         .with_context(|| {
@@ -1101,16 +1100,9 @@ fn normalize_manifest_versions_for_revalidation(value: &Value, context: &str) ->
             .with_context(|| format!("{context}[{index}] must be a JSON object"))?;
         let source_manifest_id = match object.get("source_manifest_id") {
             None | Some(Value::Null) => None,
-            Some(value) => Some(
-                value
-                    .as_i64()
-                    .filter(|value| *value > 0)
-                    .with_context(|| {
-                        format!(
-                            "{context}[{index}].source_manifest_id must be null or a positive integer"
-                        )
-                    })?,
-            ),
+            Some(value) => Some(value.as_i64().filter(|value| *value > 0).with_context(|| {
+                format!("{context}[{index}].source_manifest_id must be null or a positive integer")
+            })?),
         };
         let source_family = match object.get("source_family") {
             None | Some(Value::Null) => None,
@@ -1118,9 +1110,7 @@ fn normalize_manifest_versions_for_revalidation(value: &Value, context: &str) ->
             Some(_) => bail!("{context}[{index}].source_family must be null or a non-empty string"),
         };
         if source_manifest_id.is_none() && source_family.is_none() {
-            bail!(
-                "{context}[{index}] must include source_manifest_id or source_family"
-            );
+            bail!("{context}[{index}] must include source_manifest_id or source_family");
         }
         let manifest_version = object
             .get("manifest_version")
@@ -1167,7 +1157,8 @@ fn build_resolution_topology_for_revalidation(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Result<Value> {
-    if let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary)
+    if let Some(projected_topology) =
+        projected_resolution_topology_for_revalidation(&row.declared_summary)
     {
         return Ok(projected_topology);
     }
@@ -1220,15 +1211,9 @@ fn build_legacy_resolution_topology_for_revalidation(
     );
 
     let mut topology = Map::new();
-    topology.insert(
-        "registry_path".to_owned(),
-        Value::Array(vec![registry_ref]),
-    );
+    topology.insert("registry_path".to_owned(), Value::Array(vec![registry_ref]));
     topology.insert("subregistry_path".to_owned(), Value::Array(Vec::new()));
-    topology.insert(
-        "resolver_path".to_owned(),
-        Value::Array(vec![resolver_hop]),
-    );
+    topology.insert("resolver_path".to_owned(), Value::Array(vec![resolver_hop]));
     topology.insert(
         "wildcard".to_owned(),
         Value::Object(default_wildcard_detail()),
@@ -1366,8 +1351,11 @@ fn resolution_verified_support_boundary_from_storage(
         return Ok(None);
     }
 
-    if let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary) {
-        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions_for_revalidation(row)
+    if let Some(projected_topology) =
+        projected_resolution_topology_for_revalidation(&row.declared_summary)
+    {
+        if row.namespace == BASENAMES_NAMESPACE
+            && !row_has_basenames_supported_chain_positions_for_revalidation(row)
         {
             return Ok(None);
         }
@@ -1431,7 +1419,9 @@ fn classify_supported_resolution_topology_from_storage(
     }
 
     let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)
-        .with_context(|| "projected topology must include resolver_path[0].logical_name_id".to_owned())?;
+        .with_context(|| {
+            "projected topology must include resolver_path[0].logical_name_id".to_owned()
+        })?;
     let alias_present = resolution_topology_alias_is_present(topology)?;
     let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
     let transport_is_null = resolution_topology_transport_is_null(topology);
@@ -1495,8 +1485,10 @@ fn resolution_topology_resolver_logical_name_id(topology: &Value) -> Option<Stri
 }
 
 fn resolution_topology_alias_is_present(topology: &Value) -> Result<bool> {
-    let alias = json_field(topology, "alias").with_context(|| "projected topology must include alias".to_owned())?;
-    let final_target_present = !matches!(json_field(alias, "final_target"), None | Some(Value::Null));
+    let alias = json_field(topology, "alias")
+        .with_context(|| "projected topology must include alias".to_owned())?;
+    let final_target_present =
+        !matches!(json_field(alias, "final_target"), None | Some(Value::Null));
     let hops = json_field(alias, "hops")
         .and_then(Value::as_array)
         .with_context(|| "projected topology alias must include hops".to_owned())?;
@@ -1524,7 +1516,9 @@ fn resolution_topology_wildcard_state(topology: &Value) -> Result<Option<String>
             }
         }
         Some(_) if matched_labels.is_empty() => {
-            bail!("projected topology wildcard must keep matched_labels non-empty when source is present")
+            bail!(
+                "projected topology wildcard must keep matched_labels non-empty when source is present"
+            )
         }
         Some(source) => Ok(Some(
             json_string_field(json_field(source, "logical_name_id")).with_context(|| {
@@ -1623,7 +1617,8 @@ fn ensure_storage_supported_boundary_matches_request(
     if support_boundary.path_class != expected_path_class {
         bail!("{context} stored supported path class does not match the request trace");
     }
-    if support_boundary.topology_version_boundary != request.outcome.cache_key.topology_version_boundary
+    if support_boundary.topology_version_boundary
+        != request.outcome.cache_key.topology_version_boundary
     {
         bail!(
             "{context} cache_key.topology_version_boundary must match the stored mixed-route topology boundary"
@@ -1636,7 +1631,8 @@ fn ensure_storage_supported_boundary_matches_request(
         );
     }
 
-    let stored_alias = normalize_alias_detail(json_field(topology, "alias"), &request.trace.namespace)?;
+    let stored_alias =
+        normalize_alias_detail(json_field(topology, "alias"), &request.trace.namespace)?;
     let request_alias = normalize_alias_detail(
         persisted_trace_detail_object(&request.trace, "alias").as_ref(),
         &request.trace.namespace,
@@ -1656,8 +1652,9 @@ fn ensure_storage_supported_boundary_matches_request(
     }
 
     let stored_transport = normalize_transport_detail(json_field(topology, "transport"))?;
-    let request_transport =
-        normalize_transport_detail(persisted_trace_detail_object(&request.trace, "transport").as_ref())?;
+    let request_transport = normalize_transport_detail(
+        persisted_trace_detail_object(&request.trace, "transport").as_ref(),
+    )?;
     if stored_transport != request_transport {
         bail!("{context} stored transport topology does not match the request trace");
     }
@@ -1747,7 +1744,9 @@ fn normalize_transport_detail(value: Option<&Value>) -> Result<Value> {
         let value = match transport.get(field_name) {
             None | Some(Value::Null) => Value::Null,
             Some(Value::String(value)) if !value.trim().is_empty() => Value::String(value.clone()),
-            Some(_) => bail!("transport detail field {field_name} must be null or a non-empty string"),
+            Some(_) => {
+                bail!("transport detail field {field_name} must be null or a non-empty string")
+            }
         };
         normalized.insert(field_name.to_owned(), value);
     }
@@ -1791,11 +1790,12 @@ fn ensure_storage_selector_families_supported(
     let unsupported_families = record_inventory_row
         .unsupported_families
         .as_array()
-        .with_context(|| format!("{context} record_inventory_current.unsupported_families must be a JSON array"))?;
-    let entries = record_inventory_row
-        .entries
-        .as_array()
-        .with_context(|| format!("{context} record_inventory_current.entries must be a JSON array"))?;
+        .with_context(|| {
+            format!("{context} record_inventory_current.unsupported_families must be a JSON array")
+        })?;
+    let entries = record_inventory_row.entries.as_array().with_context(|| {
+        format!("{context} record_inventory_current.entries must be a JSON array")
+    })?;
 
     for query in queries {
         let (record_family, selector_key) =
@@ -1832,14 +1832,14 @@ fn selector_family_and_key(
     selector: &SupportedVerifiedRecordKey,
 ) -> (String, Option<String>) {
     match selector {
-        SupportedVerifiedRecordKey::Addr { coin_type } => ("addr".to_owned(), Some(coin_type.clone())),
+        SupportedVerifiedRecordKey::Addr { coin_type } => {
+            ("addr".to_owned(), Some(coin_type.clone()))
+        }
         SupportedVerifiedRecordKey::Avatar => ("avatar".to_owned(), None),
         SupportedVerifiedRecordKey::Contenthash => ("contenthash".to_owned(), None),
         SupportedVerifiedRecordKey::Text => (
             "text".to_owned(),
-            record_key
-                .strip_prefix("text:")
-                .map(str::to_owned),
+            record_key.strip_prefix("text:").map(str::to_owned),
         ),
     }
 }
@@ -2028,7 +2028,8 @@ async fn load_name_current_for_revalidation(
         format!("failed to load name_current row for logical_name_id {logical_name_id}")
     })?;
 
-    row.map(decode_name_current_row_for_revalidation).transpose()
+    row.map(decode_name_current_row_for_revalidation)
+        .transpose()
 }
 
 fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow> {
@@ -2175,9 +2176,11 @@ fn decode_record_inventory_current_row_for_revalidation(
 }
 
 fn summary_is_unsupported(section: Option<&Value>) -> bool {
-    matches!(json_string_field(section.and_then(|value| json_field(value, "status"))).as_deref(), Some("unsupported"))
-        && json_string_field(section.and_then(|value| json_field(value, "unsupported_reason")))
-            .is_some()
+    matches!(
+        json_string_field(section.and_then(|value| json_field(value, "status"))).as_deref(),
+        Some("unsupported")
+    ) && json_string_field(section.and_then(|value| json_field(value, "unsupported_reason")))
+        .is_some()
 }
 
 fn json_field<'a>(value: &'a Value, field_name: &str) -> Option<&'a Value> {
@@ -4193,24 +4196,30 @@ fn ensure_absent(object: &Map<String, Value>, field_name: &str, context: &str) -
 #[cfg(test)]
 mod tests {
     use std::{
+        path::PathBuf,
+        process::Command,
         str::FromStr,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use serde_json::json;
     use sqlx::{
-        PgPool,
+        ConnectOptions, PgPool, Row,
         postgres::{PgConnectOptions, PgPoolOptions},
         types::time::OffsetDateTime,
     };
     use tokio::time::{Duration, timeout};
 
     use super::*;
-    use bigname_storage::{MIGRATOR, default_database_url};
+    use bigname_storage::{MIGRATOR, NormalizedEvent, default_database_url};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+    static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 
     struct TestDatabase {
         admin_pool: PgPool,
@@ -4286,6 +4295,263 @@ mod tests {
             self.admin_pool.close().await;
             Ok(())
         }
+    }
+
+    fn raw_block(
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        block_timestamp: i64,
+    ) -> bigname_storage::RawBlock {
+        bigname_storage::RawBlock {
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number,
+            block_timestamp: timestamp(block_timestamp),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }
+    }
+
+    fn logical_name_id_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> String {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        format!(
+            "{}:{}",
+            request.trace.namespace, requested_selectors.surface
+        )
+    }
+
+    async fn rebuild_name_current_projection(
+        database: &TestDatabase,
+        logical_name_id: &str,
+    ) -> Result<()> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let base_options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for execution name_current rebuild")?;
+        let rebuild_database_url = base_options
+            .database(&database.database_name)
+            .to_url_lossy()
+            .to_string();
+        let logical_name_id = logical_name_id.to_owned();
+        let worker_manifest_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _guard = WORKER_CARGO_LOCK
+                .lock()
+                .expect("worker cargo lock must not be poisoned");
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+            let output = Command::new(cargo)
+                .arg("run")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(worker_manifest_path)
+                .arg("--")
+                .arg("name-current")
+                .arg("rebuild")
+                .arg("--database-url")
+                .arg(&rebuild_database_url)
+                .arg("--logical-name-id")
+                .arg(&logical_name_id)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "failed to invoke worker name_current rebuild for {logical_name_id}"
+                    )
+                })?;
+
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "worker name_current rebuild failed for {logical_name_id}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+        .context("execution name_current rebuild task panicked")??;
+
+        Ok(())
+    }
+
+    fn requested_chain_positions_json_from_projection(chain_positions: &Value) -> Result<Value> {
+        Ok(Value::Array(
+            build_requested_chain_positions_from_projection(chain_positions)?
+                .into_iter()
+                .map(|position| {
+                    json!({
+                        "chain_id": position.chain_id,
+                        "block_number": position.block_number,
+                        "block_hash": position.block_hash,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    fn append_cache_key_part(buffer: &mut String, value: &str) {
+        use std::fmt::Write as _;
+
+        write!(buffer, "{}:{value};", value.len())
+            .expect("string write to cache-key buffer must succeed");
+    }
+
+    fn manifest_versions_for_request_from_projection(value: &Value) -> Result<Value> {
+        let items = value
+            .as_array()
+            .context("rebuilt execution test manifest_versions must be an array")?;
+        let mut sanitized = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| -> Result<(String, Value)> {
+                let object = item.as_object().with_context(|| {
+                    format!("rebuilt execution test manifest_versions[{index}] must be an object")
+                })?;
+                let mut manifest_version = Map::new();
+                let mut identity_key = String::new();
+                let source_manifest_id = object
+                    .get("source_manifest_id")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value > 0);
+                append_cache_key_part(
+                    &mut identity_key,
+                    &source_manifest_id
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                );
+                if let Some(source_manifest_id) = source_manifest_id {
+                    manifest_version.insert(
+                        "source_manifest_id".to_owned(),
+                        Value::Number(source_manifest_id.into()),
+                    );
+                }
+                let source_family = object
+                    .get("source_family")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                append_cache_key_part(
+                    &mut identity_key,
+                    source_family.as_deref().unwrap_or_default(),
+                );
+                if let Some(source_family) = source_family {
+                    manifest_version.insert(
+                        "source_family".to_owned(),
+                        Value::String(source_family),
+                    );
+                }
+                let manifest_version_number = object
+                    .get("manifest_version")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value > 0)
+                    .with_context(|| {
+                        format!(
+                            "rebuilt execution test manifest_versions[{index}].manifest_version must be positive"
+                        )
+                    })?;
+                append_cache_key_part(&mut identity_key, &manifest_version_number.to_string());
+                manifest_version.insert(
+                    "manifest_version".to_owned(),
+                    Value::Number(manifest_version_number.into()),
+                );
+                Ok((identity_key, Value::Object(manifest_version)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        sanitized.sort_by(|left, right| left.0.cmp(&right.0));
+        sanitized.dedup_by(|left, right| left.0 == right.0);
+        Ok(Value::Array(
+            sanitized
+                .into_iter()
+                .map(|(_, manifest_version)| manifest_version)
+                .collect(),
+        ))
+    }
+
+    fn sync_request_with_rebuilt_name_current(
+        request: &mut PersistEnsExactNameVerifiedResolutionRequest,
+        row: &NameCurrentRow,
+    ) -> Result<()> {
+        let topology = row
+            .declared_summary
+            .get("topology")
+            .cloned()
+            .context("rebuilt execution test row must project topology")?;
+        let version_boundaries = topology
+            .get("version_boundaries")
+            .and_then(Value::as_object)
+            .context("rebuilt execution test topology must include version_boundaries")?;
+        request.outcome.cache_key.manifest_versions =
+            manifest_versions_for_request_from_projection(
+                row.provenance
+                    .get("manifest_versions")
+                    .unwrap_or(&Value::Null),
+            )?;
+        request.outcome.cache_key.requested_chain_positions =
+            requested_chain_positions_json_from_projection(&row.chain_positions)?;
+        request.outcome.cache_key.topology_version_boundary = version_boundaries
+            .get("topology_version_boundary")
+            .cloned()
+            .context("rebuilt execution test topology must include topology boundary")?;
+        request.outcome.cache_key.record_version_boundary = version_boundaries
+            .get("record_version_boundary")
+            .cloned()
+            .context("rebuilt execution test topology must include record boundary")?;
+        request.trace.chain_context["requested_positions"] =
+            request.outcome.cache_key.requested_chain_positions.clone();
+        let requested_positions = request
+            .outcome
+            .cache_key
+            .requested_chain_positions
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for snapshot in &mut request.raw_call_snapshots {
+            let requested_position = requested_positions
+                .iter()
+                .find(|position| {
+                    position
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|chain_id| chain_id == snapshot.chain_id)
+                })
+                .or_else(|| requested_positions.first());
+            if let Some(requested_position) = requested_position {
+                if let Some(chain_id) = requested_position.get("chain_id").and_then(Value::as_str) {
+                    snapshot.chain_id = chain_id.to_owned();
+                }
+                if let Some(block_number) = requested_position
+                    .get("block_number")
+                    .and_then(Value::as_i64)
+                {
+                    snapshot.block_number = block_number;
+                }
+                if let Some(block_hash) =
+                    requested_position.get("block_hash").and_then(Value::as_str)
+                {
+                    snapshot.block_hash = block_hash.to_owned();
+                }
+            }
+        }
+
+        if request.trace.namespace == ENS_NAMESPACE {
+            request.trace.request_metadata["alias"] = topology["alias"].clone();
+            request.trace.request_metadata["wildcard"] = topology["wildcard"].clone();
+        }
+        if request.trace.namespace == BASENAMES_NAMESPACE {
+            request.trace.request_metadata["transport"] = topology["transport"].clone();
+        }
+
+        Ok(())
     }
 
     fn timestamp(seconds: i64) -> OffsetDateTime {
@@ -4403,6 +4669,18 @@ mod tests {
         })
     }
 
+    fn wildcard_source_ref(resource_id: Uuid) -> Value {
+        json!({
+            "logical_name_id": "ens:eth",
+            "namespace": ENS_NAMESPACE,
+            "normalized_name": "eth",
+            "canonical_display_name": "Eth",
+            "namehash": "namehash:eth",
+            "resource_id": resource_id.to_string(),
+            "binding_kind": OBSERVED_WILDCARD_PATH_BINDING_KIND
+        })
+    }
+
     fn boundary_resource_id(boundary: &Value) -> Uuid {
         let resource_id = boundary
             .get("resource_id")
@@ -4425,8 +4703,16 @@ mod tests {
         request: &PersistEnsExactNameVerifiedResolutionRequest,
     ) -> Value {
         let boundary_timestamps = [
-            request.outcome.cache_key.topology_version_boundary.get("chain_position"),
-            request.outcome.cache_key.record_version_boundary.get("chain_position"),
+            request
+                .outcome
+                .cache_key
+                .topology_version_boundary
+                .get("chain_position"),
+            request
+                .outcome
+                .cache_key
+                .record_version_boundary
+                .get("chain_position"),
         ];
         let positions = request
             .outcome
@@ -4575,14 +4861,18 @@ mod tests {
         let requested_selectors =
             extract_requested_selectors(&request.trace).expect("request selectors must parse");
         match requested_selectors.binding_kind.as_deref() {
-            None | Some(DECLARED_REGISTRY_PATH_BINDING_KIND) => SurfaceBindingKind::DeclaredRegistryPath,
+            None | Some(DECLARED_REGISTRY_PATH_BINDING_KIND) => {
+                SurfaceBindingKind::DeclaredRegistryPath
+            }
             Some(RESOLVER_ALIAS_PATH_BINDING_KIND) => SurfaceBindingKind::ResolverAliasPath,
             Some(OBSERVED_WILDCARD_PATH_BINDING_KIND) => SurfaceBindingKind::ObservedWildcardPath,
             Some(other) => panic!("unsupported binding_kind fixture {other}"),
         }
     }
 
-    fn resolver_address_for_request(request: &PersistEnsExactNameVerifiedResolutionRequest) -> String {
+    fn resolver_address_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> String {
         request
             .trace
             .request_metadata
@@ -4606,7 +4896,9 @@ mod tests {
             })
     }
 
-    fn resolver_chain_id_for_request(request: &PersistEnsExactNameVerifiedResolutionRequest) -> String {
+    fn resolver_chain_id_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> String {
         match request.trace.namespace.as_str() {
             ENS_NAMESPACE => ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
             BASENAMES_NAMESPACE => BASE_MAINNET_CHAIN_ID.to_owned(),
@@ -4625,11 +4917,7 @@ mod tests {
         }
     }
 
-    fn resource_for_request(
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        chain_id: &str,
-    ) -> Resource {
+    fn resource_for_request(resource_id: Uuid, token_lineage_id: Uuid, chain_id: &str) -> Resource {
         Resource {
             resource_id,
             token_lineage_id: Some(token_lineage_id),
@@ -4648,7 +4936,10 @@ mod tests {
         let requested_selectors =
             extract_requested_selectors(&request.trace).expect("request selectors must parse");
         NameSurface {
-            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            logical_name_id: format!(
+                "{}:{}",
+                request.trace.namespace, requested_selectors.surface
+            ),
             namespace: request.trace.namespace.clone(),
             input_name: requested_selectors.surface.clone(),
             canonical_display_name: requested_selectors.surface.clone(),
@@ -4678,7 +4969,10 @@ mod tests {
             extract_requested_selectors(&request.trace).expect("request selectors must parse");
         SurfaceBinding {
             surface_binding_id,
-            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            logical_name_id: format!(
+                "{}:{}",
+                request.trace.namespace, requested_selectors.surface
+            ),
             resource_id,
             binding_kind,
             active_from: timestamp(1_717_171_700),
@@ -4703,7 +4997,10 @@ mod tests {
         let resolver_chain_id = resolver_chain_id_for_request(request);
         let resolver_address = resolver_address_for_request(request);
         NameCurrentRow {
-            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            logical_name_id: format!(
+                "{}:{}",
+                request.trace.namespace, requested_selectors.surface
+            ),
             namespace: request.trace.namespace.clone(),
             canonical_display_name: requested_selectors.surface.clone(),
             normalized_name: requested_selectors.surface.clone(),
@@ -4765,16 +5062,16 @@ mod tests {
                     "chains": Value::Object(chains)
                 })
             },
-            manifest_version: first_boundary_manifest_version(&request.outcome.cache_key.manifest_versions),
+            manifest_version: first_boundary_manifest_version(
+                &request.outcome.cache_key.manifest_versions,
+            ),
             last_recomputed_at: timestamp(1_717_171_717),
         }
     }
 
-    fn record_inventory_selector_entry(
-        query: &VerifiedQuerySummary,
-        cacheable: bool,
-    ) -> Value {
-        let (record_family, selector_key) = selector_family_and_key(&query.record_key, &query.selector);
+    fn record_inventory_selector_entry(query: &VerifiedQuerySummary, cacheable: bool) -> Value {
+        let (record_family, selector_key) =
+            selector_family_and_key(&query.record_key, &query.selector);
         json!({
             "record_key": query.record_key,
             "record_family": record_family,
@@ -4784,7 +5081,8 @@ mod tests {
     }
 
     fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
-        let (record_family, selector_key) = selector_family_and_key(&query.record_key, &query.selector);
+        let (record_family, selector_key) =
+            selector_family_and_key(&query.record_key, &query.selector);
         let mut entry = json!({
             "record_key": query.record_key,
             "record_family": record_family,
@@ -4817,13 +5115,10 @@ mod tests {
             }
             VerifiedQueryStatus::NotFound => {}
             VerifiedQueryStatus::ExecutionFailed => {
-                entry
-                    .as_object_mut()
-                    .expect("entry must be object")
-                    .insert(
-                        "unsupported_reason".to_owned(),
-                        json!("value_not_retained_in_normalized_events"),
-                    );
+                entry.as_object_mut().expect("entry must be object").insert(
+                    "unsupported_reason".to_owned(),
+                    json!("value_not_retained_in_normalized_events"),
+                );
             }
         }
         entry
@@ -4850,10 +5145,11 @@ mod tests {
             .filter(|query| query.status != VerifiedQueryStatus::ExecutionFailed)
             .map(record_inventory_entry)
             .collect::<Vec<_>>();
-        let chain_id = request.outcome.cache_key.record_version_boundary["chain_position"]["chain_id"]
-            .as_str()
-            .unwrap_or(ETHEREUM_MAINNET_CHAIN_ID)
-            .to_owned();
+        let chain_id =
+            request.outcome.cache_key.record_version_boundary["chain_position"]["chain_id"]
+                .as_str()
+                .unwrap_or(ETHEREUM_MAINNET_CHAIN_ID)
+                .to_owned();
         let mut chain_positions = Map::new();
         chain_positions.insert(
             chain_id.clone(),
@@ -4893,9 +5189,838 @@ mod tests {
                 "status": "finalized",
                 "chains": Value::Object(canonicality_chains)
             }),
-            manifest_version: first_boundary_manifest_version(&request.outcome.cache_key.manifest_versions),
+            manifest_version: first_boundary_manifest_version(
+                &request.outcome.cache_key.manifest_versions,
+            ),
             last_recomputed_at: timestamp(1_717_171_719),
         }
+    }
+
+    async fn seed_alias_only_name_current_rebuild_inputs(
+        database: &TestDatabase,
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        let logical_name_id = logical_name_id_for_request(request);
+        bigname_storage::upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xsurface", 98, 1_717_171_698),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresource", 99, 1_717_171_699),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresolver", 101, 1_717_171_701),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xalias", 102, 1_717_171_702),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbinding-alias",
+                    103,
+                    1_717_171_703,
+                ),
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_name_surfaces(
+            database.pool(),
+            &[name_surface_for_request(request, ETHEREUM_MAINNET_CHAIN_ID)],
+        )
+        .await?;
+        bigname_storage::upsert_token_lineages(
+            database.pool(),
+            &[TokenLineage {
+                token_lineage_id,
+                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xresource".to_owned(),
+                block_number: 99,
+                provenance: json!({"seed": "execution_alias_token_lineage"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_resources(
+            database.pool(),
+            &[Resource {
+                resource_id,
+                token_lineage_id: Some(token_lineage_id),
+                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xresource".to_owned(),
+                block_number: 99,
+                provenance: json!({"seed": "execution_alias_resource"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_surface_bindings(
+            database.pool(),
+            &[SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.clone(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::ResolverAliasPath,
+                active_from: timestamp(1_717_171_703),
+                active_to: None,
+                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbinding-alias".to_owned(),
+                block_number: 103,
+                provenance: json!({"seed": "execution_alias_binding"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_normalized_events(
+            database.pool(),
+            &[
+                NormalizedEvent {
+                    event_identity: "execution:alias-resolver".to_owned(),
+                    namespace: ENS_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "ResolverChanged".to_owned(),
+                    source_family: "ens_v1_unwrapped_authority".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(101),
+                    block_hash: Some("0xresolver".to_owned()),
+                    transaction_hash: Some("0xtxresolver".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:alias-resolver"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "resolver": "0x0000000000000000000000000000000000000abc",
+                        "namehash": "namehash:alice.eth",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:alias-changed".to_owned(),
+                    namespace: ENS_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "AliasChanged".to_owned(),
+                    source_family: "ens_v2_resolver".to_owned(),
+                    manifest_version: 5,
+                    source_manifest_id: None,
+                    chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(102),
+                    block_hash: Some("0xalias".to_owned()),
+                    transaction_hash: Some("0xtxalias".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:alias-changed"}),
+                    derivation_kind: "ens_v2_resolver".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "active": true,
+                        "alias_state": "active",
+                        "to_name": "profile.alice.eth",
+                        "to_logical_name_id": "ens:profile.alice.eth",
+                        "to_normalized_name": "profile.alice.eth",
+                        "to_canonical_display_name": "profile.alice.eth",
+                        "to_namehash": "namehash:profile.alice.eth",
+                        "to_resource_id": resource_id.to_string(),
+                    }),
+                },
+            ],
+        )
+        .await?;
+        rebuild_name_current_projection(database, &logical_name_id).await
+    }
+
+    async fn seed_wildcard_name_current_rebuild_inputs(
+        database: &TestDatabase,
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        let logical_name_id = logical_name_id_for_request(request);
+        let wildcard = persisted_trace_detail_object(&request.trace, "wildcard")
+            .context("wildcard-derived execution request must include wildcard detail")?;
+        let source = wildcard
+            .get("source")
+            .cloned()
+            .context("wildcard-derived execution request must include wildcard source")?;
+        let source_logical_name_id = source
+            .get("logical_name_id")
+            .and_then(Value::as_str)
+            .unwrap_or("ens:eth");
+        let source_namespace = source
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or(ENS_NAMESPACE);
+        let source_normalized_name = source
+            .get("normalized_name")
+            .and_then(Value::as_str)
+            .unwrap_or("eth");
+        let source_canonical_display_name = source
+            .get("canonical_display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(source_normalized_name);
+        let source_namehash = source
+            .get("namehash")
+            .and_then(Value::as_str)
+            .unwrap_or("namehash:eth");
+        let source_resource_id = source
+            .get("resource_id")
+            .and_then(Value::as_str)
+            .map(Uuid::parse_str)
+            .transpose()
+            .context("wildcard source resource_id must be a UUID")?
+            .unwrap_or(resource_id);
+        let source_token_lineage_id = Uuid::from_u128(source_resource_id.as_u128() + 1);
+        let source_surface_binding_id = Uuid::from_u128(source_resource_id.as_u128() + 2);
+        bigname_storage::upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xsource-surface",
+                    96,
+                    1_717_171_696,
+                ),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xsurface", 98, 1_717_171_698),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresource", 99, 1_717_171_699),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xsource-resource",
+                    100,
+                    1_717_171_700,
+                ),
+                raw_block(ETHEREUM_MAINNET_CHAIN_ID, "0xresolver", 101, 1_717_171_701),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xsource-record-version",
+                    102,
+                    1_717_171_702,
+                ),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbinding-wildcard",
+                    103,
+                    1_717_171_703,
+                ),
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface_for_request(request, ETHEREUM_MAINNET_CHAIN_ID),
+                NameSurface {
+                    logical_name_id: source_logical_name_id.to_owned(),
+                    namespace: source_namespace.to_owned(),
+                    input_name: source_normalized_name.to_owned(),
+                    canonical_display_name: source_canonical_display_name.to_owned(),
+                    normalized_name: source_normalized_name.to_owned(),
+                    dns_encoded_name: source_normalized_name.as_bytes().to_vec(),
+                    namehash: source_namehash.to_owned(),
+                    labelhashes: vec![format!("labelhash:{source_normalized_name}")],
+                    normalizer_version: "uts46-v1".to_owned(),
+                    normalization_warnings: json!([]),
+                    normalization_errors: json!([]),
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xsource-surface".to_owned(),
+                    block_number: 96,
+                    provenance: json!({"seed": "execution_wildcard_source_surface"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_token_lineages(
+            database.pool(),
+            &[
+                TokenLineage {
+                    token_lineage_id,
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xresource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "execution_wildcard_token_lineage"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                TokenLineage {
+                    token_lineage_id: source_token_lineage_id,
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xsource-resource".to_owned(),
+                    block_number: 100,
+                    provenance: json!({"seed": "execution_wildcard_source_token_lineage"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_resources(
+            database.pool(),
+            &[
+                Resource {
+                    resource_id,
+                    token_lineage_id: Some(token_lineage_id),
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xresource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "execution_wildcard_resource"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                Resource {
+                    resource_id: source_resource_id,
+                    token_lineage_id: Some(source_token_lineage_id),
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xsource-resource".to_owned(),
+                    block_number: 100,
+                    provenance: json!({"seed": "execution_wildcard_source_resource"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_surface_bindings(
+            database.pool(),
+            &[
+                SurfaceBinding {
+                    surface_binding_id: source_surface_binding_id,
+                    logical_name_id: source_logical_name_id.to_owned(),
+                    resource_id: source_resource_id,
+                    binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                    active_from: timestamp(1_717_171_700),
+                    active_to: None,
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xsource-resource".to_owned(),
+                    block_number: 100,
+                    provenance: json!({"seed": "execution_wildcard_source_binding"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                SurfaceBinding {
+                    surface_binding_id,
+                    logical_name_id: logical_name_id.clone(),
+                    resource_id,
+                    binding_kind: SurfaceBindingKind::ObservedWildcardPath,
+                    active_from: timestamp(1_717_171_703),
+                    active_to: None,
+                    chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                    block_hash: "0xbinding-wildcard".to_owned(),
+                    block_number: 103,
+                    provenance: json!({"seed": "execution_wildcard_binding"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_normalized_events(
+            database.pool(),
+            &[
+                NormalizedEvent {
+                    event_identity: "execution:wildcard-source-resolver".to_owned(),
+                    namespace: ENS_NAMESPACE.to_owned(),
+                    logical_name_id: Some(source_logical_name_id.to_owned()),
+                    resource_id: Some(source_resource_id),
+                    event_kind: "ResolverChanged".to_owned(),
+                    source_family: "ens_v1_unwrapped_authority".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(101),
+                    block_hash: Some("0xresolver".to_owned()),
+                    transaction_hash: Some("0xtxwildcardsourceresolver".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:wildcard-source-resolver"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "resolver": "0x0000000000000000000000000000000000000def",
+                        "namehash": source_namehash,
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:wildcard-source-record-version".to_owned(),
+                    namespace: ENS_NAMESPACE.to_owned(),
+                    logical_name_id: Some(source_logical_name_id.to_owned()),
+                    resource_id: Some(source_resource_id),
+                    event_kind: "RecordVersionChanged".to_owned(),
+                    source_family: "ens_v1_unwrapped_authority".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(102),
+                    block_hash: Some("0xsource-record-version".to_owned()),
+                    transaction_hash: Some("0xtxwildcardsourceversion".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:wildcard-source-record-version"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({"record_version": 6}),
+                    after_state: json!({"record_version": 7}),
+                },
+            ],
+        )
+        .await?;
+        rebuild_name_current_projection(database, &logical_name_id).await
+    }
+
+    async fn insert_basenames_execution_manifest(pool: &PgPool) -> Result<i64> {
+        let manifest_id = sqlx::query(
+            r#"
+                INSERT INTO manifest_versions (
+                    manifest_version,
+                    namespace,
+                    source_family,
+                    chain,
+                    deployment_epoch,
+                    rollout_status,
+                    normalizer_version,
+                    file_path,
+                    manifest_payload
+                )
+                VALUES ($1, $2, $3, $4, $5, $6::manifest_rollout_status, $7, $8, $9::jsonb)
+                RETURNING manifest_id
+            "#,
+        )
+        .bind(2_i64)
+        .bind(BASENAMES_NAMESPACE)
+        .bind("basenames_execution")
+        .bind(ETHEREUM_MAINNET_CHAIN_ID)
+        .bind("basenames_v1")
+        .bind("active")
+        .bind("ensip15@2026-04-16")
+        .bind("tests/execution/basenames_execution-v2.toml")
+        .bind("{}")
+        .fetch_one(pool)
+        .await?
+        .try_get("manifest_id")?;
+        sqlx::query(
+            r#"
+                INSERT INTO manifest_capability_flags (
+                    manifest_id,
+                    capability_name,
+                    status,
+                    notes
+                )
+                VALUES ($1, $2, $3::capability_support_status, $4)
+            "#,
+        )
+        .bind(manifest_id)
+        .bind("verified_resolution")
+        .bind("supported")
+        .bind(None::<String>)
+        .execute(pool)
+        .await?;
+        insert_basenames_execution_manifest_contract(pool, manifest_id).await?;
+        Ok(manifest_id)
+    }
+
+    async fn insert_basenames_execution_manifest_contract(
+        pool: &PgPool,
+        manifest_id: i64,
+    ) -> Result<()> {
+        let contract_instance_id = Uuid::from_u128(0x0b45_0000_0000_0000_0000_0000_0000_0002);
+        sqlx::query(
+            r#"
+                INSERT INTO contract_instances (
+                    contract_instance_id,
+                    chain_id,
+                    contract_kind,
+                    provenance
+                )
+                VALUES ($1, $2, 'contract', $3::jsonb)
+                ON CONFLICT (contract_instance_id) DO NOTHING
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(ETHEREUM_MAINNET_CHAIN_ID)
+        .bind(json!({"seed": "execution_basenames_execution"}))
+        .execute(pool)
+        .await
+        .context("failed to insert Basenames execution contract_instance")?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO manifest_contract_instances (
+                    manifest_id,
+                    declaration_kind,
+                    declaration_name,
+                    contract_instance_id,
+                    declared_address,
+                    role,
+                    proxy_kind
+                )
+                VALUES (
+                    $1,
+                    'contract',
+                    'l1_resolver',
+                    $2,
+                    '0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31',
+                    'l1_resolver',
+                    'none'
+                )
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to insert Basenames execution manifest_contract_instance")?;
+
+        Ok(())
+    }
+
+    async fn insert_chain_checkpoint(
+        pool: &PgPool,
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+                INSERT INTO chain_checkpoints (
+                    chain_id,
+                    finalized_block_hash,
+                    finalized_block_number
+                )
+                VALUES ($1, $2, $3)
+                ON CONFLICT (chain_id)
+                DO UPDATE SET
+                    finalized_block_hash = EXCLUDED.finalized_block_hash,
+                    finalized_block_number = EXCLUDED.finalized_block_number
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to insert chain checkpoint for {chain_id}"))?;
+
+        Ok(())
+    }
+
+    async fn seed_basenames_name_current_rebuild_inputs(
+        database: &TestDatabase,
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        let logical_name_id = logical_name_id_for_request(request);
+        bigname_storage::upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-surface", 98, 1_717_171_698),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-resource", 99, 1_717_171_699),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-grant", 101, 1_717_171_701),
+                raw_block(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-authority",
+                    102,
+                    1_717_171_702,
+                ),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-resolver", 103, 1_717_171_703),
+                raw_block(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-binding-supported",
+                    104,
+                    1_717_171_704,
+                ),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1",
+                    21_000_100,
+                    1_776_387_700,
+                ),
+            ],
+        )
+        .await?;
+        insert_chain_checkpoint(
+            database.pool(),
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xbasenamesl1",
+            21_000_100,
+        )
+        .await?;
+        bigname_storage::upsert_name_surfaces(
+            database.pool(),
+            &[NameSurface {
+                logical_name_id: logical_name_id.clone(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                input_name: "alice.base.eth".to_owned(),
+                canonical_display_name: "Alice.base.eth".to_owned(),
+                normalized_name: "alice.base.eth".to_owned(),
+                dns_encoded_name: b"alice.base.eth".to_vec(),
+                namehash: "namehash:alice.base.eth".to_owned(),
+                labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-surface".to_owned(),
+                block_number: 98,
+                provenance: json!({"seed": "execution_basenames_surface"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_token_lineages(
+            database.pool(),
+            &[TokenLineage {
+                token_lineage_id,
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-resource".to_owned(),
+                block_number: 99,
+                provenance: json!({"seed": "execution_basenames_token_lineage"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_resources(
+            database.pool(),
+            &[Resource {
+                resource_id,
+                token_lineage_id: Some(token_lineage_id),
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-resource".to_owned(),
+                block_number: 99,
+                provenance: json!({"seed": "execution_basenames_resource"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_surface_bindings(
+            database.pool(),
+            &[SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.clone(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: timestamp(1_717_171_704),
+                active_to: None,
+                chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xbase-binding-supported".to_owned(),
+                block_number: 104,
+                provenance: json!({"seed": "execution_basenames_binding"}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        bigname_storage::upsert_normalized_events(
+            database.pool(),
+            &[
+                NormalizedEvent {
+                    event_identity: "execution:basenames:grant".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RegistrationGranted".to_owned(),
+                    source_family: "basenames_base_registrar".to_owned(),
+                    manifest_version: 3,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(101),
+                    block_hash: Some("0xbase-grant".to_owned()),
+                    transaction_hash: Some("0xtxbasegrant".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:grant"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:alice",
+                        "registrant": "0x00000000000000000000000000000000000000aa",
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:basenames:authority".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "AuthorityTransferred".to_owned(),
+                    source_family: "basenames_base_registry".to_owned(),
+                    manifest_version: 3,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(102),
+                    block_hash: Some("0xbase-authority".to_owned()),
+                    transaction_hash: Some("0xtxbaseauthority".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:authority"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "owner": "0x00000000000000000000000000000000000000bb",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:basenames:resolver".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "ResolverChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(103),
+                    block_hash: Some("0xbase-resolver".to_owned()),
+                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:resolver"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "resolver": "0x0000000000000000000000000000000000000abc",
+                        "namehash": "namehash:alice.base.eth",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:basenames:record-version".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordVersionChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(104),
+                    block_hash: Some("0xbase-binding-supported".to_owned()),
+                    transaction_hash: Some("0xtxbaserecordversion".to_owned()),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:record-version"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({
+                        "record_version": 6,
+                    }),
+                    after_state: json!({
+                        "record_version": 7,
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:basenames:addr".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(104),
+                    block_hash: Some("0xbase-binding-supported".to_owned()),
+                    transaction_hash: Some("0xtxbaseaddr".to_owned()),
+                    log_index: Some(1),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:addr"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "execution:basenames:text".to_owned(),
+                    namespace: BASENAMES_NAMESPACE.to_owned(),
+                    logical_name_id: Some(logical_name_id.clone()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some(BASE_MAINNET_CHAIN_ID.to_owned()),
+                    block_number: Some(104),
+                    block_hash: Some("0xbase-binding-supported".to_owned()),
+                    transaction_hash: Some("0xtxbasetext".to_owned()),
+                    log_index: Some(2),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "execution:basenames:text"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                    }),
+                },
+            ],
+        )
+        .await?;
+        insert_basenames_execution_manifest(database.pool()).await?;
+        rebuild_name_current_projection(database, &logical_name_id).await
+    }
+
+    async fn seed_supported_resolution_storage_from_rebuild(
+        database: &TestDatabase,
+        request: &mut PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> Result<()> {
+        let resource_id = boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
+        let token_lineage_id = Uuid::from_u128(resource_id.as_u128() + 1);
+        let surface_binding_id = Uuid::from_u128(resource_id.as_u128() + 2);
+        match (
+            request.trace.namespace.as_str(),
+            binding_kind_for_request(request),
+        ) {
+            (ENS_NAMESPACE, SurfaceBindingKind::ResolverAliasPath) => {
+                seed_alias_only_name_current_rebuild_inputs(
+                    database,
+                    request,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            }
+            (ENS_NAMESPACE, SurfaceBindingKind::ObservedWildcardPath) => {
+                seed_wildcard_name_current_rebuild_inputs(
+                    database,
+                    request,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            }
+            (BASENAMES_NAMESPACE, SurfaceBindingKind::DeclaredRegistryPath) => {
+                seed_basenames_name_current_rebuild_inputs(
+                    database,
+                    request,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            }
+            (namespace, binding_kind) => {
+                bail!(
+                    "no rebuild-backed supported-resolution seed for namespace {namespace} binding_kind {}",
+                    binding_kind.as_str()
+                );
+            }
+        }
+
+        let logical_name_id = logical_name_id_for_request(request);
+        let row = bigname_storage::load_name_current(database.pool(), &logical_name_id)
+            .await?
+            .with_context(|| {
+                format!("rebuilt execution test name_current row missing for {logical_name_id}")
+            })?;
+        sync_request_with_rebuilt_name_current(request, &row)?;
+        let record_resource_id =
+            boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
+        upsert_record_inventory_current_rows(
+            database.pool(),
+            &[supported_record_inventory_row_for_request(
+                request,
+                record_resource_id,
+            )],
+        )
+        .await?;
+        Ok(())
     }
 
     async fn seed_supported_resolution_storage(
@@ -4915,10 +6040,21 @@ mod tests {
             .unwrap_or(ETHEREUM_MAINNET_CHAIN_ID);
         let binding_kind = binding_kind_for_request(request);
 
-        upsert_token_lineages(database.pool(), &[token_lineage_for_request(token_lineage_id, primary_chain_id)]).await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[token_lineage_for_request(
+                token_lineage_id,
+                primary_chain_id,
+            )],
+        )
+        .await?;
         upsert_resources(
             database.pool(),
-            &[resource_for_request(resource_id, token_lineage_id, primary_chain_id)],
+            &[resource_for_request(
+                resource_id,
+                token_lineage_id,
+                primary_chain_id,
+            )],
         )
         .await?;
         upsert_name_surfaces(
@@ -4949,7 +6085,10 @@ mod tests {
         .await?;
         upsert_record_inventory_current_rows(
             database.pool(),
-            &[supported_record_inventory_row_for_request(request, resource_id)],
+            &[supported_record_inventory_row_for_request(
+                request,
+                resource_id,
+            )],
         )
         .await?;
         Ok(())
@@ -6018,8 +7157,8 @@ mod tests {
     #[tokio::test]
     async fn persists_exact_surface_alias_only_path_with_resolver_alias_binding() -> Result<()> {
         let database = TestDatabase::new().await?;
-        let request = alias_only_text_request();
-        seed_supported_resolution_storage(&database, &request).await?;
+        let mut request = alias_only_text_request();
+        seed_supported_resolution_storage_from_rebuild(&database, &mut request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -6503,7 +7642,8 @@ mod tests {
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let mut request = success_request();
-        let wildcard_source = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab6));
+        let wildcard_source =
+            wildcard_source_ref(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab6));
 
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000030);
         request.trace.request_key = "ens:alice.eth:addr:60".to_owned();
@@ -6513,7 +7653,7 @@ mod tests {
             "binding_kind": OBSERVED_WILDCARD_PATH_BINDING_KIND,
             "wildcard": {
                 "source": wildcard_source.clone(),
-                "matched_labels": ["profile"]
+                "matched_labels": ["alice"]
             },
             "normalizer_version": "uts46-v1"
         });
@@ -6534,7 +7674,7 @@ mod tests {
                 "name": "alice.eth",
                 "wildcard": {
                     "source": wildcard_source,
-                    "matched_labels": ["profile"]
+                    "matched_labels": ["alice"]
                 }
             }),
         });
@@ -6544,7 +7684,7 @@ mod tests {
             .trace
             .finished_at
             .expect("wildcard-derived test trace must finish");
-        seed_supported_resolution_storage(&database, &request).await?;
+        seed_supported_resolution_storage_from_rebuild(&database, &mut request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -6610,8 +7750,8 @@ mod tests {
     #[tokio::test]
     async fn persists_basenames_transport_assisted_direct_path() -> Result<()> {
         let database = TestDatabase::new().await?;
-        let request = basenames_transport_direct_request();
-        seed_supported_resolution_storage(&database, &request).await?;
+        let mut request = basenames_transport_direct_request();
+        seed_supported_resolution_storage_from_rebuild(&database, &mut request).await?;
 
         let persisted = persist_basenames_exact_name_verified_resolution_transport_direct(
             database.pool(),
