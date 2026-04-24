@@ -85,13 +85,12 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/indexer/src/provider.rs"
-loc = 3550
+loc = 1853
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/worker/src/address_names.rs"
-loc = 2239
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 891
 
 [[files]]
 path = "apps/worker/src/children.rs"
@@ -115,7 +114,7 @@ justification = "Phase 0 ratchet baseline for an existing oversized wiring file;
 
 [[files]]
 path = "apps/worker/src/name_current.rs"
-loc = 5899
+loc = 2434
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
@@ -130,7 +129,7 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/worker/src/record_inventory.rs"
-loc = 3426
+loc = 1147
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
@@ -140,23 +139,21 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/worker/src/resolver.rs"
-loc = 2827
+loc = 1248
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
 path = "crates/adapters/src/block_derived_normalized_events.rs"
-loc = 3294
+loc = 1238
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_reverse_claim.rs"
-loc = 1230
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 631
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
-loc = 2552
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 815
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority.rs"
@@ -184,7 +181,7 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/adapters/src/ens_v2_registry.rs"
-loc = 3623
+loc = 2405
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
@@ -198,8 +195,7 @@ loc = 62
 
 [[files]]
 path = "crates/adapters/src/manifest_normalized_events.rs"
-loc = 1205
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 610
 
 [[files]]
 path = "crates/domain/src/lib.rs"
@@ -207,7 +203,7 @@ loc = 6
 
 [[files]]
 path = "crates/execution/src/lib.rs"
-loc = 8455
+loc = 3698
 justification = "Phase 0 ratchet baseline for an existing oversized wiring file; future changes should move logic behind smaller modules."
 
 [[files]]
@@ -246,7 +242,7 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/storage/src/address_names.rs"
-loc = 2435
+loc = 1389
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
@@ -265,7 +261,7 @@ loc = 479
 
 [[files]]
 path = "crates/storage/src/children.rs"
-loc = 2350
+loc = 1212
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
@@ -275,8 +271,7 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/storage/src/history.rs"
-loc = 3103
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 724
 
 [[files]]
 path = "crates/storage/src/identity.rs"
@@ -293,8 +288,7 @@ loc = 621
 
 [[files]]
 path = "crates/storage/src/name_current.rs"
-loc = 1128
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 550
 
 [[files]]
 path = "crates/storage/src/normalized_events.rs"
@@ -302,8 +296,7 @@ loc = 606
 
 [[files]]
 path = "crates/storage/src/permissions.rs"
-loc = 1512
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 890
 
 [[files]]
 path = "crates/storage/src/primary_name.rs"
@@ -339,7 +332,7 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/storage/src/record_inventory.rs"
-loc = 1960
+loc = 1107
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
