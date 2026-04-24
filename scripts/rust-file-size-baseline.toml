@@ -1419,7 +1419,31 @@ loc = 550
 
 [[files]]
 path = "crates/storage/src/normalized_events.rs"
-loc = 606
+loc = 19
+
+[[files]]
+path = "crates/storage/src/normalized_events/decode.rs"
+loc = 52
+
+[[files]]
+path = "crates/storage/src/normalized_events/orphaning.rs"
+loc = 105
+
+[[files]]
+path = "crates/storage/src/normalized_events/reads.rs"
+loc = 121
+
+[[files]]
+path = "crates/storage/src/normalized_events/types.rs"
+loc = 27
+
+[[files]]
+path = "crates/storage/src/normalized_events/upsert.rs"
+loc = 248
+
+[[files]]
+path = "crates/storage/src/normalized_events/validation.rs"
+loc = 72
 
 [[files]]
 path = "crates/storage/src/permissions.rs"
