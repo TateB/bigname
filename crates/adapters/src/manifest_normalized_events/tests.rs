@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,7 +16,14 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use super::*;
+use super::{
+    ManifestNormalizedEventKindSyncSummary,
+    constants::{
+        DERIVATION_KIND_MANIFEST_SYNC, EVENT_KIND_CAPABILITY_CHANGED,
+        EVENT_KIND_PROXY_IMPLEMENTATION_CHANGED, EVENT_KIND_SOURCE_MANIFEST_UPDATED,
+    },
+    sync_manifest_normalized_events,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 

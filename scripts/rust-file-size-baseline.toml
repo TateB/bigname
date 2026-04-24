@@ -899,7 +899,27 @@ loc = 62
 
 [[files]]
 path = "crates/adapters/src/manifest_normalized_events.rs"
-loc = 610
+loc = 76
+
+[[files]]
+path = "crates/adapters/src/manifest_normalized_events/builders.rs"
+loc = 205
+
+[[files]]
+path = "crates/adapters/src/manifest_normalized_events/drift_alerts.rs"
+loc = 192
+
+[[files]]
+path = "crates/adapters/src/manifest_normalized_events/loading.rs"
+loc = 78
+
+[[files]]
+path = "crates/adapters/src/manifest_normalized_events/types.rs"
+loc = 23
+
+[[files]]
+path = "crates/adapters/src/manifest_normalized_events/utils.rs"
+loc = 95
 
 [[files]]
 path = "crates/domain/src/lib.rs"
