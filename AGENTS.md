@@ -43,12 +43,13 @@ Citation rules:
 ## Rust File Size
 
 - Hand-written production `.rs` files normally target <=500 LOC.
-- Phase 0 warns for files >600 LOC; later phases may harden this into a required allowlist entry.
-- Baseline entries must match the current file size so shrinkage ratchets down in the same change.
-- Files >900 LOC require explicit baseline justification.
-- Files >1200 LOC are blocked for new hand-written production files unless they are generated code, bindings, typegen, constants, fixtures, or equivalent exceptions.
-- `lib.rs` and `main.rs` are wiring files: target <=300 LOC, with hard review at >500 LOC.
-- Existing legacy offenders are ratcheted down until the allowlist is empty or contains only true exceptions.
+- The script emits advisory warnings for hand-written production files >500 LOC.
+- Hand-written production files >600 LOC require an explicit entry in `scripts/rust-file-size-baseline.toml`; the file is now an oversized-file allowlist, not a full production-file ratchet list.
+- Every allowlist entry must match the current file size and include a justification. Entries >900 LOC also require explicit review justification.
+- Newly allowlisted hand-written production files may not exceed 1200 LOC. Existing allowlist allowances may not increase over the base allowance.
+- Remove allowlist entries once files shrink to <=600 LOC. Omitting a base entry is OK only when the current file is no longer oversized.
+- Generated code, bindings, typegen, constants, fixtures, tests, and equivalent non-production files remain excluded from the gate.
+- `lib.rs` and `main.rs` are wiring files: target <=300 LOC, with hard review and an allowlist entry required above 500 LOC.
 - The CI/script gate lives in `scripts/check-rust-file-size`.
 
 ## Core Skills

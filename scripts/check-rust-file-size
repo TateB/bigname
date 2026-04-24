@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Phase 0 Rust source file size ratchet."""
+"""Check the Phase 7 Rust source file size allowlist."""
 from __future__ import annotations
 
 import argparse
@@ -50,16 +50,22 @@ EXCLUDED_COMPONENT_KEYWORDS = (
     "typegen",
 )
 
-WARNING_LOC = 600
+WARNING_LOC = 500
+ALLOWLIST_REQUIRED_LOC = 600
+REVIEW_REQUIRED_LOC = 900
 NEW_FILE_MAX_LOC = 1200
-JUSTIFICATION_REQUIRED_LOC = 900
 WIRING_TARGET_LOC = 300
-WIRING_NEW_FILE_MAX_LOC = 500
+WIRING_ALLOWLIST_REQUIRED_LOC = 500
 WIRING_FILENAMES = {"lib.rs", "main.rs"}
+
+LEGACY_WARNING_LOC = 600
+LEGACY_NEW_FILE_MAX_LOC = 1200
+LEGACY_JUSTIFICATION_REQUIRED_LOC = 900
+LEGACY_WIRING_NEW_FILE_MAX_LOC = 500
 
 
 class CheckError(Exception):
-    """Raised for malformed local ratchet data."""
+    """Raised for malformed local allowlist data."""
 
 
 def rel(path: Path) -> str:
@@ -138,6 +144,12 @@ def is_production_rust(path: Path) -> bool:
 
 def is_wiring_file(path_text: str) -> bool:
     return Path(path_text).name in WIRING_FILENAMES
+
+
+def allowlist_required_loc(path_text: str) -> int:
+    if is_wiring_file(path_text):
+        return WIRING_ALLOWLIST_REQUIRED_LOC
+    return ALLOWLIST_REQUIRED_LOC
 
 
 def line_count(path: Path) -> int:
@@ -245,22 +257,46 @@ def expect_string_list(
         )
 
 
-def parse_baseline(
-    source_name: str, data: dict[str, Any]
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    errors: list[str] = []
-    settings = data.get("settings")
-    if not isinstance(settings, dict):
-        errors.append(f"{source_name}: baseline must include a [settings] table")
-        settings = {}
-
+def validate_allowlist_settings(
+    source_name: str, settings: dict[str, Any], errors: list[str]
+) -> None:
     expect_int(source_name, settings, "warning_loc", WARNING_LOC, errors)
+    expect_int(
+        source_name,
+        settings,
+        "allowlist_required_loc",
+        ALLOWLIST_REQUIRED_LOC,
+        errors,
+    )
+    expect_int(source_name, settings, "review_required_loc", REVIEW_REQUIRED_LOC, errors)
     expect_int(source_name, settings, "new_file_max_loc", NEW_FILE_MAX_LOC, errors)
+    expect_int(source_name, settings, "wiring_target_loc", WIRING_TARGET_LOC, errors)
+    expect_int(
+        source_name,
+        settings,
+        "wiring_allowlist_required_loc",
+        WIRING_ALLOWLIST_REQUIRED_LOC,
+        errors,
+    )
+    expect_string_list(source_name, settings, "wiring_files", WIRING_FILENAMES, errors)
+
+
+def validate_legacy_settings(
+    source_name: str, settings: dict[str, Any], errors: list[str]
+) -> None:
+    expect_int(source_name, settings, "warning_loc", LEGACY_WARNING_LOC, errors)
+    expect_int(
+        source_name,
+        settings,
+        "new_file_max_loc",
+        LEGACY_NEW_FILE_MAX_LOC,
+        errors,
+    )
     expect_int(
         source_name,
         settings,
         "justification_required_loc",
-        JUSTIFICATION_REQUIRED_LOC,
+        LEGACY_JUSTIFICATION_REQUIRED_LOC,
         errors,
     )
     expect_int(source_name, settings, "wiring_target_loc", WIRING_TARGET_LOC, errors)
@@ -268,14 +304,30 @@ def parse_baseline(
         source_name,
         settings,
         "wiring_new_file_max_loc",
-        WIRING_NEW_FILE_MAX_LOC,
+        LEGACY_WIRING_NEW_FILE_MAX_LOC,
         errors,
     )
     expect_string_list(source_name, settings, "wiring_files", WIRING_FILENAMES, errors)
 
-    entries = data.get("files")
+
+def parse_baseline(
+    source_name: str, data: dict[str, Any], *, allow_legacy: bool = False
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        errors.append(f"{source_name}: baseline must include a [settings] table")
+        settings = {}
+
+    legacy = allow_legacy and "allowlist_required_loc" not in settings
+    if legacy:
+        validate_legacy_settings(source_name, settings, errors)
+    else:
+        validate_allowlist_settings(source_name, settings, errors)
+
+    entries = data.get("files", [])
     if not isinstance(entries, list):
-        errors.append(f"{source_name}: baseline must include [[files]] entries")
+        errors.append(f"{source_name}: baseline [[files]] entries must be a list")
         entries = []
 
     baseline: dict[str, dict[str, Any]] = {}
@@ -287,6 +339,7 @@ def parse_baseline(
         path_text = entry.get("path")
         loc_value = entry.get("loc")
         justification = entry.get("justification")
+        review_justification = entry.get("review_justification")
 
         if not isinstance(path_text, str) or not path_text:
             errors.append(f"{source_name}: baseline entry {index} must include a non-empty path")
@@ -305,30 +358,57 @@ def parse_baseline(
                 "must include non-negative integer loc"
             )
             continue
-        if loc_value > JUSTIFICATION_REQUIRED_LOC and (
-            not isinstance(justification, str) or not justification.strip()
-        ):
-            errors.append(
-                f"{source_name}: {path_text}: baseline entries above "
-                f"{JUSTIFICATION_REQUIRED_LOC} LOC require justification"
-            )
+
+        if legacy:
+            if loc_value > LEGACY_JUSTIFICATION_REQUIRED_LOC and (
+                not isinstance(justification, str) or not justification.strip()
+            ):
+                errors.append(
+                    f"{source_name}: {path_text}: legacy baseline entries above "
+                    f"{LEGACY_JUSTIFICATION_REQUIRED_LOC} LOC require justification"
+                )
+        else:
+            required_loc = allowlist_required_loc(path_text)
+            if loc_value <= required_loc:
+                errors.append(
+                    f"{source_name}: {path_text}: allowlist entries must be above "
+                    f"{required_loc} LOC"
+                )
+            if not isinstance(justification, str) or not justification.strip():
+                errors.append(
+                    f"{source_name}: {path_text}: allowlist entries require justification"
+                )
+            if loc_value > REVIEW_REQUIRED_LOC and (
+                not isinstance(review_justification, str)
+                or not review_justification.strip()
+            ):
+                errors.append(
+                    f"{source_name}: {path_text}: allowlist entries above "
+                    f"{REVIEW_REQUIRED_LOC} LOC require review_justification"
+                )
 
         baseline[path_text] = entry
 
     return baseline, errors
 
 
-def load_baseline(path: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def load_baseline(
+    path: Path, *, allow_legacy: bool = False
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if not path.exists():
         raise CheckError(f"baseline not found: {display_path(path)}")
 
-    return parse_baseline(display_path(path), load_toml_path(path))
+    return parse_baseline(
+        display_path(path), load_toml_path(path), allow_legacy=allow_legacy
+    )
 
 
 def load_baseline_text(
-    source_name: str, text: str
+    source_name: str, text: str, *, allow_legacy: bool = False
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    return parse_baseline(source_name, load_toml_text(source_name, text))
+    return parse_baseline(
+        source_name, load_toml_text(source_name, text), allow_legacy=allow_legacy
+    )
 
 
 def git_ref_exists(ref: str) -> bool:
@@ -374,7 +454,9 @@ def load_baseline_from_ref(
         raise CheckError(f"base ref not found: {ref}")
     if not git_ref_has_path(ref, git_path):
         return None
-    return load_baseline_text(f"{ref}:{git_path}", git_show(ref, git_path))
+    return load_baseline_text(
+        f"{ref}:{git_path}", git_show(ref, git_path), allow_legacy=True
+    )
 
 
 def production_files_with_loc() -> dict[str, int]:
@@ -397,6 +479,11 @@ def validate_baseline_paths(
             errors.append(f"{path_text}: baseline path is not production Rust ({reason})")
         elif path_text not in current:
             errors.append(f"{path_text}: baseline entry is stale; remove it")
+        elif current[path_text] <= allowlist_required_loc(path_text):
+            errors.append(
+                f"{path_text}: allowlist entry is resolved at {current[path_text]} LOC; "
+                "remove it"
+            )
     return errors
 
 
@@ -409,10 +496,11 @@ def check_current_files(
     for path_text, loc_value in sorted(current.items()):
         entry = baseline.get(path_text)
         wiring = is_wiring_file(path_text)
+        required_loc = allowlist_required_loc(path_text)
 
         if loc_value > WARNING_LOC:
             warnings.append(
-                f"{path_text}: {loc_value} LOC exceeds warning threshold {WARNING_LOC}"
+                f"{path_text}: {loc_value} LOC exceeds advisory threshold {WARNING_LOC}"
             )
         if wiring and loc_value > WIRING_TARGET_LOC:
             warnings.append(
@@ -420,24 +508,24 @@ def check_current_files(
             )
 
         if entry is None:
-            max_loc = WIRING_NEW_FILE_MAX_LOC if wiring else NEW_FILE_MAX_LOC
-            if loc_value > max_loc:
+            if loc_value > required_loc:
                 errors.append(
-                    f"{path_text}: new production file is {loc_value} LOC; "
-                    f"maximum is {max_loc}"
+                    f"{path_text}: production file is {loc_value} LOC; "
+                    f"files above {required_loc} LOC require an allowlist entry"
                 )
             continue
 
-        baseline_loc = entry["loc"]
-        if loc_value > baseline_loc:
+        allowed_loc = entry["loc"]
+        if loc_value > allowed_loc:
             errors.append(
-                f"{path_text}: {loc_value} LOC exceeds baseline {baseline_loc}; "
-                "split or shrink the file before updating the ratchet"
+                f"{path_text}: {loc_value} LOC exceeds allowlist allowance "
+                f"{allowed_loc}; split or shrink the file before increasing "
+                "the allowance"
             )
-        elif loc_value < baseline_loc:
+        elif loc_value < allowed_loc:
             errors.append(
-                f"{path_text}: baseline records {baseline_loc} LOC but file is now "
-                f"{loc_value}; regenerate the baseline to ratchet it down"
+                f"{path_text}: allowlist records {allowed_loc} LOC but file is now "
+                f"{loc_value}; regenerate the allowlist to ratchet it down"
             )
 
     return errors, warnings
@@ -449,31 +537,35 @@ def check_base_allowances(
     current: dict[str, int],
 ) -> list[str]:
     errors: list[str] = []
-    for path_text in sorted(base_baseline):
-        if path_text in current and path_text not in baseline:
+    for path_text, base_entry in sorted(base_baseline.items()):
+        if (
+            path_text in current
+            and current[path_text] > allowlist_required_loc(path_text)
+            and path_text not in baseline
+            and base_entry["loc"] > allowlist_required_loc(path_text)
+        ):
             errors.append(
-                f"{path_text}: candidate baseline omits an existing production file "
-                "from the base baseline; keep the entry so the ratchet can enforce "
-                "future shrinkage"
+                f"{path_text}: candidate allowlist omits the base allowance, "
+                f"but the current file is still oversized at {current[path_text]} LOC"
             )
 
     for path_text, entry in sorted(baseline.items()):
         loc_value = entry["loc"]
         base_entry = base_baseline.get(path_text)
-        if base_entry is None:
-            max_loc = WIRING_NEW_FILE_MAX_LOC if is_wiring_file(path_text) else NEW_FILE_MAX_LOC
-            if loc_value > max_loc:
+        if base_entry is None or base_entry["loc"] <= allowlist_required_loc(path_text):
+            if loc_value > NEW_FILE_MAX_LOC:
                 errors.append(
-                    f"{path_text}: baseline adds a {loc_value} LOC allowance absent "
-                    f"from the base baseline; new production files may not exceed {max_loc}"
+                    f"{path_text}: candidate allowlist adds a {loc_value} LOC "
+                    f"allowance absent from the base allowlist; new hand-written "
+                    f"production files may not exceed {NEW_FILE_MAX_LOC}"
                 )
             continue
 
         base_loc = base_entry["loc"]
         if loc_value > base_loc:
             errors.append(
-                f"{path_text}: baseline allowance increases from base {base_loc} "
-                f"to {loc_value}; baseline increases are not allowed in the same change"
+                f"{path_text}: candidate allowlist allowance increases from base "
+                f"{base_loc} to {loc_value}; allowance increases are not allowed"
             )
     return errors
 
@@ -482,42 +574,50 @@ def quote(value: str) -> str:
     return json.dumps(value)
 
 
-def baseline_justification(path_text: str, loc_value: int) -> str | None:
-    if loc_value <= JUSTIFICATION_REQUIRED_LOC:
-        return None
+def baseline_justification(path_text: str) -> str:
     if is_wiring_file(path_text):
         return (
-            "Phase 0 ratchet baseline for an existing oversized wiring file; "
-            "future changes should move logic behind smaller modules."
+            "Phase 7 allowlist for an oversized wiring file; future changes "
+            "should move logic behind smaller modules."
         )
     return (
-        "Phase 0 ratchet baseline for an existing large production file; "
-        "future changes should split or shrink it."
+        "Phase 7 allowlist for an oversized production file; future changes "
+        "should split or shrink it."
+    )
+
+
+def review_justification() -> str:
+    return (
+        "Explicit review accepted this file above 900 LOC; future changes should "
+        "split or shrink it."
     )
 
 
 def print_baseline() -> int:
     current = production_files_with_loc()
     print("# Generated by scripts/check-rust-file-size --print-baseline.")
-    print("# Tracks hand-written production Rust files for the Phase 0 size ratchet.")
+    print("# Tracks oversized hand-written production Rust files for the Phase 7 allowlist.")
     print()
     print("[settings]")
     print(f"warning_loc = {WARNING_LOC}")
+    print(f"allowlist_required_loc = {ALLOWLIST_REQUIRED_LOC}")
+    print(f"review_required_loc = {REVIEW_REQUIRED_LOC}")
     print(f"new_file_max_loc = {NEW_FILE_MAX_LOC}")
-    print(f"justification_required_loc = {JUSTIFICATION_REQUIRED_LOC}")
     print(f"wiring_target_loc = {WIRING_TARGET_LOC}")
-    print(f"wiring_new_file_max_loc = {WIRING_NEW_FILE_MAX_LOC}")
+    print(f"wiring_allowlist_required_loc = {WIRING_ALLOWLIST_REQUIRED_LOC}")
     wiring_files = ", ".join(quote(name) for name in sorted(WIRING_FILENAMES))
     print(f"wiring_files = [{wiring_files}]")
 
     for path_text, loc_value in sorted(current.items()):
+        if loc_value <= allowlist_required_loc(path_text):
+            continue
         print()
         print("[[files]]")
         print(f"path = {quote(path_text)}")
         print(f"loc = {loc_value}")
-        justification = baseline_justification(path_text, loc_value)
-        if justification is not None:
-            print(f"justification = {quote(justification)}")
+        print(f"justification = {quote(baseline_justification(path_text))}")
+        if loc_value > REVIEW_REQUIRED_LOC:
+            print(f"review_justification = {quote(review_justification())}")
 
     return 0
 
@@ -529,7 +629,7 @@ def check(
         baseline, baseline_errors = load_baseline(baseline_path)
         base_baseline_result: tuple[dict[str, dict[str, Any]], list[str]] | None = None
         if base_baseline_path is not None:
-            base_baseline_result = load_baseline(base_baseline_path)
+            base_baseline_result = load_baseline(base_baseline_path, allow_legacy=True)
         elif base_ref is not None:
             base_baseline_result = load_baseline_from_ref(base_ref)
     except CheckError as error:
@@ -563,11 +663,11 @@ def check(
         print(f"warning: {warning}", file=sys.stderr)
 
     if errors:
-        print("Rust file size ratchet failed:", file=sys.stderr)
+        print("Rust file size allowlist failed:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         print(
-            "Regenerate the baseline only for intentional ratchet changes: "
+            "Regenerate the allowlist after intentional oversized-file changes: "
             "scripts/check-rust-file-size --print-baseline > "
             "scripts/rust-file-size-baseline.toml",
             file=sys.stderr,
@@ -575,7 +675,7 @@ def check(
         return 1
 
     print(
-        f"Rust file size ratchet OK: {len(current)} production files checked "
+        f"Rust file size allowlist OK: {len(current)} production files checked "
         f"against {display_path(baseline_path)}."
     )
     if base_source is not None and base_baseline_result is not None:
@@ -606,7 +706,7 @@ def main() -> int:
         "--base-ref",
         help=(
             "git ref containing scripts/rust-file-size-baseline.toml; "
-            "candidate allowances may not exceed it"
+            "candidate allowlist allowances may not exceed it"
         ),
     )
     args = parser.parse_args()
