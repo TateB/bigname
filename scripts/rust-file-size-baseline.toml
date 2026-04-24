@@ -1383,7 +1383,35 @@ loc = 234
 
 [[files]]
 path = "crates/storage/src/lineage.rs"
-loc = 621
+loc = 18
+
+[[files]]
+path = "crates/storage/src/lineage/canonicality.rs"
+loc = 137
+
+[[files]]
+path = "crates/storage/src/lineage/decode.rs"
+loc = 42
+
+[[files]]
+path = "crates/storage/src/lineage/orphaning.rs"
+loc = 69
+
+[[files]]
+path = "crates/storage/src/lineage/reads.rs"
+loc = 187
+
+[[files]]
+path = "crates/storage/src/lineage/types.rs"
+loc = 26
+
+[[files]]
+path = "crates/storage/src/lineage/upserts.rs"
+loc = 144
+
+[[files]]
+path = "crates/storage/src/lineage/validation.rs"
+loc = 40
 
 [[files]]
 path = "crates/storage/src/name_current.rs"
