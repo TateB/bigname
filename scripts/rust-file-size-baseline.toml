@@ -115,8 +115,23 @@ loc = 426
 
 [[files]]
 path = "apps/api/src/responses/resolution_verified.rs"
-loc = 921
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 160
+
+[[files]]
+path = "apps/api/src/responses/resolution_verified/execution_summary.rs"
+loc = 200
+
+[[files]]
+path = "apps/api/src/responses/resolution_verified/readback.rs"
+loc = 376
+
+[[files]]
+path = "apps/api/src/responses/resolution_verified/response.rs"
+loc = 153
+
+[[files]]
+path = "apps/api/src/responses/resolution_verified/topology.rs"
+loc = 190
 
 [[files]]
 path = "apps/api/src/routes.rs"
