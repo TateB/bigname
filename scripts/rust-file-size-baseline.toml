@@ -588,7 +588,27 @@ loc = 631
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
-loc = 815
+loc = 108
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/assignment.rs"
+loc = 189
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/emitter.rs"
+loc = 34
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/event.rs"
+loc = 154
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/hex_topic.rs"
+loc = 84
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/loader.rs"
+loc = 314
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority.rs"

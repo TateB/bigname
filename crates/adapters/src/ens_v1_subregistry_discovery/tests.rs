@@ -5,24 +5,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_manifests::{
     WatchedChainPlan, WatchedContractSource, WatchedSourceSelector, load_repository,
     load_watched_chain_plan, load_watched_contract_summary, load_watched_contracts,
     load_watched_source_selector_plan, sync_repository,
 };
 use bigname_storage::{
-    RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace, upsert_raw_blocks,
-    upsert_raw_logs,
+    CanonicalityState, RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
+    upsert_raw_blocks, upsert_raw_logs,
 };
+use sha3::{Digest, Keccak256};
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
     query_scalar,
-    types::time::OffsetDateTime,
+    types::{Uuid, time::OffsetDateTime},
 };
 
-use super::*;
+use super::{
+    hex_topic::{
+        ZERO_ADDRESS, ZERO_NODE, child_node, hex_string, new_owner_topic0, new_resolver_topic0,
+        normalize_address, normalize_hex_32,
+    },
+    *,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 const TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
