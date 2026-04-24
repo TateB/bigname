@@ -224,6 +224,7 @@ async fn get_resolution_payload(
     database: &HarnessDatabase,
     uri: &str,
 ) -> Result<ResolutionResponse> {
+    database.seed_snapshot_selector_for_route(uri).await?;
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -234,9 +235,18 @@ async fn get_resolution_payload(
         .await
         .with_context(|| format!("resolution request failed for {uri}"))?;
 
-    assert_eq!(response.status(), StatusCode::OK, "uri {uri}");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .with_context(|| format!("failed to read resolution response body for {uri}"))?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "uri {uri} body {}",
+        String::from_utf8_lossy(&bytes)
+    );
 
-    read_json(response).await
+    serde_json::from_slice(&bytes).context("failed to decode resolution response JSON")
 }
 
 fn query_encode(value: &str) -> String {
@@ -973,13 +983,7 @@ async fn set_name_current_resolver_and_boundary(
         .await?
         .context("dynamic resolver profile test requires name_current row")?;
     set_declared_current_resolver(&mut name_row, chain_id, resolver_address);
-    name_row.chain_positions = json!({
-        "ethereum": record_inventory_row
-            .record_version_boundary
-            .get("chain_position")
-            .cloned()
-            .expect("record_inventory_current boundary must include chain_position"),
-    });
+    name_row.chain_positions = record_inventory_row.chain_positions.clone();
     database.insert_name_current_row(name_row).await
 }
 
@@ -2103,11 +2107,6 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
     database
         .rebuild_name_current(basenames_logical_name_id)
         .await?;
-    insert_basenames_supported_ethereum_position_for_current_row(
-        &database,
-        basenames_logical_name_id,
-    )
-    .await?;
     rebuild_record_inventory_current(&database, basenames_resource_id).await?;
 
     database
@@ -2129,7 +2128,7 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
         .context("ENS decoy row must exist for inferred basenames fallback guard")?;
     let ens_records = parse_resolution_record_keys(Some(records_query), ResolutionMode::Verified)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let ens_cache_key = build_resolution_execution_cache_key(
+    let ens_cache_key = bigname_storage::build_resolution_execution_cache_key(
         &ens_name_row,
         &ens_records,
         Some(&ens_record_inventory_row),
@@ -2167,6 +2166,12 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
         "/v1/resolve/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
     )
     .await?;
+    insert_basenames_supported_ethereum_position_for_current_row(
+        &database,
+        basenames_logical_name_id,
+    )
+    .await?;
+    rebuild_record_inventory_current(&database, basenames_resource_id).await?;
     let canonical_verified_payload = get_resolution_payload(
         &database,
         "/v1/resolutions/basenames/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
@@ -2777,8 +2782,10 @@ async fn resolution_contract_reads_persisted_basenames_transport_direct_answers(
     let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("basenames supported resolution test requires rebuilt name_current row")?;
-    let topology = projected_resolution_topology(&name_row)?;
-    let (_, record_boundary) = projected_resolution_boundaries(&name_row)?;
+    let topology = bigname_storage::projected_resolution_topology(&name_row.declared_summary)
+        .context("rebuilt name_current row must project supported topology")?;
+    let (_, record_boundary) =
+        bigname_storage::projected_resolution_boundaries_from_topology(&topology)?;
     let worker_row = bigname_storage::load_record_inventory_current(
         &database.pool,
         resource_id,
@@ -3549,7 +3556,7 @@ async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_pr
         ResolutionMode::Verified,
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &persisted_records,
         Some(&record_inventory_row),
@@ -3652,7 +3659,7 @@ async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses
     let explain_records =
         parse_resolution_record_keys(Some("text:com.twitter,addr:60"), ResolutionMode::Verified)
             .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &explain_records,
         Some(&record_inventory_row),
@@ -3771,7 +3778,7 @@ async fn resolution_execution_explain_contract_reads_persisted_avatar_answer_and
         ResolutionMode::Verified,
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &explain_records,
         Some(&record_inventory_row),
@@ -3883,12 +3890,15 @@ async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_r
     let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("mixed alias resolution requires rebuilt name_current row")?;
-    let projected_topology = projected_resolution_topology(&name_row)?;
+    let projected_topology =
+        bigname_storage::projected_resolution_topology(&name_row.declared_summary)
+            .context("rebuilt name_current row must project supported topology")?;
     let alias_target = projected_topology
         .pointer("/alias/final_target")
         .cloned()
         .context("alias-only projected topology must include final_target")?;
-    let (_, record_boundary) = projected_resolution_boundaries(&name_row)?;
+    let (_, record_boundary) =
+        bigname_storage::projected_resolution_boundaries_from_topology(&projected_topology)?;
     database
         .insert_record_inventory_current_row(resolution_record_inventory_current_row_with_boundary(
             logical_name_id,
@@ -3908,7 +3918,7 @@ async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_r
     let alias_records =
         parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
             .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &alias_records,
         Some(&record_inventory_row),
@@ -4012,12 +4022,15 @@ async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar
     let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("alias execution explain requires rebuilt name_current row")?;
-    let projected_topology = projected_resolution_topology(&name_row)?;
+    let projected_topology =
+        bigname_storage::projected_resolution_topology(&name_row.declared_summary)
+            .context("rebuilt name_current row must project supported topology")?;
     let alias_target = projected_topology
         .pointer("/alias/final_target")
         .cloned()
         .context("alias-only projected topology must include final_target")?;
-    let (_, record_boundary) = projected_resolution_boundaries(&name_row)?;
+    let (_, record_boundary) =
+        bigname_storage::projected_resolution_boundaries_from_topology(&projected_topology)?;
     database
         .insert_record_inventory_current_row(resolution_record_inventory_current_row_with_boundary(
             logical_name_id,
@@ -4037,7 +4050,7 @@ async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar
     let alias_records =
         parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
             .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &alias_records,
         Some(&record_inventory_row),
@@ -4164,7 +4177,9 @@ async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_ro
     let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("wildcard-derived mixed resolution requires rebuilt name_current row")?;
-    let projected_topology = projected_resolution_topology(&name_row)?;
+    let projected_topology =
+        bigname_storage::projected_resolution_topology(&name_row.declared_summary)
+            .context("rebuilt name_current row must project supported topology")?;
     let wildcard_source = projected_topology
         .pointer("/wildcard/source")
         .cloned()
@@ -4176,7 +4191,7 @@ async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_ro
 
     let records = parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &records,
         None,
@@ -4388,7 +4403,7 @@ async fn resolution_execution_explain_contract_returns_not_found_for_selector_se
         resolution_record_inventory_current_row(logical_name_id, resource_id);
     let persisted_records = parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
         &name_row,
         &persisted_records,
         Some(&record_inventory_row),
@@ -4480,7 +4495,6 @@ async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_sta
             surface_binding_id,
         )
         .await?;
-    database.rebuild_name_current(logical_name_id).await?;
     seed_ens_v2_event_fixture_inputs(
         &database.pool,
         &[
@@ -4492,7 +4506,7 @@ async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_sta
                 namehash,
                 "2",
                 15,
-                121,
+                123,
                 0,
             ),
             ens_v2_record_changed_event(
@@ -4504,8 +4518,8 @@ async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_sta
                 "addr",
                 Some("60"),
                 16,
-                122,
-                0,
+                123,
+                1,
             ),
             ens_v2_record_changed_event(
                 "conformance:ensv2:alice:text",
@@ -4516,8 +4530,8 @@ async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_sta
                 "text",
                 None,
                 16,
-                122,
-                1,
+                123,
+                2,
             ),
             ens_v2_record_changed_event(
                 "conformance:ensv2:alice:pubkey",
@@ -4529,22 +4543,14 @@ async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_sta
                 None,
                 17,
                 123,
-                0,
+                3,
             ),
         ],
     )
     .await?;
+
+    database.rebuild_name_current(logical_name_id).await?;
     rebuild_record_inventory_current(&database, resource_id).await?;
-    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
-        .await?
-        .context("ENSv2 declared resolution inventory test requires name_current row")?;
-    name_row.chain_positions["ethereum"] = json!({
-        "chain_id": "ethereum-mainnet",
-        "block_number": 121,
-        "block_hash": "0xensv2block79",
-        "timestamp": "2024-05-31T21:15:21Z",
-    });
-    database.insert_name_current_row(name_row).await?;
 
     let response = app_router(database.app_state())
                         .oneshot(
@@ -5368,7 +5374,7 @@ async fn resource_permissions_contract_returns_rows_with_shared_collection_envel
     );
     assert!(payload.verified_state.is_none());
     assert_eq!(payload.declared_state, json!({}));
-    assert_eq!(payload.page.page_size, 3);
+    assert_eq!(payload.page.page_size, 50);
     assert_eq!(payload.page.sort, "subject_scope_asc");
     assert_eq!(payload.consistency, "finalized");
     assert_eq!(payload.coverage.status, "full");
@@ -5492,7 +5498,7 @@ async fn resource_permissions_contract_returns_rows_with_shared_collection_envel
         &replay_page_payload.data,
         &replay_page_payload.page,
         "subject_scope_asc",
-        3,
+        50,
         1,
     );
 

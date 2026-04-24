@@ -181,6 +181,7 @@ dependencies = [
  "bigname-domain",
  "bigname-manifests",
  "bigname-storage",
+ "bigname-test-support",
  "clap",
  "serde",
  "serde_json",
@@ -249,12 +250,21 @@ name = "bigname-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bigname-test-support",
  "clap",
  "serde_json",
  "sqlx",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bigname-test-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sqlx",
 ]
 
 [[package]]
@@ -266,6 +276,7 @@ dependencies = [
  "bigname-execution",
  "bigname-manifests",
  "bigname-storage",
+ "bigname-test-support",
  "clap",
  "serde_json",
  "sqlx",

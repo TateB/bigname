@@ -5,7 +5,6 @@ use std::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -22,11 +21,12 @@ use bigname_storage::{
     upsert_normalized_events, upsert_primary_name_current_rows,
     upsert_primary_name_current_snapshots,
 };
+use bigname_test_support::TestDatabaseConfig;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::{
     ConnectOptions, PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
+    postgres::PgConnectOptions,
     types::{Uuid, time::OffsetDateTime},
 };
 use tower::ServiceExt;
@@ -40,7 +40,7 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 
 struct TestDatabase {
-    admin_pool: PgPool,
+    database: bigname_test_support::TestDatabase,
     pool: PgPool,
     database_name: String,
 }
@@ -97,39 +97,17 @@ impl TestDatabase {
         initialize_manifest_schema: bool,
         initialize_name_current_schema: bool,
     ) -> Result<Self> {
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API tests")?;
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before unix epoch")?
-            .as_nanos();
-        let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let database_name = format!(
-            "bigname_api_test_{}_{}_{}",
-            std::process::id(),
-            unique,
-            sequence
-        );
-
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(base_options.clone())
-            .await
-            .context("failed to connect admin pool for API tests")?;
-
-        sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
-            .execute(&admin_pool)
-            .await
-            .with_context(|| format!("failed to create test database {database_name}"))?;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(base_options.database(&database_name))
-            .await
-            .context("failed to connect API test pool")?;
+        let database = bigname_test_support::TestDatabase::create(
+            TestDatabaseConfig::new("bigname_api_test")
+                .admin_database_from_url()
+                .pool_max_connections(1)
+                .parse_context("failed to parse database URL for API tests")
+                .admin_connect_context("failed to connect admin pool for API tests")
+                .pool_connect_context("failed to connect API test pool"),
+        )
+        .await?;
+        let pool = database.pool().clone();
+        let database_name = database.database_name().to_owned();
 
         if initialize_manifest_schema {
             sqlx::query(
@@ -484,7 +462,7 @@ impl TestDatabase {
         }
 
         Ok(Self {
-            admin_pool,
+            database,
             pool,
             database_name,
         })
@@ -492,10 +470,13 @@ impl TestDatabase {
 
     async fn new_migrated() -> Result<Self> {
         let database = Self::new(false).await?;
-        bigname_storage::MIGRATOR
-            .run(&database.pool)
-            .await
-            .context("failed to apply checked-in migrations for API tests")?;
+        database
+            .database
+            .apply_migrations(
+                &bigname_storage::MIGRATOR,
+                "failed to apply checked-in migrations for API tests",
+            )
+            .await?;
         Ok(database)
     }
 
@@ -730,16 +711,9 @@ impl TestDatabase {
     async fn insert_name_current_row(&self, row: bigname_storage::NameCurrentRow) -> Result<()> {
         self.seed_snapshot_selector_chain_positions(&row.chain_positions)
             .await?;
-        let basenames_record_inventory_positions = (row.namespace == "basenames")
-            .then_some(row.resource_id.zip(Some(row.chain_positions.clone())))
-            .flatten();
         bigname_storage::upsert_name_current_rows(&self.pool, &[row])
             .await
             .context("failed to upsert name_current row for API test")?;
-        if let Some((resource_id, chain_positions)) = basenames_record_inventory_positions {
-            self.set_record_inventory_chain_positions(resource_id, chain_positions)
-                .await?;
-        }
         Ok(())
     }
 
@@ -849,61 +823,6 @@ impl TestDatabase {
             }
         }))
         .await
-    }
-
-    async fn set_record_inventory_chain_positions(
-        &self,
-        resource_id: Uuid,
-        chain_positions: Value,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE record_inventory_current
-            SET chain_positions = $2::jsonb
-            WHERE resource_id = $1
-            "#,
-        )
-        .bind(resource_id)
-        .bind(&chain_positions)
-        .execute(&self.pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to set chain_positions on record_inventory_current rows for {resource_id}"
-            )
-        })?;
-        self.seed_snapshot_selector_chain_positions(&chain_positions)
-            .await
-    }
-
-    async fn sync_record_inventory_chain_positions_from_name_current(
-        &self,
-        resource_id: Uuid,
-    ) -> Result<()> {
-        let row = sqlx::query(
-            r#"
-            SELECT chain_positions
-            FROM name_current
-            WHERE resource_id = $1
-            ORDER BY logical_name_id
-            LIMIT 1
-            "#,
-        )
-        .bind(resource_id)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| {
-            format!("failed to load name_current chain_positions for resource_id {resource_id}")
-        })?;
-
-        let Some(row) = row else {
-            return Ok(());
-        };
-        let chain_positions = row
-            .try_get::<Value, _>("chain_positions")
-            .context("name_current row missing chain_positions")?;
-        self.set_record_inventory_chain_positions(resource_id, chain_positions)
-            .await
     }
 
     async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
@@ -1082,9 +1001,6 @@ impl TestDatabase {
         })
         .await
         .context("worker record_inventory_current rebuild task panicked")??;
-
-        self.sync_record_inventory_chain_positions_from_name_current(resource_id_value)
-            .await?;
 
         let rows = sqlx::query(
             r#"
@@ -2166,16 +2082,13 @@ impl TestDatabase {
     }
 
     async fn cleanup(self) -> Result<()> {
-        self.pool.close().await;
-        sqlx::query(&format!(
-            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-            self.database_name
-        ))
-        .execute(&self.admin_pool)
-        .await
-        .with_context(|| format!("failed to drop test database {}", self.database_name))?;
-        self.admin_pool.close().await;
-        Ok(())
+        let Self {
+            database,
+            pool,
+            database_name: _,
+        } = self;
+        drop(pool);
+        database.cleanup().await
     }
 }
 

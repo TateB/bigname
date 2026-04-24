@@ -9,6 +9,7 @@ members = [
     "crates/manifests",
     "crates/adapters",
     "crates/execution",
+    "crates/test-support",
 ]
 default-members = [
     "apps/api",
@@ -38,3 +39,4 @@ bigname-domain = { path = "crates/domain" }
 bigname-execution = { path = "crates/execution" }
 bigname-manifests = { path = "crates/manifests" }
 bigname-storage = { path = "crates/storage" }
+bigname-test-support = { path = "crates/test-support" }

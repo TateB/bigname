@@ -229,7 +229,7 @@
             );
             assert_eq!(payload.coverage.unsupported_reason, None);
             assert_eq!(payload.page.sort, "display_name_asc");
-            assert_eq!(payload.page.page_size, 2);
+            assert_eq!(payload.page.page_size, 50);
             assert_eq!(payload.consistency, "finalized");
             assert_eq!(payload.last_updated, "2024-05-31T16:13:32Z");
             assert_eq!(
@@ -334,7 +334,7 @@
                 &replay_page_payload.data,
                 &replay_page_payload.page,
                 "display_name_asc",
-                2,
+                50,
                 1,
             );
 
@@ -388,7 +388,7 @@
             );
             assert_eq!(payload.coverage.unsupported_reason, None);
             assert_eq!(payload.page.sort, "display_name_asc");
-            assert_eq!(payload.page.page_size, 1);
+            assert_eq!(payload.page.page_size, 50);
             assert_eq!(payload.consistency, "finalized");
             assert_eq!(
                 payload.provenance,
@@ -807,7 +807,7 @@
                 "surface_current_relations"
             );
             assert_eq!(payload.page.sort, "display_name_asc");
-            assert_eq!(payload.page.page_size, 2);
+            assert_eq!(payload.page.page_size, 50);
             assert_eq!(payload.consistency, "finalized");
 
             let logical_name_ids = payload
@@ -884,7 +884,7 @@
                 &replay_page_payload.data,
                 &replay_page_payload.page,
                 "display_name_asc",
-                2,
+                50,
                 1,
             );
 
@@ -2258,7 +2258,7 @@
                 &children_replay_payload.data,
                 &children_replay_payload.page,
                 "display_name_asc",
-                child_count as u64,
+                50,
                 11,
             );
             assert_page_walk_matches_base_prefix(
@@ -2355,7 +2355,7 @@
                 &address_replay_payload.data,
                 &address_replay_payload.page,
                 "display_name_asc",
-                address_name_count as u64,
+                50,
                 9,
             );
             assert_page_walk_matches_base_prefix(
@@ -2453,7 +2453,7 @@
                 &permissions_replay_payload.data,
                 &permissions_replay_payload.page,
                 "subject_scope_asc",
-                permission_count as u64,
+                50,
                 7,
             );
             assert_page_walk_matches_base_prefix(

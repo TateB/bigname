@@ -2571,6 +2571,9 @@
             database: &HarnessDatabase,
             route: &ReplayRoute,
         ) -> Result<Value> {
+            database
+                .seed_snapshot_selector_for_route(route.uri.as_str())
+                .await?;
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
@@ -2581,14 +2584,20 @@
                 .await
                 .with_context(|| format!("{} replay route request failed", route.label))?;
 
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .with_context(|| {
+                    format!("failed to read {} replay route response body", route.label)
+                })?;
             assert_eq!(
-                response.status(),
+                status,
                 StatusCode::OK,
-                "{} replay route returned unexpected status",
-                route.label
+                "{} replay route returned unexpected status; body {}",
+                route.label,
+                String::from_utf8_lossy(&bytes)
             );
 
-            read_json(response)
-                .await
+            serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to decode {} replay route response", route.label))
         }

@@ -6,6 +6,11 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
+use crate::projection_helpers::{
+    checked_page_limit_i64, checked_page_size_usize, serialize_jsonb_field,
+    serialize_optional_jsonb_field, take_json_array,
+};
+
 const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::canonicality_state,
@@ -286,9 +291,16 @@ pub async fn load_permissions_current_page(
     cursor: Option<&PermissionsCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<PermissionsCurrentPage> {
-    let limit = permissions_current_page_limit(page_size)?;
-    let page_size_usize =
-        usize::try_from(page_size).context("permissions_current page_size must fit in usize")?;
+    let limit = checked_page_limit_i64(
+        page_size,
+        "permissions_current page_size must be positive",
+        "permissions_current page_size is too large",
+    )?;
+    let page_size_usize = checked_page_size_usize(
+        page_size,
+        "permissions_current page_size must be positive",
+        "permissions_current page_size must fit in usize",
+    )?;
     let scope_storage_key = scope.map(PermissionScope::storage_key);
 
     let page_rows = {
@@ -584,29 +596,43 @@ async fn upsert_permissions_current_row(
     let scope = row.scope.storage_key();
     let scope_kind = row.scope.kind();
     let scope_detail =
-        serde_json::to_string(&row.scope.detail()).context("failed to serialize scope_detail")?;
-    let effective_powers = serde_json::to_string(&row.effective_powers)
-        .context("failed to serialize permissions_current effective_powers")?;
-    let grant_source = serde_json::to_string(&row.grant_source)
-        .context("failed to serialize permissions_current grant_source")?;
-    let revocation_source = row
-        .revocation_source
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .context("failed to serialize permissions_current revocation_source")?;
-    let inheritance_path = serde_json::to_string(&row.inheritance_path)
-        .context("failed to serialize permissions_current inheritance_path")?;
-    let transfer_behavior = serde_json::to_string(&row.transfer_behavior)
-        .context("failed to serialize permissions_current transfer_behavior")?;
-    let provenance = serde_json::to_string(&row.provenance)
-        .context("failed to serialize permissions_current provenance")?;
-    let coverage = serde_json::to_string(&row.coverage)
-        .context("failed to serialize permissions_current coverage")?;
-    let chain_positions = serde_json::to_string(&row.chain_positions)
-        .context("failed to serialize permissions_current chain_positions")?;
-    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
-        .context("failed to serialize permissions_current canonicality_summary")?;
+        serialize_jsonb_field(&row.scope.detail(), "failed to serialize scope_detail")?;
+    let effective_powers = serialize_jsonb_field(
+        &row.effective_powers,
+        "failed to serialize permissions_current effective_powers",
+    )?;
+    let grant_source = serialize_jsonb_field(
+        &row.grant_source,
+        "failed to serialize permissions_current grant_source",
+    )?;
+    let revocation_source = serialize_optional_jsonb_field(
+        row.revocation_source.as_ref(),
+        "failed to serialize permissions_current revocation_source",
+    )?;
+    let inheritance_path = serialize_jsonb_field(
+        &row.inheritance_path,
+        "failed to serialize permissions_current inheritance_path",
+    )?;
+    let transfer_behavior = serialize_jsonb_field(
+        &row.transfer_behavior,
+        "failed to serialize permissions_current transfer_behavior",
+    )?;
+    let provenance = serialize_jsonb_field(
+        &row.provenance,
+        "failed to serialize permissions_current provenance",
+    )?;
+    let coverage = serialize_jsonb_field(
+        &row.coverage,
+        "failed to serialize permissions_current coverage",
+    )?;
+    let chain_positions = serialize_jsonb_field(
+        &row.chain_positions,
+        "failed to serialize permissions_current chain_positions",
+    )?;
+    let canonicality_summary = serialize_jsonb_field(
+        &row.canonicality_summary,
+        "failed to serialize permissions_current canonicality_summary",
+    )?;
 
     let snapshot = sqlx::query(
         r#"
@@ -845,22 +871,10 @@ fn push_permissions_current_keyset_cursor<'a>(
     }
 }
 
-fn permissions_current_page_limit(page_size: u64) -> Result<i64> {
-    if page_size == 0 {
-        bail!("permissions_current page_size must be positive");
-    }
-    let limit = page_size
-        .checked_add(1)
-        .filter(|limit| *limit <= i64::MAX as u64)
-        .context("permissions_current page_size is too large")?;
-    Ok(limit as i64)
-}
-
 fn json_array(value: Value, field: &str) -> Result<Vec<Value>> {
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => bail!("permissions_current summary field {field} must be a JSON array"),
-    }
+    take_json_array(value, || {
+        format!("permissions_current summary field {field} must be a JSON array")
+    })
 }
 
 fn json_text_field(value: &Value, field: &str) -> Result<String> {

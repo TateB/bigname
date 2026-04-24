@@ -557,9 +557,7 @@ fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::
 }
 
 fn projected_resolution_topology(row: &bigname_storage::NameCurrentRow) -> Result<Value> {
-    row.declared_summary
-        .get("topology")
-        .cloned()
+    bigname_storage::projected_resolution_topology(&row.declared_summary)
         .context("rebuilt name_current row must project supported topology")
 }
 
@@ -567,20 +565,7 @@ fn projected_resolution_boundaries(
     row: &bigname_storage::NameCurrentRow,
 ) -> Result<(Value, Value)> {
     let topology = projected_resolution_topology(row)?;
-    let version_boundaries = topology
-        .get("version_boundaries")
-        .and_then(Value::as_object)
-        .context("projected topology must include version_boundaries")?;
-    Ok((
-        version_boundaries
-            .get("topology_version_boundary")
-            .cloned()
-            .context("projected topology must include topology_version_boundary")?,
-        version_boundaries
-            .get("record_version_boundary")
-            .cloned()
-            .context("projected topology must include record_version_boundary")?,
-    ))
+    bigname_storage::projected_resolution_boundaries_from_topology(&topology)
 }
 
 async fn seed_supported_alias_only_rebuild_inputs(
@@ -1245,6 +1230,251 @@ fn resolution_unsupported_verified_state(records: &[&str]) -> Value {
             })
             .collect::<Vec<_>>(),
     })
+}
+
+fn ensv2_sepolia_resolution_boundary(logical_name_id: &str, resource_id: Uuid) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": null,
+        "event_kind": null,
+        "chain_position": {
+            "chain_id": "ethereum-sepolia",
+            "block_number": 206,
+            "block_hash": "0xensv2-regen",
+            "timestamp": "2024-05-31T19:03:26Z",
+        },
+    })
+}
+
+fn ensv2_sepolia_resolution_topology(
+    logical_name_id: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    boundary: &Value,
+) -> Value {
+    json!({
+        "registry_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "ens",
+            "normalized_name": normalized_name,
+            "canonical_display_name": canonical_display_name,
+            "namehash": format!("namehash:{normalized_name}"),
+            "resource_id": resource_id.to_string(),
+            "binding_kind": "declared_registry_path",
+        }],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "ens",
+            "normalized_name": normalized_name,
+            "canonical_display_name": canonical_display_name,
+            "resource_id": resource_id.to_string(),
+            "chain_id": "ethereum-sepolia",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged",
+        }],
+        "wildcard": {
+            "source": null,
+            "matched_labels": [],
+        },
+        "alias": {
+            "final_target": null,
+            "hops": [],
+        },
+        "version_boundaries": {
+            "topology_version_boundary": boundary.clone(),
+            "record_version_boundary": boundary.clone(),
+        },
+        "transport": {
+            "source_chain_id": null,
+            "target_chain_id": null,
+            "contract_address": null,
+            "latest_event_kind": null,
+        },
+    })
+}
+
+fn ensv2_sepolia_resolution_row(
+    logical_name_id: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    surface_binding_id: Uuid,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    include_projected_topology: bool,
+) -> bigname_storage::NameCurrentRow {
+    let boundary = ensv2_sepolia_resolution_boundary(logical_name_id, resource_id);
+    let mut declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "ens_v2_registry",
+            "latest_event_kind": "RegistrationRenewed",
+        },
+        "resolver": {
+            "chain_id": "ethereum-sepolia",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged",
+        },
+    });
+    if include_projected_topology {
+        declared_summary["topology"] = ensv2_sepolia_resolution_topology(
+            logical_name_id,
+            normalized_name,
+            canonical_display_name,
+            resource_id,
+            &boundary,
+        );
+    }
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.canonical_display_name = canonical_display_name.to_owned();
+    row.normalized_name = normalized_name.to_owned();
+    row.namehash = format!("namehash:{normalized_name}");
+    row.declared_summary = declared_summary;
+    row.provenance = json!({
+        "normalized_event_ids": [204, 205, 206],
+        "raw_fact_refs": [{
+            "kind": "raw_log",
+            "chain_id": "ethereum-sepolia",
+            "block_number": 206,
+        }],
+        "manifest_versions": [
+            {
+                "manifest_version": 11,
+                "source_family": "ens_v2_registry_l1",
+                "chain": "ethereum-sepolia",
+                "deployment_epoch": "ens_v2_sepolia_dev",
+            },
+            {
+                "manifest_version": 11,
+                "source_family": "ens_v2_registrar_l1",
+                "chain": "ethereum-sepolia",
+                "deployment_epoch": "ens_v2_sepolia_dev",
+            }
+        ],
+        "execution_trace_id": null,
+        "derivation_kind": "name_current_rebuild",
+    });
+    row.coverage = json!({
+        "status": "full",
+        "exhaustiveness": "authoritative",
+        "source_classes_considered": ["ens_v2_registry_l1", "ens_v2_registrar_l1"],
+        "unsupported_reason": null,
+        "enumeration_basis": "exact_name_profile",
+    });
+    row.chain_positions = json!({
+        "ethereum-sepolia": {
+            "chain_id": "ethereum-sepolia",
+            "block_number": 206,
+            "block_hash": "0xensv2-regen",
+            "timestamp": "2024-05-31T19:03:26Z",
+        }
+    });
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "ethereum-sepolia": "finalized",
+        }
+    });
+    row.manifest_version = 11;
+    row.last_recomputed_at = timestamp(1_717_171_906);
+    row
+}
+
+fn ensv2_sepolia_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: ensv2_sepolia_resolution_boundary(logical_name_id, resource_id),
+        enumeration_basis: json!({
+            "observed_selectors": true,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+        selectors: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true,
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "cacheable": true,
+            }
+        ]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: Some(json!({
+            "normalized_event_id": 1206,
+            "event_kind": "RecordChanged",
+            "chain_position": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 206,
+                "block_hash": "0xensv2-regen",
+                "timestamp": "2024-05-31T19:03:26Z",
+            }
+        })),
+        entries: json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000abc",
+                }
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "status": "success",
+                "value": {
+                    "value": "@alice-sepolia",
+                }
+            }
+        ]),
+        provenance: json!({
+            "normalized_event_ids": [1206],
+            "derivation_kind": "record_inventory_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ens_v2_resolver_l1"],
+            "unsupported_reason": null,
+            "enumeration_basis": "declared_record_inventory",
+        }),
+        chain_positions: json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 206,
+                "block_hash": "0xensv2-regen",
+                "timestamp": "2024-05-31T19:03:26Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-sepolia": "finalized",
+            }
+        }),
+        manifest_version: 11,
+        last_recomputed_at: timestamp(1_717_171_907),
+    }
 }
 
 async fn seed_resolution_route_name_current(
@@ -2099,6 +2329,18 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     );
     name_row.declared_summary["topology"] = topology.clone();
     database.insert_name_current_row(name_row.clone()).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context(
+        "worker-produced basenames record_inventory_current row must exist after transport seed",
+    )?;
 
     let requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
@@ -2353,13 +2595,51 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
     database
         .rebuild_record_inventory_current(resource_id)
         .await?;
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames declared resolution request failed before transport assertions")?;
+    assert_eq!(declared_response.status(), StatusCode::OK);
+
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("record_inventory"))
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
     let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("basenames supported resolution test requires rebuilt name_current row")?;
+    append_basenames_execution_manifest_version(&mut name_row);
     insert_basenames_supported_ethereum_position(&mut name_row);
+    let topology = basenames_supported_topology(
+        logical_name_id,
+        resource_id,
+        &worker_row.record_version_boundary,
+    );
+    name_row.declared_summary["topology"] = topology.clone();
     database.insert_name_current_row(name_row.clone()).await?;
-    let topology = projected_resolution_topology(&name_row)?;
-    let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+    let (topology_boundary, record_boundary) =
+        bigname_storage::projected_resolution_boundaries_from_topology(&topology)?;
     let worker_row = bigname_storage::load_record_inventory_current(
         &database.pool,
         resource_id,
@@ -3017,19 +3297,24 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         .and_then(|value| value.get("record_version_boundary"))
         .cloned()
         .context("basenames declared resolution must expose record_inventory boundary")?;
-    let worker_row = bigname_storage::load_record_inventory_current(
-        &database.pool,
-        resource_id,
-        &record_inventory_boundary,
-    )
-    .await?
-    .context("worker-produced basenames record_inventory_current row must exist")?;
     let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("basenames missing-topology test requires name_current row")?;
     append_basenames_execution_manifest_version(&mut name_row);
     insert_basenames_supported_ethereum_position(&mut name_row);
     database.insert_name_current_row(name_row.clone()).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context(
+        "worker-produced basenames record_inventory_current row must exist after transport seed",
+    )?;
 
     let requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
@@ -3303,6 +3588,9 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
         }
     });
     database.insert_name_current_row(name_row).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -3366,6 +3654,239 @@ async fn get_resolution_keeps_basenames_deferred_path_classes_selector_local() -
         assert_basenames_deferred_verified_path_case_stays_selector_local(case).await?;
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let cases = [
+        ("alice.eth", "Alice.eth", true, 0x8d10_u128),
+        ("bob.alice.eth", "Bob.alice.eth", false, 0x8d20_u128),
+    ];
+
+    for (normalized_name, canonical_display_name, include_projected_topology, base_id) in cases {
+        let logical_name_id = format!("ens:{normalized_name}");
+        let resource_id = Uuid::from_u128(base_id);
+        let token_lineage_id = Uuid::from_u128(base_id + 1);
+        let surface_binding_id = Uuid::from_u128(base_id + 2);
+        let execution_trace_id =
+            Uuid::from_u128(0x0e7ec7ace00000000000000000008d10 + base_id);
+        let row = ensv2_sepolia_resolution_row(
+            &logical_name_id,
+            normalized_name,
+            canonical_display_name,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            include_projected_topology,
+        );
+        let sepolia_boundary = ensv2_sepolia_resolution_boundary(&logical_name_id, resource_id);
+        let requested_chain_positions =
+            requested_chain_positions_from_name_current(&row.chain_positions);
+        let chain_positions_query =
+            encode_query_value(&serde_json::to_string(&row.chain_positions)?);
+        let request_key = bigname_storage::normalized_resolution_request_key_from_record_keys(
+            "ens",
+            normalized_name,
+            &["addr:60".to_owned()],
+        );
+        let persisted_verified_queries = json!([
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]);
+
+        database
+            .seed_name_current_binding_migrated(
+                &logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+        database.insert_name_current_row(row.clone()).await?;
+
+        let mut trace = resolution_execution_trace(
+            execution_trace_id,
+            &request_key,
+            &["addr:60"],
+            persisted_verified_queries.clone(),
+        );
+        trace.chain_context = json!({
+            "requested_positions": requested_chain_positions.clone(),
+        });
+        trace.manifest_context = json!({
+            "manifest_versions": row.provenance["manifest_versions"].clone(),
+        });
+        trace.contracts_called = json!([{
+            "chain_id": "ethereum-sepolia",
+            "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+            "selector": "0x9061b923",
+        }]);
+        let mut outcome = resolution_execution_outcome_with_boundaries(
+            execution_trace_id,
+            &request_key,
+            persisted_verified_queries,
+            sepolia_boundary.clone(),
+            sepolia_boundary,
+        );
+        outcome.cache_key.requested_chain_positions = requested_chain_positions;
+        outcome.cache_key.manifest_versions = row.provenance["manifest_versions"].clone();
+        upsert_execution_trace(&database.pool, &trace).await?;
+        upsert_execution_outcome(&database.pool, &outcome).await?;
+
+        let verified_response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/ens/{normalized_name}?mode=verified&records=addr:60&chain_positions={chain_positions_query}"
+                    ))
+                    .body(Body::empty())
+                    .expect("ENSv2 Sepolia verified request must build"),
+            )
+            .await
+            .with_context(|| {
+                format!("ENSv2 Sepolia verified request failed for {normalized_name}")
+            })?;
+        let explain_response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/explain/resolutions/ens/{normalized_name}/execution?records=addr:60"
+                    ))
+                    .body(Body::empty())
+                    .expect("ENSv2 Sepolia explain request must build"),
+            )
+            .await
+            .with_context(|| {
+                format!("ENSv2 Sepolia explain request failed for {normalized_name}")
+            })?;
+
+        assert_eq!(
+            verified_response.status(),
+            StatusCode::OK,
+            "{normalized_name}"
+        );
+        assert_eq!(
+            explain_response.status(),
+            StatusCode::NOT_FOUND,
+            "{normalized_name}"
+        );
+
+        let verified_payload: ResolutionResponse = read_json(verified_response).await?;
+        let explain_payload: ErrorResponse = read_json(explain_response).await?;
+        assert_eq!(
+            verified_payload.verified_state,
+            Some(resolution_unsupported_verified_state(&["addr:60"])),
+            "{normalized_name}"
+        );
+        assert_eq!(
+            verified_payload.provenance.get("execution_trace_id"),
+            Some(&Value::Null),
+            "{normalized_name}"
+        );
+        assert_eq!(explain_payload.error.code, "not_found", "{normalized_name}");
+        assert_eq!(
+            explain_payload.error.message,
+            format!(
+                "persisted resolution execution explain was not found for name {normalized_name} in namespace ens"
+            ),
+            "{normalized_name}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_ensv2_sepolia_dev_declared_record_sections_stay_unsupported_even_with_projection_row()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let normalized_name = "alice.eth";
+    let canonical_display_name = "Alice.eth";
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x8d40);
+    let token_lineage_id = Uuid::from_u128(0x8d41);
+    let surface_binding_id = Uuid::from_u128(0x8d42);
+    let row = ensv2_sepolia_resolution_row(
+        logical_name_id,
+        normalized_name,
+        canonical_display_name,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+        true,
+    );
+    let chain_positions_query = encode_query_value(&serde_json::to_string(&row.chain_positions)?);
+    let expected_topology = row
+        .declared_summary
+        .get("topology")
+        .cloned()
+        .context("ENSv2 Sepolia fixture must include projected topology")?;
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(ensv2_sepolia_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/resolutions/ens/{normalized_name}?mode=declared&records=addr:60,text:com.twitter&chain_positions={chain_positions_query}"
+                ))
+                .body(Body::empty())
+                .expect("ENSv2 Sepolia declared request must build"),
+        )
+        .await
+        .context("ENSv2 Sepolia declared resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(declared_state.get("topology"), Some(&expected_topology));
+    assert_eq!(
+        declared_state.get("record_inventory"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record inventory is not yet projected",
+        }))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record cache is not yet projected",
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -3445,7 +3966,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3454,7 +3975,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3468,11 +3989,6 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let both_payload: ResolutionResponse = read_json(both_response).await?;
     let expected_verified_state = json!({
         "verified_queries": [
-            {
-                "record_key": "avatar",
-                "status": "unsupported",
-                "unsupported_reason": "verified resolution entrypoint is not yet supported"
-            },
             {
                 "record_key": "text:com.twitter",
                 "status": "success",
@@ -3511,6 +4027,304 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     );
     assert!(both_payload.declared_state.is_some());
     assert_eq!(both_payload.verified_state, Some(expected_verified_state));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits_supported_selector()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    for mode in ["verified", "both"] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("{mode} partial verified resolution request failed"))?;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{mode}");
+
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "stale", "{mode}");
+        assert_eq!(
+            payload.error.message,
+            "persisted verified resolution output is not available for the selected snapshot",
+            "{mode}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_verified_state_reads_avatar_only_persisted_answer() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002b);
+    let request_key = resolution_execution_request_key(&["avatar"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-avatar-only.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["avatar"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let expected_verified_state = json!({
+        "verified_queries": [
+            {
+                "record_key": "avatar",
+                "status": "success",
+                "value": {
+                    "value": "https://cdn.example.test/alice-avatar-only.png"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]
+    });
+
+    for mode in ["verified", "both"] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=avatar"
+                    ))
+                    .body(Body::empty())
+                    .expect("avatar-only request must build"),
+            )
+            .await
+            .with_context(|| format!("{mode} avatar-only resolution request failed"))?;
+
+        assert_eq!(response.status(), StatusCode::OK, "{mode}");
+
+        let payload: ResolutionResponse = read_json(response).await?;
+        assert_eq!(
+            payload.provenance.get("execution_trace_id"),
+            Some(&Value::String(execution_trace_id.to_string())),
+            "{mode}"
+        );
+        assert_eq!(
+            payload.verified_state,
+            Some(expected_verified_state.clone()),
+            "{mode}"
+        );
+        assert_eq!(
+            payload.declared_state.is_some(),
+            mode == "both",
+            "{mode} declared_state"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_selected_snapshot()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002c);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    for records in ["avatar", "avatar,addr:60"] {
+        for mode in ["verified", "both"] {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resolutions/ens/alice.eth?mode={mode}&records={records}"
+                        ))
+                        .body(Body::empty())
+                        .expect("missing-avatar request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!("{mode} missing-avatar resolution request failed for {records}")
+                })?;
+
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{mode} {records}");
+
+            let payload: ErrorResponse = read_json(response).await?;
+            assert_eq!(payload.error.code, "stale", "{mode} {records}");
+            assert_eq!(
+                payload.error.message,
+                "persisted verified resolution output is not available for the selected snapshot",
+                "{mode} {records}"
+            );
+        }
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -4316,6 +5130,83 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
             ]
         }))
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_verified_modes_keep_missing_supported_output_stale_for_selected_snapshot()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    let chain_positions_query = encode_query_value(&serde_json::to_string(&row.chain_positions)?);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let selector_cases = vec![
+        ("default selector", String::new()),
+        (
+            "explicit chain_positions",
+            format!("&chain_positions={chain_positions_query}"),
+        ),
+        ("explicit at", "&at=2026-04-17T00%3A00%3A03Z".to_owned()),
+        ("consistency floor", "&consistency=finalized".to_owned()),
+    ];
+    for mode in ["verified", "both"] {
+        for (label, selector_query) in &selector_cases {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60{selector_query}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!("{mode} resolution request with {label} failed")
+                })?;
+
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{mode} {label}");
+
+            let payload: ErrorResponse = read_json(response).await?;
+            assert_eq!(payload.error.code, "stale", "{mode} {label}");
+            assert_eq!(
+                payload.error.message,
+                "persisted verified resolution output is not available for the selected snapshot",
+                "{mode} {label}"
+            );
+        }
+    }
 
     database.cleanup().await?;
     Ok(())

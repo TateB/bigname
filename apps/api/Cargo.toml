@@ -21,4 +21,5 @@ bigname-manifests.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]
+bigname-test-support.workspace = true
 tower = { version = "0.5.2", features = ["util"] }

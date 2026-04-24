@@ -548,98 +548,29 @@ fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        str::FromStr,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
     use anyhow::Result;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::json;
-    use sqlx::{
-        PgPool,
-        postgres::{PgConnectOptions, PgPoolOptions},
-    };
 
     use super::*;
     use crate::{
         CanonicalityState, ChainPositions, NameSurface, Resource, SnapshotProjectionRead,
-        SnapshotSelectionErrorKind, SurfaceBinding, TokenLineage, default_database_url,
-        upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+        SnapshotSelectionErrorKind, SurfaceBinding, TokenLineage, upsert_name_surfaces,
+        upsert_resources, upsert_surface_bindings, upsert_token_lineages,
     };
 
-    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDatabase {
-        admin_pool: PgPool,
-        pool: PgPool,
-        database_name: String,
-    }
-
-    impl TestDatabase {
-        async fn new() -> Result<Self> {
-            let database_url = std::env::var("BIGNAME_DATABASE_URL")
-                .or_else(|_| std::env::var("DATABASE_URL"))
-                .unwrap_or_else(|_| default_database_url().to_owned());
-            let base_options = PgConnectOptions::from_str(&database_url)
-                .context("failed to parse database URL for name_current tests")?;
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before unix epoch")?
-                .as_nanos();
-            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let database_name = format!(
-                "bigname_storage_name_current_test_{}_{}_{}",
-                std::process::id(),
-                unique,
-                sequence
-            );
-
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(base_options.clone().database("postgres"))
-                .await
-                .context("failed to connect admin pool for name_current tests")?;
-
-            sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
-                .execute(&admin_pool)
-                .await
-                .with_context(|| format!("failed to create test database {database_name}"))?;
-
-            let pool = PgPoolOptions::new()
-                .max_connections(5)
-                .connect_with(base_options.database(&database_name))
-                .await
-                .context("failed to connect name_current test pool")?;
-
-            crate::MIGRATOR
-                .run(&pool)
-                .await
-                .context("failed to apply migrations for name_current tests")?;
-
-            Ok(Self {
-                admin_pool,
-                pool,
-                database_name,
-            })
-        }
-
-        fn pool(&self) -> &PgPool {
-            &self.pool
-        }
-
-        async fn cleanup(self) -> Result<()> {
-            self.pool.close().await;
-            sqlx::query(&format!(
-                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                self.database_name
-            ))
-            .execute(&self.admin_pool)
-            .await
-            .with_context(|| format!("failed to drop test database {}", self.database_name))?;
-            self.admin_pool.close().await;
-            Ok(())
-        }
+    async fn test_database() -> Result<TestDatabase> {
+        TestDatabase::create_migrated(
+            TestDatabaseConfig::new("bigname_storage_name_current_test")
+                .admin_database("postgres")
+                .pool_max_connections(5)
+                .parse_context("failed to parse database URL for name_current tests")
+                .admin_connect_context("failed to connect admin pool for name_current tests")
+                .pool_connect_context("failed to connect name_current test pool"),
+            &crate::MIGRATOR,
+            "failed to apply migrations for name_current tests",
+        )
+        .await
     }
 
     fn timestamp(seconds: i64) -> OffsetDateTime {
@@ -823,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_upserts_and_loads_exact_name_projection() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let logical_name_id = "ens:alice.eth";
         let token_lineage_id = Uuid::from_u128(0x1100);
         let resource_id = Uuid::from_u128(0x2200);
@@ -857,7 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_snapshot_read_fails_stale_on_position_mismatch() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let logical_name_id = "ens:alice.eth";
         let token_lineage_id = Uuid::from_u128(0x1110);
         let resource_id = Uuid::from_u128(0x2220);
@@ -906,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_batch_loads_found_rows_by_logical_name_id() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let alice_logical_name_id = "ens:alice.eth";
         let bob_logical_name_id = "ens:bob.eth";
 
@@ -976,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_excludes_rows_with_orphaned_backing_resources() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let logical_name_id = "ens:alice.eth";
         let token_lineage_id = Uuid::from_u128(0xb100);
         let resource_id = Uuid::from_u128(0xb200);
@@ -1027,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_upsert_replaces_existing_projection_row() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let logical_name_id = "ens:alice.eth";
         let first_token_lineage_id = Uuid::from_u128(0x4100);
         let first_resource_id = Uuid::from_u128(0x4200);
@@ -1085,7 +1016,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_delete_and_clear_support_rebuild_workflows() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let first_logical_name_id = "ens:alice.eth";
         let second_logical_name_id = "ens:bob.eth";
 
@@ -1154,7 +1085,7 @@ mod tests {
 
     #[tokio::test]
     async fn name_current_rejects_partial_binding_refs() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let logical_name_id = "ens:alice.eth";
 
         upsert_name_surfaces(

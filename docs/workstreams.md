@@ -51,6 +51,7 @@ Initial ownership should map to directories:
 - `crates/manifests`: Manifests and Discovery
 - `crates/adapters`: Intake and Adapters
 - `crates/execution`: Verified Execution
+- `crates/test-support`: Conformance and Fixtures (dev-only crate, if added)
 - `tests/conformance`: Conformance and Fixtures
 
 `crates/domain` is the highest-conflict area. Keep it narrow and change it deliberately.

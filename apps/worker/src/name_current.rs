@@ -308,6 +308,8 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         pool,
         name,
         current_binding.as_ref(),
+        &events,
+        &history_heads,
         wildcard_source_context.as_ref(),
         basenames_execution_manifest.as_ref(),
     )
@@ -525,6 +527,8 @@ async fn load_supplemental_chain_observations(
     pool: &PgPool,
     name: &NameSurfaceSeed,
     current_binding: Option<&CurrentBindingContext>,
+    events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
     wildcard_source_context: Option<&WildcardSourceContext>,
     basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
 ) -> Result<Vec<SupplementalChainObservation>> {
@@ -538,10 +542,12 @@ async fn load_supplemental_chain_observations(
         }
     }
 
-    if let Some(observation) = load_basenames_execution_target_checkpoint_observation(
+    if let Some(observation) = load_basenames_execution_target_lineage_observation(
         pool,
         name,
         current_binding,
+        events,
+        history_heads,
         basenames_execution_manifest,
     )
     .await?
@@ -576,10 +582,12 @@ fn supplemental_chain_observation_from_event(
     }))
 }
 
-async fn load_basenames_execution_target_checkpoint_observation(
+async fn load_basenames_execution_target_lineage_observation(
     pool: &PgPool,
     name: &NameSurfaceSeed,
     current_binding: Option<&CurrentBindingContext>,
+    events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
     basenames_execution_manifest: Option<&BasenamesExecutionManifestVersion>,
 ) -> Result<Option<SupplementalChainObservation>> {
     if name.namespace != BASENAMES_NAMESPACE || basenames_execution_manifest.is_none() {
@@ -591,63 +599,154 @@ async fn load_basenames_execution_target_checkpoint_observation(
         return Ok(None);
     }
 
+    let Some(base_boundary) = latest_chain_position_for_chain(
+        name,
+        current_binding,
+        events,
+        history_heads,
+        BASE_MAINNET_CHAIN_ID,
+    ) else {
+        return Ok(None);
+    };
+
     let row = sqlx::query(&format!(
         r#"
-        WITH selected_checkpoint AS (
-            SELECT
-                chain_id,
-                COALESCE(finalized_block_hash, safe_block_hash, canonical_block_hash) AS block_hash,
-                COALESCE(finalized_block_number, safe_block_number, canonical_block_number) AS block_number
-            FROM chain_checkpoints
-            WHERE chain_id = $1
-        )
         SELECT
-            checkpoint.chain_id,
-            checkpoint.block_hash,
-            checkpoint.block_number,
-            rb.block_timestamp,
-            rb.canonicality_state::TEXT AS canonicality_state
-        FROM selected_checkpoint checkpoint
-        JOIN raw_blocks rb
-          ON rb.chain_id = checkpoint.chain_id
-         AND rb.block_hash = checkpoint.block_hash
-         AND rb.block_number = checkpoint.block_number
-        WHERE checkpoint.block_hash IS NOT NULL
-          AND checkpoint.block_number IS NOT NULL
-          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_timestamp <= $2
+          AND canonicality_state {CANONICAL_STATE_FILTER}
+        ORDER BY block_timestamp DESC, block_number DESC, block_hash DESC
         LIMIT 1
         "#
     ))
     .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(base_boundary.timestamp)
     .fetch_optional(pool)
     .await
-    .context("failed to load Basenames execution target checkpoint for name_current")?;
+    .context("failed to load Basenames execution target lineage position for name_current")?;
 
     row.map(|row| {
         let chain_id = row
             .try_get::<String, _>("chain_id")
-            .context("missing Basenames checkpoint chain_id")?;
+            .context("missing Basenames transport chain_id")?;
         Ok(SupplementalChainObservation {
             candidate: ChainPositionCandidate {
                 slot: chain_slot(&chain_id),
                 chain_id,
                 block_number: row
                     .try_get("block_number")
-                    .context("missing Basenames checkpoint block_number")?,
+                    .context("missing Basenames transport block_number")?,
                 block_hash: row
                     .try_get("block_hash")
-                    .context("missing Basenames checkpoint block_hash")?,
+                    .context("missing Basenames transport block_hash")?,
                 timestamp: row
                     .try_get("block_timestamp")
-                    .context("missing Basenames checkpoint block_timestamp")?,
+                    .context("missing Basenames transport block_timestamp")?,
             },
             canonicality_state: parse_canonicality_state(
                 &row.try_get::<String, _>("canonicality_state")
-                    .context("missing Basenames checkpoint canonicality_state")?,
+                    .context("missing Basenames transport canonicality_state")?,
             )?,
         })
     })
     .transpose()
+}
+
+fn latest_chain_position_for_chain(
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+    events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
+    chain_id: &str,
+) -> Option<ChainPositionCandidate> {
+    let mut latest_positions = BTreeMap::<String, ChainPositionCandidate>::new();
+
+    if name.chain_id == chain_id
+        && let Some(timestamp) = name.block_timestamp
+    {
+        push_chain_position(
+            &mut latest_positions,
+            ChainPositionCandidate {
+                slot: chain_slot(&name.chain_id),
+                chain_id: name.chain_id.clone(),
+                block_number: name.block_number,
+                block_hash: name.block_hash.clone(),
+                timestamp,
+            },
+        );
+    }
+
+    if let Some(binding) = current_binding
+        && binding.chain_id == chain_id
+        && let Some(timestamp) = binding.block_timestamp
+    {
+        push_chain_position(
+            &mut latest_positions,
+            ChainPositionCandidate {
+                slot: chain_slot(&binding.chain_id),
+                chain_id: binding.chain_id.clone(),
+                block_number: binding.block_number,
+                block_hash: binding.block_hash.clone(),
+                timestamp,
+            },
+        );
+    }
+
+    for event in events {
+        let (Some(event_chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
+            event.chain_id.as_ref(),
+            event.block_number,
+            event.block_hash.as_ref(),
+            event.block_timestamp,
+        ) else {
+            continue;
+        };
+        if event_chain_id != chain_id {
+            continue;
+        }
+        push_chain_position(
+            &mut latest_positions,
+            ChainPositionCandidate {
+                slot: chain_slot(event_chain_id),
+                chain_id: event_chain_id.clone(),
+                block_number,
+                block_hash: block_hash.clone(),
+                timestamp,
+            },
+        );
+    }
+
+    for event in history_heads.iter() {
+        let (Some(event_chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
+            event.chain_id.as_ref(),
+            event.block_number,
+            event.block_hash.as_ref(),
+            event.block_timestamp,
+        ) else {
+            continue;
+        };
+        if event_chain_id != chain_id {
+            continue;
+        }
+        push_chain_position(
+            &mut latest_positions,
+            ChainPositionCandidate {
+                slot: chain_slot(event_chain_id),
+                chain_id: event_chain_id.clone(),
+                block_number,
+                block_hash: block_hash.clone(),
+                timestamp,
+            },
+        );
+    }
+
+    latest_positions.into_values().next()
 }
 
 fn build_supported_resolution_projection(
@@ -2349,10 +2448,10 @@ mod tests {
 
     use anyhow::{Context, Result};
     use bigname_storage::{
-        NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, TokenLineage,
-        default_database_url, load_name_current, upsert_name_current_rows, upsert_name_surfaces,
-        upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
-        upsert_token_lineages,
+        ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
+        TokenLineage, default_database_url, load_name_current, upsert_chain_lineage_blocks,
+        upsert_name_current_rows, upsert_name_surfaces, upsert_normalized_events,
+        upsert_raw_blocks, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
     };
 
     use super::*;
@@ -3810,7 +3909,7 @@ mod tests {
                 ),
                 raw_block(
                     ETHEREUM_MAINNET_CHAIN_ID,
-                    "0xbasenamesl1",
+                    "0xbasenamesl1-future",
                     21_000_100,
                     1_776_387_700,
                 ),
@@ -3820,8 +3919,26 @@ mod tests {
         insert_chain_checkpoint(
             database.pool(),
             ETHEREUM_MAINNET_CHAIN_ID,
-            "0xbasenamesl1",
+            "0xbasenamesl1-future",
             21_000_100,
+        )
+        .await?;
+        upsert_chain_lineage_blocks(
+            database.pool(),
+            &[
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1-compatible",
+                    21_000_099,
+                    1_717_172_513,
+                ),
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1-future",
+                    21_000_100,
+                    1_776_387_700,
+                ),
+            ],
         )
         .await?;
         upsert_token_lineages(
@@ -3954,7 +4071,11 @@ mod tests {
         );
         assert_eq!(
             row.chain_positions["ethereum"]["block_hash"],
-            json!("0xbasenamesl1")
+            json!("0xbasenamesl1-compatible")
+        );
+        assert_eq!(
+            row.chain_positions["ethereum"]["block_number"],
+            json!(21_000_099)
         );
         assert_eq!(
             row.chain_positions["base"]["block_hash"],
@@ -5253,6 +5374,26 @@ mod tests {
             chain_id: chain_id.to_owned(),
             block_hash: block_hash.to_owned(),
             parent_hash: None,
+            block_number,
+            block_timestamp: timestamp(unix_timestamp),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn chain_lineage_block(
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        unix_timestamp: i64,
+    ) -> ChainLineageBlock {
+        ChainLineageBlock {
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: Some(format!("0xparent{block_number:08x}")),
             block_number,
             block_timestamp: timestamp(unix_timestamp),
             logs_bloom: None,

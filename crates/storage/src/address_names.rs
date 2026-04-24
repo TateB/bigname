@@ -9,7 +9,13 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::SurfaceBindingKind;
+use crate::{
+    SurfaceBindingKind,
+    projection_helpers::{
+        checked_page_limit_i64_from_usize, checked_page_size_usize, require_json_object,
+        serialize_jsonb_field,
+    },
+};
 
 const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND surface.canonicality_state IN (
@@ -255,16 +261,16 @@ pub async fn load_address_names_current_page(
     cursor: Option<&AddressNamesCurrentCursor>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentPage> {
-    if page_size == 0 {
-        bail!("address_names_current page_size must be positive");
-    }
-    let page_size = usize::try_from(page_size)
-        .context("address_names_current page_size does not fit in usize")?;
-    let page_limit = page_size
-        .checked_add(1)
-        .context("address_names_current page_size is too large")?;
-    let page_limit =
-        i64::try_from(page_limit).context("address_names_current page_size exceeds SQL limit")?;
+    let page_size = checked_page_size_usize(
+        page_size,
+        "address_names_current page_size must be positive",
+        "address_names_current page_size does not fit in usize",
+    )?;
+    let page_limit = checked_page_limit_i64_from_usize(
+        page_size,
+        "address_names_current page_size is too large",
+        "address_names_current page_size exceeds SQL limit",
+    )?;
 
     let summary =
         load_address_names_current_summary(pool, address, namespace, relation, dedupe_by).await?;
@@ -972,14 +978,22 @@ async fn upsert_address_name_current_row(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &AddressNameCurrentRow,
 ) -> Result<AddressNameCurrentRow> {
-    let provenance = serde_json::to_string(&row.provenance)
-        .context("failed to serialize address_names_current provenance")?;
-    let coverage = serde_json::to_string(&row.coverage)
-        .context("failed to serialize address_names_current coverage")?;
-    let chain_positions = serde_json::to_string(&row.chain_positions)
-        .context("failed to serialize address_names_current chain_positions")?;
-    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
-        .context("failed to serialize address_names_current canonicality_summary")?;
+    let provenance = serialize_jsonb_field(
+        &row.provenance,
+        "failed to serialize address_names_current provenance",
+    )?;
+    let coverage = serialize_jsonb_field(
+        &row.coverage,
+        "failed to serialize address_names_current coverage",
+    )?;
+    let chain_positions = serialize_jsonb_field(
+        &row.chain_positions,
+        "failed to serialize address_names_current chain_positions",
+    )?;
+    let canonicality_summary = serialize_jsonb_field(
+        &row.canonicality_summary,
+        "failed to serialize address_names_current canonicality_summary",
+    )?;
 
     let snapshot = sqlx::query(
         r#"
@@ -1141,48 +1155,30 @@ fn validate_address_name_current_row(row: &AddressNameCurrentRow) -> Result<()> 
         );
     }
 
-    ensure_json_object(
-        &row.provenance,
-        "provenance",
-        &row.address,
-        &row.logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.coverage,
-        "coverage",
-        &row.address,
-        &row.logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.chain_positions,
-        "chain_positions",
-        &row.address,
-        &row.logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.canonicality_summary,
-        "canonicality_summary",
-        &row.address,
-        &row.logical_name_id,
-    )?;
-
-    Ok(())
-}
-
-fn ensure_json_object(
-    value: &Value,
-    field_name: &str,
-    address: &str,
-    logical_name_id: &str,
-) -> Result<()> {
-    if !value.is_object() {
-        bail!(
-            "address_names_current row {} {} field {} must be a JSON object",
-            address,
-            logical_name_id,
-            field_name
-        );
-    }
+    require_json_object(&row.provenance, || {
+        format!(
+            "address_names_current row {} {} field provenance must be a JSON object",
+            row.address, row.logical_name_id
+        )
+    })?;
+    require_json_object(&row.coverage, || {
+        format!(
+            "address_names_current row {} {} field coverage must be a JSON object",
+            row.address, row.logical_name_id
+        )
+    })?;
+    require_json_object(&row.chain_positions, || {
+        format!(
+            "address_names_current row {} {} field chain_positions must be a JSON object",
+            row.address, row.logical_name_id
+        )
+    })?;
+    require_json_object(&row.canonicality_summary, || {
+        format!(
+            "address_names_current row {} {} field canonicality_summary must be a JSON object",
+            row.address, row.logical_name_id
+        )
+    })?;
 
     Ok(())
 }

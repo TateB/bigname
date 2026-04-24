@@ -9,6 +9,10 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
+use crate::projection_helpers::{
+    POSTGRES_MAX_BIND_PARAMETERS, require_resource_json_array, require_resource_json_object,
+    serialize_jsonb_field, serialize_optional_jsonb_field,
+};
 use crate::snapshot_selection::{
     ChainPositions, SnapshotProjectionRead, SnapshotSelectionError,
     ensure_projection_chain_positions_match,
@@ -22,7 +26,6 @@ const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
 const RECORD_INVENTORY_CURRENT_UPSERT_COLUMN_COUNT: usize = 15;
 const RECORD_INVENTORY_CURRENT_UPSERT_MAX_ROWS: usize =
     (POSTGRES_MAX_BIND_PARAMETERS - 1) / RECORD_INVENTORY_CURRENT_UPSERT_COLUMN_COUNT;
@@ -269,32 +272,50 @@ fn prepare_record_inventory_current_upsert_row(
                     row.resource_id
                 )
             })?;
-    let record_version_boundary = serde_json::to_string(&row.record_version_boundary)
-        .context("failed to serialize record_inventory_current record_version_boundary")?;
-    let enumeration_basis = serde_json::to_string(&row.enumeration_basis)
-        .context("failed to serialize record_inventory_current enumeration_basis")?;
-    let selectors = serde_json::to_string(&row.selectors)
-        .context("failed to serialize record_inventory_current selectors")?;
-    let explicit_gaps = serde_json::to_string(&row.explicit_gaps)
-        .context("failed to serialize record_inventory_current explicit_gaps")?;
-    let unsupported_families = serde_json::to_string(&row.unsupported_families)
-        .context("failed to serialize record_inventory_current unsupported_families")?;
-    let last_change = row
-        .last_change
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .context("failed to serialize record_inventory_current last_change")?;
-    let entries = serde_json::to_string(&row.entries)
-        .context("failed to serialize record_inventory_current entries")?;
-    let provenance = serde_json::to_string(&row.provenance)
-        .context("failed to serialize record_inventory_current provenance")?;
-    let coverage = serde_json::to_string(&row.coverage)
-        .context("failed to serialize record_inventory_current coverage")?;
-    let chain_positions = serde_json::to_string(&row.chain_positions)
-        .context("failed to serialize record_inventory_current chain_positions")?;
-    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
-        .context("failed to serialize record_inventory_current canonicality_summary")?;
+    let record_version_boundary = serialize_jsonb_field(
+        &row.record_version_boundary,
+        "failed to serialize record_inventory_current record_version_boundary",
+    )?;
+    let enumeration_basis = serialize_jsonb_field(
+        &row.enumeration_basis,
+        "failed to serialize record_inventory_current enumeration_basis",
+    )?;
+    let selectors = serialize_jsonb_field(
+        &row.selectors,
+        "failed to serialize record_inventory_current selectors",
+    )?;
+    let explicit_gaps = serialize_jsonb_field(
+        &row.explicit_gaps,
+        "failed to serialize record_inventory_current explicit_gaps",
+    )?;
+    let unsupported_families = serialize_jsonb_field(
+        &row.unsupported_families,
+        "failed to serialize record_inventory_current unsupported_families",
+    )?;
+    let last_change = serialize_optional_jsonb_field(
+        row.last_change.as_ref(),
+        "failed to serialize record_inventory_current last_change",
+    )?;
+    let entries = serialize_jsonb_field(
+        &row.entries,
+        "failed to serialize record_inventory_current entries",
+    )?;
+    let provenance = serialize_jsonb_field(
+        &row.provenance,
+        "failed to serialize record_inventory_current provenance",
+    )?;
+    let coverage = serialize_jsonb_field(
+        &row.coverage,
+        "failed to serialize record_inventory_current coverage",
+    )?;
+    let chain_positions = serialize_jsonb_field(
+        &row.chain_positions,
+        "failed to serialize record_inventory_current chain_positions",
+    )?;
+    let canonicality_summary = serialize_jsonb_field(
+        &row.canonicality_summary,
+        "failed to serialize record_inventory_current canonicality_summary",
+    )?;
 
     Ok(RecordInventoryCurrentUpsertRow {
         input_index,
@@ -491,25 +512,25 @@ fn validate_record_inventory_current_row(row: &RecordInventoryCurrentRow) -> Res
     validate_unsupported_families(&row.unsupported_families, row.resource_id)?;
     validate_last_change(&row.last_change, row.resource_id)?;
     validate_entries(&row.entries, row.resource_id, &cacheable_selector_keys)?;
-    ensure_json_object(
+    require_resource_json_object(
         &row.provenance,
         "provenance",
         "record_inventory_current",
         row.resource_id,
     )?;
-    ensure_json_object(
+    require_resource_json_object(
         &row.coverage,
         "coverage",
         "record_inventory_current",
         row.resource_id,
     )?;
-    ensure_json_object(
+    require_resource_json_object(
         &row.chain_positions,
         "chain_positions",
         "record_inventory_current",
         row.resource_id,
     )?;
-    ensure_json_object(
+    require_resource_json_object(
         &row.canonicality_summary,
         "canonicality_summary",
         "record_inventory_current",
@@ -615,7 +636,7 @@ fn append_key_part(buffer: &mut String, value: &str) {
 }
 
 fn validate_enumeration_basis(value: &Value, resource_id: Uuid) -> Result<()> {
-    let object = ensure_json_object(
+    let object = require_resource_json_object(
         value,
         "enumeration_basis",
         "record_inventory_current",
@@ -628,7 +649,8 @@ fn validate_enumeration_basis(value: &Value, resource_id: Uuid) -> Result<()> {
 }
 
 fn validate_selector_array(value: &Value, resource_id: Uuid) -> Result<BTreeSet<String>> {
-    let items = ensure_json_array(value, "selectors", "record_inventory_current", resource_id)?;
+    let items =
+        require_resource_json_array(value, "selectors", "record_inventory_current", resource_id)?;
     let mut previous_record_key: Option<&str> = None;
     let mut cacheable_record_keys = BTreeSet::new();
 
@@ -664,7 +686,7 @@ fn validate_selector_array(value: &Value, resource_id: Uuid) -> Result<BTreeSet<
 }
 
 fn validate_explicit_gap_array(value: &Value, resource_id: Uuid) -> Result<()> {
-    let items = ensure_json_array(
+    let items = require_resource_json_array(
         value,
         "explicit_gaps",
         "record_inventory_current",
@@ -701,7 +723,7 @@ fn validate_explicit_gap_array(value: &Value, resource_id: Uuid) -> Result<()> {
 }
 
 fn validate_unsupported_families(value: &Value, resource_id: Uuid) -> Result<()> {
-    let items = ensure_json_array(
+    let items = require_resource_json_array(
         value,
         "unsupported_families",
         "record_inventory_current",
@@ -745,7 +767,7 @@ fn validate_last_change(value: &Option<Value>, resource_id: Uuid) -> Result<()> 
         return Ok(());
     };
 
-    let object = ensure_json_object(
+    let object = require_resource_json_object(
         value,
         "last_change",
         "record_inventory_current",
@@ -767,7 +789,8 @@ fn validate_entries(
     resource_id: Uuid,
     expected_record_keys: &BTreeSet<String>,
 ) -> Result<()> {
-    let items = ensure_json_array(value, "entries", "record_inventory_current", resource_id)?;
+    let items =
+        require_resource_json_array(value, "entries", "record_inventory_current", resource_id)?;
     let mut seen_record_keys = BTreeSet::new();
 
     for (index, item) in items.iter().enumerate() {
@@ -924,32 +947,6 @@ fn validate_selector_identity<'a>(
     }
 
     Ok(record_key)
-}
-
-fn ensure_json_object<'a>(
-    value: &'a Value,
-    field_name: &str,
-    table_name: &str,
-    resource_id: Uuid,
-) -> Result<&'a Map<String, Value>> {
-    value.as_object().with_context(|| {
-        format!(
-            "{table_name} row for resource_id {resource_id} field {field_name} must be a JSON object"
-        )
-    })
-}
-
-fn ensure_json_array<'a>(
-    value: &'a Value,
-    field_name: &str,
-    table_name: &str,
-    resource_id: Uuid,
-) -> Result<&'a Vec<Value>> {
-    value.as_array().with_context(|| {
-        format!(
-            "{table_name} row for resource_id {resource_id} field {field_name} must be a JSON array"
-        )
-    })
 }
 
 fn required_string_field<'a>(

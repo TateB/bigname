@@ -28,6 +28,8 @@ const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
+const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
+const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
 const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compatible";
 const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
 const RECORD_INVENTORY_CURRENT_DERIVATION_KIND: &str = "record_inventory_current_rebuild";
@@ -89,6 +91,7 @@ struct RecordSelector {
 
 #[derive(Clone, Debug)]
 struct ChainPositionCandidate {
+    slot: String,
     chain_id: String,
     block_number: i64,
     block_hash: String,
@@ -387,7 +390,7 @@ async fn build_row(
             .current_record_status(resolver_event)
             .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
     {
-        return build_pending_profile_row(resource_id, resolver_event);
+        return build_pending_profile_row(pool, resource_id, resolver_event).await;
     }
 
     let boundary_index = events.iter().rposition(|event| {
@@ -431,6 +434,9 @@ async fn build_row(
         .last()
         .map(build_last_change)
         .transpose()?;
+    let chain_position_events = collect_chain_position_events(boundary_anchor, &provenance_events);
+    let supplemental_chain_positions =
+        load_basenames_transport_chain_positions(pool, &chain_position_events).await?;
 
     Ok(Some(RecordInventoryCurrentRow {
         resource_id,
@@ -459,7 +465,10 @@ async fn build_row(
         entries: Value::Array(entries),
         provenance: build_provenance(&provenance_events)?,
         coverage: build_coverage(&provenance_events),
-        chain_positions: build_chain_positions(&provenance_events),
+        chain_positions: build_chain_positions(
+            &chain_position_events,
+            supplemental_chain_positions,
+        ),
         canonicality_summary: build_canonicality_summary(&provenance_events),
         manifest_version: provenance_events
             .iter()
@@ -582,6 +591,69 @@ fn resolver_fact_family_for_event(source_family: &str, event_kind: &str) -> Opti
     }
 }
 
+async fn load_basenames_transport_chain_positions(
+    pool: &PgPool,
+    events: &[RelevantEvent],
+) -> Result<Vec<ChainPositionCandidate>> {
+    let Some(base_boundary) = events.iter().rev().find(|event| {
+        event
+            .logical_name_id
+            .split_once(':')
+            .map(|(namespace, _)| namespace)
+            == Some(BASENAMES_NAMESPACE)
+            && event.chain_id == BASE_MAINNET_CHAIN_ID
+    }) else {
+        return Ok(Vec::new());
+    };
+
+    let Some(upper_bound) = base_boundary.block_timestamp else {
+        return Ok(Vec::new());
+    };
+
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT
+            chain_id,
+            block_number,
+            block_hash,
+            block_timestamp
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_timestamp <= $2
+          AND canonicality_state {CANONICAL_STATE_FILTER}
+        ORDER BY block_timestamp DESC, block_number DESC, block_hash DESC
+        LIMIT 1
+        "#
+    ))
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(upper_bound)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load Basenames Ethereum transport chain position")?;
+
+    row.map(|row| {
+        let chain_id = row
+            .try_get::<String, _>("chain_id")
+            .context("missing Basenames transport chain_id")?;
+        let timestamp = row
+            .try_get::<OffsetDateTime, _>("block_timestamp")
+            .context("missing Basenames transport block_timestamp")?;
+        Ok(ChainPositionCandidate {
+            slot: chain_slot(&chain_id),
+            chain_id,
+            block_number: row
+                .try_get("block_number")
+                .context("missing Basenames transport block_number")?,
+            block_hash: row
+                .try_get("block_hash")
+                .context("missing Basenames transport block_hash")?,
+            timestamp: format_timestamp(timestamp),
+        })
+    })
+    .transpose()
+    .map(|candidate| candidate.into_iter().collect())
+}
+
 fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
     Ok(RelevantEvent {
         normalized_event_id: row.try_get("normalized_event_id")?,
@@ -614,10 +686,15 @@ fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
     })
 }
 
-fn build_pending_profile_row(
+async fn build_pending_profile_row(
+    pool: &PgPool,
     resource_id: Uuid,
     resolver_event: &RelevantEvent,
 ) -> Result<Option<RecordInventoryCurrentRow>> {
+    let supplemental_chain_positions =
+        load_basenames_transport_chain_positions(pool, std::slice::from_ref(resolver_event))
+            .await?;
+
     Ok(Some(RecordInventoryCurrentRow {
         resource_id,
         record_version_boundary: build_record_version_boundary(resolver_event, false)?,
@@ -646,13 +723,30 @@ fn build_pending_profile_row(
             "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
         }),
-        chain_positions: build_chain_positions(std::slice::from_ref(resolver_event)),
+        chain_positions: build_chain_positions(
+            std::slice::from_ref(resolver_event),
+            supplemental_chain_positions,
+        ),
         canonicality_summary: build_canonicality_summary(std::slice::from_ref(resolver_event)),
         manifest_version: resolver_event.manifest_version,
         last_recomputed_at: resolver_event
             .block_timestamp
             .unwrap_or(OffsetDateTime::UNIX_EPOCH),
     }))
+}
+
+fn collect_chain_position_events(
+    boundary_anchor: &RelevantEvent,
+    provenance_events: &[RelevantEvent],
+) -> Vec<RelevantEvent> {
+    let mut events = provenance_events.to_vec();
+    if !events
+        .iter()
+        .any(|event| event.normalized_event_id == boundary_anchor.normalized_event_id)
+    {
+        events.push(boundary_anchor.clone());
+    }
+    events
 }
 
 fn build_record_version_boundary(
@@ -898,7 +992,10 @@ fn build_coverage(events: &[RelevantEvent]) -> Value {
     })
 }
 
-fn build_chain_positions(events: &[RelevantEvent]) -> Value {
+fn build_chain_positions(
+    events: &[RelevantEvent],
+    supplemental_candidates: Vec<ChainPositionCandidate>,
+) -> Value {
     let mut chain_positions = BTreeMap::<String, ChainPositionCandidate>::new();
 
     for event in events {
@@ -906,29 +1003,26 @@ fn build_chain_positions(events: &[RelevantEvent]) -> Value {
             continue;
         };
         let candidate = ChainPositionCandidate {
+            slot: chain_slot(&event.chain_id),
             chain_id: event.chain_id.clone(),
             block_number: event.block_number,
             block_hash: event.block_hash.clone(),
             timestamp: format_timestamp(timestamp),
         };
 
-        match chain_positions.get(&candidate.chain_id) {
-            Some(existing)
-                if existing.block_number > candidate.block_number
-                    || (existing.block_number == candidate.block_number
-                        && existing.block_hash >= candidate.block_hash) => {}
-            _ => {
-                chain_positions.insert(candidate.chain_id.clone(), candidate);
-            }
-        }
+        push_chain_position_candidate(&mut chain_positions, candidate);
+    }
+
+    for candidate in supplemental_candidates {
+        push_chain_position_candidate(&mut chain_positions, candidate);
     }
 
     json!(
         chain_positions
             .into_iter()
-            .map(|(chain_id, candidate)| {
+            .map(|(slot, candidate)| {
                 (
-                    chain_id,
+                    slot,
                     json!({
                         "chain_id": candidate.chain_id,
                         "block_number": candidate.block_number,
@@ -939,6 +1033,29 @@ fn build_chain_positions(events: &[RelevantEvent]) -> Value {
             })
             .collect::<serde_json::Map<String, Value>>()
     )
+}
+
+fn push_chain_position_candidate(
+    chain_positions: &mut BTreeMap<String, ChainPositionCandidate>,
+    candidate: ChainPositionCandidate,
+) {
+    match chain_positions.get(&candidate.slot) {
+        Some(existing)
+            if existing.block_number > candidate.block_number
+                || (existing.block_number == candidate.block_number
+                    && existing.block_hash >= candidate.block_hash) => {}
+        _ => {
+            chain_positions.insert(candidate.slot.clone(), candidate);
+        }
+    }
+}
+
+fn chain_slot(chain_id: &str) -> String {
+    match chain_id {
+        ETHEREUM_MAINNET_CHAIN_ID => "ethereum".to_owned(),
+        BASE_MAINNET_CHAIN_ID => "base".to_owned(),
+        _ => chain_id.to_owned(),
+    }
 }
 
 fn build_canonicality_summary(events: &[RelevantEvent]) -> Value {
@@ -1037,9 +1154,10 @@ mod tests {
 
     use anyhow::Result;
     use bigname_storage::{
-        NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource, default_database_url,
-        load_record_inventory_current, upsert_normalized_events, upsert_raw_blocks,
-        upsert_raw_code_hashes, upsert_raw_logs, upsert_resources,
+        ChainLineageBlock, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource,
+        default_database_url, load_record_inventory_current, upsert_chain_lineage_blocks,
+        upsert_normalized_events, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+        upsert_resources,
     };
 
     use super::*;
@@ -1675,6 +1793,17 @@ mod tests {
             )
         );
         assert_eq!(
+            row.chain_positions,
+            json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 1033,
+                    "block_hash": "0xrec1033",
+                    "timestamp": "2026-04-14T20:53:53Z",
+                }
+            })
+        );
+        assert_eq!(
             row.last_change,
             Some(json!({
                 "normalized_event_id": 4,
@@ -1824,6 +1953,17 @@ mod tests {
 
         assert_eq!(row.selectors[0]["record_key"], json!("addr:60"));
         assert_eq!(row.entries[0]["record_key"], json!("addr:60"));
+        assert_eq!(
+            row.chain_positions,
+            json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 1051,
+                    "block_hash": "0xrec1051",
+                    "timestamp": "2026-04-14T20:54:11Z",
+                }
+            })
+        );
 
         database.cleanup().await
     }
@@ -1977,12 +2117,145 @@ mod tests {
         assert_eq!(
             row.chain_positions,
             json!({
-                "base-mainnet": {
+                "base": {
                     "chain_id": "base-mainnet",
                     "block_number": 1052,
                     "block_hash": "0xbase-rec1052",
                     "timestamp": "2026-04-14T20:54:12Z",
                 }
+            })
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x980a);
+        let resolver_contract_instance_id = Uuid::from_u128(0x980b);
+        let resolver_address = "0x00000000000000000000000000000000000000dd";
+
+        insert_basenames_resolver_profile_seed(
+            database.pool(),
+            resolver_contract_instance_id,
+            resolver_address,
+        )
+        .await?;
+        seed_basenames_resources(database.pool(), &[resource_id]).await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1055", 1055, 1_776_200_055),
+                raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1057", 1057, 1_776_200_057),
+            ],
+        )
+        .await?;
+        seed_raw_logs(
+            database.pool(),
+            &[
+                raw_log(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-rec1055",
+                    1055,
+                    "0xbase-tx1055",
+                    0,
+                    resolver_address,
+                ),
+                raw_log(
+                    BASE_MAINNET_CHAIN_ID,
+                    "0xbase-rec1057",
+                    1057,
+                    "0xbase-tx1057",
+                    0,
+                    resolver_address,
+                ),
+            ],
+        )
+        .await?;
+        upsert_chain_lineage_blocks(
+            database.pool(),
+            &[
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xeth-before-basenames-record",
+                    21_000_099,
+                    1_776_200_054,
+                ),
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xeth-before-later-basenames-record",
+                    21_000_100,
+                    1_776_200_056,
+                ),
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xeth-after-later-basenames-record",
+                    21_000_101,
+                    1_776_200_058,
+                ),
+            ],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                basenames_record_version_changed_event(
+                    "base-boundary-with-transport",
+                    "basenames:alice.base.eth",
+                    resource_id,
+                    21,
+                    1055,
+                    0,
+                ),
+                basenames_record_changed_event(
+                    "base-record-after-transport-boundary",
+                    "basenames:alice.base.eth",
+                    resource_id,
+                    "text",
+                    "text",
+                    None,
+                    1057,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+        let row = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &record_version_boundary(
+                "basenames:alice.base.eth",
+                resource_id,
+                Some(1),
+                Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+                1055,
+                "0xbase-rec1055",
+                1_776_200_055,
+                BASE_MAINNET_CHAIN_ID,
+            ),
+        )
+        .await?
+        .context("basenames transport-aware record_inventory_current row must exist")?;
+
+        assert_eq!(
+            row.chain_positions,
+            json!({
+                "base": {
+                    "chain_id": BASE_MAINNET_CHAIN_ID,
+                    "block_number": 1057,
+                    "block_hash": "0xbase-rec1057",
+                    "timestamp": "2026-04-14T20:54:17Z",
+                },
+                "ethereum": {
+                    "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                    "block_number": 21_000_100,
+                    "block_hash": "0xeth-before-later-basenames-record",
+                    "timestamp": "2026-04-14T20:54:16Z",
+                },
             })
         );
 
@@ -2821,6 +3094,27 @@ mod tests {
             block_number,
             block_timestamp: OffsetDateTime::from_unix_timestamp(timestamp)
                 .expect("test block timestamp must be valid"),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn chain_lineage_block(
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        timestamp: i64,
+    ) -> ChainLineageBlock {
+        ChainLineageBlock {
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: Some(format!("0xparent{block_number:08x}")),
+            block_number,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(timestamp)
+                .expect("test lineage timestamp must be valid"),
             logs_bloom: None,
             transactions_root: None,
             receipts_root: None,

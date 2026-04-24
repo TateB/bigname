@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, clear_children_current, delete_children_current,
@@ -12,9 +9,9 @@ use bigname_storage::{
 use bigname_storage::{
     load_children_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
 };
-use serde_json::{Value, json};
 #[cfg(test)]
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     types::time::{OffsetDateTime, UtcOffset},
@@ -280,93 +277,30 @@ fn format_timestamp(value: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
     use anyhow::Result;
-    use bigname_storage::{NameSurface, NormalizedEvent, RawBlock, default_database_url};
+    use bigname_storage::{NameSurface, NormalizedEvent, RawBlock};
 
     use super::*;
 
-    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDatabase {
-        admin_pool: PgPool,
-        pool: PgPool,
-        database_name: String,
-    }
-
-    impl TestDatabase {
-        async fn new() -> Result<Self> {
-            let database_url = std::env::var("BIGNAME_DATABASE_URL")
-                .or_else(|_| std::env::var("DATABASE_URL"))
-                .unwrap_or_else(|_| default_database_url().to_owned());
-            let base_options = PgConnectOptions::from_str(&database_url)
-                .context("failed to parse database URL for worker children_current tests")?;
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before unix epoch")?
-                .as_nanos();
-            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let database_name = format!(
-                "bigname_worker_children_current_test_{}_{}_{}",
-                std::process::id(),
-                unique,
-                sequence
-            );
-
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(base_options.clone().database("postgres"))
-                .await
-                .context("failed to connect admin pool for worker children_current tests")?;
-
-            sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
-                .execute(&admin_pool)
-                .await
-                .with_context(|| format!("failed to create test database {database_name}"))?;
-
-            let pool = PgPoolOptions::new()
-                .max_connections(5)
-                .connect_with(base_options.database(&database_name))
-                .await
-                .context("failed to connect worker children_current test pool")?;
-
-            bigname_storage::MIGRATOR
-                .run(&pool)
-                .await
-                .context("failed to apply migrations for worker children_current tests")?;
-
-            Ok(Self {
-                admin_pool,
-                pool,
-                database_name,
-            })
-        }
-
-        fn pool(&self) -> &PgPool {
-            &self.pool
-        }
-
-        async fn cleanup(self) -> Result<()> {
-            self.pool.close().await;
-            sqlx::query(&format!(
-                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                self.database_name
-            ))
-            .execute(&self.admin_pool)
-            .await
-            .with_context(|| format!("failed to drop test database {}", self.database_name))?;
-            self.admin_pool.close().await;
-            Ok(())
-        }
+    async fn test_database() -> Result<TestDatabase> {
+        TestDatabase::create_migrated(
+            TestDatabaseConfig::new("bigname_worker_children_current_test")
+                .admin_database("postgres")
+                .pool_max_connections(5)
+                .parse_context("failed to parse database URL for worker children_current tests")
+                .admin_connect_context(
+                    "failed to connect admin pool for worker children_current tests",
+                )
+                .pool_connect_context("failed to connect worker children_current test pool"),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for worker children_current tests",
+        )
+        .await
     }
 
     #[tokio::test]
     async fn rebuilds_declared_children_for_one_parent() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let parent = "ens:parent.eth";
 
         seed_raw_blocks(
@@ -466,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_all_clears_stale_rows_and_is_idempotent() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let parent = "ens:parent.eth";
         let stale_parent = "ens:stale.eth";
 
@@ -574,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn keyed_rebuild_keeps_visible_rows_when_rebuild_sources_fail() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let parent = "ens:parent.eth";
         let child = "ens:alice.parent.eth";
 
@@ -653,7 +587,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebuilds_basenames_declared_children_from_base_authority_sources() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let parent = "basenames:base.eth";
 
         seed_raw_blocks(
@@ -754,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebuilds_ensv2_declared_children_from_linked_subregistry_graph() -> Result<()> {
-        let database = TestDatabase::new().await?;
+        let database = test_database().await?;
         let parent = "ens:alice.eth";
         let child = "ens:bob.alice.eth";
         let parent_registry = "00000000-0000-0000-0000-0000000000aa";

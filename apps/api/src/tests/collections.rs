@@ -3029,20 +3029,28 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         ],
     )
     .await?;
+    let mut resolver_permission = permission_current_row(
+        resource_id,
+        subject,
+        PermissionScope::Resolver {
+            chain_id: "ethereum-mainnet".to_owned(),
+            resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
+        },
+        8,
+        72,
+    );
+    resolver_permission.canonicality_summary = json!({
+        "status": "head",
+        "chains": {
+            "ethereum-mainnet": "head",
+        }
+    });
+
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
             permission_current_row(resource_id, subject, PermissionScope::Resource, 7, 71),
-            permission_current_row(
-                resource_id,
-                subject,
-                PermissionScope::Resolver {
-                    chain_id: "ethereum-mainnet".to_owned(),
-                    resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
-                },
-                8,
-                72,
-            ),
+            resolver_permission,
             permission_current_row(resource_id, other_subject, PermissionScope::Registry, 9, 73),
         ],
     )
@@ -3089,6 +3097,7 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
     assert_eq!(payload.coverage, base_payload.coverage);
     assert_eq!(payload.page, base_payload.page);
     assert_eq!(payload.declared_state, base_payload.declared_state);
+    assert_eq!(payload.consistency, base_payload.consistency);
     assert_eq!(payload.data.len(), 1);
     assert_eq!(
         payload.data[0].get("logical_name_id"),
@@ -3815,6 +3824,7 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
     assert_eq!(payload.coverage, base_payload.coverage);
     assert_eq!(payload.page, base_payload.page);
     assert_eq!(payload.declared_state, base_payload.declared_state);
+    assert_eq!(payload.consistency, base_payload.consistency);
     assert_eq!(payload.data.len(), 1);
     assert_eq!(
         payload.data[0].get("logical_name_id"),

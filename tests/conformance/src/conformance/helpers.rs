@@ -859,10 +859,6 @@ async fn rebuild_record_inventory_current(
                     .await
                     .context("worker record_inventory_current rebuild task panicked")??;
 
-    database
-        .sync_record_inventory_chain_positions_from_name_current(resource_id_value)
-        .await?;
-
     let rows = sqlx::query(
         r#"
         SELECT chain_positions
@@ -6483,27 +6479,32 @@ async fn run_resolution_execution_invalidation_case(
     let fixture =
         seed_persisted_resolution_execution_fixture(&database, invalidation.execution_trace_id())
             .await?;
+    let mixed_uri = "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60";
+    let explain_uri =
+        "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60";
 
+    database.seed_snapshot_selector_for_route(mixed_uri).await?;
     let mixed_before_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri(mixed_uri)
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("mixed resolution request failed before invalidation")?;
+    database
+        .seed_snapshot_selector_for_route(explain_uri)
+        .await?;
     let explain_before_response = app_router(database.app_state())
-                        .oneshot(
-                            Request::builder()
-                                .uri(
-                                    "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
-                                )
-                                .body(Body::empty())
-                                .expect("request must build"),
-                        )
-                        .await
-                        .context("resolution execution explain request failed before invalidation")?;
+        .oneshot(
+            Request::builder()
+                .uri(explain_uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain request failed before invalidation")?;
 
     assert_eq!(mixed_before_response.status(), StatusCode::OK);
     assert_eq!(explain_before_response.status(), StatusCode::OK);
@@ -6558,62 +6559,61 @@ async fn run_resolution_execution_invalidation_case(
         "execution traces stay durable after cache invalidation",
     );
 
+    database.seed_snapshot_selector_for_route(mixed_uri).await?;
     let mixed_after_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri(mixed_uri)
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("mixed resolution request failed after invalidation")?;
+    database
+        .seed_snapshot_selector_for_route(explain_uri)
+        .await?;
     let explain_after_response = app_router(database.app_state())
-                        .oneshot(
-                            Request::builder()
-                                .uri(
-                                    "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
-                                )
-                                .body(Body::empty())
-                                .expect("request must build"),
-                        )
-                        .await
-                        .context("resolution execution explain request failed after invalidation")?;
+        .oneshot(
+            Request::builder()
+                .uri(explain_uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain request failed after invalidation")?;
 
-    assert_eq!(mixed_after_response.status(), StatusCode::OK);
-    assert_eq!(explain_after_response.status(), StatusCode::NOT_FOUND);
+    let mixed_after_status = mixed_after_response.status();
+    let mixed_after_bytes = to_bytes(mixed_after_response.into_body(), usize::MAX)
+        .await
+        .context("failed to read mixed resolution response body after invalidation")?;
+    assert_eq!(
+        mixed_after_status,
+        StatusCode::CONFLICT,
+        "mixed resolution response after invalidation body {}",
+        String::from_utf8_lossy(&mixed_after_bytes)
+    );
+    let explain_after_status = explain_after_response.status();
+    let explain_after_bytes = to_bytes(explain_after_response.into_body(), usize::MAX)
+        .await
+        .context("failed to read resolution explain response body after invalidation")?;
+    assert_eq!(
+        explain_after_status,
+        StatusCode::NOT_FOUND,
+        "resolution explain response after invalidation body {}",
+        String::from_utf8_lossy(&explain_after_bytes)
+    );
 
-    let mixed_after_payload: ResolutionResponse = read_json(mixed_after_response).await?;
-    let explain_after_payload: ErrorResponse = read_json(explain_after_response).await?;
+    let mixed_after_payload: ErrorResponse = serde_json::from_slice(&mixed_after_bytes)
+        .context("failed to decode mixed resolution error response after invalidation")?;
+    let explain_after_payload: ErrorResponse = serde_json::from_slice(&explain_after_bytes)
+        .context("failed to decode resolution explain response after invalidation")?;
 
-    assert_eq!(mixed_after_payload.data, mixed_before_payload.data);
-    assert_eq!(mixed_after_payload.coverage, mixed_before_payload.coverage);
+    assert_eq!(mixed_after_payload.error.code, "stale");
     assert_eq!(
-        mixed_after_payload.chain_positions,
-        mixed_before_payload.chain_positions
+        mixed_after_payload.error.message,
+        "persisted verified resolution output is not available for the selected snapshot"
     );
-    assert_eq!(
-        mixed_after_payload.consistency,
-        mixed_before_payload.consistency
-    );
-    assert_eq!(
-        mixed_after_payload.last_updated,
-        mixed_before_payload.last_updated
-    );
-    assert_eq!(
-        mixed_after_payload.declared_state,
-        mixed_before_payload.declared_state
-    );
-    assert_eq!(
-        mixed_after_payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
-    assert_eq!(
-        mixed_after_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&[
-            "text:com.twitter",
-            "addr:60",
-        ]))
-    );
+    assert!(mixed_after_payload.error.details.is_empty());
     assert_eq!(explain_after_payload.error.code, "not_found");
     assert_eq!(
         explain_after_payload.error.message,

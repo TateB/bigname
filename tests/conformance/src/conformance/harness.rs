@@ -1000,16 +1000,9 @@
             ) -> Result<()> {
                 self.seed_snapshot_selector_chain_positions(&row.chain_positions)
                     .await?;
-                let record_inventory_positions = row
-                    .resource_id
-                    .map(|resource_id| (resource_id, row.chain_positions.clone()));
                 bigname_storage::upsert_name_current_rows(&self.pool, &[row])
                     .await
                     .context("failed to upsert name_current row for conformance harness")?;
-                if let Some((resource_id, chain_positions)) = record_inventory_positions {
-                    self.set_record_inventory_chain_positions(resource_id, chain_positions)
-                        .await?;
-                }
                 Ok(())
             }
 
@@ -1017,15 +1010,12 @@
                 &self,
                 row: RecordInventoryCurrentRow,
             ) -> Result<()> {
-                let resource_id = row.resource_id;
                 let chain_positions = row.chain_positions.clone();
                 bigname_storage::upsert_record_inventory_current_rows(&self.pool, &[row])
                     .await
                     .context(
                         "failed to upsert record_inventory_current row for conformance harness",
                     )?;
-                self.sync_record_inventory_chain_positions_from_name_current(resource_id)
-                    .await?;
                 self.seed_snapshot_selector_chain_positions(&chain_positions)
                     .await?;
                 Ok(())
@@ -1121,60 +1111,23 @@
                 Ok(())
             }
 
-            async fn set_record_inventory_chain_positions(
-                &self,
-                resource_id: Uuid,
-                chain_positions: Value,
-            ) -> Result<()> {
-                sqlx::query(
-                    r#"
-                    UPDATE record_inventory_current
-                    SET chain_positions = $2::jsonb
-                    WHERE resource_id = $1
-                    "#,
-                )
-                .bind(resource_id)
-                .bind(&chain_positions)
-                .execute(&self.pool)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to set chain_positions on record_inventory_current rows for {resource_id}"
-                    )
-                })?;
-                self.seed_snapshot_selector_chain_positions(&chain_positions)
-                    .await
-            }
-
-            async fn sync_record_inventory_chain_positions_from_name_current(
-                &self,
-                resource_id: Uuid,
-            ) -> Result<()> {
-                let row = sqlx::query(
-                    r#"
-                    SELECT chain_positions
-                    FROM name_current
-                    WHERE resource_id = $1
-                    ORDER BY logical_name_id
-                    LIMIT 1
-                    "#,
-                )
-                .bind(resource_id)
-                .fetch_optional(&self.pool)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load name_current chain_positions for resource_id {resource_id}"
-                    )
-                })?;
-
-                let Some(row) = row else {
+            async fn seed_snapshot_selector_for_route(&self, uri: &str) -> Result<()> {
+                let Some((namespace, name)) = exact_name_route_target(uri) else {
                     return Ok(());
                 };
-                let chain_positions = row
-                    .try_get::<Value, _>("chain_positions")
-                    .context("name_current row missing chain_positions")?;
-                self.set_record_inventory_chain_positions(resource_id, chain_positions)
+                let logical_name_id = format!("{namespace}:{name}");
+                let Some(row) = bigname_storage::load_name_current(&self.pool, &logical_name_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load name_current row {logical_name_id} for route selector seed"
+                        )
+                    })?
+                else {
+                    return Ok(());
+                };
+
+                self.seed_snapshot_selector_chain_positions(&row.chain_positions)
                     .await
             }
 
@@ -1218,5 +1171,42 @@
                 })?;
                 self.admin_pool.close().await;
                 Ok(())
+            }
+        }
+
+        fn exact_name_route_target(uri: &str) -> Option<(&str, &str)> {
+            let path = uri.split('?').next().unwrap_or(uri);
+            let parts = path
+                .trim_start_matches('/')
+                .split('/')
+                .collect::<Vec<_>>();
+            match parts.as_slice() {
+                ["v1", "names", namespace, name] => Some((namespace, name)),
+                ["v1", "coverage", namespace, name] => Some((namespace, name)),
+                ["v1", "resolutions", namespace, name] => Some((namespace, name)),
+                ["v1", "explain", "names", namespace, name, "surface-binding"]
+                | ["v1", "explain", "names", namespace, name, "authority-control"]
+                | ["v1", "explain", "resolutions", namespace, name, "execution"] => {
+                    Some((namespace, name))
+                }
+                ["v1", "resolve", name] => {
+                    Some((infer_conformance_resolution_namespace(name), name))
+                }
+                _ => None,
+            }
+        }
+
+        fn infer_conformance_resolution_namespace(name: &str) -> &'static str {
+            if name == "base.eth" {
+                return "ens";
+            }
+
+            if name
+                .strip_suffix(".base.eth")
+                .is_some_and(|prefix| !prefix.is_empty())
+            {
+                "basenames"
+            } else {
+                "ens"
             }
         }

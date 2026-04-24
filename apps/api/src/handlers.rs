@@ -445,7 +445,7 @@ async fn resolution_response_for_name(
         .await?;
 
     let record_inventory_current = if mode.includes_declared() || mode.includes_verified() {
-        load_supported_record_inventory_current_for_snapshot(pool, &row, &selected_snapshot)
+        load_resolution_record_inventory_current_for_snapshot(pool, &row, mode, &selected_snapshot)
             .await
             .map_err(snapshot_selection_api_error)?
     } else {
@@ -460,8 +460,8 @@ async fn resolution_response_for_name(
             record_inventory_current.as_ref(),
             &selected_snapshot,
         )
-            .await
-            .map_err(snapshot_selection_api_error)?
+        .await
+        .map_err(snapshot_selection_api_error)?
     } else {
         None
     };
@@ -490,6 +490,190 @@ async fn resolution_response_for_name(
             "failed to load resolution projection for name {namespace}/{name}"
         ))
     })
+}
+
+async fn load_resolution_record_inventory_current_for_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    mode: ResolutionMode,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    match load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await {
+        Ok(Some(record_inventory_row)) => Ok(Some(record_inventory_row)),
+        Ok(None) => load_record_inventory_current_matching_selected_snapshot(
+            pool,
+            row,
+            selected_snapshot,
+        )
+        .await,
+        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => {
+            if let Some(record_inventory_row) =
+                load_explicit_unsupported_record_inventory_current(pool, row).await?
+            {
+                return Ok(Some(record_inventory_row));
+            }
+
+            if mode.includes_verified() && resolution_verified_support_boundary(row, None).is_none()
+            {
+                return Ok(None);
+            }
+
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn load_record_inventory_current_matching_selected_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let Some((resource_id, _)) = record_inventory_lookup_key(row) else {
+        return Ok(None);
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT ric.record_version_boundary, ric.chain_positions
+        FROM record_inventory_current ric
+        JOIN resources resource
+          ON resource.resource_id = ric.resource_id
+        WHERE ric.resource_id = $1
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        "#,
+    )
+    .bind(resource_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to load record_inventory_current rows for resource_id {resource_id}: {error}"
+        ))
+    })?;
+
+    let mut matching_boundaries = Vec::new();
+    for candidate in rows {
+        let chain_positions = candidate
+            .try_get::<JsonValue, _>("chain_positions")
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "record_inventory_current lookup for resource_id {resource_id} returned a row without chain_positions: {error}"
+                ))
+            })?;
+        let projected = ChainPositions::from_value(&chain_positions).map_err(|error| {
+            SnapshotSelectionError::stale(format!(
+                "record_inventory_current projection has unusable chain_positions: {}",
+                error.message()
+            ))
+        })?;
+        if !selected_snapshot
+            .chain_positions
+            .equivalent_by_chain_id(&projected)
+        {
+            continue;
+        }
+
+        let record_version_boundary =
+            candidate
+                .try_get::<JsonValue, _>("record_version_boundary")
+                .map_err(|error| {
+                    SnapshotSelectionError::internal(format!(
+                        "record_inventory_current lookup for resource_id {resource_id} returned a row without record_version_boundary: {error}"
+                    ))
+                })?;
+        matching_boundaries.push(record_version_boundary);
+    }
+
+    let Some(record_version_boundary) = matching_boundaries.pop() else {
+        return Ok(None);
+    };
+    if !matching_boundaries.is_empty() {
+        return Err(SnapshotSelectionError::internal(format!(
+            "record_inventory_current lookup for resource_id {resource_id} found multiple projection rows for the selected snapshot"
+        )));
+    }
+
+    match load_record_inventory_current_for_snapshot(
+        pool,
+        resource_id,
+        &record_version_boundary,
+        &selected_snapshot.chain_positions,
+    )
+    .await?
+    {
+        SnapshotProjectionRead::Found(record_inventory_row) => Ok(Some(record_inventory_row)),
+        SnapshotProjectionRead::NotFound => Err(SnapshotSelectionError::internal(format!(
+            "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+        ))),
+    }
+}
+
+async fn load_explicit_unsupported_record_inventory_current(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let Some((resource_id, record_version_boundary)) = record_inventory_lookup_key(row) else {
+        return Ok(None);
+    };
+
+    if let Some(record_inventory_row) =
+        load_record_inventory_current(pool, resource_id, &record_version_boundary)
+            .await
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
+                ))
+            })?
+    {
+        return Ok(record_inventory_current_has_explicit_unsupported_coverage(
+            &record_inventory_row,
+        )
+        .then_some(record_inventory_row));
+    }
+
+    if record_version_boundary_has_pointer(&record_version_boundary) {
+        return Ok(None);
+    }
+
+    let Some(persisted_boundary) =
+        find_supported_record_inventory_boundary(pool, resource_id, &record_version_boundary)
+            .await
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "failed to locate supported record_inventory_current boundary for resource_id {resource_id}: {error}"
+                ))
+            })?
+    else {
+        return Ok(None);
+    };
+
+    let record_inventory_row =
+        load_record_inventory_current(pool, resource_id, &persisted_boundary)
+            .await
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                SnapshotSelectionError::internal(format!(
+                    "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+                ))
+            })?;
+
+    Ok(record_inventory_current_has_explicit_unsupported_coverage(&record_inventory_row)
+        .then_some(record_inventory_row))
+}
+
+fn record_inventory_current_has_explicit_unsupported_coverage(
+    row: &RecordInventoryCurrentRow,
+) -> bool {
+    string_field(provenance_field(&row.coverage, "unsupported_reason")).is_some()
 }
 
 fn infer_resolution_namespace(name: &str) -> &'static str {

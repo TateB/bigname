@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, NameCurrentRow, RawCallSnapshot,
-    RecordInventoryCurrentRow, SurfaceBindingKind, load_primary_name_current,
+    RecordInventoryCurrentRow, SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey,
+    SurfaceBindingKind, VerifiedResolutionPathClass, VerifiedResolutionSupportBoundary,
+    load_primary_name_current, parse_supported_verified_resolution_record_key,
     upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
     upsert_raw_call_snapshots_in_transaction,
 };
@@ -15,10 +17,11 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use bigname_storage::{
-    NameSurface, PrimaryNameClaimStatus, PrimaryNameCurrentRow, Resource, SurfaceBinding,
-    TokenLineage, upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_record_inventory_current_rows,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    ChainLineageBlock, NameSurface, PrimaryNameClaimStatus, PrimaryNameCurrentRow, Resource,
+    SurfaceBinding, TokenLineage, upsert_chain_lineage_blocks, upsert_execution_outcome,
+    upsert_execution_trace, upsert_name_current_rows, upsert_name_surfaces,
+    upsert_primary_name_current_rows, upsert_record_inventory_current_rows, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 
 pub use bigname_storage::{
@@ -28,16 +31,16 @@ pub use bigname_storage::{
 
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";
-pub const ENS_NAMESPACE: &str = "ens";
-pub const BASENAMES_NAMESPACE: &str = "basenames";
-pub const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
-pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
+pub const ENS_NAMESPACE: &str = bigname_storage::ENS_NAMESPACE;
+pub const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;
+pub const BASE_MAINNET_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
+pub const ETHEREUM_MAINNET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
 pub const BASENAMES_EXECUTION_SOURCE_FAMILY: &str = "basenames_execution";
 pub const BASENAMES_L1_RESOLVER_ROLE: &str = "l1_resolver";
-pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
+pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = bigname_storage::BASENAMES_L1_RESOLVER_ADDRESS;
 pub const DECLARED_REGISTRY_PATH_BINDING_KIND: &str = "declared_registry_path";
 pub const LINKED_SUBREGISTRY_PATH_BINDING_KIND: &str = "linked_subregistry_path";
 pub const RESOLVER_ALIAS_PATH_BINDING_KIND: &str = "resolver_alias_path";
@@ -356,14 +359,6 @@ struct VerifiedQuerySummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum SupportedVerifiedRecordKey {
-    Addr { coin_type: String },
-    Avatar,
-    Contenthash,
-    Text,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct RequestedSelectorSet {
     surface: String,
     ordered_record_keys: Vec<String>,
@@ -377,34 +372,11 @@ struct RequestedChainPosition {
     block_hash: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ProjectionChainPosition {
-    chain_id: String,
-    block_number: i64,
-    block_hash: String,
-    timestamp: String,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ManifestVersionIdentity {
     source_manifest_id: Option<i64>,
     source_family: Option<String>,
     manifest_version: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StorageSupportedResolutionPathClass {
-    Direct,
-    AliasOnly,
-    WildcardDerived,
-    BasenamesTransportDirect,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct StorageSupportedResolutionBoundary {
-    path_class: StorageSupportedResolutionPathClass,
-    topology_version_boundary: Value,
-    record_version_boundary: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -806,13 +778,15 @@ async fn revalidate_supported_resolution_persistence_from_storage(
     }
 
     let topology = build_resolution_topology_for_revalidation(&row, record_inventory_row.as_ref())?;
-    let support_boundary =
-        resolution_verified_support_boundary_from_storage(&row, record_inventory_row.as_ref())?
-            .with_context(|| {
-                format!(
-                    "{context} could not re-establish a supported mixed-route topology boundary for logical_name_id {logical_name_id}"
-                )
-            })?;
+    let support_boundary = bigname_storage::try_resolution_verified_support_boundary(
+        &row,
+        record_inventory_row.as_ref(),
+    )?
+    .with_context(|| {
+        format!(
+            "{context} could not re-establish a supported mixed-route topology boundary for logical_name_id {logical_name_id}"
+        )
+    })?;
 
     ensure_storage_supported_boundary_matches_request(
         request,
@@ -836,7 +810,7 @@ async fn load_supported_record_inventory_current_for_revalidation(
     row: &NameCurrentRow,
 ) -> Result<Option<RecordInventoryCurrentRow>> {
     let Some((resource_id, record_version_boundary)) =
-        record_inventory_lookup_key_for_revalidation(row)?
+        bigname_storage::resolution_record_inventory_lookup_key_for_revalidation(row)?
     else {
         return Ok(None);
     };
@@ -875,164 +849,6 @@ async fn load_supported_record_inventory_current_for_revalidation(
         .map(Some)
 }
 
-fn record_inventory_lookup_key_for_revalidation(
-    row: &NameCurrentRow,
-) -> Result<Option<(Uuid, Value)>> {
-    if let Some(lookup) = projected_record_inventory_lookup_key_for_revalidation(row)? {
-        return Ok(Some(lookup));
-    }
-
-    let Some(record_version_boundary) =
-        build_supported_resolution_declared_boundary_for_revalidation(row)
-    else {
-        return Ok(None);
-    };
-    let resource_id = row
-        .resource_id
-        .with_context(|| "supported resolution revalidation requires resource_id".to_owned())?;
-    Ok(Some((resource_id, record_version_boundary)))
-}
-
-fn projected_record_inventory_lookup_key_for_revalidation(
-    row: &NameCurrentRow,
-) -> Result<Option<(Uuid, Value)>> {
-    let Some(projected_topology) =
-        projected_resolution_topology_for_revalidation(&row.declared_summary)
-    else {
-        return Ok(None);
-    };
-
-    let version_boundaries =
-        json_field(&projected_topology, "version_boundaries").with_context(|| {
-            format!(
-                "projected topology for logical_name_id {} must include version_boundaries",
-                row.logical_name_id
-            )
-        })?;
-    let record_version_boundary = json_field(version_boundaries, "record_version_boundary")
-        .cloned()
-        .with_context(|| {
-            format!(
-                "projected topology for logical_name_id {} must include version_boundaries.record_version_boundary",
-                row.logical_name_id
-            )
-        })?;
-    let resource_id = json_field(&record_version_boundary, "resource_id")
-        .and_then(Value::as_str)
-        .with_context(|| {
-            format!(
-                "projected topology record_version_boundary for logical_name_id {} must include resource_id",
-                row.logical_name_id
-            )
-        })?;
-    let resource_id = Uuid::parse_str(resource_id).with_context(|| {
-        format!(
-            "projected topology record_version_boundary for logical_name_id {} must include a valid UUID resource_id",
-            row.logical_name_id
-        )
-    })?;
-
-    Ok(Some((resource_id, record_version_boundary)))
-}
-
-fn build_supported_resolution_declared_boundary_for_revalidation(
-    row: &NameCurrentRow,
-) -> Option<Value> {
-    let binding_supported = match row.namespace.as_str() {
-        ENS_NAMESPACE => matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ),
-        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
-        _ => false,
-    };
-    if !binding_supported || row.resource_id.is_none() {
-        return None;
-    }
-
-    let chain_position = build_resolution_boundary_chain_position_for_revalidation(row)?;
-    match row.namespace.as_str() {
-        ENS_NAMESPACE if chain_position.chain_id == ETHEREUM_MAINNET_CHAIN_ID => {}
-        BASENAMES_NAMESPACE if chain_position.chain_id == BASE_MAINNET_CHAIN_ID => {}
-        _ => return None,
-    }
-
-    Some(build_resolution_version_boundary_for_revalidation(
-        row,
-        &chain_position,
-    ))
-}
-
-fn build_resolution_boundary_chain_position_for_revalidation(
-    row: &NameCurrentRow,
-) -> Option<ProjectionChainPosition> {
-    let chain_positions = row.chain_positions.as_object()?;
-    if row.namespace == BASENAMES_NAMESPACE
-        && let Some(position) = chain_positions
-            .values()
-            .filter_map(projection_chain_position_from_value)
-            .find(|position| position.chain_id == BASE_MAINNET_CHAIN_ID)
-    {
-        return Some(position);
-    }
-
-    chain_positions
-        .get("ethereum")
-        .and_then(projection_chain_position_from_value)
-        .or_else(|| {
-            let mut parsed = chain_positions
-                .values()
-                .filter_map(projection_chain_position_from_value);
-            let first = parsed.next()?;
-            parsed.next().is_none().then_some(first)
-        })
-}
-
-fn build_resolution_version_boundary_for_revalidation(
-    row: &NameCurrentRow,
-    chain_position: &ProjectionChainPosition,
-) -> Value {
-    let mut boundary = Map::new();
-    boundary.insert(
-        "logical_name_id".to_owned(),
-        Value::String(row.logical_name_id.clone()),
-    );
-    boundary.insert(
-        "resource_id".to_owned(),
-        row.resource_id
-            .map(|value| Value::String(value.to_string()))
-            .unwrap_or(Value::Null),
-    );
-    boundary.insert("normalized_event_id".to_owned(), Value::Null);
-    boundary.insert("event_kind".to_owned(), Value::Null);
-    boundary.insert(
-        "chain_position".to_owned(),
-        Value::Object(chain_position_value(chain_position)),
-    );
-    Value::Object(boundary)
-}
-
-fn chain_position_value(position: &ProjectionChainPosition) -> Map<String, Value> {
-    let mut value = Map::new();
-    value.insert(
-        "chain_id".to_owned(),
-        Value::String(position.chain_id.clone()),
-    );
-    value.insert(
-        "block_number".to_owned(),
-        Value::Number(position.block_number.into()),
-    );
-    value.insert(
-        "block_hash".to_owned(),
-        Value::String(position.block_hash.clone()),
-    );
-    value.insert(
-        "timestamp".to_owned(),
-        Value::String(position.timestamp.clone()),
-    );
-    value
-}
-
 fn normalize_requested_chain_positions(
     value: Option<&Value>,
     context: &str,
@@ -1050,39 +866,16 @@ fn normalize_requested_chain_positions(
 fn build_requested_chain_positions_from_projection(
     chain_positions: &Value,
 ) -> Result<Vec<RequestedChainPosition>> {
-    let chain_positions = chain_positions
-        .as_object()
-        .context("projected chain_positions must be a JSON object")?;
-    let mut positions = chain_positions
-        .values()
-        .filter_map(projection_chain_position_from_value)
-        .map(|position| RequestedChainPosition {
-            chain_id: position.chain_id,
-            block_number: position.block_number,
-            block_hash: position.block_hash,
-        })
-        .collect::<Vec<_>>();
-
-    if positions.is_empty() {
-        bail!("projected chain_positions must include at least one chain position");
-    }
-
-    positions.sort_by(|left, right| {
-        left.chain_id
-            .cmp(&right.chain_id)
-            .then(left.block_number.cmp(&right.block_number))
-            .then(left.block_hash.cmp(&right.block_hash))
-    });
-    Ok(positions)
-}
-
-fn projection_chain_position_from_value(value: &Value) -> Option<ProjectionChainPosition> {
-    Some(ProjectionChainPosition {
-        chain_id: json_string_field(json_field(value, "chain_id"))?,
-        block_number: json_field(value, "block_number")?.as_i64()?,
-        block_hash: json_string_field(json_field(value, "block_hash"))?,
-        timestamp: json_string_field(json_field(value, "timestamp"))?,
-    })
+    Ok(
+        bigname_storage::resolution_requested_chain_positions_from_projection(chain_positions)?
+            .into_iter()
+            .map(|position| RequestedChainPosition {
+                chain_id: position.chain_id,
+                block_number: position.block_number,
+                block_hash: position.block_hash,
+            })
+            .collect(),
+    )
 }
 
 fn normalize_manifest_versions_for_revalidation(value: &Value, context: &str) -> Result<Value> {
@@ -1158,7 +951,7 @@ fn build_resolution_topology_for_revalidation(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Result<Value> {
     if let Some(projected_topology) =
-        projected_resolution_topology_for_revalidation(&row.declared_summary)
+        bigname_storage::projected_resolution_topology(&row.declared_summary)
     {
         return Ok(projected_topology);
     }
@@ -1189,8 +982,11 @@ fn build_legacy_resolution_topology_for_revalidation(
     }
 
     let record_version_boundary =
-        resolution_record_version_boundary_for_revalidation(row, record_inventory_row)
-            .with_context(|| "declared resolution topology is not yet projected".to_owned())?;
+        bigname_storage::resolution_record_version_boundary_for_revalidation(
+            row,
+            record_inventory_row,
+        )
+        .with_context(|| "declared resolution topology is not yet projected".to_owned())?;
 
     let registry_ref = build_resolution_name_ref_for_revalidation(row);
     let resolver_hop = build_resolution_resolver_hop_for_revalidation(
@@ -1328,274 +1124,11 @@ fn build_resolution_transport_for_revalidation(row: &NameCurrentRow) -> Map<Stri
     transport
 }
 
-fn resolution_record_version_boundary_for_revalidation(
-    row: &NameCurrentRow,
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> Option<Value> {
-    record_inventory_row
-        .map(|row| row.record_version_boundary.clone())
-        .or_else(|| build_supported_resolution_declared_boundary_for_revalidation(row))
-}
-
-fn projected_resolution_topology_for_revalidation(summary: &Value) -> Option<Value> {
-    json_field(summary, "topology")
-        .filter(|value| value.is_object())
-        .cloned()
-}
-
-fn resolution_verified_support_boundary_from_storage(
-    row: &NameCurrentRow,
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> Result<Option<StorageSupportedResolutionBoundary>> {
-    if !matches!(row.namespace.as_str(), ENS_NAMESPACE | BASENAMES_NAMESPACE) {
-        return Ok(None);
-    }
-
-    if let Some(projected_topology) =
-        projected_resolution_topology_for_revalidation(&row.declared_summary)
-    {
-        if row.namespace == BASENAMES_NAMESPACE
-            && !row_has_basenames_supported_chain_positions_for_revalidation(row)
-        {
-            return Ok(None);
-        }
-        let path_class = classify_supported_resolution_topology_from_storage(
-            &row.namespace,
-            &row.logical_name_id,
-            &projected_topology,
-        )?;
-        let version_boundaries = json_field(&projected_topology, "version_boundaries")
-            .with_context(|| "projected topology must include version_boundaries".to_owned())?;
-        let topology_version_boundary = json_field(version_boundaries, "topology_version_boundary")
-            .cloned()
-            .with_context(|| {
-                "projected topology must include version_boundaries.topology_version_boundary"
-                    .to_owned()
-            })?;
-        let record_version_boundary = json_field(version_boundaries, "record_version_boundary")
-            .cloned()
-            .with_context(|| {
-                "projected topology must include version_boundaries.record_version_boundary"
-                    .to_owned()
-            })?;
-        return Ok(Some(StorageSupportedResolutionBoundary {
-            path_class,
-            topology_version_boundary,
-            record_version_boundary,
-        }));
-    }
-
-    let Some(topology_version_boundary) = (match row.namespace.as_str() {
-        ENS_NAMESPACE => build_supported_resolution_declared_boundary_for_revalidation(row),
-        BASENAMES_NAMESPACE => None,
-        _ => None,
-    }) else {
-        return Ok(None);
-    };
-    let record_version_boundary =
-        resolution_record_version_boundary_for_revalidation(row, record_inventory_row)
-            .unwrap_or_else(|| topology_version_boundary.clone());
-    let path_class = match row.binding_kind {
-        Some(SurfaceBindingKind::ResolverAliasPath) => {
-            StorageSupportedResolutionPathClass::AliasOnly
-        }
-        _ => StorageSupportedResolutionPathClass::Direct,
-    };
-
-    Ok(Some(StorageSupportedResolutionBoundary {
-        path_class,
-        topology_version_boundary,
-        record_version_boundary,
-    }))
-}
-
-fn classify_supported_resolution_topology_from_storage(
-    namespace: &str,
-    logical_name_id: &str,
-    topology: &Value,
-) -> Result<StorageSupportedResolutionPathClass> {
-    if summary_is_unsupported(Some(topology)) {
-        bail!("projected topology is unsupported");
-    }
-
-    let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)
-        .with_context(|| {
-            "projected topology must include resolver_path[0].logical_name_id".to_owned()
-        })?;
-    let alias_present = resolution_topology_alias_is_present(topology)?;
-    let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
-    let transport_is_null = resolution_topology_transport_is_null(topology);
-
-    if namespace == BASENAMES_NAMESPACE {
-        if transport_is_null {
-            bail!("projected Basenames topology must include supported transport detail");
-        }
-        if !resolution_topology_subregistry_path_is_empty(topology) {
-            bail!("projected Basenames topology must keep subregistry_path empty");
-        }
-        if resolver_logical_name_id != logical_name_id {
-            bail!("projected Basenames topology must anchor resolver_path[0] to the request name");
-        }
-        if alias_present {
-            bail!("projected Basenames topology must keep alias detail empty");
-        }
-        if wildcard_source_logical_name_id.is_some() {
-            bail!("projected Basenames topology must keep wildcard detail empty");
-        }
-        if !resolution_topology_transport_matches_basenames_supported_class(topology) {
-            bail!("projected Basenames topology transport is outside the supported class");
-        }
-        return Ok(StorageSupportedResolutionPathClass::BasenamesTransportDirect);
-    }
-
-    if !transport_is_null {
-        bail!("projected ENS topology must keep transport detail null");
-    }
-
-    if let Some(wildcard_source_logical_name_id) = wildcard_source_logical_name_id {
-        if alias_present || !resolution_topology_subregistry_path_is_empty(topology) {
-            bail!(
-                "projected wildcard-derived ENS topology must keep alias detail empty and subregistry_path empty"
-            );
-        }
-        if resolver_logical_name_id != wildcard_source_logical_name_id {
-            bail!(
-                "projected wildcard-derived ENS topology must anchor resolver_path[0] to wildcard.source.logical_name_id"
-            );
-        }
-        return Ok(StorageSupportedResolutionPathClass::WildcardDerived);
-    }
-
-    if resolver_logical_name_id != logical_name_id {
-        bail!("projected ENS topology must anchor resolver_path[0] to the request name");
-    }
-
-    if alias_present {
-        Ok(StorageSupportedResolutionPathClass::AliasOnly)
-    } else {
-        Ok(StorageSupportedResolutionPathClass::Direct)
-    }
-}
-
-fn resolution_topology_resolver_logical_name_id(topology: &Value) -> Option<String> {
-    json_field(topology, "resolver_path")
-        .and_then(Value::as_array)
-        .and_then(|resolver_path| resolver_path.first())
-        .and_then(|hop| json_string_field(json_field(hop, "logical_name_id")))
-}
-
-fn resolution_topology_alias_is_present(topology: &Value) -> Result<bool> {
-    let alias = json_field(topology, "alias")
-        .with_context(|| "projected topology must include alias".to_owned())?;
-    let final_target_present =
-        !matches!(json_field(alias, "final_target"), None | Some(Value::Null));
-    let hops = json_field(alias, "hops")
-        .and_then(Value::as_array)
-        .with_context(|| "projected topology alias must include hops".to_owned())?;
-    let hops_present = !hops.is_empty();
-    if final_target_present != hops_present {
-        bail!("projected topology alias must set final_target and non-empty hops together");
-    }
-    Ok(final_target_present)
-}
-
-fn resolution_topology_wildcard_state(topology: &Value) -> Result<Option<String>> {
-    let wildcard = json_field(topology, "wildcard")
-        .with_context(|| "projected topology must include wildcard".to_owned())?;
-    let matched_labels = json_field(wildcard, "matched_labels")
-        .and_then(Value::as_array)
-        .with_context(|| "projected topology wildcard must include matched_labels".to_owned())?;
-    let source = json_field(wildcard, "source");
-
-    match source {
-        None | Some(Value::Null) => {
-            if matched_labels.is_empty() {
-                Ok(None)
-            } else {
-                bail!("projected topology wildcard with null source must keep matched_labels empty")
-            }
-        }
-        Some(_) if matched_labels.is_empty() => {
-            bail!(
-                "projected topology wildcard must keep matched_labels non-empty when source is present"
-            )
-        }
-        Some(source) => Ok(Some(
-            json_string_field(json_field(source, "logical_name_id")).with_context(|| {
-                "projected topology wildcard source must include logical_name_id".to_owned()
-            })?,
-        )),
-    }
-}
-
-fn resolution_topology_subregistry_path_is_empty(topology: &Value) -> bool {
-    json_field(topology, "subregistry_path")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty)
-}
-
-fn resolution_topology_transport_is_null(topology: &Value) -> bool {
-    let Some(transport) = json_field(topology, "transport") else {
-        return true;
-    };
-
-    for field_name in [
-        "source_chain_id",
-        "target_chain_id",
-        "contract_address",
-        "latest_event_kind",
-    ] {
-        if !matches!(json_field(transport, field_name), None | Some(Value::Null)) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn resolution_topology_transport_matches_basenames_supported_class(topology: &Value) -> bool {
-    let Some(transport) = json_field(topology, "transport").and_then(Value::as_object) else {
-        return false;
-    };
-    if transport.iter().any(|(field_name, value)| {
-        !matches!(
-            field_name.as_str(),
-            "source_chain_id" | "target_chain_id" | "contract_address" | "latest_event_kind"
-        ) && !value.is_null()
-    }) {
-        return false;
-    }
-    json_string_field(transport.get("source_chain_id"))
-        .is_some_and(|value| value == BASE_MAINNET_CHAIN_ID)
-        && json_string_field(transport.get("target_chain_id"))
-            .is_some_and(|value| value == ETHEREUM_MAINNET_CHAIN_ID)
-        && json_string_field(transport.get("contract_address"))
-            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS))
-}
-
-fn row_has_basenames_supported_chain_positions_for_revalidation(row: &NameCurrentRow) -> bool {
-    let Some(chain_positions) = row.chain_positions.as_object() else {
-        return false;
-    };
-
-    let mut saw_base = false;
-    let mut saw_ethereum = false;
-    for position in chain_positions.values() {
-        match projection_chain_position_from_value(position).map(|position| position.chain_id) {
-            Some(chain_id) if chain_id == BASE_MAINNET_CHAIN_ID => saw_base = true,
-            Some(chain_id) if chain_id == ETHEREUM_MAINNET_CHAIN_ID => saw_ethereum = true,
-            Some(_) | None => {}
-        }
-    }
-
-    saw_base && saw_ethereum
-}
-
 fn ensure_storage_supported_boundary_matches_request(
     request: &PersistEnsExactNameVerifiedResolutionRequest,
     requested_selectors: &RequestedSelectorSet,
     topology: &Value,
-    support_boundary: &StorageSupportedResolutionBoundary,
+    support_boundary: &VerifiedResolutionSupportBoundary,
     context: &str,
 ) -> Result<()> {
     let expected_path_class = match request.trace.namespace.as_str() {
@@ -1603,15 +1136,13 @@ fn ensure_storage_supported_boundary_matches_request(
             requested_selectors.binding_kind.as_deref(),
             request.trace.execution_trace_id,
         )? {
-            SupportedResolutionPathClass::Direct => StorageSupportedResolutionPathClass::Direct,
-            SupportedResolutionPathClass::AliasOnly => {
-                StorageSupportedResolutionPathClass::AliasOnly
-            }
+            SupportedResolutionPathClass::Direct => VerifiedResolutionPathClass::Direct,
+            SupportedResolutionPathClass::AliasOnly => VerifiedResolutionPathClass::AliasOnly,
             SupportedResolutionPathClass::WildcardDerived => {
-                StorageSupportedResolutionPathClass::WildcardDerived
+                VerifiedResolutionPathClass::WildcardDerived
             }
         },
-        BASENAMES_NAMESPACE => StorageSupportedResolutionPathClass::BasenamesTransportDirect,
+        BASENAMES_NAMESPACE => VerifiedResolutionPathClass::BasenamesTransportDirect,
         other => bail!("{context} does not support namespace {other}"),
     };
     if support_boundary.path_class != expected_path_class {
@@ -1949,13 +1480,7 @@ async fn find_supported_record_inventory_boundary_for_revalidation(
 }
 
 fn record_version_boundary_has_pointer(record_version_boundary: &Value) -> bool {
-    !matches!(
-        json_field(record_version_boundary, "normalized_event_id"),
-        None | Some(Value::Null)
-    ) && !matches!(
-        json_field(record_version_boundary, "event_kind"),
-        None | Some(Value::Null)
-    )
+    bigname_storage::record_version_boundary_has_pointer(record_version_boundary)
 }
 
 async fn load_name_current_for_revalidation(
@@ -3166,33 +2691,7 @@ fn validate_raw_call_snapshots(
 }
 
 fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVerifiedRecordKey> {
-    if let Some(coin_type) = record_key.strip_prefix("addr:")
-        && !coin_type.is_empty()
-        && coin_type.as_bytes().iter().all(u8::is_ascii_digit)
-    {
-        return Ok(SupportedVerifiedRecordKey::Addr {
-            coin_type: coin_type.to_owned(),
-        });
-    }
-
-    if record_key == "contenthash" {
-        return Ok(SupportedVerifiedRecordKey::Contenthash);
-    }
-
-    if record_key == "avatar" {
-        return Ok(SupportedVerifiedRecordKey::Avatar);
-    }
-
-    if let Some(text_key) = record_key.strip_prefix("text:")
-        && !text_key.is_empty()
-    {
-        return Ok(SupportedVerifiedRecordKey::Text);
-    }
-
-    bail!(
-        "ENS direct-path verified resolution only supports addr:<coin_type>, avatar, contenthash, and text:<key> selectors, found {}",
-        record_key
-    );
+    parse_supported_verified_resolution_record_key(record_key)
 }
 
 fn validate_success_final_payload(
@@ -3309,9 +2808,11 @@ fn normalized_request_key(
     surface: &str,
     ordered_record_keys: &[String],
 ) -> String {
-    let mut normalized_record_keys = ordered_record_keys.to_vec();
-    normalized_record_keys.sort_unstable();
-    format!("{namespace}:{surface}:{}", normalized_record_keys.join(","))
+    bigname_storage::normalized_resolution_request_key_from_record_keys(
+        namespace,
+        surface,
+        ordered_record_keys,
+    )
 }
 
 fn normalized_verified_primary_name_request_key(
@@ -4314,6 +3815,26 @@ mod tests {
             receipts_root: None,
             state_root: None,
             canonicality_state: CanonicalityState::Canonical,
+        }
+    }
+
+    fn chain_lineage_block(
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        block_timestamp: i64,
+    ) -> ChainLineageBlock {
+        ChainLineageBlock {
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: Some(format!("0xparent{block_number:08x}")),
+            block_number,
+            block_timestamp: timestamp(block_timestamp),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Finalized,
         }
     }
 
@@ -5724,6 +5245,12 @@ mod tests {
                 ),
                 raw_block(
                     ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1-compatible",
+                    21_000_099,
+                    1_717_171_704,
+                ),
+                raw_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
                     "0xbasenamesl1",
                     21_000_100,
                     1_776_387_700,
@@ -5736,6 +5263,24 @@ mod tests {
             ETHEREUM_MAINNET_CHAIN_ID,
             "0xbasenamesl1",
             21_000_100,
+        )
+        .await?;
+        upsert_chain_lineage_blocks(
+            database.pool(),
+            &[
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1-compatible",
+                    21_000_099,
+                    1_717_171_704,
+                ),
+                chain_lineage_block(
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    "0xbasenamesl1",
+                    21_000_100,
+                    1_776_387_700,
+                ),
+            ],
         )
         .await?;
         bigname_storage::upsert_name_surfaces(

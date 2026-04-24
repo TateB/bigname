@@ -60,7 +60,7 @@ fn build_address_names_response_from_summary(
             std::iter::once(&summary.chain_positions).chain(supplement.chain_positions.iter()),
         ),
         page,
-        consistency: summary_consistency(
+        consistency: address_names_collection_consistency(
             &summary.consistency,
             supplement.canonicality_summaries.iter(),
         ),
@@ -407,13 +407,11 @@ fn build_permissions_coverage_from_sample(sample: Option<&JsonValue>) -> Coverag
     }
 }
 
-fn summary_consistency<'a>(
+fn address_names_collection_consistency<'a>(
     base_consistency: &str,
-    supplement_summaries: impl Iterator<Item = &'a JsonValue>,
+    _row_expansion_summaries: impl Iterator<Item = &'a JsonValue>,
 ) -> String {
-    let mut summaries = vec![json!({ "status": base_consistency })];
-    summaries.extend(supplement_summaries.cloned());
-    collection_consistency(summaries.iter()).to_owned()
+    base_consistency.to_owned()
 }
 
 fn build_permission_scope_value(scope: &PermissionScope) -> JsonValue {

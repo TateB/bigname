@@ -5,7 +5,11 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
-const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+use crate::projection_helpers::{
+    POSTGRES_MAX_BIND_PARAMETERS, remap_input_indexed_rows, require_json_object,
+    serialize_jsonb_field,
+};
+
 const RESOLVER_CURRENT_UPSERT_BIND_COLUMNS: usize = 9;
 const RESOLVER_CURRENT_MAX_ROWS_PER_CHUNK: usize =
     POSTGRES_MAX_BIND_PARAMETERS / RESOLVER_CURRENT_UPSERT_BIND_COLUMNS;
@@ -153,16 +157,26 @@ fn prepare_resolver_current_row(row: &ResolverCurrentRow) -> Result<PreparedReso
     Ok(PreparedResolverCurrentRow {
         chain_id: row.chain_id.clone(),
         resolver_address: normalize_resolver_address(&row.resolver_address),
-        declared_summary: serde_json::to_string(&row.declared_summary)
-            .context("failed to serialize resolver_current declared_summary")?,
-        provenance: serde_json::to_string(&row.provenance)
-            .context("failed to serialize resolver_current provenance")?,
-        coverage: serde_json::to_string(&row.coverage)
-            .context("failed to serialize resolver_current coverage")?,
-        chain_positions: serde_json::to_string(&row.chain_positions)
-            .context("failed to serialize resolver_current chain_positions")?,
-        canonicality_summary: serde_json::to_string(&row.canonicality_summary)
-            .context("failed to serialize resolver_current canonicality_summary")?,
+        declared_summary: serialize_jsonb_field(
+            &row.declared_summary,
+            "failed to serialize resolver_current declared_summary",
+        )?,
+        provenance: serialize_jsonb_field(
+            &row.provenance,
+            "failed to serialize resolver_current provenance",
+        )?,
+        coverage: serialize_jsonb_field(
+            &row.coverage,
+            "failed to serialize resolver_current coverage",
+        )?,
+        chain_positions: serialize_jsonb_field(
+            &row.chain_positions,
+            "failed to serialize resolver_current chain_positions",
+        )?,
+        canonicality_summary: serialize_jsonb_field(
+            &row.canonicality_summary,
+            "failed to serialize resolver_current canonicality_summary",
+        )?,
         manifest_version: row.manifest_version,
         last_recomputed_at: row.last_recomputed_at,
     })
@@ -317,35 +331,12 @@ fn decode_resolver_current_batch(
     rows: Vec<PgRow>,
     expected_len: usize,
 ) -> Result<Vec<ResolverCurrentRow>> {
-    let mut snapshots = vec![None; expected_len];
-    for row in rows {
-        let input_index = row
-            .try_get::<i64, _>("input_index")
-            .context("missing resolver_current input_index")?;
-        let input_index =
-            usize::try_from(input_index).context("resolver_current input_index is negative")?;
-        if input_index >= expected_len {
-            bail!(
-                "resolver_current batch returned input_index {} beyond expected row count {}",
-                input_index,
-                expected_len
-            );
-        }
-        let snapshot = decode_resolver_current_row(row)?;
-        if snapshots[input_index].replace(snapshot).is_some() {
-            bail!("resolver_current batch returned duplicate input_index {input_index}");
-        }
-    }
-
-    snapshots
-        .into_iter()
-        .enumerate()
-        .map(|(input_index, snapshot)| {
-            snapshot.with_context(|| {
-                format!("resolver_current batch did not return input_index {input_index}")
-            })
-        })
-        .collect()
+    remap_input_indexed_rows(
+        rows,
+        expected_len,
+        "resolver_current",
+        decode_resolver_current_row,
+    )
 }
 
 fn validate_resolver_current_row(row: &ResolverCurrentRow) -> Result<()> {
@@ -367,24 +358,36 @@ fn validate_resolver_current_row(row: &ResolverCurrentRow) -> Result<()> {
         );
     }
 
-    ensure_json_object(&row.declared_summary, "declared_summary", row)?;
-    ensure_json_object(&row.provenance, "provenance", row)?;
-    ensure_json_object(&row.coverage, "coverage", row)?;
-    ensure_json_object(&row.chain_positions, "chain_positions", row)?;
-    ensure_json_object(&row.canonicality_summary, "canonicality_summary", row)?;
-
-    Ok(())
-}
-
-fn ensure_json_object(value: &Value, field_name: &str, row: &ResolverCurrentRow) -> Result<()> {
-    if !value.is_object() {
-        bail!(
-            "resolver_current row for chain_id {} resolver_address {} field {} must be a JSON object",
-            row.chain_id,
-            row.resolver_address,
-            field_name
-        );
-    }
+    require_json_object(&row.declared_summary, || {
+        format!(
+            "resolver_current row for chain_id {} resolver_address {} field declared_summary must be a JSON object",
+            row.chain_id, row.resolver_address
+        )
+    })?;
+    require_json_object(&row.provenance, || {
+        format!(
+            "resolver_current row for chain_id {} resolver_address {} field provenance must be a JSON object",
+            row.chain_id, row.resolver_address
+        )
+    })?;
+    require_json_object(&row.coverage, || {
+        format!(
+            "resolver_current row for chain_id {} resolver_address {} field coverage must be a JSON object",
+            row.chain_id, row.resolver_address
+        )
+    })?;
+    require_json_object(&row.chain_positions, || {
+        format!(
+            "resolver_current row for chain_id {} resolver_address {} field chain_positions must be a JSON object",
+            row.chain_id, row.resolver_address
+        )
+    })?;
+    require_json_object(&row.canonicality_summary, || {
+        format!(
+            "resolver_current row for chain_id {} resolver_address {} field canonicality_summary must be a JSON object",
+            row.chain_id, row.resolver_address
+        )
+    })?;
 
     Ok(())
 }

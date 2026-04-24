@@ -3,6 +3,11 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
+use crate::projection_helpers::{
+    checked_page_limit_i64, checked_page_size_usize, require_json_object, serialize_jsonb_field,
+    take_json_array,
+};
+
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const SUBREGISTRY_EVENT_KIND: &str = "SubregistryChanged";
 const PARENT_EVENT_KIND: &str = "ParentChanged";
@@ -128,9 +133,16 @@ pub async fn load_children_current_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<ChildrenCurrentPage> {
-    let limit = children_current_page_limit(page_size)?;
-    let page_size =
-        usize::try_from(page_size).context("children_current page_size does not fit in usize")?;
+    let limit = checked_page_limit_i64(
+        page_size,
+        "children_current page_size must be positive",
+        "children_current page_size is too large",
+    )?;
+    let page_size = checked_page_size_usize(
+        page_size,
+        "children_current page_size must be positive",
+        "children_current page_size does not fit in usize",
+    )?;
 
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -884,12 +896,18 @@ async fn upsert_children_current_row(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &ChildrenCurrentRow,
 ) -> Result<ChildrenCurrentRow> {
-    let provenance = serde_json::to_string(&row.provenance)
-        .context("failed to serialize children_current provenance")?;
-    let chain_positions = serde_json::to_string(&row.chain_positions)
-        .context("failed to serialize children_current chain_positions")?;
-    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
-        .context("failed to serialize children_current canonicality_summary")?;
+    let provenance = serialize_jsonb_field(
+        &row.provenance,
+        "failed to serialize children_current provenance",
+    )?;
+    let chain_positions = serialize_jsonb_field(
+        &row.chain_positions,
+        "failed to serialize children_current chain_positions",
+    )?;
+    let canonicality_summary = serialize_jsonb_field(
+        &row.canonicality_summary,
+        "failed to serialize children_current canonicality_summary",
+    )?;
 
     let snapshot = sqlx::query(
         r#"
@@ -1038,42 +1056,24 @@ fn validate_children_current_row(row: &ChildrenCurrentRow) -> Result<()> {
         );
     }
 
-    ensure_json_object(
-        &row.provenance,
-        "provenance",
-        &row.parent_logical_name_id,
-        &row.child_logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.chain_positions,
-        "chain_positions",
-        &row.parent_logical_name_id,
-        &row.child_logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.canonicality_summary,
-        "canonicality_summary",
-        &row.parent_logical_name_id,
-        &row.child_logical_name_id,
-    )?;
-
-    Ok(())
-}
-
-fn ensure_json_object(
-    value: &Value,
-    field_name: &str,
-    parent_logical_name_id: &str,
-    child_logical_name_id: &str,
-) -> Result<()> {
-    if !value.is_object() {
-        bail!(
-            "children_current row {} -> {} field {} must be a JSON object",
-            parent_logical_name_id,
-            child_logical_name_id,
-            field_name
-        );
-    }
+    require_json_object(&row.provenance, || {
+        format!(
+            "children_current row {} -> {} field provenance must be a JSON object",
+            row.parent_logical_name_id, row.child_logical_name_id
+        )
+    })?;
+    require_json_object(&row.chain_positions, || {
+        format!(
+            "children_current row {} -> {} field chain_positions must be a JSON object",
+            row.parent_logical_name_id, row.child_logical_name_id
+        )
+    })?;
+    require_json_object(&row.canonicality_summary, || {
+        format!(
+            "children_current row {} -> {} field canonicality_summary must be a JSON object",
+            row.parent_logical_name_id, row.child_logical_name_id
+        )
+    })?;
 
     Ok(())
 }
@@ -1133,25 +1133,13 @@ fn decode_children_current_summary(row: PgRow) -> Result<ChildrenCurrentSummary>
     })
 }
 
-fn children_current_page_limit(page_size: u64) -> Result<i64> {
-    if page_size == 0 {
-        bail!("children_current page_size must be positive");
-    }
-    let limit = page_size
-        .checked_add(1)
-        .filter(|limit| *limit <= i64::MAX as u64)
-        .context("children_current page_size is too large")?;
-    Ok(limit as i64)
-}
-
 fn json_array_field(row: &PgRow, field_name: &str) -> Result<Vec<Value>> {
     let value: Value = row
         .try_get(field_name)
         .with_context(|| format!("children_current summary row missing {field_name}"))?;
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => bail!("children_current summary field {field_name} must be a JSON array"),
-    }
+    take_json_array(value, || {
+        format!("children_current summary field {field_name} must be a JSON array")
+    })
 }
 
 fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredChildEventSource> {

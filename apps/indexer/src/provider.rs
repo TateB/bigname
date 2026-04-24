@@ -86,6 +86,7 @@ pub struct ProviderBlockCodeObservationRequest {
     pub addresses: Vec<String>,
 }
 
+#[allow(dead_code, reason = "staged for exact block log fetch callers")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderBlockLogRequest {
     pub block_number: i64,
@@ -262,6 +263,7 @@ impl JsonRpcProvider {
         })
     }
 
+    #[allow(dead_code, reason = "staged provider helper covered by tests")]
     pub async fn fetch_block_hash_by_number(&self, block_number: i64) -> Result<String> {
         let block_parameter = ProviderBlockSelection::Number(block_number).json_rpc_parameter()?;
         let block = self
@@ -484,6 +486,7 @@ impl JsonRpcProvider {
         Ok(bundle)
     }
 
+    #[allow(dead_code, reason = "staged provider helper covered by tests")]
     pub async fn fetch_logs_by_block_hashes(
         &self,
         requests: &[ProviderBlockLogRequest],
@@ -731,6 +734,7 @@ impl JsonRpcProvider {
         Ok(())
     }
 
+    #[allow(dead_code, reason = "staged cache-fill helper covered by tests")]
     pub async fn cache_fill_full_block_by_hash(
         &self,
         pool: &sqlx::PgPool,

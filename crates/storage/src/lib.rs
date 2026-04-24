@@ -13,12 +13,14 @@ mod name_current;
 mod normalized_events;
 mod permissions;
 mod primary_name;
+mod projection_helpers;
 mod raw;
 mod raw_calls;
 mod raw_children;
 mod raw_code;
 mod raw_payload_cache;
 mod record_inventory;
+mod resolution_support;
 mod resolver;
 mod snapshot_selection;
 
@@ -144,6 +146,25 @@ pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
     load_record_inventory_current, load_record_inventory_current_for_snapshot,
     upsert_record_inventory_current_rows,
+};
+pub use resolution_support::{
+    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
+    ETHEREUM_MAINNET_CHAIN_ID, SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass,
+    VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition,
+    VerifiedResolutionSupportBoundary, build_resolution_execution_cache_key,
+    build_resolution_requested_chain_positions, classify_supported_resolution_topology,
+    is_resolution_avatar_record, normalized_resolution_request_key,
+    normalized_resolution_request_key_from_record_keys,
+    parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
+    projected_resolution_topology, record_version_boundary_has_pointer,
+    resolution_execution_cache_lookup_records, resolution_record_inventory_lookup_key,
+    resolution_record_inventory_lookup_key_for_revalidation, resolution_record_version_boundary,
+    resolution_record_version_boundary_for_revalidation,
+    resolution_requested_chain_positions_from_projection, resolution_supports_avatar_readback,
+    resolution_verified_support_boundary, row_has_basenames_supported_chain_positions,
+    supported_resolution_verified_lookup_records, supported_resolution_verified_readback_records,
+    supports_resolution_verified_lookup_record, try_classify_supported_resolution_topology,
+    try_resolution_verified_support_boundary,
 };
 pub use resolver::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,

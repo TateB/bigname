@@ -1,7 +1,21 @@
-const BASENAMES_NAMESPACE: &str = "basenames";
-const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = "base-mainnet";
-const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = "ethereum-mainnet";
-const BASENAMES_COMPAT_CONTRACT_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
+const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;
+const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
+const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
+const BASENAMES_COMPAT_CONTRACT_ADDRESS: &str = bigname_storage::BASENAMES_L1_RESOLVER_ADDRESS;
+
+impl bigname_storage::VerifiedResolutionRecord for ResolutionRecordKey {
+    fn record_key(&self) -> &str {
+        &self.record_key
+    }
+
+    fn record_family(&self) -> &str {
+        &self.record_family
+    }
+
+    fn selector_key(&self) -> Option<&str> {
+        self.selector_key.as_deref()
+    }
+}
 
 fn build_resolution_declared_state(
     row: &NameCurrentRow,
@@ -16,7 +30,7 @@ fn build_resolution_declared_state(
         "declared resolution record cache is not yet projected",
     );
     if classify_supported_resolution_topology(&row.namespace, &row.logical_name_id, &topology)
-        == Some(SupportedResolutionPathClass::BasenamesTransportDirect)
+        == Some(bigname_storage::VerifiedResolutionPathClass::BasenamesTransportDirect)
     {
         mark_basenames_transport_direct_unretained_record_cache_values(&mut record_cache);
     }
@@ -134,37 +148,11 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
     query
 }
 
-fn supported_resolution_verified_lookup_records(
-    records: &[ResolutionRecordKey],
-) -> Vec<ResolutionRecordKey> {
-    records
-        .iter()
-        .filter(|record| match record.record_family.as_str() {
-            "addr" => record
-                .selector_key
-                .as_deref()
-                .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit)),
-            "contenthash" => record.record_key == "contenthash" && record.selector_key.is_none(),
-            "text" => record.selector_key.is_some(),
-            _ => false,
-        })
-        .cloned()
-        .collect()
-}
-
 fn supported_resolution_verified_readback_records(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
 ) -> Vec<ResolutionRecordKey> {
-    records
-        .iter()
-        .filter(|record| {
-            supports_resolution_verified_lookup_record(record)
-                || (resolution_supports_avatar_readback(row, None)
-                    && is_resolution_avatar_record(record))
-        })
-        .cloned()
-        .collect()
+    bigname_storage::supported_resolution_verified_readback_records(row, records)
 }
 
 async fn load_resolution_verified_outcome(
@@ -181,14 +169,15 @@ async fn load_resolution_verified_outcome(
         return Ok(None);
     }
 
-    let supported_records = supported_resolution_verified_lookup_records(records);
+    let supported_records = supported_resolution_verified_readback_records(row, records);
     if supported_records.is_empty() {
         return Ok(None);
     }
+    let cache_key_records = resolution_execution_cache_lookup_records(row, &supported_records);
 
     let cache_key = build_resolution_execution_cache_key(
         row,
-        &supported_records,
+        &cache_key_records,
         record_inventory_row,
         selected_snapshot.chain_positions_value(),
     )
@@ -205,11 +194,40 @@ async fn load_resolution_verified_outcome(
         ))
     })?;
 
-    outcome.ok_or_else(|| {
-        SnapshotSelectionError::stale(format!(
+    match outcome {
+        Some(outcome) => {
+            validate_loaded_resolution_verified_outcome(row, records, &outcome)?;
+            Ok(Some(outcome))
+        }
+        None => Err(SnapshotSelectionError::stale(format!(
             "persisted verified resolution output is not available for the selected snapshot"
-        ))
-    }).map(Some)
+        ))),
+    }
+}
+
+fn validate_loaded_resolution_verified_outcome(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    outcome: &ExecutionOutcome,
+) -> std::result::Result<(), SnapshotSelectionError> {
+    let supported_records = supported_resolution_verified_readback_records(row, records);
+    if supported_records.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(persisted_queries) = persisted_verified_queries_by_record_key(outcome) else {
+        return Ok(());
+    };
+
+    for record in supported_records {
+        if !persisted_queries.contains_key(&record.record_key) {
+            return Err(SnapshotSelectionError::stale(format!(
+                "persisted verified resolution output is not available for the selected snapshot"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn record_inventory_blocks_verified_entrypoint(
@@ -559,21 +577,6 @@ fn build_legacy_resolution_topology(
     topology
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum SupportedResolutionPathClass {
-    Direct,
-    AliasOnly,
-    WildcardDerived,
-    BasenamesTransportDirect,
-}
-
-struct ResolutionVerifiedSupportBoundary {
-    #[allow(dead_code)]
-    path_class: SupportedResolutionPathClass,
-    topology_version_boundary: JsonValue,
-    record_version_boundary: JsonValue,
-}
-
 fn build_resolution_name_ref(row: &NameCurrentRow) -> JsonValue {
     let mut name_ref = empty_object();
     insert_string_field(
@@ -632,38 +635,11 @@ fn build_resolution_resolver_hop(
     hop
 }
 
-fn build_resolution_version_boundary(
-    row: &NameCurrentRow,
-    chain_position: &ChainPositionResponse,
-) -> JsonValue {
-    let mut boundary = empty_object();
-    insert_string_field(
-        &mut boundary,
-        "logical_name_id",
-        row.logical_name_id.clone(),
-    );
-    insert_optional_string_field(
-        &mut boundary,
-        "resource_id",
-        row.resource_id.map(|value| value.to_string()),
-    );
-    insert_value_field(&mut boundary, "normalized_event_id", JsonValue::Null);
-    insert_value_field(&mut boundary, "event_kind", JsonValue::Null);
-    insert_value_field(
-        &mut boundary,
-        "chain_position",
-        serde_json::to_value(chain_position).expect("chain position must serialize"),
-    );
-    boundary
-}
-
 fn resolution_record_version_boundary(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<JsonValue> {
-    record_inventory_row
-        .map(|record_inventory_row| record_inventory_row.record_version_boundary.clone())
-        .or_else(|| build_supported_resolution_declared_boundary(row))
+    bigname_storage::resolution_record_version_boundary(row, record_inventory_row)
 }
 
 fn build_resolution_execution_cache_key(
@@ -672,131 +648,19 @@ fn build_resolution_execution_cache_key(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     chain_positions: JsonValue,
 ) -> Result<ExecutionCacheKey> {
-    let manifest_versions = array_or_empty(provenance_field(&row.provenance, "manifest_versions"));
-    if manifest_versions
-        .as_array()
-        .is_none_or(|items| items.is_empty())
-    {
-        bail!(
-            "resolution execution explain requires non-empty manifest_versions provenance for {}",
-            row.logical_name_id
-        );
-    }
-
-    let support_boundary = resolution_verified_support_boundary(row, record_inventory_row)
-        .with_context(|| {
-            format!(
-                "resolution execution explain requires a supported topology boundary for {}",
-                row.logical_name_id
-            )
-        })?;
-    let topology_version_boundary = support_boundary.topology_version_boundary;
-    let record_version_boundary = support_boundary.record_version_boundary;
-
-    Ok(ExecutionCacheKey {
-        request_key: normalized_resolution_request_key(
-            &row.namespace,
-            &row.normalized_name,
-            records,
-        ),
-        requested_chain_positions: build_requested_chain_positions(&chain_positions)?,
-        manifest_versions,
-        topology_version_boundary,
-        record_version_boundary,
-    })
-}
-
-fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
-    let chain_positions = row.chain_positions.as_object()?;
-    if row.namespace == BASENAMES_NAMESPACE
-        && let Some(position) = chain_positions
-            .values()
-            .filter_map(chain_position_from_value)
-            .find(|position| position.chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
-    {
-        return Some(position);
-    }
-    chain_positions
-        .get("ethereum")
-        .and_then(chain_position_from_value)
-        .or_else(|| {
-            let mut parsed = chain_positions
-                .values()
-                .filter_map(chain_position_from_value);
-            let first = parsed.next()?;
-            parsed.next().is_none().then_some(first)
-        })
-}
-
-fn normalized_resolution_request_key(
-    namespace: &str,
-    normalized_name: &str,
-    records: &[ResolutionRecordKey],
-) -> String {
-    let mut record_keys = records
-        .iter()
-        .map(|record| record.record_key.clone())
-        .collect::<Vec<_>>();
-    record_keys.sort_unstable();
-    format!("{namespace}:{normalized_name}:{}", record_keys.join(","))
-}
-
-fn build_requested_chain_positions(chain_positions: &JsonValue) -> Result<JsonValue> {
-    let positions = chain_positions
-        .as_object()
-        .context("resolution execution explain requires chain_positions")?
-        .values()
-        .filter_map(chain_position_from_value)
-        .map(|position| {
-            json!({
-                "chain_id": position.chain_id,
-                "block_number": position.block_number,
-                "block_hash": position.block_hash,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if positions.is_empty() {
-        bail!("resolution execution explain requires at least one chain position");
-    }
-
-    let mut positions = positions;
-    positions.sort_by(|left, right| {
-        string_field(provenance_field(left, "chain_id"))
-            .cmp(&string_field(provenance_field(right, "chain_id")))
-            .then(
-                provenance_field(left, "block_number")
-                    .and_then(JsonValue::as_i64)
-                    .cmp(&provenance_field(right, "block_number").and_then(JsonValue::as_i64)),
-            )
-            .then(
-                string_field(provenance_field(left, "block_hash"))
-                    .cmp(&string_field(provenance_field(right, "block_hash"))),
-            )
-    });
-
-    Ok(JsonValue::Array(positions))
+    bigname_storage::build_resolution_execution_cache_key(
+        row,
+        records,
+        record_inventory_row,
+        chain_positions,
+    )
 }
 
 fn resolution_execution_cache_lookup_records(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
 ) -> Vec<ResolutionRecordKey> {
-    if !resolution_supports_avatar_readback(row, None) {
-        return records.to_vec();
-    }
-
-    let lookup_records = records
-        .iter()
-        .filter(|record| !is_resolution_avatar_record(record))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if lookup_records.is_empty() || lookup_records.len() == records.len() {
-        records.to_vec()
-    } else {
-        lookup_records
-    }
+    bigname_storage::resolution_execution_cache_lookup_records(row, records)
 }
 
 fn persisted_trace_detail_object(trace: &ExecutionTrace, key: &str) -> Option<JsonValue> {
@@ -904,83 +768,11 @@ async fn load_supported_record_inventory_current_for_snapshot(
 }
 
 fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
-    Some((
-        row.resource_id?,
-        build_supported_resolution_declared_boundary(row)?,
-    ))
-}
-
-fn supports_resolution_verified_lookup_record(record: &ResolutionRecordKey) -> bool {
-    match record.record_family.as_str() {
-        "addr" => record
-            .selector_key
-            .as_deref()
-            .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit)),
-        "contenthash" => record.record_key == "contenthash" && record.selector_key.is_none(),
-        "text" => record.selector_key.is_some(),
-        _ => false,
-    }
-}
-
-fn is_resolution_avatar_record(record: &ResolutionRecordKey) -> bool {
-    record.record_key == "avatar"
-        && record.record_family == "avatar"
-        && record.selector_key.is_none()
-}
-
-fn resolution_supports_avatar_readback(
-    row: &NameCurrentRow,
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> bool {
-    resolution_verified_support_boundary(row, record_inventory_row).is_some()
-}
-
-fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
-    if row.namespace != "ens"
-        || !matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        )
-        || row.resource_id.is_none()
-    {
-        return None;
-    }
-
-    let chain_position = build_resolution_boundary_chain_position(row)?;
-    if !chain_position.chain_id.starts_with("ethereum") {
-        return None;
-    }
-
-    Some(build_resolution_version_boundary(row, &chain_position))
-}
-
-fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
-    let binding_supported = match row.namespace.as_str() {
-        "ens" => matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ),
-        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
-        _ => false,
-    };
-    if !binding_supported || row.resource_id.is_none() {
-        return None;
-    }
-
-    let chain_position = build_resolution_boundary_chain_position(row)?;
-    match row.namespace.as_str() {
-        "ens" if chain_position.chain_id.starts_with("ethereum") => {}
-        BASENAMES_NAMESPACE if chain_position.chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID => {}
-        _ => return None,
-    }
-
-    Some(build_resolution_version_boundary(row, &chain_position))
+    bigname_storage::resolution_record_inventory_lookup_key(row)
 }
 
 fn projected_resolution_topology(summary: &JsonValue) -> Option<JsonValue> {
-    provenance_field(summary, "topology")
-        .filter(|value| value.is_object())
-        .cloned()
+    bigname_storage::projected_resolution_topology(summary)
 }
 
 fn projected_resolution_resolver_path(summary: &JsonValue) -> Option<JsonValue> {
@@ -994,208 +786,16 @@ fn projected_resolution_resolver_path(summary: &JsonValue) -> Option<JsonValue> 
 fn resolution_verified_support_boundary(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> Option<ResolutionVerifiedSupportBoundary> {
-    if !matches!(row.namespace.as_str(), "ens" | BASENAMES_NAMESPACE) {
-        return None;
-    }
-
-    if let Some(projected_topology) = projected_resolution_topology(&row.declared_summary) {
-        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions(row)
-        {
-            return None;
-        }
-        let path_class = classify_supported_resolution_topology(
-            &row.namespace,
-            &row.logical_name_id,
-            &projected_topology,
-        )?;
-        let version_boundaries = provenance_field(&projected_topology, "version_boundaries")?;
-        let topology_version_boundary =
-            provenance_field(version_boundaries, "topology_version_boundary")?.clone();
-        let record_version_boundary =
-            provenance_field(version_boundaries, "record_version_boundary")?.clone();
-        return Some(ResolutionVerifiedSupportBoundary {
-            path_class,
-            topology_version_boundary,
-            record_version_boundary,
-        });
-    }
-
-    let topology_version_boundary = match row.namespace.as_str() {
-        "ens" => build_supported_resolution_verified_boundary(row)?,
-        BASENAMES_NAMESPACE => return None,
-        _ => return None,
-    };
-    let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
-        .or_else(|| Some(topology_version_boundary.clone()))?;
-    let path_class = match row.binding_kind {
-        Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
-        _ => SupportedResolutionPathClass::Direct,
-    };
-
-    Some(ResolutionVerifiedSupportBoundary {
-        path_class,
-        topology_version_boundary,
-        record_version_boundary,
-    })
+) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
+    bigname_storage::resolution_verified_support_boundary(row, record_inventory_row)
 }
 
 fn classify_supported_resolution_topology(
     namespace: &str,
     logical_name_id: &str,
     topology: &JsonValue,
-) -> Option<SupportedResolutionPathClass> {
-    if summary_is_unsupported(Some(topology)) {
-        return None;
-    }
-
-    let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)?;
-    let alias_present = resolution_topology_alias_is_present(topology)?;
-    let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
-    let transport_is_null = resolution_topology_transport_is_null(topology);
-
-    if namespace == BASENAMES_NAMESPACE {
-        if !transport_is_null {
-            return resolution_topology_subregistry_path_is_empty(topology)
-                .then_some(())
-                .filter(|_| resolver_logical_name_id == logical_name_id)
-                .filter(|_| !alias_present)
-                .filter(|_| wildcard_source_logical_name_id.is_none())
-                .filter(|_| {
-                    resolution_topology_transport_matches_basenames_supported_class(topology)
-                })
-                .map(|_| SupportedResolutionPathClass::BasenamesTransportDirect);
-        }
-        return None;
-    }
-
-    if !transport_is_null {
-        return None;
-    }
-
-    if wildcard_source_logical_name_id.is_some() {
-        if alias_present || !resolution_topology_subregistry_path_is_empty(topology) {
-            return None;
-        }
-        return (resolver_logical_name_id == wildcard_source_logical_name_id?)
-            .then_some(SupportedResolutionPathClass::WildcardDerived);
-    }
-
-    if resolver_logical_name_id != logical_name_id {
-        return None;
-    }
-
-    if alias_present {
-        Some(SupportedResolutionPathClass::AliasOnly)
-    } else {
-        Some(SupportedResolutionPathClass::Direct)
-    }
-}
-
-fn resolution_topology_resolver_logical_name_id(topology: &JsonValue) -> Option<String> {
-    provenance_field(topology, "resolver_path")
-        .and_then(JsonValue::as_array)
-        .and_then(|resolver_path| resolver_path.first())
-        .and_then(|hop| string_field(provenance_field(hop, "logical_name_id")))
-}
-
-fn resolution_topology_alias_is_present(topology: &JsonValue) -> Option<bool> {
-    let alias = provenance_field(topology, "alias")?;
-    let final_target_present = !matches!(
-        provenance_field(alias, "final_target"),
-        None | Some(JsonValue::Null)
-    );
-    let hops = provenance_field(alias, "hops")?.as_array()?;
-    let hops_present = !hops.is_empty();
-
-    if final_target_present != hops_present {
-        return None;
-    }
-
-    Some(final_target_present)
-}
-
-fn resolution_topology_wildcard_state(topology: &JsonValue) -> Option<Option<String>> {
-    let wildcard = provenance_field(topology, "wildcard")?;
-    let matched_labels = provenance_field(wildcard, "matched_labels")?.as_array()?;
-    let source = provenance_field(wildcard, "source");
-
-    match source {
-        None | Some(JsonValue::Null) => matched_labels.is_empty().then_some(None),
-        Some(_) if matched_labels.is_empty() => None,
-        Some(source) => string_field(provenance_field(source, "logical_name_id")).map(Some),
-    }
-}
-
-fn resolution_topology_subregistry_path_is_empty(topology: &JsonValue) -> bool {
-    provenance_field(topology, "subregistry_path")
-        .and_then(JsonValue::as_array)
-        .is_some_and(Vec::is_empty)
-}
-
-fn resolution_topology_transport_is_null(topology: &JsonValue) -> bool {
-    let Some(transport) = provenance_field(topology, "transport") else {
-        return true;
-    };
-
-    for field_name in [
-        "source_chain_id",
-        "target_chain_id",
-        "contract_address",
-        "latest_event_kind",
-    ] {
-        if !matches!(
-            provenance_field(transport, field_name),
-            None | Some(JsonValue::Null)
-        ) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn resolution_topology_transport_matches_basenames_supported_class(topology: &JsonValue) -> bool {
-    let Some(transport) = provenance_field(topology, "transport") else {
-        return false;
-    };
-    let Some(transport_fields) = transport.as_object() else {
-        return false;
-    };
-
-    if transport_fields.iter().any(|(field_name, value)| {
-        !matches!(
-            field_name.as_str(),
-            "source_chain_id" | "target_chain_id" | "contract_address" | "latest_event_kind"
-        ) && !value.is_null()
-    }) {
-        return false;
-    }
-
-    string_field(transport_fields.get("source_chain_id"))
-        .is_some_and(|value| value == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
-        && string_field(transport_fields.get("target_chain_id"))
-            .is_some_and(|value| value == BASENAMES_COMPAT_TARGET_CHAIN_ID)
-        && string_field(transport_fields.get("contract_address"))
-            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_COMPAT_CONTRACT_ADDRESS))
-}
-
-fn row_has_basenames_supported_chain_positions(row: &NameCurrentRow) -> bool {
-    let Some(chain_positions) = row.chain_positions.as_object() else {
-        return false;
-    };
-
-    let mut saw_base = false;
-    let mut saw_ethereum = false;
-    for position in chain_positions.values() {
-        match chain_position_from_value(position).map(|position| position.chain_id) {
-            Some(chain_id) if chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID => saw_base = true,
-            Some(chain_id) if chain_id == BASENAMES_COMPAT_TARGET_CHAIN_ID => saw_ethereum = true,
-            Some(_) | None => {}
-        }
-    }
-
-    saw_base && saw_ethereum
+) -> Option<bigname_storage::VerifiedResolutionPathClass> {
+    bigname_storage::classify_supported_resolution_topology(namespace, logical_name_id, topology)
 }
 
 fn build_resolution_transport(row: &NameCurrentRow) -> JsonValue {
