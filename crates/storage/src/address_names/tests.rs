@@ -5,17 +5,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Map, Value as JsonValue, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
+    types::time::OffsetDateTime,
 };
+use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CanonicalityState, NameSurface, Resource, SurfaceBinding, TokenLineage, default_database_url,
-    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    CanonicalityState, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    default_database_url, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
