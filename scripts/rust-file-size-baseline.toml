@@ -107,7 +107,35 @@ loc = 89
 
 [[files]]
 path = "apps/api/src/responses/projections.rs"
-loc = 635
+loc = 231
+
+[[files]]
+path = "apps/api/src/responses/projections/common.rs"
+loc = 18
+
+[[files]]
+path = "apps/api/src/responses/projections/consistency.rs"
+loc = 26
+
+[[files]]
+path = "apps/api/src/responses/projections/coverage.rs"
+loc = 65
+
+[[files]]
+path = "apps/api/src/responses/projections/data.rs"
+loc = 52
+
+[[files]]
+path = "apps/api/src/responses/projections/declared_state.rs"
+loc = 234
+
+[[files]]
+path = "apps/api/src/responses/projections/provenance.rs"
+loc = 45
+
+[[files]]
+path = "apps/api/src/responses/projections/records.rs"
+loc = 195
 
 [[files]]
 path = "apps/api/src/responses/resolution.rs"
