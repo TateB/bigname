@@ -31,14 +31,17 @@ pub(crate) async fn reconcile_manifest_source_graph(
         MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE,
     )
     .await?;
+
     cleared_edge_count += reconcile_managed_edges(
         executor,
         &desired_successor_edges,
         MANIFEST_SUCCESSOR_DISCOVERY_SOURCE,
     )
     .await?;
-    cleared_edge_count +=
+
+    let stale_source_edge_count =
         deactivate_discovery_edges_without_active_source_manifest(executor).await?;
+    cleared_edge_count += stale_source_edge_count;
 
     reconcile_active_contract_instance_addresses(executor).await?;
 

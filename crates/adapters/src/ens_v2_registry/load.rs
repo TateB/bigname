@@ -81,7 +81,7 @@ pub(super) async fn load_registry_raw_logs(
               ON rb.chain_id = rl.chain_id
              AND rb.block_hash = rl.block_hash
             WHERE rl.chain_id = $1
-              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
               AND EXISTS (
                   SELECT 1
@@ -90,7 +90,7 @@ pub(super) async fn load_registry_raw_logs(
                       effective_from_block,
                       effective_to_block
                   )
-                  WHERE watched.address = lower(rl.emitting_address)
+                  WHERE watched.address = rl.emitting_address
                     AND rl.block_number BETWEEN watched.effective_from_block
                         AND watched.effective_to_block
               )
@@ -101,12 +101,12 @@ pub(super) async fn load_registry_raw_logs(
                       effective_from_block,
                       effective_to_block
                   )
-                  WHERE scoped.address = lower(rl.emitting_address)
+                  WHERE scoped.address = rl.emitting_address
                     AND rl.block_number BETWEEN scoped.effective_from_block
                         AND scoped.effective_to_block
               )
               AND rl.canonicality_state <> 'orphaned'::canonicality_state
-            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, lower(rl.emitting_address)
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
         .bind(chain)
@@ -144,10 +144,10 @@ pub(super) async fn load_registry_raw_logs(
               ON rb.chain_id = rl.chain_id
              AND rb.block_hash = rl.block_hash
             WHERE rl.chain_id = $1
-              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
               AND rl.canonicality_state <> 'orphaned'::canonicality_state
-            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, lower(rl.emitting_address)
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
         .bind(chain)

@@ -218,6 +218,41 @@ async fn normalized_event_upsert_promotes_canonicality() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_escapes_nul_bytes_for_jsonb() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut event = normalized_event(
+        "manifest:1:nul-byte",
+        "CapabilityChanged",
+        CanonicalityState::Finalized,
+    );
+    event.logical_name_id = Some("name\0with-nul".to_owned());
+    event.after_state = json!({
+        "record": "before\0after",
+        "key\0with-nul": "value",
+        "nested": ["left\0right"],
+    });
+
+    let inserted = upsert_normalized_events(database.pool(), &[event]).await?;
+    assert_eq!(
+        inserted[0].logical_name_id.as_deref(),
+        Some("name\\u0000with-nul")
+    );
+    assert_eq!(
+        inserted[0].after_state,
+        json!({
+            "record": "before\\u0000after",
+            "key\\u0000with-nul": "value",
+            "nested": ["left\\u0000right"],
+        })
+    );
+
+    let loaded = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+    assert_eq!(loaded, inserted);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn orphan_range_marks_block_derived_normalized_events_orphaned() -> Result<()> {
     let database = TestDatabase::new().await?;
 

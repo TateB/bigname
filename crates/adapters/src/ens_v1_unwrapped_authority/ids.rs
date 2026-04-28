@@ -50,8 +50,42 @@ pub(super) fn name_registered_topic0() -> String {
     keccak256_hex(NAME_REGISTERED_SIGNATURE.as_bytes())
 }
 
+pub(super) fn wrapped_name_registered_topic0() -> String {
+    keccak256_hex(WRAPPED_NAME_REGISTERED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn unwrapped_name_registered_topic0() -> String {
+    keccak256_hex(UNWRAPPED_NAME_REGISTERED_SIGNATURE.as_bytes())
+}
+
 pub(super) fn name_renewed_topic0() -> String {
     keccak256_hex(NAME_RENEWED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn unwrapped_name_renewed_topic0() -> String {
+    keccak256_hex(UNWRAPPED_NAME_RENEWED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn registrar_name_registered_expiry_word_start(topic0: &str) -> Option<usize> {
+    if topic0.eq_ignore_ascii_case(&name_registered_topic0()) {
+        Some(64)
+    } else if topic0.eq_ignore_ascii_case(&wrapped_name_registered_topic0())
+        || topic0.eq_ignore_ascii_case(&unwrapped_name_registered_topic0())
+    {
+        Some(96)
+    } else {
+        None
+    }
+}
+
+pub(super) fn registrar_name_renewed_expiry_word_start(topic0: &str) -> Option<usize> {
+    if topic0.eq_ignore_ascii_case(&name_renewed_topic0())
+        || topic0.eq_ignore_ascii_case(&unwrapped_name_renewed_topic0())
+    {
+        Some(64)
+    } else {
+        None
+    }
 }
 
 pub(super) fn transfer_topic0() -> String {

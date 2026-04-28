@@ -5,6 +5,8 @@ use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
 
 use crate::CanonicalityState;
 
+mod bulk;
+
 /// Persisted exact code-hash observation anchored to one observed block hash.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawCodeHash {
@@ -25,6 +27,10 @@ pub async fn upsert_raw_code_hashes(
 ) -> Result<Vec<RawCodeHash>> {
     if code_hashes.is_empty() {
         return Ok(Vec::new());
+    }
+
+    if code_hashes.len() >= bulk::BULK_RAW_CODE_HASH_UPSERT_MIN_ROWS {
+        return bulk::upsert_raw_code_hashes_bulk(pool, code_hashes).await;
     }
 
     let mut transaction = pool
@@ -453,6 +459,47 @@ mod tests {
         .await?;
         assert_eq!(promoted.len(), 1);
         assert_eq!(promoted[0].canonicality_state, CanonicalityState::Finalized);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn bulk_upserts_and_promotes_raw_code_hashes() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let code_hashes = (0_i64..150)
+            .map(|index| RawCodeHash {
+                block_hash: format!("0xblock{index:064x}"),
+                block_number: index,
+                contract_address: format!("0x{index:040x}"),
+                ..raw_code_hash("0x0001", CanonicalityState::Canonical)
+            })
+            .collect::<Vec<_>>();
+
+        let inserted = upsert_raw_code_hashes(database.pool(), &code_hashes).await?;
+
+        assert_eq!(inserted.len(), code_hashes.len());
+        assert!(
+            inserted
+                .iter()
+                .all(|code_hash| code_hash.canonicality_state == CanonicalityState::Canonical)
+        );
+
+        let promoted_code_hashes = code_hashes
+            .iter()
+            .cloned()
+            .map(|mut code_hash| {
+                code_hash.canonicality_state = CanonicalityState::Finalized;
+                code_hash
+            })
+            .collect::<Vec<_>>();
+        let promoted = upsert_raw_code_hashes(database.pool(), &promoted_code_hashes).await?;
+
+        assert_eq!(promoted.len(), promoted_code_hashes.len());
+        assert!(
+            promoted
+                .iter()
+                .all(|code_hash| code_hash.canonicality_state == CanonicalityState::Finalized)
+        );
 
         database.cleanup().await
     }

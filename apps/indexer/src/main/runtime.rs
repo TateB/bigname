@@ -34,7 +34,8 @@ pub(crate) use logging::{
 };
 #[allow(unused_imports)]
 pub(crate) use manifest::{
-    DiscoveryAdmissionSnapshot, ManifestRuntimeState, build_manifest_runtime_state,
+    DiscoveryAdmissionSnapshot, ManifestRuntimeState, RuntimeWatchScope,
+    build_manifest_runtime_state, build_manifest_runtime_state_with_watch_scope,
     discovery_admission_snapshot, ensure_manifest_root_ready, load_manifest_repository,
     manifest_normalized_event_kind_count, verify_stored_manifest_state,
 };

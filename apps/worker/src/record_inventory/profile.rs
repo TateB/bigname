@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -12,19 +12,42 @@ pub(super) struct ResolverProfileGate {
 }
 
 impl ResolverProfileGate {
-    pub(super) async fn load(pool: &PgPool) -> Result<Self> {
+    pub(super) async fn load_for_events(pool: &PgPool, events: &[RelevantEvent]) -> Result<Self> {
+        let mut ens_v1_targets = BTreeSet::<(String, String)>::new();
+        let mut basenames_targets = BTreeSet::<(String, String)>::new();
+
+        for event in events {
+            match resolver_profile_target_for_event(event) {
+                Some((SOURCE_FAMILY_ENS_V1_RESOLVER_L1, chain_id, address)) => {
+                    ens_v1_targets.insert((chain_id, address));
+                }
+                Some((SOURCE_FAMILY_BASENAMES_BASE_RESOLVER, chain_id, address)) => {
+                    basenames_targets.insert((chain_id, address));
+                }
+                _ => {}
+            }
+        }
+
         let mut admissions =
-            bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
-                .await
-                .context("failed to load ENSv1 PublicResolver profile admissions")?
-                .into_iter()
-                .collect::<Vec<_>>();
+            bigname_manifests::load_ens_v1_public_resolver_profile_admissions_for_targets(
+                pool,
+                &ens_v1_targets.into_iter().collect::<Vec<_>>(),
+            )
+            .await
+            .context("failed to load scoped ENSv1 PublicResolver profile admissions")?;
         admissions.extend(
-            bigname_manifests::load_basenames_l2_resolver_profile_admissions(pool)
-                .await
-                .context("failed to load Basenames L2Resolver profile admissions")?,
+            bigname_manifests::load_basenames_l2_resolver_profile_admissions_for_targets(
+                pool,
+                &basenames_targets.into_iter().collect::<Vec<_>>(),
+            )
+            .await
+            .context("failed to load scoped Basenames L2Resolver profile admissions")?,
         );
 
+        Ok(Self::from_admissions(admissions))
+    }
+
+    fn from_admissions(admissions: Vec<bigname_manifests::ResolverProfileAdmission>) -> Self {
         let admissions = admissions
             .into_iter()
             .filter(|admission| {
@@ -44,7 +67,7 @@ impl ResolverProfileGate {
             })
             .collect();
 
-        Ok(Self { admissions })
+        Self { admissions }
     }
 
     fn status_for(
@@ -73,6 +96,9 @@ impl ResolverProfileGate {
         else {
             return true;
         };
+        if event_evidenced_resolver_fact(event) {
+            return true;
+        }
         let Some(emitting_address) = event.emitting_address.as_deref() else {
             return false;
         };
@@ -92,6 +118,9 @@ impl ResolverProfileGate {
 
         let source_family = resolver_source_family_for_resolver_event(&event.source_family)?;
         let resolver_address = resolver_address_from_event(event)?;
+        if resolver_address == "0x0000000000000000000000000000000000000000" {
+            return None;
+        }
         Some(
             self.status_for(
                 &event.chain_id,
@@ -102,6 +131,35 @@ impl ResolverProfileGate {
             .unwrap_or(RESOLVER_PROFILE_STATUS_PENDING),
         )
     }
+}
+
+fn event_evidenced_resolver_fact(event: &RelevantEvent) -> bool {
+    match event.event_kind.as_str() {
+        EVENT_KIND_RECORD_CHANGED => event.after_state.get("value").is_some(),
+        EVENT_KIND_RECORD_VERSION_CHANGED => true,
+        _ => false,
+    }
+}
+
+fn resolver_profile_target_for_event(
+    event: &RelevantEvent,
+) -> Option<(&'static str, String, String)> {
+    if let Some(source_family) = resolver_local_source_family(&event.source_family) {
+        let emitting_address = event.emitting_address.as_deref()?;
+        return Some((
+            source_family,
+            event.chain_id.clone(),
+            normalize_address(emitting_address),
+        ));
+    }
+
+    let source_family = resolver_source_family_for_resolver_event(&event.source_family)?;
+    let resolver_address = resolver_address_from_event(event)?;
+    if resolver_address == "0x0000000000000000000000000000000000000000" {
+        return None;
+    }
+
+    Some((source_family, event.chain_id.clone(), resolver_address))
 }
 
 fn resolver_profile_for_source_family(source_family: &str) -> Option<&'static str> {

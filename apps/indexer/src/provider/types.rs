@@ -24,6 +24,20 @@ pub struct ProviderBlockCodeObservationRequest {
     pub addresses: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderTransactionReceiptRequest {
+    pub transaction_hash: String,
+    pub block_hash: String,
+    pub block_number: i64,
+    pub transaction_index: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderTransactionReceiptBundle {
+    pub transaction: ProviderTransaction,
+    pub receipt: ProviderReceipt,
+}
+
 #[allow(dead_code, reason = "staged for exact block log fetch callers")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderBlockLogRequest {

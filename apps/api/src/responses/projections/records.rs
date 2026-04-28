@@ -1,11 +1,37 @@
-pub(super) fn build_record_inventory_section(
+pub(super) fn build_record_inventory_section_for_name(
+    name_row: &NameCurrentRow,
     row: Option<&RecordInventoryCurrentRow>,
     unsupported_reason: &str,
 ) -> JsonValue {
-    row.map(build_record_inventory_state)
-        .unwrap_or_else(|| unsupported_section(unsupported_reason))
+    if let Some(boundary) = fallback_no_declared_resolver_boundary(name_row) {
+        return build_no_declared_resolver_inventory_state(boundary);
+    }
+
+    if let Some(row) = row {
+        return build_record_inventory_state(row);
+    }
+
+    unsupported_section(unsupported_reason)
 }
 
+pub(super) fn build_record_cache_section_for_name(
+    name_row: &NameCurrentRow,
+    row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+    unsupported_reason: &str,
+) -> JsonValue {
+    if let Some(boundary) = fallback_no_declared_resolver_boundary(name_row) {
+        return build_no_declared_resolver_cache_state(boundary, records);
+    }
+
+    if let Some(row) = row {
+        return build_record_cache_state(row, records);
+    }
+
+    unsupported_section(unsupported_reason)
+}
+
+#[cfg(test)]
 pub(super) fn build_record_cache_section(
     row: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
@@ -50,6 +76,37 @@ fn build_record_inventory_state(row: &RecordInventoryCurrentRow) -> JsonValue {
     record_inventory
 }
 
+fn build_no_declared_resolver_inventory_state(record_version_boundary: JsonValue) -> JsonValue {
+    let mut record_inventory = empty_object();
+    insert_value_field(
+        &mut record_inventory,
+        "record_version_boundary",
+        record_version_boundary,
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "enumeration_basis",
+        json!({
+            "observed_selectors": false,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+    );
+    insert_value_field(&mut record_inventory, "selectors", JsonValue::Array(Vec::new()));
+    insert_value_field(
+        &mut record_inventory,
+        "explicit_gaps",
+        JsonValue::Array(Vec::new()),
+    );
+    insert_value_field(
+        &mut record_inventory,
+        "unsupported_families",
+        JsonValue::Array(Vec::new()),
+    );
+    insert_value_field(&mut record_inventory, "last_change", JsonValue::Null);
+    record_inventory
+}
+
 fn build_record_cache_state(
     row: &RecordInventoryCurrentRow,
     records: &[ResolutionRecordKey],
@@ -66,6 +123,38 @@ fn build_record_cache_state(
         build_record_cache_entries(row, records),
     );
     record_cache
+}
+
+fn build_no_declared_resolver_cache_state(
+    record_version_boundary: JsonValue,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
+    let mut record_cache = empty_object();
+    insert_value_field(
+        &mut record_cache,
+        "record_version_boundary",
+        record_version_boundary,
+    );
+    insert_value_field(
+        &mut record_cache,
+        "entries",
+        JsonValue::Array(
+            records
+                .iter()
+                .map(build_no_declared_resolver_cache_entry)
+                .collect(),
+        ),
+    );
+    record_cache
+}
+
+fn build_no_declared_resolver_cache_entry(record: &ResolutionRecordKey) -> JsonValue {
+    let mut entry = empty_object();
+    insert_string_field(&mut entry, "record_key", record.record_key.clone());
+    insert_string_field(&mut entry, "record_family", record.record_family.clone());
+    insert_nullable_string_field(&mut entry, "selector_key", record.selector_key.clone());
+    insert_string_field(&mut entry, "status", "not_found".to_owned());
+    entry
 }
 
 fn build_record_cache_entries(
@@ -192,4 +281,26 @@ fn build_missing_record_cache_entry(
     }
 
     entry
+}
+
+fn fallback_no_declared_resolver_boundary(name_row: &NameCurrentRow) -> Option<JsonValue> {
+    name_has_terminal_no_declared_resolver(name_row)
+        .then(|| bigname_storage::resolution_record_version_boundary(name_row, None))
+        .flatten()
+}
+
+fn name_has_terminal_no_declared_resolver(name_row: &NameCurrentRow) -> bool {
+    let Some(resolver_summary) = provenance_field(&name_row.declared_summary, "resolver")
+        .filter(|value| value.is_object())
+    else {
+        return false;
+    };
+    if string_field(provenance_field(resolver_summary, "status"))
+        .is_some_and(|status| status == "unsupported")
+    {
+        return false;
+    }
+
+    string_field(provenance_field(resolver_summary, "chain_id")).is_none()
+        && string_field(provenance_field(resolver_summary, "address")).is_none()
 }

@@ -45,6 +45,54 @@ If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
+Deployments with a same-host Reth database can layer
+`docker-compose.reth-db.yml` on top of the server compose file. Set
+`BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
+`BIGNAME_INDEXER_RETH_DATADIR_CONTAINER` to the in-container mount path, and
+`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to comma-delimited `<chain>=<path>`
+entries that use that in-container path. The override clears
+`BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain still has only
+one provider source. Reth DB sources remain operational intake sources; they do
+not replace bigname raw facts or normalized-event `raw_fact_ref` identities.
+The repository Dockerfile builds `bigname-indexer` with the
+`bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider
+path available. Custom images that omit that feature fail fast when
+`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` is set, with a rebuild instruction
+instead of silently falling back to JSON-RPC or dropping the provider.
+The indexer opens the Reth database through Reth's read-only provider API, but
+the container mount is writable because MDBX cooperative read-only opens still
+need writable lock/coordination files in the datadir.
+The override defaults the indexer to `BIGNAME_INDEXER_RETH_DB_USER=0:0` because
+container-managed Reth datadirs are commonly `root:root`; operators may set a
+less-privileged UID/GID after granting that identity write access to
+the Reth datadir's MDBX lock files. The override also raises `nofile` because
+Reth's read-only RocksDB provider can keep thousands of SST files open.
+It bypasses the image's `tini` entrypoint so the indexer process owns PID 1;
+Reth's live MDBX read-only open can fail from the default `tini` child process.
+High-volume bootstrap defaults to
+`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
+hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while
+the indexer is catching up, live polling keeps new block-derived events current,
+and the indexer also runs automatic bounded raw-fact normalized-event replay
+from its `normalized_replay_*` cursor until historical normalized events reach
+the persisted raw-log head. Broad manifest-observation, discovery-refresh, and
+discovery-emitter adapter sync stay outside the live tailer. Operators may set
+`raw-only` to defer live normalized sync manually, or `inline` to replay each
+chunk immediately for small ranges and enable broad runtime refreshes.
+
+```sh
+BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
+BIGNAME_INDEXER_RETH_DATADIR_CONTAINER=/reth-data \
+BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=ethereum-mainnet=/reth-data \
+BIGNAME_INDEXER_RETH_DB_USER=0:0 \
+BIGNAME_INDEXER_RETH_DB_NOFILE_SOFT=1048576 \
+BIGNAME_INDEXER_RETH_DB_NOFILE_HARD=1048576 \
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  up -d indexer
+```
+
 RPC requirements are per selected profile and active watched chain. An
 Ethereum-only run may omit Base entirely. If the selected profile includes Base
 but no Base RPC is configured, Base provider-backed intake, automatic bootstrap,
@@ -64,7 +112,19 @@ Hash-pinned backfill execution batches each reserved range into
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS`-sized chunks. The default
 server profile uses `1024` blocks. Larger chunks reduce checkpoint churn and RPC
 round trips during long historical bootstrap, while also increasing the amount
-of range work retried after a failed chunk.
+of range work retried after a failed chunk. Raw-only sparse backfill also caps
+each materialized push with
+`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
+split before transaction and receipt fetch/persist work. The older
+`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
+as a fallback.
+Automatic normalized-event replay catch-up keeps its block cursor, but also caps
+each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
+so sparse eras can move in large block jumps while dense spans are bounded by
+the number of persisted raw logs replayed.
+Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
+warnings can print huge generated INSERT statements for dense chunks and waste
+time on logging instead of ingest.
 
 Operational catch-up to finalized head should be run as bounded idempotent
 backfill chunks. Before every chunk starts range work, check current Postgres

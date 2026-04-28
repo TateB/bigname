@@ -4,11 +4,18 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::{ResolverProfileAdmission, WatchedContract};
+use crate::{ResolverProfileAdmission, WatchedContract, WatchedContractSource, normalize_address};
 
 use super::{
-    drift::load_manifest_code_hash_observations, types::ManifestCodeHashObservation,
-    watched::load_watched_contracts,
+    drift::{
+        load_manifest_code_hash_observations,
+        load_manifest_code_hash_observations_for_watched_contracts,
+    },
+    types::ManifestCodeHashObservation,
+    watched::{
+        load_watched_contracts_by_source_family,
+        load_watched_contracts_by_source_family_and_addresses,
+    },
 };
 
 const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
@@ -44,7 +51,8 @@ pub async fn load_ens_v1_public_resolver_profile_admissions(
         "ENSv1 PublicResolver",
     )
     .await?;
-    let watched_contracts = load_watched_contracts(pool).await?;
+    let watched_contracts =
+        load_watched_contracts_by_source_family(pool, ENS_V1_RESOLVER_SOURCE_FAMILY).await?;
     let code_hash_observations = load_manifest_code_hash_observations(pool).await?;
 
     Ok(derive_code_hash_resolver_profile_admissions(
@@ -71,13 +79,105 @@ pub async fn load_basenames_l2_resolver_profile_admissions(
         "Basenames L2Resolver",
     )
     .await?;
-    let watched_contracts = load_watched_contracts(pool).await?;
+    let watched_contracts =
+        load_watched_contracts_by_source_family(pool, BASENAMES_BASE_RESOLVER_SOURCE_FAMILY)
+            .await?;
     let code_hash_observations = load_manifest_code_hash_observations(pool).await?;
 
     Ok(derive_basenames_l2_resolver_profile_admissions(
         &watched_contracts,
         &code_hash_observations,
         &l2_resolver_seed_ids,
+    ))
+}
+
+pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
+    pool: &PgPool,
+    targets: &[(String, String)],
+) -> Result<Vec<ResolverProfileAdmission>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let public_resolver_seed_contracts = load_resolver_profile_seed_watched_contracts(
+        pool,
+        "ens",
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+        ENS_V1_PUBLIC_RESOLVER_ROLE,
+        "ENSv1 PublicResolver",
+    )
+    .await?;
+    let public_resolver_seed_ids = public_resolver_seed_contracts
+        .iter()
+        .map(|contract| contract.contract_instance_id)
+        .collect::<Vec<_>>();
+    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
+        pool,
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+        targets,
+    )
+    .await?;
+    let mut code_hash_targets = public_resolver_seed_contracts.clone();
+    code_hash_targets.extend(target_contracts.clone());
+    let code_hash_observations =
+        load_manifest_code_hash_observations_for_watched_contracts(pool, &code_hash_targets)
+            .await?;
+
+    Ok(derive_code_hash_resolver_profile_admissions(
+        &target_contracts,
+        &code_hash_observations,
+        &public_resolver_seed_ids,
+        ResolverProfileAdmissionConfig {
+            source_family: ENS_V1_RESOLVER_SOURCE_FAMILY,
+            profile: ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
+            fact_families: &ENS_V1_PUBLIC_RESOLVER_PROFILE_FACT_FAMILIES,
+            manifest_seed_basis: RESOLVER_PROFILE_BASIS_MANIFEST_SEED,
+        },
+    ))
+}
+
+pub async fn load_basenames_l2_resolver_profile_admissions_for_targets(
+    pool: &PgPool,
+    targets: &[(String, String)],
+) -> Result<Vec<ResolverProfileAdmission>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let l2_resolver_seed_contracts = load_resolver_profile_seed_watched_contracts(
+        pool,
+        "basenames",
+        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
+        BASENAMES_L2_RESOLVER_ROLE,
+        "Basenames L2Resolver",
+    )
+    .await?;
+    let l2_resolver_seed_ids = l2_resolver_seed_contracts
+        .iter()
+        .map(|contract| contract.contract_instance_id)
+        .collect::<Vec<_>>();
+    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
+        pool,
+        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
+        targets,
+    )
+    .await?;
+    let mut code_hash_targets = l2_resolver_seed_contracts.clone();
+    code_hash_targets.extend(target_contracts.clone());
+    let code_hash_observations =
+        load_manifest_code_hash_observations_for_watched_contracts(pool, &code_hash_targets)
+            .await?;
+
+    Ok(derive_code_hash_resolver_profile_admissions(
+        &target_contracts,
+        &code_hash_observations,
+        &l2_resolver_seed_ids,
+        ResolverProfileAdmissionConfig {
+            source_family: BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
+            profile: BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE,
+            fact_families: &BASENAMES_L2_RESOLVER_PROFILE_FACT_FAMILIES,
+            manifest_seed_basis: RESOLVER_PROFILE_BASIS_BASENAMES_L2_RESOLVER_SEED,
+        },
     ))
 }
 
@@ -148,6 +248,83 @@ async fn load_resolver_profile_seed_ids(
         .map(|row| {
             row.try_get("contract_instance_id").with_context(|| {
                 format!("failed to read {context_label} seed contract_instance_id")
+            })
+        })
+        .collect()
+}
+
+async fn load_resolver_profile_seed_watched_contracts(
+    pool: &PgPool,
+    namespace: &str,
+    source_family: &str,
+    role: &str,
+    context_label: &str,
+) -> Result<Vec<WatchedContract>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT
+            mv.chain AS chain,
+            mv.source_family AS source_family,
+            cia.address AS address,
+            mci.contract_instance_id AS contract_instance_id,
+            mv.manifest_id AS source_manifest_id,
+            CASE
+                WHEN manifest_range.start_block IS NULL THEN cia.active_from_block_number
+                WHEN cia.active_from_block_number IS NULL THEN manifest_range.start_block
+                ELSE GREATEST(manifest_range.start_block, cia.active_from_block_number)
+            END AS active_from_block_number,
+            cia.active_to_block_number AS active_to_block_number
+        FROM manifest_versions mv
+        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+        LEFT JOIN LATERAL (
+            SELECT (entry ->> 'start_block')::BIGINT AS start_block
+            FROM jsonb_array_elements(mv.manifest_payload -> 'contracts') entry
+            WHERE entry ->> 'role' = mci.declaration_name
+            ORDER BY start_block NULLS LAST
+            LIMIT 1
+        ) manifest_range ON TRUE
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+         AND cia.deactivated_at IS NULL
+        WHERE mv.rollout_status = 'active'
+          AND mv.namespace = $1
+          AND mv.source_family = $2
+          AND mci.declaration_kind = 'contract'
+          AND mci.role = $3
+        ORDER BY mv.chain, cia.address, mci.contract_instance_id
+        "#,
+    )
+    .bind(namespace)
+    .bind(source_family)
+    .bind(role)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load {context_label} seed watched contracts"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let address = row
+                .try_get::<String, _>("address")
+                .context("failed to read resolver seed address")?;
+            Ok(WatchedContract {
+                chain: row.try_get("chain").context("failed to read seed chain")?,
+                source_family: row
+                    .try_get("source_family")
+                    .context("failed to read seed source_family")?,
+                address: normalize_address(&address),
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read seed contract_instance_id")?,
+                source: WatchedContractSource::ManifestContract,
+                source_manifest_id: row
+                    .try_get("source_manifest_id")
+                    .context("failed to read seed source_manifest_id")?,
+                active_from_block_number: row
+                    .try_get("active_from_block_number")
+                    .context("failed to read seed active_from_block_number")?,
+                active_to_block_number: row
+                    .try_get("active_to_block_number")
+                    .context("failed to read seed active_to_block_number")?,
             })
         })
         .collect()

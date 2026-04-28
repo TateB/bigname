@@ -1,11 +1,14 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
+use sqlx::types::time::OffsetDateTime;
+use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CanonicalityState, ChainPositions, NameSurface, Resource, SnapshotProjectionRead,
-    SnapshotSelectionErrorKind, SurfaceBinding, TokenLineage, upsert_name_surfaces,
+    CanonicalityState, ChainLineageBlock, ChainPositions, NameSurface, NormalizedEvent, Resource,
+    SnapshotProjectionRead, SnapshotSelectionErrorKind, SurfaceBinding, SurfaceBindingKind,
+    TokenLineage, upsert_chain_lineage_blocks, upsert_name_surfaces, upsert_normalized_events,
     upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
@@ -91,6 +94,53 @@ fn surface_binding(
         block_hash: block_hash.to_owned(),
         block_number,
         provenance: json!({"source": "name_current_test", "anchor": "binding"}),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn normalized_event(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    block_hash: &str,
+    block_number: i64,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: format!("name-current-test:{logical_name_id}:{block_number}"),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: Some(resource_id),
+        event_kind: "ResolverChanged".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash.to_owned()),
+        transaction_hash: Some(format!("0xtx{block_number}")),
+        log_index: Some(0),
+        raw_fact_ref: json!({}),
+        derivation_kind: "name_current_test".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({}),
+    }
+}
+
+fn lineage_block(
+    block_hash: &str,
+    parent_hash: Option<&str>,
+    block_number: i64,
+) -> ChainLineageBlock {
+    ChainLineageBlock {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        parent_hash: parent_hash.map(str::to_owned),
+        block_number,
+        block_timestamp: timestamp(1_776_384_000 + (block_number - 21_000_000)),
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
         canonicality_state: CanonicalityState::Finalized,
     }
 }
@@ -237,7 +287,7 @@ async fn name_current_upserts_and_loads_exact_name_projection() -> Result<()> {
 }
 
 #[tokio::test]
-async fn name_current_snapshot_read_fails_stale_on_position_mismatch() -> Result<()> {
+async fn name_current_snapshot_read_covers_later_snapshot_until_new_input() -> Result<()> {
     let database = test_database().await?;
     let logical_name_id = "ens:alice.eth";
     let token_lineage_id = Uuid::from_u128(0x1110);
@@ -261,11 +311,19 @@ async fn name_current_snapshot_read_fails_stale_on_position_mismatch() -> Result
         token_lineage_id,
     );
     upsert_name_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0xbinding", None, 21_000_003),
+            lineage_block("0xnewer", Some("0xbinding"), 21_000_004),
+        ],
+    )
+    .await?;
 
     let selected = ChainPositions::from_value(&expected.chain_positions)?;
     assert_eq!(
         load_name_current_for_snapshot(database.pool(), logical_name_id, &selected).await?,
-        SnapshotProjectionRead::Found(expected)
+        SnapshotProjectionRead::Found(expected.clone())
     );
 
     let stale_selected = ChainPositions::from_value(&json!({
@@ -276,9 +334,77 @@ async fn name_current_snapshot_read_fails_stale_on_position_mismatch() -> Result
             "timestamp": "2026-04-17T00:00:04Z"
         }
     }))?;
+    assert_eq!(
+        load_name_current_for_snapshot(database.pool(), logical_name_id, &stale_selected).await?,
+        SnapshotProjectionRead::Found(expected.clone())
+    );
+
+    upsert_normalized_events(
+        database.pool(),
+        &[normalized_event(
+            logical_name_id,
+            resource_id,
+            "0xnewer",
+            21_000_004,
+        )],
+    )
+    .await?;
+
     let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &stale_selected)
         .await
-        .expect_err("mismatched selected snapshot must be stale");
+        .expect_err("newer selected snapshot with unreplayed input must be stale");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_snapshot_read_rejects_later_snapshot_on_different_ancestry() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:alice.eth";
+    let token_lineage_id = Uuid::from_u128(0x1120);
+    let resource_id = Uuid::from_u128(0x2230);
+    let surface_binding_id = Uuid::from_u128(0x3340);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let expected = name_current_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0xbinding", None, 21_000_003),
+            lineage_block("0xfork-parent", None, 21_000_003),
+            lineage_block("0xfork", Some("0xfork-parent"), 21_000_004),
+        ],
+    )
+    .await?;
+
+    let forked_selected = ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_004,
+            "block_hash": "0xfork",
+            "timestamp": "2026-04-17T00:00:04Z"
+        }
+    }))?;
+
+    let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &forked_selected)
+        .await
+        .expect_err("later selected snapshot on another fork must be stale");
     assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
 
     database.cleanup().await
@@ -455,6 +581,76 @@ async fn name_current_upsert_replaces_existing_projection_row() -> Result<()> {
     assert_eq!(
         load_name_current(database.pool(), logical_name_id).await?,
         Some(replacement)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_replacement_rolls_back_when_one_row_is_invalid() -> Result<()> {
+    let database = test_database().await?;
+    let first_logical_name_id = "ens:alice.eth";
+    let second_logical_name_id = "ens:bob.eth";
+
+    seed_binding_references(
+        &database,
+        first_logical_name_id,
+        "alice.eth",
+        Uuid::from_u128(0x5210),
+        Uuid::from_u128(0x5110),
+        Uuid::from_u128(0x5310),
+    )
+    .await?;
+    seed_binding_references(
+        &database,
+        second_logical_name_id,
+        "bob.eth",
+        Uuid::from_u128(0x5220),
+        Uuid::from_u128(0x5120),
+        Uuid::from_u128(0x5320),
+    )
+    .await?;
+
+    let first = name_current_row(
+        first_logical_name_id,
+        Uuid::from_u128(0x5310),
+        Uuid::from_u128(0x5210),
+        Uuid::from_u128(0x5110),
+    );
+    let mut second = name_current_row(
+        second_logical_name_id,
+        Uuid::from_u128(0x5320),
+        Uuid::from_u128(0x5220),
+        Uuid::from_u128(0x5120),
+    );
+    second.canonical_display_name = "bob.eth".to_owned();
+    second.normalized_name = "bob.eth".to_owned();
+    second.namehash = "namehash:bob.eth".to_owned();
+    upsert_name_current_rows(database.pool(), &[first.clone(), second.clone()]).await?;
+
+    let mut replacement = first.clone();
+    replacement.declared_summary = json!({"status": "replacement"});
+    let mut invalid = second.clone();
+    invalid.manifest_version = 0;
+
+    replace_name_current_rows(
+        database.pool(),
+        &[replacement, invalid],
+        &[
+            first_logical_name_id.to_owned(),
+            second_logical_name_id.to_owned(),
+        ],
+    )
+    .await
+    .expect_err("invalid replacement row must roll back the replacement transaction");
+
+    assert_eq!(
+        load_name_current(database.pool(), first_logical_name_id).await?,
+        Some(first)
+    );
+    assert_eq!(
+        load_name_current(database.pool(), second_logical_name_id).await?,
+        Some(second)
     );
 
     database.cleanup().await

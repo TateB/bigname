@@ -40,7 +40,7 @@ mod projections {
 
     mod declared_state {
         use super::common::summary_is_unsupported;
-        use super::records::build_record_inventory_section;
+        use super::records::build_record_inventory_section_for_name;
         use super::*;
 
         include!(concat!(
@@ -137,13 +137,24 @@ mod projections {
         provenance::build_name_provenance_with_execution_trace(provenance, execution_trace_id)
     }
 
-    pub(super) fn build_record_inventory_section(
+    pub(super) fn build_record_cache_section_for_name(
+        name_row: &NameCurrentRow,
+        row: Option<&RecordInventoryCurrentRow>,
+        records: &[ResolutionRecordKey],
+        unsupported_reason: &str,
+    ) -> JsonValue {
+        records::build_record_cache_section_for_name(name_row, row, records, unsupported_reason)
+    }
+
+    pub(super) fn build_record_inventory_section_for_name(
+        name_row: &NameCurrentRow,
         row: Option<&RecordInventoryCurrentRow>,
         unsupported_reason: &str,
     ) -> JsonValue {
-        records::build_record_inventory_section(row, unsupported_reason)
+        records::build_record_inventory_section_for_name(name_row, row, unsupported_reason)
     }
 
+    #[cfg(test)]
     pub(super) fn build_record_cache_section(
         row: Option<&RecordInventoryCurrentRow>,
         records: &[ResolutionRecordKey],
@@ -207,13 +218,24 @@ fn build_name_authority_control_explain_declared_state(row: &NameCurrentRow) -> 
     projections::build_name_authority_control_explain_declared_state(row)
 }
 
-fn build_record_inventory_section(
+fn build_record_cache_section_for_name(
+    name_row: &NameCurrentRow,
+    row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+    unsupported_reason: &str,
+) -> JsonValue {
+    projections::build_record_cache_section_for_name(name_row, row, records, unsupported_reason)
+}
+
+fn build_record_inventory_section_for_name(
+    name_row: &NameCurrentRow,
     row: Option<&RecordInventoryCurrentRow>,
     unsupported_reason: &str,
 ) -> JsonValue {
-    projections::build_record_inventory_section(row, unsupported_reason)
+    projections::build_record_inventory_section_for_name(name_row, row, unsupported_reason)
 }
 
+#[cfg(test)]
 fn build_record_cache_section(
     row: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],

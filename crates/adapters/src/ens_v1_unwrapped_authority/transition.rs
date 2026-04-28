@@ -156,6 +156,42 @@ pub(super) fn transition_authority(
         ));
     }
 
+    if let (Some(name), Some(after_anchor), Some(current_resolver)) = (
+        history.name.as_ref(),
+        after.as_ref(),
+        nonzero_address(history.current_resolver.as_deref()),
+    ) {
+        history.events.push(build_boundary_event(
+            reference,
+            BoundaryEventPayload {
+                logical_name_id: Some(name.logical_name_id.clone()),
+                resource_id: Some(after_anchor.resource_id),
+                event_kind: EVENT_KIND_RESOLVER_CHANGED,
+                before_state: json!({
+                    "resolver": serde_json::Value::Null,
+                }),
+                after_state: json!({
+                    "resolver": current_resolver,
+                    "namehash": name.namehash.clone(),
+                    "source_event": "AuthorityEpochChanged",
+                }),
+                identity_suffix: format!(
+                    "resolver-boundary:{}:{}:{}:{}",
+                    reference.block_hash,
+                    name.logical_name_id,
+                    effective_time.unix_timestamp(),
+                    after_anchor.authority_key
+                ),
+            },
+            BoundaryEventSource {
+                source_family: after_anchor.binding_source_family.clone(),
+                manifest_version: after_anchor.binding_manifest_version,
+                source_manifest_id: Some(after_anchor.binding_manifest_id),
+                canonicality_state: reference.canonicality_state,
+            },
+        ));
+    }
+
     Ok(())
 }
 

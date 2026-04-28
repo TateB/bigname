@@ -142,6 +142,53 @@ async fn upserts_and_loads_lineage_blocks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bulk_upserts_and_promotes_lineage_blocks() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let blocks = (0_i64..150)
+        .map(|number| {
+            let block_hash = format!("0xblock{number:064x}");
+            let parent_hash = format!("0xparent{number:064x}");
+            block(
+                "eth-mainnet",
+                &block_hash,
+                Some(&parent_hash),
+                number,
+                timestamp(1_717_180_000 + number),
+                CanonicalityState::Canonical,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let inserted = upsert_chain_lineage_blocks(database.pool(), &blocks).await?;
+
+    assert_eq!(inserted.len(), blocks.len());
+    assert!(
+        inserted
+            .iter()
+            .all(|block| block.canonicality_state == CanonicalityState::Canonical)
+    );
+
+    let promoted_blocks = blocks
+        .iter()
+        .cloned()
+        .map(|mut block| {
+            block.canonicality_state = CanonicalityState::Finalized;
+            block
+        })
+        .collect::<Vec<_>>();
+    let promoted = upsert_chain_lineage_blocks(database.pool(), &promoted_blocks).await?;
+
+    assert_eq!(promoted.len(), promoted_blocks.len());
+    assert!(
+        promoted
+            .iter()
+            .all(|block| block.canonicality_state == CanonicalityState::Finalized)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reobserving_orphaned_block_revives_observed_state_without_rewriting_identity() -> Result<()>
 {
     let database = TestDatabase::new().await?;

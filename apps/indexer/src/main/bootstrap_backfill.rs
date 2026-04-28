@@ -1,20 +1,39 @@
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_manifests::{
-    ManifestBootstrapSkippedTarget, ManifestBootstrapTarget, WatchedSourceSelector,
-    WatchedSourceSelectorKind, WatchedSourceSelectorPlan, WatchedTargetIdentity,
-    load_manifest_declared_bootstrap_targets, load_manifest_skipped_bootstrap_targets,
-    load_watched_source_selector_plan,
+    ManifestBootstrapSkippedTarget, WatchedSourceSelector, WatchedTargetIdentity,
+    load_manifest_declared_bootstrap_targets, load_manifest_declared_watched_source_selector_plan,
+    load_manifest_skipped_bootstrap_targets,
 };
 use tracing::{info, warn};
 
 use crate::{
-    backfill::{BackfillBlockRange, run_resumable_hash_pinned_backfill_job},
+    backfill::{
+        BackfillAdapterSyncMode, BackfillBlockRange, run_resumable_hash_pinned_backfill_job,
+    },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
-    provider::ProviderRegistry,
+    provider::{ChainProviderOps, ProviderRegistry},
+    reconciliation::{
+        RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+        log_raw_fact_normalized_event_replay_outcome, replay_raw_fact_normalized_events,
+    },
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
+};
+
+#[path = "bootstrap_backfill/checkpoints.rs"]
+mod checkpoints;
+#[path = "bootstrap_backfill/planning.rs"]
+mod planning;
+
+use checkpoints::{
+    bootstrap_segment_target_ids, load_bootstrap_segment_checkpoint,
+    load_bootstrap_target_checkpoint,
+};
+use planning::{
+    BootstrapBackfillTargetRange, bootstrap_target_range, narrow_manifest_bootstrap_source_plan,
+    plan_bootstrap_backfill_segments,
 };
 
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
@@ -37,18 +56,9 @@ pub(crate) struct BootstrapBackfillOutcome {
     pub(crate) raw_receipt_count: usize,
     pub(crate) raw_log_count: usize,
     pub(crate) raw_code_hash_count: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct BootstrapBackfillTargetRange {
-    target: ManifestBootstrapTarget,
-    range: BackfillBlockRange,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct BootstrapBackfillSegment {
-    range: BackfillBlockRange,
-    targets: Vec<ManifestBootstrapTarget>,
+    pub(crate) normalized_replay_job_count: usize,
+    pub(crate) normalized_replay_synced_count: usize,
+    pub(crate) normalized_replay_inserted_count: usize,
 }
 
 impl BootstrapBackfillOutcome {
@@ -71,6 +81,8 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     intake_chain_tasks: &[IntakeChainTask],
     provider_registry: &ProviderRegistry,
     hash_pinned_chunk_blocks: i64,
+    adapter_sync_mode: BackfillAdapterSyncMode,
+    replay_completed_raw_ranges: bool,
 ) -> Result<BootstrapBackfillOutcome> {
     validate_provider_registry_for_intake_tasks(intake_chain_tasks, provider_registry)?;
     let deployment_profile = deployment_profile_from_manifest_root(manifests_root);
@@ -109,7 +121,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 bootstrap_backfill_status = "idle_missing_provider",
                 chain = %task.chain,
                 intake_address_count = task.addresses.len(),
-                "no RPC provider is configured for an active bootstrap chain; automatic bootstrap backfill will stay idle for this chain"
+                "no provider source is configured for an active bootstrap chain; automatic bootstrap backfill will stay idle for this chain"
             );
             continue;
         };
@@ -159,11 +171,111 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 continue;
             };
 
+            let mut range = range;
+            if let Some(stored_checkpoint) = load_bootstrap_target_checkpoint(
+                pool,
+                &deployment_profile,
+                manifests_root,
+                &task.chain,
+                range,
+                &target.contract_instance_id.to_string(),
+            )
+            .await?
+            {
+                if stored_checkpoint >= range.to_block {
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "skipped_target_stored_checkpoint",
+                        chain = %task.chain,
+                        source_family = %target.source_family,
+                        contract_instance_id = %target.contract_instance_id,
+                        address = %target.address,
+                        from_block = range.from_block,
+                        to_block = range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        "manifest-declared bootstrap target already has stored backfill checkpoint coverage"
+                    );
+                    continue;
+                }
+                if stored_checkpoint >= range.from_block {
+                    let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
+                        format!(
+                            "stored bootstrap checkpoint {stored_checkpoint} overflowed while resuming target"
+                        )
+                    })?;
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "resuming_target_after_stored_checkpoint",
+                        chain = %task.chain,
+                        source_family = %target.source_family,
+                        contract_instance_id = %target.contract_instance_id,
+                        address = %target.address,
+                        from_block = range.from_block,
+                        resumed_from_block,
+                        to_block = range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        "manifest-declared bootstrap target resumes after stored backfill checkpoint"
+                    );
+                    range = BackfillBlockRange::new(resumed_from_block, range.to_block)?;
+                }
+            }
+
             target_ranges.push(BootstrapBackfillTargetRange { target, range });
         }
 
         for segment in plan_bootstrap_backfill_segments(target_ranges)? {
-            let source_plan = load_watched_source_selector_plan(
+            let segment_target_ids = bootstrap_segment_target_ids(&segment.targets);
+            let mut segment_range = segment.range;
+            if let Some(stored_checkpoint) = load_bootstrap_segment_checkpoint(
+                pool,
+                &deployment_profile,
+                manifests_root,
+                &task.chain,
+                segment.range,
+                &segment_target_ids,
+            )
+            .await?
+            {
+                if stored_checkpoint >= segment_range.to_block {
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "skipped_stored_checkpoint",
+                        chain = %task.chain,
+                        from_block = segment.range.from_block,
+                        to_block = segment.range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        selected_target_count = segment.targets.len(),
+                        "manifest-declared bootstrap segment already has stored backfill checkpoint coverage"
+                    );
+                    continue;
+                }
+                if stored_checkpoint >= segment_range.from_block {
+                    let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
+                        format!(
+                            "stored bootstrap checkpoint {stored_checkpoint} overflowed while resuming"
+                        )
+                    })?;
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "resuming_after_stored_checkpoint",
+                        chain = %task.chain,
+                        from_block = segment.range.from_block,
+                        resumed_from_block,
+                        to_block = segment.range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        selected_target_count = segment.targets.len(),
+                        "manifest-declared bootstrap segment resumes after stored backfill checkpoint"
+                    );
+                    segment_range =
+                        BackfillBlockRange::new(resumed_from_block, segment_range.to_block)?;
+                }
+            }
+
+            let mut source_plan = load_manifest_declared_watched_source_selector_plan(
                 pool,
                 &task.chain,
                 WatchedSourceSelector::WatchedTargetSet(
@@ -175,17 +287,21 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                         })
                         .collect(),
                 ),
-                segment.range.from_block,
-                segment.range.to_block,
+                segment_range.from_block,
+                segment_range.to_block,
             )
             .await
             .with_context(|| {
                 format!(
                     "failed to build bootstrap watched-target source plan for chain {} range {}..={}",
-                    task.chain, segment.range.from_block, segment.range.to_block
+                    task.chain, segment_range.from_block, segment_range.to_block
                 )
             })?;
-            ensure_manifest_bootstrap_source_plan(&source_plan, &segment.targets, segment.range)?;
+            narrow_manifest_bootstrap_source_plan(
+                &mut source_plan,
+                &segment.targets,
+                segment_range,
+            )?;
 
             let source_identity_hash = source_plan.source_identity_hash();
             let idempotency_key = bootstrap_backfill_idempotency_key(
@@ -193,24 +309,51 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 manifests_root,
                 &task.chain,
                 &source_identity_hash,
-                segment.range,
+                segment_range,
             );
             let config = crate::backfill::BackfillJobRunConfig {
                 deployment_profile: deployment_profile.clone(),
                 idempotency_key,
-                range: segment.range,
+                range: segment_range,
                 lease_owner: lease_owner.clone(),
                 lease_token: generated_backfill_lease_token()?,
                 lease_expires_at: backfill_lease_expires_at(
                     BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS,
                 )?,
                 hash_pinned_chunk_blocks,
+                adapter_sync_mode,
             };
 
             let job_outcome =
                 run_resumable_hash_pinned_backfill_job(pool, &source_plan, provider, config)
                     .await?;
             outcome.add_job(&job_outcome);
+            if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
+                let replay_outcome = replay_raw_fact_normalized_events(
+                    pool,
+                    RawFactNormalizedEventReplayRequest {
+                        deployment_profile: deployment_profile.clone(),
+                        chain: task.chain.clone(),
+                        selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                            from_block: job_outcome.from_block,
+                            to_block: job_outcome.to_block,
+                        },
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to replay normalized events after bootstrap raw backfill for chain {} range {}..={}",
+                        task.chain, job_outcome.from_block, job_outcome.to_block
+                    )
+                })?;
+                log_raw_fact_normalized_event_replay_outcome(&replay_outcome);
+                outcome.normalized_replay_job_count += 1;
+                outcome.normalized_replay_synced_count +=
+                    replay_outcome.normalized_event_synced_count;
+                outcome.normalized_replay_inserted_count +=
+                    replay_outcome.normalized_event_inserted_count;
+            }
         }
     }
 
@@ -235,6 +378,9 @@ pub(crate) async fn run_startup_bootstrap_backfills(
         raw_receipt_count = outcome.raw_receipt_count,
         raw_log_count = outcome.raw_log_count,
         raw_code_hash_count = outcome.raw_code_hash_count,
+        normalized_replay_job_count = outcome.normalized_replay_job_count,
+        normalized_replay_synced_count = outcome.normalized_replay_synced_count,
+        normalized_replay_inserted_count = outcome.normalized_replay_inserted_count,
         "startup bootstrap backfill jobs drained before live polling"
     );
 
@@ -254,138 +400,4 @@ pub(crate) fn bootstrap_backfill_idempotency_key(
         range.from_block,
         range.to_block
     )
-}
-
-fn bootstrap_target_range(
-    target: &ManifestBootstrapTarget,
-    provider_head_block: i64,
-) -> Result<Option<BackfillBlockRange>> {
-    let finite_end_block = target
-        .effective_to_block
-        .map(|effective_to_block| effective_to_block.min(provider_head_block))
-        .unwrap_or(provider_head_block);
-    let finite_start_block = target.effective_from_block;
-    if finite_start_block > finite_end_block {
-        return Ok(None);
-    }
-
-    BackfillBlockRange::new(finite_start_block, finite_end_block).map(Some)
-}
-
-fn plan_bootstrap_backfill_segments(
-    target_ranges: Vec<BootstrapBackfillTargetRange>,
-) -> Result<Vec<BootstrapBackfillSegment>> {
-    let Some(max_end_block) = target_ranges
-        .iter()
-        .map(|target_range| target_range.range.to_block)
-        .max()
-    else {
-        return Ok(Vec::new());
-    };
-
-    let mut boundaries = BTreeSet::new();
-    for target_range in &target_ranges {
-        boundaries.insert(target_range.range.from_block);
-        if target_range.range.to_block < i64::MAX {
-            boundaries.insert(
-                target_range
-                    .range
-                    .to_block
-                    .checked_add(1)
-                    .with_context(|| {
-                        format!(
-                            "bootstrap target range end {} overflowed while planning segments",
-                            target_range.range.to_block
-                        )
-                    })?,
-            );
-        }
-    }
-
-    let boundaries = boundaries.into_iter().collect::<Vec<_>>();
-    let mut segments = Vec::new();
-    for (index, segment_start) in boundaries.iter().copied().enumerate() {
-        if segment_start > max_end_block {
-            break;
-        }
-
-        let segment_end = boundaries
-            .get(index + 1)
-            .map(|next_start| *next_start - 1)
-            .unwrap_or(max_end_block)
-            .min(max_end_block);
-        if segment_start > segment_end {
-            continue;
-        }
-
-        let targets = target_ranges
-            .iter()
-            .filter(|target_range| {
-                target_range.range.from_block <= segment_start
-                    && segment_end <= target_range.range.to_block
-            })
-            .map(|target_range| target_range.target.clone())
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            continue;
-        }
-
-        segments.push(BootstrapBackfillSegment {
-            range: BackfillBlockRange::new(segment_start, segment_end)?,
-            targets,
-        });
-    }
-
-    Ok(segments)
-}
-
-fn ensure_manifest_bootstrap_source_plan(
-    source_plan: &WatchedSourceSelectorPlan,
-    targets: &[ManifestBootstrapTarget],
-    range: BackfillBlockRange,
-) -> Result<()> {
-    if source_plan.selector_kind != WatchedSourceSelectorKind::WatchedTargetSet {
-        bail!(
-            "bootstrap source plan for range {}..={} used selector kind {} instead of watched_target_set",
-            range.from_block,
-            range.to_block,
-            source_plan.selector_kind.as_str()
-        );
-    }
-
-    if source_plan.selected_targets.len() != targets.len() {
-        bail!(
-            "bootstrap source plan for range {}..={} selected {} targets instead of {}",
-            range.from_block,
-            range.to_block,
-            source_plan.selected_targets.len(),
-            targets.len()
-        );
-    }
-
-    for target in targets {
-        let Some(selected_target) = source_plan.selected_targets.iter().find(|selected_target| {
-            selected_target.source_family == target.source_family
-                && selected_target.contract_instance_id == target.contract_instance_id
-        }) else {
-            bail!(
-                "bootstrap source plan for range {}..={} did not select manifest-declared contract_instance_id {}",
-                range.from_block,
-                range.to_block,
-                target.contract_instance_id
-            );
-        };
-
-        if selected_target.address != target.address
-            || selected_target.effective_from_block != range.from_block
-            || selected_target.effective_to_block != range.to_block
-        {
-            bail!(
-                "bootstrap source plan for contract_instance_id {} does not match the segmented manifest-declared effective range",
-                target.contract_instance_id
-            );
-        }
-    }
-
-    Ok(())
 }

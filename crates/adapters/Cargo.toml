@@ -9,9 +9,11 @@ license.workspace = true
 anyhow.workspace = true
 bigname-manifests = { workspace = true }
 bigname-storage = { workspace = true }
+futures-util = "0.3.31"
 serde_json = "1.0.145"
 sha3 = "0.10.8"
 sqlx.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -5,7 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+reth-db = ["dep:reth-ethereum"]
+
 [dependencies]
+alloy-consensus = "2.0.0"
+alloy-primitives = "1.4.1"
+alloy-rpc-types-eth = "2.0.1"
 anyhow.workspace = true
 bytes = "1.10.1"
 clap.workspace = true
@@ -19,6 +26,7 @@ sqlx.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false, features = ["std", "node"], optional = true }
 
 bigname-adapters.workspace = true
 bigname-domain.workspace = true

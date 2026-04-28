@@ -1999,6 +1999,53 @@ fn basenames_supported_topology(
     })
 }
 
+fn basenames_no_declared_resolver_topology(
+    logical_name_id: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Value {
+    json!({
+        "registry_path": [basenames_name_ref(
+            logical_name_id,
+            normalized_name,
+            canonical_display_name,
+            resource_id,
+            "declared_registry_path",
+        )],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "basenames",
+            "normalized_name": normalized_name,
+            "canonical_display_name": canonical_display_name,
+            "resource_id": resource_id.to_string(),
+            "chain_id": null,
+            "address": null,
+            "latest_event_kind": "ResolverChanged",
+        }],
+        "wildcard": {
+            "source": null,
+            "matched_labels": [],
+        },
+        "alias": {
+            "final_target": null,
+            "hops": [],
+        },
+        "version_boundaries": {
+            "topology_version_boundary": record_version_boundary.clone(),
+            "record_version_boundary": record_version_boundary.clone(),
+        },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null,
+        },
+    })
+}
+
 fn basenames_dynamic_resolver_record_inventory_boundary(
     logical_name_id: &str,
     resource_id: Uuid,
@@ -7772,11 +7819,19 @@ async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolv
         }
     });
     database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(
+            dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7819,6 +7874,206 @@ async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolv
             .get("version_boundaries")
             .and_then(Value::as_object)
             .and_then(|value| value.get("record_version_boundary"))
+    );
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("record_inventory")),
+        Some(&json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "enumeration_basis": {
+                "observed_selectors": false,
+                "capability_declared_families": true,
+                "globally_enumerable": false,
+            },
+            "selectors": [],
+            "explicit_gaps": [],
+            "unsupported_families": [],
+            "last_change": null,
+        }))
+    );
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("record_cache")),
+        Some(&json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "entries": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "not_found",
+                }
+            ],
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_basenames_no_declared_resolver_addr60_stays_not_found_with_pending_inventory()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:no-resolver.base.eth";
+    let normalized_name = "no-resolver.base.eth";
+    let canonical_display_name = "No-resolver.base.eth";
+    let resource_id = Uuid::from_u128(0x6260);
+    let token_lineage_id = Uuid::from_u128(0x6261);
+    let surface_binding_id = Uuid::from_u128(0x6262);
+    let boundary = basenames_dynamic_resolver_record_inventory_boundary(
+        logical_name_id,
+        resource_id,
+        None,
+        None,
+    );
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            normalized_name,
+            canonical_display_name,
+            "namehash:no-resolver.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.normalized_name = normalized_name.to_owned();
+    row.canonical_display_name = canonical_display_name.to_owned();
+    row.namehash = "namehash:no-resolver.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": null,
+            "address": null,
+            "latest_event_kind": "ResolverChanged"
+        },
+        "topology": basenames_no_declared_resolver_topology(
+            logical_name_id,
+            normalized_name,
+            canonical_display_name,
+            resource_id,
+            &boundary,
+        )
+    });
+    row.provenance = json!({
+        "normalized_event_ids": [1202],
+        "raw_fact_refs": [
+            {
+                "kind": "log",
+                "chain_id": "base-mainnet",
+                "block_hash": "0xbase-binding"
+            }
+        ],
+        "manifest_versions": [
+            {
+                "manifest_version": 6,
+                "source_family": "basenames_base_registry",
+                "chain": "base-mainnet",
+                "deployment_epoch": "basenames_v1"
+            }
+        ],
+        "execution_trace_id": null,
+        "derivation_kind": "name_current_rebuild"
+    });
+    row.coverage = json!({
+        "status": "full",
+        "exhaustiveness": "authoritative",
+        "source_classes_considered": ["basenames_base_registry"],
+        "unsupported_reason": null,
+        "enumeration_basis": "exact_name_profile"
+    });
+    row.chain_positions = json!({
+        "base-mainnet": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    row.manifest_version = 6;
+    database.insert_name_current_row(row).await?;
+
+    let mut inventory_row = basenames_dynamic_resolver_pending_record_inventory_current_row(
+        logical_name_id,
+        resource_id,
+    );
+    inventory_row.record_version_boundary = boundary.clone();
+    inventory_row.last_change = None;
+    database
+        .insert_record_inventory_current_row(inventory_row)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/no-resolver.base.eth?mode=declared&records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames no-declared-resolver request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/chain_id"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        declared_state
+            .pointer("/record_cache/entries/0/record_key")
+            .and_then(Value::as_str),
+        Some("addr:60")
+    );
+    assert_eq!(
+        declared_state
+            .pointer("/record_cache/entries/0/status")
+            .and_then(Value::as_str),
+        Some("not_found")
+    );
+    assert_ne!(
+        declared_state
+            .pointer("/record_cache/entries/0/status")
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert!(
+        declared_state
+            .pointer("/record_cache/entries/0/unsupported_reason")
+            .is_none()
     );
 
     database.cleanup().await?;

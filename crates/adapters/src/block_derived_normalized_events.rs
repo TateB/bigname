@@ -46,11 +46,43 @@ pub async fn sync_block_derived_normalized_events(
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<BlockDerivedNormalizedEventSyncSummary> {
+    sync_block_derived_normalized_events_inner(pool, chain, block_hashes, source_scope, None).await
+}
+
+/// Sync block-derived normalized events when the caller already knows how many
+/// canonical raw logs the replay selected.
+pub async fn sync_block_derived_normalized_events_with_scanned_log_count(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    scanned_log_count: usize,
+) -> Result<BlockDerivedNormalizedEventSyncSummary> {
+    sync_block_derived_normalized_events_inner(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        Some(scanned_log_count),
+    )
+    .await
+}
+
+async fn sync_block_derived_normalized_events_inner(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    known_scanned_log_count: Option<usize>,
+) -> Result<BlockDerivedNormalizedEventSyncSummary> {
     if block_hashes.is_empty() {
-        return Ok(empty_summary(0));
+        return Ok(empty_summary(known_scanned_log_count.unwrap_or(0)));
     }
 
-    let scanned_log_count = load_scanned_log_count(pool, chain, block_hashes).await?;
+    let scanned_log_count = match known_scanned_log_count {
+        Some(scanned_log_count) => scanned_log_count,
+        None => load_scanned_log_count(pool, chain, block_hashes).await?,
+    };
     let raw_logs = load_watched_raw_logs(pool, chain, block_hashes, source_scope).await?;
     if raw_logs.is_empty() {
         return Ok(empty_summary(scanned_log_count));

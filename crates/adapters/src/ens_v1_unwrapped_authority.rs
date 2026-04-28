@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContract, WatchedContractSource, load_watched_contracts};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
     TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
     load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
-    upsert_name_surfaces, upsert_normalized_events, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    upsert_name_surfaces, upsert_normalized_events_with_summary, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Map, Value, json};
 use sha3::{Digest, Keccak256};
@@ -42,7 +42,13 @@ const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
 const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 
 const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256,uint256)";
+const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
+const UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
 const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
+const UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
 const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
 const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
 const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
@@ -78,6 +84,7 @@ pub struct EnsV1UnwrappedAuthoritySyncSummary {
     pub total_resource_count: usize,
     pub total_surface_binding_count: usize,
     pub total_normalized_event_count: usize,
+    pub total_normalized_event_inserted_count: usize,
     pub by_kind: BTreeMap<String, usize>,
 }
 
@@ -153,6 +160,13 @@ struct ObservationRef {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct RawLogPosition {
+    block_hash: String,
+    transaction_hash: String,
+    log_index: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct NameRegistrationObservation {
     label: String,
     labelhash: String,
@@ -203,6 +217,7 @@ struct RecordChangeObservation {
     namehash: String,
     resolver: String,
     selector: RecordSelector,
+    value: Option<Value>,
     raw_name: Option<String>,
     reference: ObservationRef,
 }

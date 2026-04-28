@@ -13,8 +13,8 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    CanonicalityState, ChainLineageBlock, RawLog, default_database_url,
-    upsert_chain_lineage_blocks, upsert_raw_logs,
+    CanonicalityState, ChainLineageBlock, RawLog, default_database_url, load_chain_lineage_block,
+    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_without_snapshots, upsert_raw_logs,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -161,6 +161,134 @@ async fn upserts_and_loads_raw_blocks() -> Result<()> {
         load_raw_block(database.pool(), "eth-mainnet", "0xaaa").await?,
         Some(blocks[0].clone())
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bulk_upserts_and_promotes_raw_blocks() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let blocks = (0_i64..150)
+        .map(|number| RawBlock {
+            block_hash: format!("0xblock{number:064x}"),
+            parent_hash: Some(format!("0xparent{number:064x}")),
+            block_number: number,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_010_000 + number)
+                .expect("timestamp must be valid"),
+            logs_bloom: Some(vec![number as u8]),
+            transactions_root: Some(format!("0xtxroot{number:064x}")),
+            receipts_root: Some(format!("0xrcroot{number:064x}")),
+            state_root: Some(format!("0xstroot{number:064x}")),
+            ..raw_block(CanonicalityState::Canonical)
+        })
+        .collect::<Vec<_>>();
+
+    let inserted = upsert_raw_blocks(database.pool(), &blocks).await?;
+
+    assert_eq!(inserted.len(), blocks.len());
+    assert!(
+        inserted
+            .iter()
+            .all(|block| block.canonicality_state == CanonicalityState::Canonical)
+    );
+
+    let promoted_blocks = blocks
+        .iter()
+        .cloned()
+        .map(|mut block| {
+            block.canonicality_state = CanonicalityState::Finalized;
+            block
+        })
+        .collect::<Vec<_>>();
+    let promoted = upsert_raw_blocks(database.pool(), &promoted_blocks).await?;
+
+    assert_eq!(promoted.len(), promoted_blocks.len());
+    assert!(
+        promoted
+            .iter()
+            .all(|block| block.canonicality_state == CanonicalityState::Finalized)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let lineage_anchor = ChainLineageBlock {
+        chain_id: "eth-mainnet".to_owned(),
+        block_hash: "0xempty".to_owned(),
+        parent_hash: Some("0xparent".to_owned()),
+        block_number: 1_000,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_001_000)
+            .expect("timestamp must be valid"),
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    };
+    let raw_anchor = RawBlock {
+        chain_id: lineage_anchor.chain_id.clone(),
+        block_hash: lineage_anchor.block_hash.clone(),
+        parent_hash: lineage_anchor.parent_hash.clone(),
+        block_number: lineage_anchor.block_number,
+        block_timestamp: lineage_anchor.block_timestamp,
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    };
+
+    upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[lineage_anchor.clone()])
+        .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), &[raw_anchor.clone()]).await?;
+
+    let mut observed_lineage_anchor = lineage_anchor.clone();
+    observed_lineage_anchor.canonicality_state = CanonicalityState::Observed;
+    let mut observed_raw_anchor = raw_anchor.clone();
+    observed_raw_anchor.canonicality_state = CanonicalityState::Observed;
+    upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[observed_lineage_anchor])
+        .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), &[observed_raw_anchor]).await?;
+
+    let stored_lineage = load_chain_lineage_block(database.pool(), "eth-mainnet", "0xempty")
+        .await?
+        .expect("empty-block lineage anchor must be retained");
+    let stored_raw = load_raw_block(database.pool(), "eth-mainnet", "0xempty")
+        .await?
+        .expect("empty-block raw anchor must be retained");
+    assert_eq!(
+        stored_lineage.canonicality_state,
+        CanonicalityState::Finalized
+    );
+    assert_eq!(stored_raw.canonicality_state, CanonicalityState::Finalized);
+    assert_eq!(stored_raw.logs_bloom, None);
+    assert_eq!(stored_raw.transactions_root, None);
+    assert_eq!(stored_raw.receipts_root, None);
+    assert_eq!(stored_raw.state_root, None);
+
+    let mut conflicting_raw_anchor = raw_anchor.clone();
+    conflicting_raw_anchor.state_root = Some("0xchanged".to_owned());
+    let error = upsert_raw_blocks_without_snapshots(database.pool(), &[conflicting_raw_anchor])
+        .await
+        .expect_err("sparse raw block anchor identity must be immutable");
+    assert!(
+        error.to_string().contains("raw block identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+
+    for table in ["raw_transactions", "raw_receipts", "raw_logs"] {
+        let count = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*)::BIGINT FROM {table} WHERE chain_id = $1 AND block_hash = $2"
+        ))
+        .bind("eth-mainnet")
+        .bind("0xempty")
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(count, 0, "empty-block anchor must not create {table} rows");
+    }
 
     database.cleanup().await
 }

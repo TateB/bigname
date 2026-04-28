@@ -1,9 +1,16 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 use super::validate::{
     validate_name_surface, validate_resource, validate_surface_binding, validate_token_lineage,
+};
+use super::write_fast::{
+    insert_name_surfaces_do_nothing, insert_resources_do_nothing,
+    insert_surface_bindings_do_nothing, insert_token_lineages_do_nothing,
+    load_existing_surface_binding_ids,
 };
 use super::write_rows::{
     upsert_name_surface, upsert_resource, upsert_surface_binding, upsert_token_lineage,
@@ -23,10 +30,18 @@ pub async fn upsert_token_lineages(
         .await
         .context("failed to open transaction for token-lineage upsert")?;
 
-    let mut snapshots = Vec::with_capacity(token_lineages.len());
     for token_lineage in token_lineages {
         validate_token_lineage(token_lineage)?;
-        snapshots.push(upsert_token_lineage(&mut transaction, token_lineage).await?);
+    }
+    let mut inserted_ids =
+        insert_token_lineages_do_nothing(&mut transaction, token_lineages).await?;
+    let mut snapshots = Vec::with_capacity(token_lineages.len());
+    for token_lineage in token_lineages {
+        if inserted_ids.remove(&token_lineage.token_lineage_id) {
+            snapshots.push(token_lineage.clone());
+        } else {
+            snapshots.push(upsert_token_lineage(&mut transaction, token_lineage).await?);
+        }
     }
 
     transaction
@@ -48,10 +63,17 @@ pub async fn upsert_resources(pool: &PgPool, resources: &[Resource]) -> Result<V
         .await
         .context("failed to open transaction for resource upsert")?;
 
-    let mut snapshots = Vec::with_capacity(resources.len());
     for resource in resources {
         validate_resource(resource)?;
-        snapshots.push(upsert_resource(&mut transaction, resource).await?);
+    }
+    let mut inserted_ids = insert_resources_do_nothing(&mut transaction, resources).await?;
+    let mut snapshots = Vec::with_capacity(resources.len());
+    for resource in resources {
+        if inserted_ids.remove(&resource.resource_id) {
+            snapshots.push(resource.clone());
+        } else {
+            snapshots.push(upsert_resource(&mut transaction, resource).await?);
+        }
     }
 
     transaction
@@ -76,10 +98,17 @@ pub async fn upsert_name_surfaces(
         .await
         .context("failed to open transaction for name-surface upsert")?;
 
-    let mut snapshots = Vec::with_capacity(name_surfaces.len());
     for name_surface in name_surfaces {
         validate_name_surface(name_surface)?;
-        snapshots.push(upsert_name_surface(&mut transaction, name_surface).await?);
+    }
+    let mut inserted_ids = insert_name_surfaces_do_nothing(&mut transaction, name_surfaces).await?;
+    let mut snapshots = Vec::with_capacity(name_surfaces.len());
+    for name_surface in name_surfaces {
+        if inserted_ids.remove(&name_surface.logical_name_id) {
+            snapshots.push(name_surface.clone());
+        } else {
+            snapshots.push(upsert_name_surface(&mut transaction, name_surface).await?);
+        }
     }
 
     transaction
@@ -104,10 +133,36 @@ pub async fn upsert_surface_bindings(
         .await
         .context("failed to open transaction for surface-binding upsert")?;
 
-    let mut snapshots = Vec::with_capacity(bindings.len());
     for binding in bindings {
         validate_surface_binding(binding)?;
-        snapshots.push(upsert_surface_binding(&mut transaction, binding).await?);
+    }
+    let existing_ids = load_existing_surface_binding_ids(&mut transaction, bindings).await?;
+    let mut existing_snapshots = HashMap::new();
+    for binding in bindings
+        .iter()
+        .filter(|binding| existing_ids.contains(&binding.surface_binding_id))
+    {
+        existing_snapshots.insert(
+            binding.surface_binding_id,
+            upsert_surface_binding(&mut transaction, binding).await?,
+        );
+    }
+    let new_bindings = bindings
+        .iter()
+        .filter(|binding| !existing_ids.contains(&binding.surface_binding_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut inserted_ids =
+        insert_surface_bindings_do_nothing(&mut transaction, &new_bindings).await?;
+    let mut snapshots = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        if let Some(snapshot) = existing_snapshots.remove(&binding.surface_binding_id) {
+            snapshots.push(snapshot);
+        } else if inserted_ids.remove(&binding.surface_binding_id) {
+            snapshots.push(binding.clone());
+        } else {
+            snapshots.push(upsert_surface_binding(&mut transaction, binding).await?);
+        }
     }
 
     transaction

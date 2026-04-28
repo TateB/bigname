@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContractSource, load_watched_contracts};
+use bigname_manifests::{WatchedContractSource, load_manifest_declared_watched_contracts};
 use sqlx::{PgPool, Row};
 
 use super::helpers::supports_reverse_claim_source_family;
@@ -27,9 +27,11 @@ struct ActiveManifestMetadata {
 }
 
 pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_watched_contracts(pool)
+    let watched_contracts = load_manifest_declared_watched_contracts(pool)
         .await
-        .context("failed to load watched contracts for ENSv1 reverse attribution")?;
+        .context(
+            "failed to load manifest-declared watched contracts for ENSv1 reverse attribution",
+        )?;
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)

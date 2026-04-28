@@ -256,6 +256,119 @@ async fn upserts_raw_transactions_receipts_and_logs() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bulk_upserts_raw_logs_and_promotes_existing_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logs = (0..150)
+        .map(|index| {
+            let mut log = raw_log(CanonicalityState::Canonical);
+            log.log_index = index;
+            log.transaction_hash = format!("0xtx{index:064x}");
+            log.transaction_index = index;
+            log
+        })
+        .collect::<Vec<_>>();
+
+    let inserted = upsert_raw_logs(database.pool(), &logs).await?;
+
+    assert_eq!(inserted.len(), logs.len());
+    assert!(
+        inserted
+            .iter()
+            .all(|log| log.canonicality_state == CanonicalityState::Canonical)
+    );
+
+    let promoted_logs = logs
+        .iter()
+        .cloned()
+        .map(|mut log| {
+            log.canonicality_state = CanonicalityState::Finalized;
+            log
+        })
+        .collect::<Vec<_>>();
+    let promoted = upsert_raw_logs(database.pool(), &promoted_logs).await?;
+
+    assert_eq!(promoted.len(), promoted_logs.len());
+    assert!(
+        promoted
+            .iter()
+            .all(|log| log.canonicality_state == CanonicalityState::Finalized)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bulk_upserts_raw_transactions_and_receipts_and_promotes_existing_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let transactions = (0..150)
+        .map(|index| {
+            let mut transaction = raw_transaction(CanonicalityState::Canonical);
+            transaction.transaction_hash = format!("0xtx{index:064x}");
+            transaction.transaction_index = index;
+            transaction
+        })
+        .collect::<Vec<_>>();
+    let receipts = (0..150)
+        .map(|index| {
+            let mut receipt = raw_receipt(CanonicalityState::Canonical);
+            receipt.transaction_hash = format!("0xtx{index:064x}");
+            receipt.transaction_index = index;
+            receipt.cumulative_gas_used = Some(21_000 + index);
+            receipt
+        })
+        .collect::<Vec<_>>();
+
+    let inserted_transactions = upsert_raw_transactions(database.pool(), &transactions).await?;
+    let inserted_receipts = upsert_raw_receipts(database.pool(), &receipts).await?;
+
+    assert_eq!(inserted_transactions.len(), transactions.len());
+    assert_eq!(inserted_receipts.len(), receipts.len());
+    assert!(
+        inserted_transactions
+            .iter()
+            .all(|transaction| transaction.canonicality_state == CanonicalityState::Canonical)
+    );
+    assert!(
+        inserted_receipts
+            .iter()
+            .all(|receipt| receipt.canonicality_state == CanonicalityState::Canonical)
+    );
+
+    let promoted_transactions = transactions
+        .iter()
+        .cloned()
+        .map(|mut transaction| {
+            transaction.canonicality_state = CanonicalityState::Finalized;
+            transaction
+        })
+        .collect::<Vec<_>>();
+    let promoted_receipts = receipts
+        .iter()
+        .cloned()
+        .map(|mut receipt| {
+            receipt.canonicality_state = CanonicalityState::Finalized;
+            receipt
+        })
+        .collect::<Vec<_>>();
+    let promoted_transactions =
+        upsert_raw_transactions(database.pool(), &promoted_transactions).await?;
+    let promoted_receipts = upsert_raw_receipts(database.pool(), &promoted_receipts).await?;
+
+    assert!(
+        promoted_transactions
+            .iter()
+            .all(|transaction| transaction.canonicality_state == CanonicalityState::Finalized)
+    );
+    assert!(
+        promoted_receipts
+            .iter()
+            .all(|receipt| receipt.canonicality_state == CanonicalityState::Finalized)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rejects_mismatched_raw_transaction_identity() -> Result<()> {
     let database = TestDatabase::new().await?;
 

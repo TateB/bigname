@@ -4,7 +4,88 @@ pub(super) async fn load_reverse_claim_sources(
     pool: &PgPool,
     chain: &str,
 ) -> Result<HashMap<String, ReverseClaimSource>> {
-    let rows = sqlx::query(
+    load_reverse_claim_sources_internal(pool, chain, None).await
+}
+
+pub(super) async fn load_reverse_claim_sources_for_nodes(
+    pool: &PgPool,
+    chain: &str,
+    reverse_nodes: &[String],
+) -> Result<HashMap<String, ReverseClaimSource>> {
+    if reverse_nodes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    load_reverse_claim_sources_internal(pool, chain, Some(reverse_nodes)).await
+}
+
+async fn load_reverse_claim_sources_internal(
+    pool: &PgPool,
+    chain: &str,
+    reverse_nodes: Option<&[String]>,
+) -> Result<HashMap<String, ReverseClaimSource>> {
+    let rows = if let Some(reverse_nodes) = reverse_nodes {
+        sqlx::query(
+            r#"
+        SELECT DISTINCT ON (LOWER(ne.after_state->>'reverse_node'))
+            LOWER(ne.after_state->>'reverse_node') AS reverse_node,
+            LOWER(ne.after_state->>'address') AS address,
+            COALESCE(ne.after_state->>'namespace', ne.namespace) AS namespace,
+            ne.after_state->>'coin_type' AS coin_type,
+            ne.after_state->>'reverse_name' AS reverse_name,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'source_family',
+                ne.source_family
+            ) AS claim_source_family,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'contract_role',
+                $4
+            ) AS claim_contract_role,
+            ne.after_state->'claim_provenance'->>'contract_instance_id' AS claim_contract_instance_id,
+            COALESCE(
+                ne.after_state->'claim_provenance'->>'emitting_address',
+                ne.raw_fact_ref->>'emitting_address'
+            ) AS claim_emitting_address
+        FROM normalized_events ne
+        WHERE ne.chain_id = $1
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) IN ($2, $3)
+          AND ne.event_kind = $5
+          AND ne.derivation_kind = $6
+          AND LOWER(ne.after_state->>'reverse_node') = ANY($7::TEXT[])
+          AND ne.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND ne.after_state->>'reverse_node' IS NOT NULL
+          AND ne.after_state->>'reverse_node' <> ''
+          AND ne.after_state->>'address' IS NOT NULL
+          AND ne.after_state->>'address' <> ''
+          AND ne.after_state->>'coin_type' IS NOT NULL
+          AND ne.after_state->>'coin_type' <> ''
+          AND ne.after_state->>'reverse_name' IS NOT NULL
+          AND ne.after_state->>'reverse_name' <> ''
+        ORDER BY
+            LOWER(ne.after_state->>'reverse_node'),
+            ne.block_number DESC NULLS LAST,
+            ne.log_index DESC NULLS LAST,
+            ne.normalized_event_id DESC
+        "#,
+        )
+        .bind(chain)
+        .bind("ens")
+        .bind("basenames")
+        .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
+        .bind(EVENT_KIND_REVERSE_CHANGED)
+        .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
+        .bind(reverse_nodes)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load scoped reverse claim sources for chain {chain}")
+        })?
+    } else {
+        sqlx::query(
         r#"
         SELECT DISTINCT ON (LOWER(ne.after_state->>'reverse_node'))
             LOWER(ne.after_state->>'reverse_node') AS reverse_node,
@@ -18,7 +99,7 @@ pub(super) async fn load_reverse_claim_sources(
             ) AS claim_source_family,
             COALESCE(
                 ne.after_state->'claim_provenance'->>'contract_role',
-                $3
+                $4
             ) AS claim_contract_role,
             ne.after_state->'claim_provenance'->>'contract_instance_id' AS claim_contract_instance_id,
             COALESCE(
@@ -49,16 +130,17 @@ pub(super) async fn load_reverse_claim_sources(
             ne.log_index DESC NULLS LAST,
             ne.normalized_event_id DESC
         "#,
-    )
-    .bind(chain)
-    .bind("ens")
-    .bind("basenames")
-    .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
-    .bind(EVENT_KIND_REVERSE_CHANGED)
-    .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load reverse claim sources for chain {chain}"))?;
+        )
+        .bind(chain)
+        .bind("ens")
+        .bind("basenames")
+        .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
+        .bind(EVENT_KIND_REVERSE_CHANGED)
+        .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load reverse claim sources for chain {chain}"))?
+    };
 
     rows.into_iter()
         .map(|row| {

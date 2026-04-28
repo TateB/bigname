@@ -30,6 +30,7 @@ pub(super) async fn load_reverse_raw_logs(
     active_emitters: &[ActiveEmitter],
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<Vec<ReverseRawLogRow>> {
     let emitters_by_address = active_emitters
         .iter()
@@ -37,6 +38,11 @@ pub(super) async fn load_reverse_raw_logs(
         .map(|emitter| (emitter.address.clone(), emitter))
         .collect::<HashMap<_, _>>();
     let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+    let (scope_addresses, scope_from_blocks, scope_to_blocks) =
+        reverse_source_scope_bindings(source_scope);
+    if source_scope.is_some() && scope_addresses.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let rows = sqlx::query(
         r#"
@@ -52,8 +58,19 @@ pub(super) async fn load_reverse_raw_logs(
             rl.canonicality_state::TEXT AS canonicality_state
         FROM raw_logs rl
         WHERE rl.chain_id = $1
-          AND lower(rl.emitting_address) = ANY($2::TEXT[])
+          AND LOWER(rl.emitting_address) = ANY($2::TEXT[])
           AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+          AND (
+              $5::BOOLEAN = FALSE
+              OR EXISTS (
+                  SELECT 1
+                  FROM unnest($6::TEXT[], $7::BIGINT[], $8::BIGINT[])
+                    AS source_scope(address, from_block, to_block)
+                  WHERE LOWER(rl.emitting_address) = source_scope.address
+                    AND rl.block_number >= source_scope.from_block
+                    AND rl.block_number <= source_scope.to_block
+              )
+          )
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -66,6 +83,10 @@ pub(super) async fn load_reverse_raw_logs(
     .bind(&watched_addresses)
     .bind(restrict_to_block_hashes)
     .bind(block_hashes)
+    .bind(source_scope.is_some())
+    .bind(&scope_addresses)
+    .bind(&scope_from_blocks)
+    .bind(&scope_to_blocks)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load ENSv1 reverse raw logs for chain {chain}"))?;
@@ -107,6 +128,23 @@ pub(super) async fn load_reverse_raw_logs(
             })
         })
         .collect()
+}
+
+fn reverse_source_scope_bindings(
+    source_scope: Option<&[(String, String, i64, i64)]>,
+) -> (Vec<String>, Vec<i64>, Vec<i64>) {
+    let mut addresses = Vec::new();
+    let mut from_blocks = Vec::new();
+    let mut to_blocks = Vec::new();
+    for (source_family, address, from_block, to_block) in source_scope.unwrap_or(&[]) {
+        if source_family != "ens_v1_reverse_l1" && source_family != "basenames_base_primary" {
+            continue;
+        }
+        addresses.push(address.to_ascii_lowercase());
+        from_blocks.push(*from_block);
+        to_blocks.push(*to_block);
+    }
+    (addresses, from_blocks, to_blocks)
 }
 
 fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {

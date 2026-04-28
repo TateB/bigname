@@ -4,6 +4,11 @@ use anyhow::{Context, Result, bail};
 use bigname_manifests::DiscoveryObservation;
 use sqlx::{PgPool, Row};
 
+use crate::registry_migration_cache::{
+    MigratedRegistryNodes, RegistryMigrationMarkerEmitter,
+    load_migrated_registry_nodes_before_block as load_cached_migrated_registry_nodes_before_block,
+};
+
 use super::{
     CONTRACT_ROLE_REGISTRY, ENS_V1_REGISTRY_SOURCE_FAMILY, hex_topic::normalize_address,
     loader::ActiveEmitter, migration_guard::new_owner_child_node_from_topics,
@@ -40,7 +45,7 @@ pub(super) async fn load_migrated_registry_nodes_before_block(
     chain: &str,
     emitters: &[ActiveEmitter],
     before_block: i64,
-) -> Result<HashSet<String>> {
+) -> Result<MigratedRegistryNodes> {
     let current_registry_emitters = emitters
         .iter()
         .filter(|emitter| {
@@ -49,69 +54,28 @@ pub(super) async fn load_migrated_registry_nodes_before_block(
         })
         .collect::<Vec<_>>();
     if current_registry_emitters.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(MigratedRegistryNodes::empty());
     }
 
-    let addresses = current_registry_emitters
+    let emitters = current_registry_emitters
         .iter()
-        .map(|emitter| emitter.address.clone())
-        .collect::<Vec<_>>();
-    let from_blocks = current_registry_emitters
-        .iter()
-        .map(|emitter| emitter.active_from_block_number.unwrap_or(0))
-        .collect::<Vec<_>>();
-    let to_blocks = current_registry_emitters
-        .iter()
-        .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
-        .collect::<Vec<_>>();
-
-    let rows = sqlx::query(
-        r#"
-        SELECT topics
-        FROM raw_logs
-        WHERE chain_id = $1
-          AND lower(emitting_address) = ANY($2::TEXT[])
-          AND block_number < $3
-          AND topics[1] = $4
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($2::TEXT[], $5::BIGINT[], $6::BIGINT[]) AS watched(
-                  address,
-                  effective_from_block,
-                  effective_to_block
-              )
-              WHERE watched.address = lower(emitting_address)
-                AND block_number BETWEEN watched.effective_from_block
-                    AND watched.effective_to_block
-          )
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY block_number, transaction_index, log_index
-        "#,
-    )
-    .bind(chain)
-    .bind(&addresses)
-    .bind(before_block)
-    .bind(super::hex_topic::new_owner_topic0())
-    .bind(&from_blocks)
-    .bind(&to_blocks)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load ENSv1 registry migration markers before block {before_block}")
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            let topics = row
-                .try_get::<Vec<String>, _>("topics")
-                .context("missing topics")?;
-            new_owner_child_node_from_topics(&topics)
+        .map(|emitter| {
+            RegistryMigrationMarkerEmitter::new(
+                &emitter.address,
+                emitter.active_from_block_number.unwrap_or(0),
+                emitter.active_to_block_number.unwrap_or(i64::MAX),
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    load_cached_migrated_registry_nodes_before_block(
+        pool,
+        chain,
+        &emitters,
+        before_block,
+        &super::hex_topic::new_owner_topic0(),
+        new_owner_child_node_from_topics,
+    )
+    .await
 }
 
 pub(super) async fn load_active_registry_edge_observations_excluding_keys(

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -21,6 +21,187 @@ fn provider_registry_parses_chain_rpc_urls() -> Result<()> {
     assert!(registry.provider_for("ethereum-mainnet").is_some());
     assert!(registry.provider_for("base-mainnet").is_some());
     assert!(registry.provider_for("optimism-mainnet").is_none());
+    assert_eq!(
+        registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
+        2
+    );
+    assert_eq!(
+        registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
+        0
+    );
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+#[test]
+fn provider_registry_parses_optional_reth_db_sources() -> Result<()> {
+    let registry = ProviderRegistry::from_sources(
+        &["ethereum-mainnet=http://127.0.0.1:8545".to_owned()],
+        &["base-mainnet=/var/lib/reth/base".to_owned()],
+    )?;
+
+    assert_eq!(registry.configured_chain_count(), 2);
+    assert_eq!(
+        registry
+            .provider_for("ethereum-mainnet")
+            .expect("ethereum source must be configured")
+            .kind(),
+        ChainProviderKind::JsonRpc
+    );
+    assert_eq!(
+        registry
+            .provider_for("base-mainnet")
+            .expect("base source must be configured")
+            .kind(),
+        ChainProviderKind::RethDb
+    );
+    assert_eq!(
+        registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
+        1
+    );
+    assert_eq!(
+        registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
+        1
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "reth-db"))]
+#[test]
+fn provider_registry_rejects_reth_db_sources_without_feature() {
+    let error = match ProviderRegistry::from_sources(
+        &["ethereum-mainnet=http://127.0.0.1:8545".to_owned()],
+        &["base-mainnet=/var/lib/reth/base".to_owned()],
+    ) {
+        Ok(_) => panic!("Reth DB sources must require the reth-db feature"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("--features reth-db"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn provider_registry_rejects_duplicate_chain_across_sources() {
+    let error = match ProviderRegistry::from_sources(
+        &["ethereum-mainnet=http://127.0.0.1:8545".to_owned()],
+        &["ethereum-mainnet=/var/lib/reth/ethereum".to_owned()],
+    ) {
+        Ok(_) => panic!("a chain must not have two provider sources"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate provider source configuration for ethereum-mainnet"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[cfg(feature = "reth-db")]
+#[tokio::test]
+async fn reth_db_provider_source_fails_closed_for_unsupported_chain() -> Result<()> {
+    let registry =
+        ProviderRegistry::from_sources(&[], &["base-mainnet=/var/lib/reth/base".to_owned()])?;
+    let provider = registry
+        .provider_for("base-mainnet")
+        .expect("Reth DB provider source must be configured");
+
+    let error = provider
+        .fetch_chain_heads()
+        .await
+        .expect_err("unsupported Reth DB chain must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Reth DB provider currently supports ethereum-mainnet only"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        error.to_string().contains("configured chain base-mainnet"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+#[tokio::test]
+#[ignore = "requires BIGNAME_INDEXER_TEST_RETH_DB_DATADIR to point at a local Ethereum Mainnet Reth datadir"]
+async fn reth_db_provider_reads_local_ethereum_mainnet_datadir() -> Result<()> {
+    let datadir = std::env::var("BIGNAME_INDEXER_TEST_RETH_DB_DATADIR").context(
+        "BIGNAME_INDEXER_TEST_RETH_DB_DATADIR must point at a local Ethereum Mainnet Reth datadir",
+    )?;
+    let registry = ProviderRegistry::from_sources(&[], &[format!("ethereum-mainnet={datadir}")])?;
+    let provider = registry
+        .provider_for("ethereum-mainnet")
+        .expect("Reth DB provider source must be configured");
+
+    let resolved = provider.fetch_block_hashes_by_numbers(&[0]).await?;
+    assert_eq!(resolved.len(), 1);
+    let genesis = provider
+        .fetch_block_by_hash(&resolved[0].block_hash)
+        .await?;
+    assert_eq!(genesis.block_number, 0);
+
+    let heads = provider.fetch_chain_heads().await?;
+    assert!(heads.canonical.block_number > genesis.block_number);
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+#[tokio::test]
+#[ignore = "requires BIGNAME_INDEXER_TEST_RETH_DB_DATADIR and BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL"]
+async fn reth_db_provider_matches_json_rpc_for_local_blocks() -> Result<()> {
+    let datadir = std::env::var("BIGNAME_INDEXER_TEST_RETH_DB_DATADIR").context(
+        "BIGNAME_INDEXER_TEST_RETH_DB_DATADIR must point at a local Ethereum Mainnet Reth datadir",
+    )?;
+    let rpc_url = std::env::var("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL")
+        .context("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL must point at an Ethereum Mainnet RPC")?;
+    let block_numbers = std::env::var("BIGNAME_INDEXER_TEST_RETH_COMPARE_BLOCKS")
+        .unwrap_or_else(|_| "0".to_owned())
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<i64>()
+                .with_context(|| format!("invalid Reth compare block number {value}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert!(
+        !block_numbers.is_empty(),
+        "Reth compare block list must not be empty"
+    );
+
+    let reth = RethDbProvider::new("ethereum-mainnet", &datadir)?;
+    let rpc = JsonRpcProvider::new(&rpc_url)?;
+    let reth_resolved = reth.fetch_block_hashes_by_numbers(&block_numbers).await?;
+    let rpc_resolved = rpc.fetch_block_hashes_by_numbers(&block_numbers).await?;
+    assert_eq!(reth_resolved, rpc_resolved);
+
+    let reth_bundles = reth.fetch_block_bundles_by_hashes(&reth_resolved).await?;
+    let rpc_bundles = rpc.fetch_block_bundles_by_hashes(&rpc_resolved).await?;
+    assert_eq!(reth_bundles.len(), rpc_bundles.len());
+    for (reth_bundle, rpc_bundle) in reth_bundles.iter().zip(&rpc_bundles) {
+        assert_eq!(reth_bundle.block, rpc_bundle.block);
+        assert_eq!(reth_bundle.transactions, rpc_bundle.transactions);
+        assert_eq!(reth_bundle.receipts, rpc_bundle.receipts);
+        assert_eq!(reth_bundle.logs, rpc_bundle.logs);
+        assert!(
+            reth_bundle.raw_payloads.is_empty(),
+            "Reth DB bundles must not retain provider-local payload cache metadata"
+        );
+    }
+
     Ok(())
 }
 
@@ -50,7 +231,7 @@ fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<
 
     assert!(
         error.to_string().contains(
-            "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+            "configured provider source chains outside selected/admitted runtime chain set: optimism-mainnet"
         ),
         "unexpected error: {error:#}"
     );
@@ -712,6 +893,159 @@ async fn json_rpc_provider_fetches_logs_by_block_range() -> Result<()> {
 }
 
 #[tokio::test]
+async fn json_rpc_provider_splits_logs_by_block_range_after_result_limit_error() -> Result<()> {
+    let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let block_hash_44 = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let block_hash_45 = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let address = "0x1111111111111111111111111111111111111111";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&requests);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        if let Some(response) = rpc_block_number_batch_response(
+            &body,
+            &[
+                (42, block_hash_42),
+                (43, block_hash_43),
+                (44, block_hash_44),
+                (45, block_hash_45),
+            ],
+        ) {
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push(body.clone());
+            return response;
+        }
+
+        request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(body.clone());
+        assert_eq!(
+            body.get("method").and_then(Value::as_str),
+            Some("eth_getLogs")
+        );
+        let filter = body
+            .get("params")
+            .and_then(Value::as_array)
+            .and_then(|params| params.first())
+            .and_then(Value::as_object)
+            .expect("range log request must include a filter object");
+        let from_block = filter
+            .get("fromBlock")
+            .and_then(Value::as_str)
+            .expect("range log request must include fromBlock");
+        let to_block = filter
+            .get("toBlock")
+            .and_then(Value::as_str)
+            .expect("range log request must include toBlock");
+
+        match (from_block, to_block) {
+            ("0x2a", "0x2d") => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": -32602,
+                    "message": "query exceeds max results 20000, retry with the range 42-44"
+                }
+            }),
+            ("0x2a", "0x2b") => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [rpc_log_payload(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    block_hash_42,
+                    42,
+                    0,
+                    2,
+                    address,
+                    "0x4444444444444444444444444444444444444444444444444444444444444444",
+                )]
+            }),
+            ("0x2c", "0x2d") => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [rpc_log_payload(
+                    "0x5555555555555555555555555555555555555555555555555555555555555555",
+                    block_hash_45,
+                    45,
+                    1,
+                    3,
+                    address,
+                    "0x6666666666666666666666666666666666666666666666666666666666666666",
+                )]
+            }),
+            _ => panic!("unexpected log range {from_block}..={to_block}"),
+        }
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+    let resolved_blocks = vec![
+        ProviderResolvedBlock {
+            block_number: 42,
+            block_hash: block_hash_42.to_owned(),
+        },
+        ProviderResolvedBlock {
+            block_number: 43,
+            block_hash: block_hash_43.to_owned(),
+        },
+        ProviderResolvedBlock {
+            block_number: 44,
+            block_hash: block_hash_44.to_owned(),
+        },
+        ProviderResolvedBlock {
+            block_number: 45,
+            block_hash: block_hash_45.to_owned(),
+        },
+    ];
+    let addresses = vec![address.to_owned()];
+
+    let logs_by_block_number = provider
+        .fetch_logs_by_block_range(&resolved_blocks, &addresses)
+        .await?;
+
+    assert_eq!(logs_by_block_number.get(&42).expect("block 42").len(), 1);
+    assert_eq!(logs_by_block_number.get(&45).expect("block 45").len(), 1);
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests
+            .iter()
+            .take(3)
+            .map(|request| {
+                let filter = request
+                    .get("params")
+                    .and_then(Value::as_array)
+                    .and_then(|params| params.first())
+                    .and_then(Value::as_object)
+                    .expect("log request must include a filter object");
+                (
+                    filter.get("fromBlock").and_then(Value::as_str),
+                    filter.get("toBlock").and_then(Value::as_str),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("0x2a"), Some("0x2d")),
+            (Some("0x2a"), Some("0x2b")),
+            (Some("0x2c"), Some("0x2d")),
+        ]
+    );
+    assert!(
+        requests[3].as_array().is_some_and(|batch| batch.len() == 4),
+        "successful split log lookup must still revalidate all block hashes"
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_rejects_empty_range_when_post_range_block_hash_drifts() -> Result<()> {
     let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1136,6 +1470,285 @@ async fn json_rpc_provider_rejects_invalid_code_payloads() -> Result<()> {
         error
             .to_string()
             .contains("invalid hex byte string with odd length")
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_batches_block_bundles_without_logs() -> Result<()> {
+    let block_hash_one = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_two = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let tx_hash_one = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let tx_hash_two = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&requests);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(body.clone());
+
+        let batch = body.as_array().expect("request must be batched");
+        let method = batch
+            .first()
+            .and_then(|request| request.get("method"))
+            .and_then(Value::as_str)
+            .expect("batch request must include a method");
+
+        Value::Array(
+            batch
+                .iter()
+                .map(|request| {
+                    let params = request
+                        .get("params")
+                        .and_then(Value::as_array)
+                        .expect("batch request must include params");
+                    let block_hash = params
+                        .first()
+                        .and_then(Value::as_str)
+                        .expect("batch request must include block hash");
+                    let id = request.get("id").cloned().unwrap_or(Value::Null);
+                    let result = match method {
+                        "eth_getBlockByHash" => {
+                            assert_eq!(params.get(1), Some(&Value::Bool(true)));
+                            match block_hash {
+                                hash if hash == block_hash_one => rpc_exact_block_payload(
+                                    block_hash_one,
+                                    ZERO_HASH,
+                                    42,
+                                    None,
+                                    vec![rpc_transaction_payload(
+                                        tx_hash_one,
+                                        block_hash_one,
+                                        42,
+                                        0,
+                                        "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                        Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                                    )],
+                                ),
+                                hash if hash == block_hash_two => rpc_exact_block_payload(
+                                    block_hash_two,
+                                    block_hash_one,
+                                    43,
+                                    None,
+                                    vec![rpc_transaction_payload(
+                                        tx_hash_two,
+                                        block_hash_two,
+                                        43,
+                                        0,
+                                        "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+                                        None,
+                                    )],
+                                ),
+                                _ => panic!("unexpected block hash {block_hash}"),
+                            }
+                        }
+                        "eth_getBlockReceipts" => match block_hash {
+                            hash if hash == block_hash_one => {
+                                Value::Array(vec![rpc_receipt_payload(
+                                    tx_hash_one,
+                                    block_hash_one,
+                                    42,
+                                    0,
+                                    None,
+                                )])
+                            }
+                            hash if hash == block_hash_two => {
+                                Value::Array(vec![rpc_receipt_payload(
+                                    tx_hash_two,
+                                    block_hash_two,
+                                    43,
+                                    0,
+                                    None,
+                                )])
+                            }
+                            _ => panic!("unexpected receipt block hash {block_hash}"),
+                        },
+                        _ => panic!("unexpected batch method {method}"),
+                    };
+
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result,
+                    })
+                })
+                .collect(),
+        )
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let bundles = provider
+        .fetch_block_bundles_without_logs_by_hashes(&[
+            ProviderResolvedBlock {
+                block_number: 42,
+                block_hash: block_hash_one.to_owned(),
+            },
+            ProviderResolvedBlock {
+                block_number: 43,
+                block_hash: block_hash_two.to_owned(),
+            },
+        ])
+        .await?;
+
+    assert_eq!(bundles.len(), 2);
+    assert_eq!(bundles[0].block.block_hash, block_hash_one);
+    assert_eq!(bundles[0].transactions[0].transaction_hash, tx_hash_one);
+    assert_eq!(bundles[0].receipts[0].transaction_hash, tx_hash_one);
+    assert!(bundles[0].logs.is_empty());
+    assert!(bundles[0].raw_payloads.is_empty());
+    assert_eq!(bundles[1].block.block_hash, block_hash_two);
+    assert_eq!(bundles[1].receipts[0].transaction_hash, tx_hash_two);
+
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| {
+                request
+                    .as_array()
+                    .and_then(|batch| batch.first())
+                    .and_then(|request| request.get("method"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>(),
+        vec![Some("eth_getBlockByHash"), Some("eth_getBlockReceipts")]
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| { request.as_array().is_some_and(|batch| batch.len() == 2) })
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_batches_selected_transaction_receipt_pairs() -> Result<()> {
+    let block_hash_one = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_two = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let tx_hash_one = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let tx_hash_two = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&requests);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(body.clone());
+
+        let batch = body.as_array().expect("request must be batched");
+        Value::Array(
+            batch
+                .iter()
+                .map(|request| {
+                    let method = request
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .expect("batch request must include a method");
+                    let params = request
+                        .get("params")
+                        .and_then(Value::as_array)
+                        .expect("batch request must include params");
+                    let transaction_hash = params
+                        .first()
+                        .and_then(Value::as_str)
+                        .expect("batch request must include transaction hash");
+                    let result = match (method, transaction_hash) {
+                        ("eth_getTransactionByHash", hash) if hash == tx_hash_one => {
+                            rpc_transaction_payload(
+                                tx_hash_one,
+                                block_hash_one,
+                                42,
+                                0,
+                                "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                            )
+                        }
+                        ("eth_getTransactionReceipt", hash) if hash == tx_hash_one => {
+                            rpc_receipt_payload(tx_hash_one, block_hash_one, 42, 0, None)
+                        }
+                        ("eth_getTransactionByHash", hash) if hash == tx_hash_two => {
+                            rpc_transaction_payload(
+                                tx_hash_two,
+                                block_hash_two,
+                                43,
+                                1,
+                                "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+                                None,
+                            )
+                        }
+                        ("eth_getTransactionReceipt", hash) if hash == tx_hash_two => {
+                            rpc_receipt_payload(tx_hash_two, block_hash_two, 43, 1, None)
+                        }
+                        _ => panic!("unexpected selected transaction request: {request}"),
+                    };
+
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").cloned().unwrap_or(Value::Null),
+                        "result": result,
+                    })
+                })
+                .collect(),
+        )
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let bundles = provider
+        .fetch_transaction_receipt_pairs_by_hashes(&[
+            ProviderTransactionReceiptRequest {
+                transaction_hash: tx_hash_one.to_owned(),
+                block_hash: block_hash_one.to_owned(),
+                block_number: 42,
+                transaction_index: 0,
+            },
+            ProviderTransactionReceiptRequest {
+                transaction_hash: tx_hash_two.to_owned(),
+                block_hash: block_hash_two.to_owned(),
+                block_number: 43,
+                transaction_index: 1,
+            },
+        ])
+        .await?;
+
+    assert_eq!(bundles.len(), 2);
+    assert_eq!(bundles[0].transaction.transaction_hash, tx_hash_one);
+    assert_eq!(bundles[0].receipt.transaction_hash, tx_hash_one);
+    assert_eq!(bundles[1].transaction.transaction_hash, tx_hash_two);
+    assert_eq!(bundles[1].receipt.transaction_index, 1);
+
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    let batch = requests[0]
+        .as_array()
+        .expect("selected transaction requests must be batched");
+    assert_eq!(batch.len(), 4);
+    assert_eq!(
+        batch
+            .iter()
+            .map(|request| request.get("method").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("eth_getTransactionByHash"),
+            Some("eth_getTransactionReceipt"),
+            Some("eth_getTransactionByHash"),
+            Some("eth_getTransactionReceipt"),
+        ]
     );
 
     server.abort();

@@ -10,4 +10,6 @@ include!("tests/adapter_sync.rs");
 
 include!("tests/replay.rs");
 
+include!("tests/normalized_replay_catchup.rs");
+
 include!("tests/reorg.rs");

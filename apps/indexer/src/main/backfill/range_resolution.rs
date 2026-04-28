@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
 
-use crate::provider::{JsonRpcProvider, ProviderResolvedBlock};
+use crate::provider::{ChainProviderOps, ProviderResolvedBlock};
 
 use super::BackfillBlockRange;
 
 pub(super) async fn resolve_backfill_range(
-    provider: &JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     range: BackfillBlockRange,
 ) -> Result<Vec<ProviderResolvedBlock>> {
     let block_numbers = (range.from_block..=range.to_block).collect::<Vec<_>>();

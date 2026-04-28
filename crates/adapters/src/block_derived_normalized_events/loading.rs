@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::CanonicalityState;
 use sqlx::{PgPool, Row};
 
+use super::event_builders::preimage_observed_topic0s;
 use super::source_selection::{load_active_emitters, normalized_source_scope_targets};
 use super::types::WatchedRawLogRow;
 
@@ -57,6 +58,7 @@ pub(super) async fn load_watched_raw_logs(
     if active_emitters.is_empty() {
         return Ok(Vec::new());
     }
+    let preimage_topic0s = preimage_observed_topic0s();
 
     let emitters_by_address = active_emitters
         .into_iter()
@@ -94,7 +96,8 @@ pub(super) async fn load_watched_raw_logs(
             FROM raw_logs rl
             WHERE rl.chain_id = $1
               AND rl.block_hash = ANY($2::TEXT[])
-              AND lower(rl.emitting_address) = ANY($3::TEXT[])
+              AND rl.emitting_address = ANY($3::TEXT[])
+              AND rl.topics[1] = ANY($7::TEXT[])
               AND EXISTS (
                   SELECT 1
                   FROM unnest($4::TEXT[], $5::BIGINT[], $6::BIGINT[]) AS scoped(
@@ -102,7 +105,7 @@ pub(super) async fn load_watched_raw_logs(
                       effective_from_block,
                       effective_to_block
                   )
-                  WHERE scoped.address = lower(rl.emitting_address)
+                  WHERE scoped.address = rl.emitting_address
                     AND rl.block_number BETWEEN scoped.effective_from_block
                         AND scoped.effective_to_block
               )
@@ -119,6 +122,7 @@ pub(super) async fn load_watched_raw_logs(
         .bind(&scoped_addresses)
         .bind(&scoped_from_blocks)
         .bind(&scoped_to_blocks)
+        .bind(&preimage_topic0s)
         .fetch_all(pool)
         .await
         .with_context(|| {
@@ -144,7 +148,8 @@ pub(super) async fn load_watched_raw_logs(
             FROM raw_logs rl
             WHERE rl.chain_id = $1
               AND rl.block_hash = ANY($2::TEXT[])
-              AND lower(rl.emitting_address) = ANY($3::TEXT[])
+              AND rl.emitting_address = ANY($3::TEXT[])
+              AND rl.topics[1] = ANY($4::TEXT[])
               AND rl.canonicality_state <> 'orphaned'::canonicality_state
             ORDER BY
                 rl.block_number,
@@ -155,6 +160,7 @@ pub(super) async fn load_watched_raw_logs(
         .bind(chain)
         .bind(block_hashes)
         .bind(&watched_addresses)
+        .bind(&preimage_topic0s)
         .fetch_all(pool)
         .await
         .with_context(|| {

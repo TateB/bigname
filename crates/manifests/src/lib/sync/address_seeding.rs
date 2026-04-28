@@ -60,28 +60,6 @@ pub(crate) async fn ensure_contract_instance_address_seed(
     source_manifest_id: Option<i64>,
     provenance: &serde_json::Value,
 ) -> Result<()> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM contract_instance_addresses
-            WHERE contract_instance_id = $1
-        )
-        "#,
-    )
-    .bind(contract_instance_id)
-    .fetch_one(&mut *executor)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to check seeded address rows for contract_instance_id {contract_instance_id}"
-        )
-    })?;
-
-    if exists {
-        return Ok(());
-    }
-
     sqlx::query(
         r#"
         INSERT INTO contract_instance_addresses (
@@ -92,6 +70,9 @@ pub(crate) async fn ensure_contract_instance_address_seed(
             provenance
         )
         VALUES ($1, $2, $3, $4, $5::jsonb)
+        ON CONFLICT (contract_instance_id)
+        WHERE deactivated_at IS NULL
+        DO NOTHING
         "#,
     )
     .bind(contract_instance_id)

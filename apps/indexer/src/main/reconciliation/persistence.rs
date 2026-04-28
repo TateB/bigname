@@ -8,14 +8,15 @@ use bigname_storage::{
     upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
     upsert_raw_transactions,
 };
+use tracing::info;
 
 use crate::{
-    provider::{self, ProviderBlockSelection, ProviderHeadSnapshot},
+    provider::{ChainProviderOps, ProviderBlockSelection, ProviderHeadSnapshot},
     runtime::IntakeChainTask,
 };
 
 use super::{
-    adapter_sync::sync_adapter_state_from_persisted_raw_payloads,
+    adapter_sync::sync_live_adapter_state_from_persisted_raw_payloads,
     payload::{
         canonical_raw_state, ensure_provider_bundle_matches_raw_block, insert_raw_block_candidate,
         provider_code_observation_to_raw_code_hash, provider_logs_to_live_selected_raw_logs,
@@ -54,10 +55,11 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     pool: &sqlx::PgPool,
     chain: &str,
     selected_addresses: &[String],
-    provider: &provider::JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
+    adapter_sync_enabled: bool,
 ) -> Result<()> {
     let block_hashes = raw_payload_candidate_hashes(heads, canonical, head_change_set);
     if block_hashes.is_empty() {
@@ -118,7 +120,18 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
-    sync_adapter_state_from_persisted_raw_payloads(pool, chain, &block_hashes).await?;
+    if adapter_sync_enabled {
+        sync_live_adapter_state_from_persisted_raw_payloads(pool, chain, &block_hashes).await?;
+    } else {
+        info!(
+            service = "indexer",
+            command = "poll",
+            chain,
+            block_hash_count = block_hashes.len(),
+            raw_log_count = logs.len(),
+            "live raw payload adapter sync skipped after raw fact persistence"
+        );
+    }
 
     Ok(())
 }
@@ -178,7 +191,7 @@ pub(super) async fn ensure_losing_branch_raw_blocks_exist(
 pub(crate) async fn persist_reconciled_raw_code_hashes(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
-    provider: &provider::JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,

@@ -1,22 +1,32 @@
+use std::io::{self, Write};
+
 use anyhow::{Context, Result, bail};
-use bigname_manifests::WatchedSourceSelectorPlan;
+use bigname_manifests::{
+    WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
+};
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, complete_backfill_range, create_backfill_job,
     load_backfill_job, reserve_backfill_range,
 };
+use serde::Serialize;
+use serde_json::{Value, json};
+use sha3::{Digest, Keccak256};
+use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
-use crate::provider::JsonRpcProvider;
+use crate::provider::ChainProviderOps;
 
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
+    selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
 pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
+pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
 pub(crate) async fn create_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
@@ -28,7 +38,7 @@ pub(crate) async fn create_hash_pinned_backfill_job(
         &BackfillJobCreate {
             deployment_profile: config.deployment_profile.clone(),
             chain_id: source_plan.watched_chain_plan.chain.clone(),
-            source_identity: source_plan.source_identity_payload(),
+            source_identity: backfill_job_source_identity_payload(source_plan)?,
             scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
             range_start_block_number: config.range.from_block,
             range_end_block_number: config.range.to_block,
@@ -42,16 +52,97 @@ pub(crate) async fn create_hash_pinned_backfill_job(
     .await
 }
 
+pub(crate) fn backfill_job_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+) -> Result<Value> {
+    if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily
+        || source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    {
+        return Ok(source_plan.source_identity_payload());
+    }
+
+    let selected_targets_digest = keccak256_json_digest(&source_plan.selected_targets)
+        .context("failed to digest compact backfill source selected targets")?;
+    let mut payload = json!({
+        "selector_kind": source_plan.selector_kind.as_str(),
+        "source_family": &source_plan.source_family,
+        "requested_watched_targets": &source_plan.requested_watched_targets,
+        "selected_target_count": source_plan.selected_targets.len(),
+        "selected_targets_digest_algorithm": "keccak256",
+        "selected_targets_digest": selected_targets_digest,
+        "selected_targets_sample": selected_targets_sample(&source_plan.selected_targets),
+        "source_identity_payload_format": "selected_targets_digest_v1",
+    });
+    let source_identity_hash = keccak256_json_digest(&payload)
+        .context("failed to digest compact backfill source identity")?;
+    payload
+        .as_object_mut()
+        .expect("compact source identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    Ok(payload)
+}
+
+fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value {
+    json!({
+        "first": selected_targets.first(),
+        "last": selected_targets.last(),
+    })
+}
+
+fn keccak256_json_digest<T>(value: &T) -> Result<String>
+where
+    T: Serialize + ?Sized,
+{
+    let mut writer = Keccak256Writer::default();
+    serde_json::to_writer(&mut writer, value).context("failed to serialize JSON digest input")?;
+    Ok(format!("keccak256:{}", hex_string(&writer.finalize())))
+}
+
+#[derive(Default)]
+struct Keccak256Writer {
+    hasher: Keccak256,
+}
+
+impl Keccak256Writer {
+    fn finalize(self) -> [u8; 32] {
+        self.hasher.finalize().into()
+    }
+}
+
+impl Write for Keccak256Writer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    let mut output = String::from("0x");
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
-    provider: &JsonRpcProvider,
-    config: BackfillJobRunConfig,
+    provider: &(impl ChainProviderOps + ?Sized),
+    mut config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
+    config.adapter_sync_mode = config.adapter_sync_mode.hash_pinned_backfill_mode();
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
+    let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
 
     info!(
         service = "indexer",
@@ -66,6 +157,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         to_block = config.range.to_block,
         idempotency_key = %config.idempotency_key,
         hash_pinned_chunk_blocks = config.hash_pinned_chunk_blocks,
+        adapter_sync_mode = config.adapter_sync_mode.as_str(),
         range_count = record.ranges.len(),
         "resumable backfill job loaded"
     );
@@ -76,7 +168,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
             record.job.backfill_job_id,
             &config.lease_owner,
             &config.lease_token,
-            config.lease_expires_at,
+            refreshed_backfill_lease_expires_at(lease_duration_secs)?,
         )
         .await?
         else {
@@ -109,6 +201,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
             to_block = outcome.to_block,
             idempotency_key = %outcome.idempotency_key,
             hash_pinned_chunk_blocks = config.hash_pinned_chunk_blocks,
+            adapter_sync_mode = config.adapter_sync_mode.as_str(),
             reserved_range_count = outcome.reserved_range_count,
             completed_range_count = outcome.completed_range_count,
             resolved_block_count = outcome.resolved_block_count,
@@ -132,13 +225,15 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
 async fn run_reserved_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
-    provider: &JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     config: &BackfillJobRunConfig,
     reserved_range: &BackfillRange,
     aggregate: &mut BackfillJobRunOutcome,
 ) -> Result<()> {
     let mut active_range = reserved_range.clone();
     let mut block_number = active_range.checkpoint_block_number;
+    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
+    let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
     let canonicality_evidence = match load_backfill_canonicality_evidence(
         pool,
         &source_plan.watched_chain_plan.chain,
@@ -167,12 +262,17 @@ async fn run_reserved_hash_pinned_backfill_range(
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
+        let selected_target_addresses_for_chunk = selected_target_range_cursor
+            .active_addresses_for_monotonic_range(chunk_range.from_block, chunk_range.to_block);
         let chunk_outcome = match run_hash_pinned_backfill_range(
             pool,
             source_plan,
+            &selected_target_index,
+            &selected_target_addresses_for_chunk,
             provider,
             chunk_range,
             canonicality_evidence,
+            config.adapter_sync_mode,
         )
         .await
         {
@@ -250,4 +350,25 @@ fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
+    let duration_secs = lease_expires_at
+        .unix_timestamp()
+        .checked_sub(OffsetDateTime::now_utc().unix_timestamp())
+        .context("backfill lease duration timestamp underflowed")?;
+    if duration_secs <= 0 {
+        bail!("lease_expires_at must be in the future");
+    }
+
+    Ok(duration_secs)
+}
+
+fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
+    let deadline = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .checked_add(duration_secs)
+        .context("backfill lease expiry timestamp overflowed while refreshing range lease")?;
+    OffsetDateTime::from_unix_timestamp(deadline)
+        .context("refreshed backfill lease expiry timestamp is out of range")
 }

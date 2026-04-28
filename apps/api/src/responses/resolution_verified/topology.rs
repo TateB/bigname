@@ -150,7 +150,27 @@ fn resolution_record_version_boundary(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<JsonValue> {
+    if name_has_terminal_no_declared_resolver(row) {
+        return bigname_storage::resolution_record_version_boundary(row, None);
+    }
+
     bigname_storage::resolution_record_version_boundary(row, record_inventory_row)
+}
+
+fn name_has_terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
+    let Some(resolver_summary) =
+        provenance_field(&row.declared_summary, "resolver").filter(|value| value.is_object())
+    else {
+        return false;
+    };
+    if string_field(provenance_field(resolver_summary, "status"))
+        .is_some_and(|status| status == "unsupported")
+    {
+        return false;
+    }
+
+    string_field(provenance_field(resolver_summary, "chain_id")).is_none()
+        && string_field(provenance_field(resolver_summary, "address")).is_none()
 }
 fn projected_resolution_topology(summary: &JsonValue) -> Option<JsonValue> {
     bigname_storage::projected_resolution_topology(summary)

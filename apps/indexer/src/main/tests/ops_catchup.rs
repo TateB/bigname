@@ -305,7 +305,7 @@ async fn ops_catchup_rejects_configured_provider_outside_intake_tasks() -> Resul
 
     assert!(
         error.to_string().contains(
-            "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+            "configured provider source chains outside selected/admitted runtime chain set: optimism-mainnet"
         ),
         "unexpected error: {error:#}"
     );

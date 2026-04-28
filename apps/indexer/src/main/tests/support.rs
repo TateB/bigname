@@ -1126,6 +1126,27 @@ async fn insert_raw_reverse_claimed_log(
     claimed_address: &str,
     canonicality_state: CanonicalityState,
 ) -> Result<()> {
+    insert_raw_reverse_claimed_log_at_index(
+        pool,
+        chain,
+        block,
+        emitting_address,
+        claimed_address,
+        canonicality_state,
+        0,
+    )
+    .await
+}
+
+async fn insert_raw_reverse_claimed_log_at_index(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    claimed_address: &str,
+    canonicality_state: CanonicalityState,
+    log_index: i64,
+) -> Result<()> {
     upsert_raw_blocks(
         pool,
         &[provider_block_to_raw_block(
@@ -1143,7 +1164,7 @@ async fn insert_raw_reverse_claimed_log(
             block_number: block.block_number,
             transaction_hash: transaction_hash_for_block(block),
             transaction_index: 0,
-            log_index: 0,
+            log_index,
             emitting_address: emitting_address.to_ascii_lowercase(),
             topics: vec![
                 reverse_claimed_topic0(),
@@ -1685,6 +1706,30 @@ async fn bundle_provider_with_fixtures(
                     .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
                 Value::Array(vec![rpc_receipt_payload(&fixture.block)])
             }
+            "eth_getTransactionByHash" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = blocks
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction request: {body}"));
+                rpc_transaction_payload(&fixture.block)
+            }
+            "eth_getTransactionReceipt" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = blocks
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction receipt request: {body}"));
+                rpc_receipt_payload(&fixture.block)
+            }
             "eth_getCode" => {
                 let address = params
                     .first()
@@ -1823,7 +1868,6 @@ fn transaction_hash_for_block(block: &ProviderBlock) -> String {
 }
 
 fn rpc_block_bundle_payload(block: &ProviderBlock) -> Value {
-    let transaction_hash = transaction_hash_for_block(block);
     json!({
         "hash": block.block_hash.clone(),
         "parentHash": block.parent_hash.clone().unwrap_or_else(|| {
@@ -1835,16 +1879,18 @@ fn rpc_block_bundle_payload(block: &ProviderBlock) -> Value {
         "transactionsRoot": block.transactions_root.clone(),
         "receiptsRoot": block.receipts_root.clone(),
         "stateRoot": block.state_root.clone(),
-        "transactions": [
-            {
-                "hash": transaction_hash,
-                "blockHash": block.block_hash.clone(),
-                "blockNumber": format!("0x{:x}", block.block_number),
-                "transactionIndex": "0x0",
-                "from": "0x0000000000000000000000000000000000000001",
-                "to": "0x0000000000000000000000000000000000000002"
-            }
-        ]
+        "transactions": [rpc_transaction_payload(block)]
+    })
+}
+
+fn rpc_transaction_payload(block: &ProviderBlock) -> Value {
+    json!({
+        "hash": transaction_hash_for_block(block),
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionIndex": "0x0",
+        "from": "0x0000000000000000000000000000000000000001",
+        "to": "0x0000000000000000000000000000000000000002"
     })
 }
 

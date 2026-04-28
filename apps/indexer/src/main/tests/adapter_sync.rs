@@ -160,6 +160,113 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
 }
 
 #[tokio::test]
+async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x343);
+    let reverse_address = "0x00000000000000000000000000000000000000af";
+    let claimed_address = "0x1111111111111111111111111111111111111111";
+    let stored_block = provider_block(
+        "0xdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+        Some("0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"),
+        65,
+    );
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                11,
+                1,
+                'ens',
+                'ens_v1_reverse_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_reverse_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for live adapter sync test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        reverse_address,
+        Some(11),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        11,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        "ethereum-mainnet",
+        &stored_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &stored_block,
+        reverse_address,
+        claimed_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let summary = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "ethereum-mainnet",
+        std::slice::from_ref(&stored_block.block_hash),
+    )
+    .await?;
+
+    assert_eq!(summary.total_synced_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;

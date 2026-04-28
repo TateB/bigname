@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    sync::{Mutex, atomic::AtomicBool},
+    time::Duration as StdDuration,
 };
 
 use bigname_manifests::{
-    WatchedSourceSelector, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
-    WatchedTargetIdentity, load_watched_source_selector_plan,
+    WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelector, WatchedSourceSelectorKind,
+    WatchedSourceSelectorPlan, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
 use bigname_storage::{BackfillLifecycleStatus, load_backfill_job, load_backfill_ranges};
 
@@ -40,6 +41,88 @@ struct DynamicResolverBackfillFixture {
     manifest_id_base: i64,
     uuid_base: u128,
     idempotency_key: &'static str,
+}
+
+#[test]
+fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<()> {
+    let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "ethereum-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("ens_v1_resolver_l1".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets,
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+
+    let payload = backfill::backfill_job_source_identity_payload(&source_plan)?;
+    assert_eq!(
+        payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_digest_v1")
+    );
+    assert!(payload.get("selected_targets").is_none());
+    assert_eq!(
+        payload.get("selected_target_count").and_then(Value::as_u64),
+        Some(source_plan.selected_targets.len() as u64)
+    );
+    assert!(
+        payload
+            .get("selected_targets_digest")
+            .and_then(Value::as_str)
+            .map(|digest| digest.starts_with("keccak256:0x"))
+            .unwrap_or(false)
+    );
+    assert!(
+        payload
+            .get("source_identity_hash")
+            .and_then(Value::as_str)
+            .map(|digest| digest.starts_with("keccak256:0x"))
+            .unwrap_or(false)
+    );
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&source_plan)?,
+        payload
+    );
+
+    let mut drifted_source_plan = source_plan.clone();
+    drifted_source_plan
+        .selected_targets
+        .last_mut()
+        .expect("test source plan has targets")
+        .effective_to_block += 1;
+    let drifted_payload = backfill::backfill_job_source_identity_payload(&drifted_source_plan)?;
+    assert_ne!(
+        drifted_payload
+            .get("selected_targets_digest")
+            .and_then(Value::as_str),
+        payload
+            .get("selected_targets_digest")
+            .and_then(Value::as_str)
+    );
+    assert_ne!(
+        drifted_payload
+            .get("source_identity_hash")
+            .and_then(Value::as_str),
+        payload.get("source_identity_hash").and_then(Value::as_str)
+    );
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -244,7 +327,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
     assert_eq!(
         table_count(database.pool(), "raw_payload_cache_metadata").await?,
-        4
+        0
     );
     let payload_cache_summary =
         sqlx::query_as::<_, (String, i64, i64, i64, Vec<String>, Vec<String>)>(
@@ -265,25 +348,8 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .await?;
     assert_eq!(
         payload_cache_summary,
-        vec![
-            (
-                provider::RAW_PAYLOAD_KIND_BLOCK_RECEIPTS.to_owned(),
-                2,
-                2,
-                2,
-                vec!["eth_getBlockReceipts".to_owned()],
-                vec!["block_hash".to_owned()],
-            ),
-            (
-                provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
-                2,
-                2,
-                2,
-                vec!["eth_getBlockByHash".to_owned()],
-                vec!["block_hash".to_owned()],
-            ),
-        ],
-        "range-fetched logs must not fake hash-scoped block_logs retained payload metadata"
+        Vec::<(String, i64, i64, i64, Vec<String>, Vec<String>)>::new(),
+        "multi-block batched fetches must not fake hash-scoped retained payload metadata"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -495,6 +561,102 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 }
 
 #[tokio::test]
+async fn hash_pinned_backfill_refreshes_lease_before_completed_reservation_noop() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let root_contract_instance_id = Uuid::from_u128(902);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (manifest_id, chain, rollout_status)
+            VALUES (1, 'ethereum-mainnet', 'active')
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for backfill lease refresh test")?;
+    insert_contract_instance(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "0x0000000000000000000000000000000000000001",
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        1,
+        root_contract_instance_id,
+        "0x0000000000000000000000000000000000000001",
+    )
+    .await?;
+
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        42,
+        42,
+    )
+    .await?;
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures_and_heads_and_delay(
+        vec![ProviderBlockFixture {
+            logs: vec![rpc_log_payload(&block)],
+            block,
+        }],
+        Arc::clone(&requests),
+        None,
+        None,
+        Some(StdDuration::from_millis(2_500)),
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let mut config = backfill_job_config(
+        range,
+        "indexer-backfill-refreshes-expired-lease",
+        "lease-refresh",
+    )?;
+    config.lease_expires_at =
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 2)
+            .context("short lease deadline must be valid")?;
+    config.hash_pinned_chunk_blocks = 1;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    assert_eq!(outcome.reserved_range_count, 1);
+    assert_eq!(outcome.completed_range_count, 1);
+    assert_eq!(outcome.resolved_block_count, 1);
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("backfill job must exist");
+    assert_eq!(job.status, BackfillLifecycleStatus::Completed);
+    let ranges = load_backfill_ranges(database.pool(), outcome.backfill_job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].status, BackfillLifecycleStatus::Completed);
+    assert_eq!(ranges[0].checkpoint_block_number, 42);
+    assert!(ranges[0].lease_expires_at.is_none());
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manual_finite_backfill_runs_full_requested_range_without_startup_cap() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
@@ -656,6 +818,473 @@ async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metad
 }
 
 #[tokio::test]
+async fn raw_only_hash_pinned_backfill_skips_adapter_replay_after_raw_persistence() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_250);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_250,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let next_block = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&block.block_hash),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block.clone(),
+                logs: vec![rpc_log_payload(&block)],
+            },
+            ProviderBlockFixture {
+                block: next_block.clone(),
+                logs: vec![rpc_log_payload(&next_block)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, "raw-only-adapter-sync", "lease-raw-only")?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_transaction_count, 2);
+    assert_eq!(outcome.raw_receipt_count, 2);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
+    assert_eq!(table_count(database.pool(), "normalized_events").await?, 0);
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.method == "eth_getBlockByHash")
+            .all(|request| request.params.get(1) == Some(&Value::Bool(false))),
+        "raw-only multi-block backfill must fetch block headers without full transaction payloads"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.method == "eth_getTransactionByHash")
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.method == "eth_getTransactionReceipt")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.method != "eth_getBlockReceipts"),
+        "raw-only multi-block backfill must not fetch whole-block receipts"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn auto_hash_pinned_backfill_normalizes_selected_raw_facts() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_260);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_260,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_log_payload(&block)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, "auto-adapter-sync", "lease-auto")?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::Auto;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 1);
+    assert!(
+        table_count(database.pool(), "normalized_events").await? > 0,
+        "manual auto hash-pinned backfill must normalize selected raw facts"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn auto_source_family_backfill_normalizes_reverse_claims_after_raw_persistence() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_265);
+    let reverse_address = "0x00000000000000000000000000000000000000af";
+    let claimed_address = "0x2222222222222222222222222222222222222222";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_265,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_reverse_l1",
+        contract_instance_id,
+        reverse_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_reverse_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_reverse_claimed_log_payload(
+                &block,
+                reverse_address,
+                claimed_address,
+                0,
+            )],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, "auto-reverse-scoped-sync", "lease-auto-reverse")?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::Auto;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "manual auto source-family backfill must run the reverse-claim adapter after raw persistence"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_reverse_l1".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn auto_watched_target_backfill_scopes_reverse_claim_replay_to_selected_target() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_contract_instance_id = Uuid::from_u128(9_266);
+    let sibling_contract_instance_id = Uuid::from_u128(9_267);
+    let selected_reverse_address = "0x00000000000000000000000000000000000000af";
+    let sibling_reverse_address = "0x00000000000000000000000000000000000000bf";
+    let selected_claimed_address = "0x2222222222222222222222222222222222222222";
+    let sibling_claimed_address = "0x3333333333333333333333333333333333333333";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_266,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_reverse_l1",
+        selected_contract_instance_id,
+        selected_reverse_address,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        sibling_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        sibling_contract_instance_id,
+        "ethereum-mainnet",
+        sibling_reverse_address,
+        Some(9_266),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        9_266,
+        "reverse_sibling",
+        sibling_contract_instance_id,
+        sibling_reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
+            contract_instance_id: selected_contract_instance_id,
+        }]),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    insert_raw_reverse_claimed_log_at_index(
+        database.pool(),
+        "ethereum-mainnet",
+        &block,
+        sibling_reverse_address,
+        sibling_claimed_address,
+        CanonicalityState::Canonical,
+        1,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_reverse_claimed_log_payload(
+                &block,
+                selected_reverse_address,
+                selected_claimed_address,
+                0,
+            )],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(
+        range,
+        "auto-reverse-target-scoped-sync",
+        "lease-auto-reverse-target",
+    )?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::Auto;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(
+        table_count(database.pool(), "raw_logs").await?,
+        2,
+        "the sibling raw log is already persisted in the selected block"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "scoped replay must normalize only the selected reverse target"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events
+             WHERE event_kind = 'ReverseChanged'
+               AND LOWER(after_state->'claim_provenance'->>'emitting_address') = LOWER($1)"
+        )
+        .bind(selected_reverse_address)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events
+             WHERE event_kind = 'ReverseChanged'
+               AND LOWER(after_state->'claim_provenance'->>'emitting_address') = LOWER($1)"
+        )
+        .bind(sibling_reverse_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "same-block sibling raw facts outside the explicit watched-target scope must stay untouched"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_retains_empty_block_lineage_and_raw_anchors() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_270);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_270,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(40, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block_40 = provider_block(
+        "0x4040404040404040404040404040404040404040404040404040404040404040",
+        Some("0x3939393939393939393939393939393939393939393939393939393939393939"),
+        40,
+    );
+    let block_41 = provider_block(
+        "0x4141414141414141414141414141414141414141414141414141414141414141",
+        Some(&block_40.block_hash),
+        41,
+    );
+    let block_42 = provider_block(
+        "0x4242424242424242424242424242424242424242424242424242424242424242",
+        Some(&block_41.block_hash),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_40.clone(),
+                logs: vec![rpc_log_payload(&block_40)],
+            },
+            ProviderBlockFixture {
+                block: block_41.clone(),
+                logs: Vec::new(),
+            },
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![rpc_log_payload(&block_42)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, "raw-only-sparse-empty", "lease-sparse-empty")?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+
+    assert_eq!(outcome.resolved_block_count, 3);
+    assert_eq!(outcome.raw_block_count, 3);
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 3);
+    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 3);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks WHERE block_number = 41")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage WHERE block_number = 41")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
@@ -755,14 +1384,7 @@ async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows()
     )
     .fetch_all(database.pool())
     .await?;
-    assert_eq!(
-        payload_states,
-        vec![
-            (40, vec!["finalized".to_owned()]),
-            (41, vec!["safe".to_owned()]),
-            (42, vec!["canonical".to_owned()]),
-        ]
-    );
+    assert_eq!(payload_states, Vec::<(i64, Vec<String>)>::new());
 
     let normalized_event_states = sqlx::query_as::<_, (i64, String)>(
         r#"
@@ -2227,6 +2849,23 @@ async fn number_resolving_provider_with_fixtures_and_heads(
     safe_block_number: Option<i64>,
     finalized_block_number: Option<i64>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    number_resolving_provider_with_fixtures_and_heads_and_delay(
+        fixtures,
+        requests,
+        safe_block_number,
+        finalized_block_number,
+        None,
+    )
+    .await
+}
+
+async fn number_resolving_provider_with_fixtures_and_heads_and_delay(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<RecordedRpcRequest>>>,
+    safe_block_number: Option<i64>,
+    finalized_block_number: Option<i64>,
+    response_delay_once: Option<StdDuration>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
     let fixtures_by_hash = Arc::new(
         fixtures
             .into_iter()
@@ -2260,8 +2899,19 @@ async fn number_resolving_provider_with_fixtures_and_heads(
                 .with_context(|| format!("finalized block fixture {block_number} is missing"))
         })
         .transpose()?;
+    let response_delay_once =
+        response_delay_once.map(|delay| Arc::new((AtomicBool::new(true), delay)));
 
     let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        if let Some(delay_once) = &response_delay_once {
+            if delay_once
+                .0
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                std::thread::sleep(delay_once.1);
+            }
+        }
+
         let method = body
             .get("method")
             .and_then(Value::as_str)
@@ -2353,6 +3003,30 @@ async fn number_resolving_provider_with_fixtures_and_heads(
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
                 Value::Array(vec![rpc_receipt_payload(&fixture.block)])
+            }
+            "eth_getTransactionByHash" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction request: {body}"));
+                rpc_transaction_payload(&fixture.block)
+            }
+            "eth_getTransactionReceipt" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction receipt request: {body}"));
+                rpc_receipt_payload(&fixture.block)
             }
             "eth_getCode" => {
                 let block_hash = params
@@ -3512,6 +4186,7 @@ fn backfill_job_config(
         lease_token: lease_token.to_owned(),
         lease_expires_at: backfill_lease_deadline()?,
         hash_pinned_chunk_blocks: backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        adapter_sync_mode: backfill::BackfillAdapterSyncMode::Inline,
     })
 }
 

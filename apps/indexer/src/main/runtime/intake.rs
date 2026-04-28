@@ -306,7 +306,7 @@ mod tests {
 
         assert!(
             error.to_string().contains(
-                "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+                "configured provider source chains outside selected/admitted runtime chain set: optimism-mainnet"
             ),
             "unexpected error: {error:#}"
         );

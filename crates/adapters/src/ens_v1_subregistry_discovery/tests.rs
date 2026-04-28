@@ -632,6 +632,8 @@ async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expand
             admitted_edge_count: 1,
             inserted_edge_count: 1,
             deactivated_edge_count: 0,
+            total_normalized_event_count: 1,
+            total_normalized_event_inserted_count: 1,
         }
     );
 
@@ -761,6 +763,8 @@ async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_ide
             admitted_edge_count: 1,
             inserted_edge_count: 1,
             deactivated_edge_count: 0,
+            total_normalized_event_count: 1,
+            total_normalized_event_inserted_count: 1,
         }
     );
 
@@ -775,6 +779,8 @@ async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_ide
             admitted_edge_count: 1,
             inserted_edge_count: 0,
             deactivated_edge_count: 0,
+            total_normalized_event_count: 1,
+            total_normalized_event_inserted_count: 0,
         }
     );
 
@@ -884,6 +890,8 @@ async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_suppo
             admitted_edge_count: 1,
             inserted_edge_count: 1,
             deactivated_edge_count: 0,
+            total_normalized_event_count: 1,
+            total_normalized_event_inserted_count: 1,
         }
     );
 
@@ -1064,6 +1072,8 @@ async fn block_hash_replay_sync_skips_discovery_reconciliation_and_unselected_re
             admitted_edge_count: 0,
             inserted_edge_count: 0,
             deactivated_edge_count: 0,
+            total_normalized_event_count: 0,
+            total_normalized_event_inserted_count: 0,
         }
     );
     assert_eq!(

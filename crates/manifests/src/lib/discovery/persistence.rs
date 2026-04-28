@@ -145,7 +145,9 @@ pub async fn persist_discovery_observation(
         admitted_edges.push(admitted_edge);
     }
 
-    reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
+    if inserted_edge_count > 0 {
+        reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
+    }
 
     transaction
         .commit()

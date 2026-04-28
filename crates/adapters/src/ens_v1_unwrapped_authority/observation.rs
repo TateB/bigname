@@ -9,8 +9,10 @@ pub(super) fn build_authority_observation(
     let profile = authority_profile_for_source_family(&raw_log.source_family);
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
-        && topic0.eq_ignore_ascii_case(&name_registered_topic0())
+        && registrar_name_registered_expiry_word_start(topic0).is_some()
     {
+        let expiry_word_start = registrar_name_registered_expiry_word_start(topic0)
+            .expect("checked registrar NameRegistered topic must have an expiry word");
         let label = decode_first_dynamic_string(&raw_log.data)?;
         let labelhash = normalize_hex_32(
             raw_log
@@ -37,7 +39,7 @@ pub(super) fn build_authority_observation(
         let expiry = abi_word_to_i64(
             raw_log
                 .data
-                .get(64..96)
+                .get(expiry_word_start..expiry_word_start + 32)
                 .context("NameRegistered data is missing expiry word")?,
         )?;
         return Ok(Some(AuthorityObservation::RegistrationGranted(
@@ -53,8 +55,10 @@ pub(super) fn build_authority_observation(
     }
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
-        && topic0.eq_ignore_ascii_case(&name_renewed_topic0())
+        && registrar_name_renewed_expiry_word_start(topic0).is_some()
     {
+        let expiry_word_start = registrar_name_renewed_expiry_word_start(topic0)
+            .expect("checked registrar NameRenewed topic must have an expiry word");
         let label = decode_first_dynamic_string(&raw_log.data)?;
         let labelhash = normalize_hex_32(
             raw_log
@@ -75,7 +79,7 @@ pub(super) fn build_authority_observation(
         let expiry = abi_word_to_i64(
             raw_log
                 .data
-                .get(64..96)
+                .get(expiry_word_start..expiry_word_start + 32)
                 .context("NameRenewed data is missing expiry word")?,
         )?;
         return Ok(Some(AuthorityObservation::RegistrationRenewed(
@@ -171,6 +175,7 @@ pub(super) fn build_authority_observation(
         && topic0.eq_ignore_ascii_case(&text_changed_topic0())
     {
         let key = decode_first_dynamic_string(&raw_log.data)?;
+        let value = decode_second_dynamic_string_if_present(&raw_log.data)?;
         let indexed_key_hash = normalize_hex_32(
             raw_log
                 .topics
@@ -194,6 +199,7 @@ pub(super) fn build_authority_observation(
                     record_family: "text".to_owned(),
                     selector_key: None,
                 },
+                value: value.map(Value::String),
                 raw_name: None,
                 reference: raw_log.reference(),
             },
@@ -203,6 +209,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&name_changed_topic0())
     {
+        let name = decode_first_dynamic_string(&raw_log.data)?;
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
                 namehash: normalize_hex_32(
@@ -217,7 +224,8 @@ pub(super) fn build_authority_observation(
                     record_family: "name".to_owned(),
                     selector_key: None,
                 },
-                raw_name: Some(decode_first_dynamic_string(&raw_log.data)?),
+                value: Some(Value::String(name.clone())),
+                raw_name: Some(name),
                 reference: raw_log.reference(),
             },
         )));
@@ -226,7 +234,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&addr_changed_topic0())
     {
-        decode_owner_address(&raw_log.data)?;
+        let address = decode_owner_address(&raw_log.data)?;
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
                 namehash: normalize_hex_32(
@@ -241,6 +249,7 @@ pub(super) fn build_authority_observation(
                     record_family: "addr".to_owned(),
                     selector_key: Some(ENS_NATIVE_COIN_TYPE.to_owned()),
                 },
+                value: Some(Value::String(address)),
                 raw_name: None,
                 reference: raw_log.reference(),
             },
@@ -256,7 +265,8 @@ pub(super) fn build_authority_observation(
                 .get(..32)
                 .context("AddressChanged log is missing coin type")?,
         )?;
-        decode_nth_dynamic_bytes(&raw_log.data, 1)?;
+        let address_bytes = decode_nth_dynamic_bytes(&raw_log.data, 1)?;
+        let value = resolver_address_record_value(coin_type, &address_bytes);
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
                 namehash: normalize_hex_32(
@@ -271,6 +281,7 @@ pub(super) fn build_authority_observation(
                     record_family: "addr".to_owned(),
                     selector_key: Some(coin_type.to_string()),
                 },
+                value: Some(value),
                 raw_name: None,
                 reference: raw_log.reference(),
             },
@@ -448,6 +459,31 @@ pub(super) fn build_authority_observation(
     }
 
     Ok(None)
+}
+
+fn decode_second_dynamic_string_if_present(data: &[u8]) -> Result<Option<String>> {
+    if data.len() < 64 {
+        return Ok(None);
+    }
+
+    let first_offset = abi_word_to_usize(&data[..32]).context("invalid TextChanged ABI offset")?;
+    if first_offset < 64 {
+        return Ok(None);
+    }
+
+    decode_nth_dynamic_string(data, 1).map(Some)
+}
+
+fn resolver_address_record_value(coin_type: i64, address_bytes: &[u8]) -> Value {
+    let hex_value = hex_string(address_bytes);
+    if coin_type.to_string() == ENS_NATIVE_COIN_TYPE && address_bytes.len() == 20 {
+        return Value::String(hex_value);
+    }
+
+    serde_json::json!({
+        "encoding": "hex",
+        "bytes": hex_value,
+    })
 }
 
 pub(super) fn observation_labelhash(observation: &AuthorityObservation) -> String {

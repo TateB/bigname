@@ -1,7 +1,10 @@
-use std::collections::{HashMap, HashSet};
+#[path = "reconciliation/bulk.rs"]
+mod bulk;
+
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, types::Uuid};
 
 use super::admission::DiscoveryAdmissionState;
 use super::loading::load_discovery_admission_state_with_excluded_source;
@@ -14,9 +17,12 @@ use super::types::{
     StoredActiveContract,
 };
 use crate::{
-    CONTRACT_KIND_CONTRACT, REACHABLE_FROM_ROOT_ADMISSION, ensure_contract_instance_address_seed,
-    normalize_address, reconcile_active_contract_instance_addresses,
-    resolve_contract_instance_by_address,
+    REACHABLE_FROM_ROOT_ADMISSION, normalize_address, reconcile_active_contract_instance_addresses,
+};
+
+use self::bulk::{
+    PendingContractInstanceSeed, insert_pending_contract_instance_seeds,
+    insert_reconciled_discovery_edges,
 };
 
 fn observation_terminal_states(
@@ -267,55 +273,16 @@ pub async fn reconcile_discovery_observations(
         deactivated_edge_count += 1;
     }
 
-    let mut inserted_edge_count = 0;
-    for desired_edge in &desired_edges {
-        if existing_set.contains(desired_edge) {
-            continue;
-        }
+    let new_edges = desired_edges
+        .iter()
+        .filter(|desired_edge| !existing_set.contains(*desired_edge))
+        .collect::<Vec<_>>();
+    let inserted_edge_count =
+        insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO discovery_edges (
-                chain_id,
-                edge_kind,
-                from_contract_instance_id,
-                to_contract_instance_id,
-                discovery_source,
-                source_manifest_id,
-                admission,
-                active_from_block_number,
-                active_from_block_hash,
-                active_to_block_number,
-                active_to_block_hash,
-                provenance
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, $10::jsonb)
-            "#,
-        )
-        .bind(&desired_edge.chain)
-        .bind(&desired_edge.edge_kind)
-        .bind(desired_edge.from_contract_instance_id)
-        .bind(desired_edge.to_contract_instance_id)
-        .bind(&desired_edge.discovery_source)
-        .bind(desired_edge.source_manifest_id)
-        .bind(&desired_edge.admission)
-        .bind(desired_edge.active_from_block_number)
-        .bind(desired_edge.active_from_block_hash.as_deref())
-        .bind(&desired_edge.provenance_json)
-        .execute(transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to insert reconciled discovery edge {} {} -> {}",
-                desired_edge.edge_kind,
-                desired_edge.from_contract_instance_id,
-                desired_edge.to_contract_instance_id
-            )
-        })?;
-        inserted_edge_count += 1;
+    if inserted_edge_count > 0 || deactivated_edge_count > 0 {
+        reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
     }
-
-    reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
 
     transaction
         .commit()
@@ -338,51 +305,94 @@ async fn resolve_reconciled_discovery_edge_specs(
 ) -> Result<(Vec<ReconciledDiscoveryEdgeSpec>, Vec<AdmittedDiscoveryEdge>)> {
     let mut desired_edges = HashSet::new();
     let mut admitted_edges = HashSet::new();
-    let mut active_contracts = admission_state.active_contracts.clone();
+    let mut active_contracts = admission_state
+        .active_contracts
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut active_contracts_by_address =
+        HashMap::<(String, String), Vec<StoredActiveContract>>::new();
+    for contract in &active_contracts {
+        active_contracts_by_address
+            .entry((contract.chain.clone(), contract.address.clone()))
+            .or_default()
+            .push(contract.clone());
+    }
+    let mut pending_contract_instance_seeds =
+        HashMap::<(String, String), PendingContractInstanceSeed>::new();
+    let mut observations_by_from_address =
+        HashMap::<(String, String), Vec<&DiscoveryObservation>>::new();
+    for observation in observations {
+        if is_zero_address(&observation.to_address) {
+            continue;
+        }
+        observations_by_from_address
+            .entry((
+                observation.chain.clone(),
+                normalize_address(&observation.from_address),
+            ))
+            .or_default()
+            .push(observation);
+    }
 
-    loop {
-        let mut changed = false;
+    let mut queued_contract_keys = active_contracts_by_address
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut pending_contract_keys = queued_contract_keys
+        .iter()
+        .cloned()
+        .collect::<VecDeque<_>>();
+    while let Some(contract_key) = pending_contract_keys.pop_front() {
+        queued_contract_keys.remove(&contract_key);
+        let Some(key_observations) = observations_by_from_address.get(&contract_key) else {
+            continue;
+        };
 
-        for observation in observations {
+        for &observation in key_observations {
             let observation_key = observation_key(observation)?;
-            if is_zero_address(&observation.to_address) {
-                continue;
-            }
 
-            for mut admitted_edge in admission_state
-                .admit_candidate_against_contracts(&active_contracts, &observation.candidate())
-            {
+            for mut admitted_edge in admission_state.admit_candidate_against_contract_lookup(
+                &active_contracts_by_address,
+                &observation.candidate(),
+            ) {
                 let to_contract_instance_id = match admitted_edge.to_contract_instance_id {
                     Some(contract_instance_id) => contract_instance_id,
                     None => {
-                        resolve_contract_instance_by_address(
-                            executor,
-                            &admitted_edge.chain,
-                            &admitted_edge.to_address,
-                            CONTRACT_KIND_CONTRACT,
-                            &serde_json::json!({
+                        let resolved_key = (
+                            admitted_edge.chain.clone(),
+                            normalize_address(&admitted_edge.to_address),
+                        );
+                        if let Some(seed) = pending_contract_instance_seeds.get(&resolved_key) {
+                            seed.contract_instance_id
+                        } else {
+                            let contract_instance_id = Uuid::new_v4();
+                            let instance_provenance_json = serde_json::json!({
                                 "source": "discovery_observation",
                                 "edge_kind": admitted_edge.edge_kind,
                                 "discovery_source": admitted_edge.discovery_source,
-                            }),
-                        )
-                        .await?
+                            });
+                            let address_provenance_json = serde_json::json!({
+                                "source": "discovery_observation_seed",
+                                "edge_kind": admitted_edge.edge_kind,
+                                "discovery_source": admitted_edge.discovery_source,
+                            });
+                            pending_contract_instance_seeds.insert(
+                                resolved_key,
+                                PendingContractInstanceSeed {
+                                    contract_instance_id,
+                                    chain: admitted_edge.chain.clone(),
+                                    address: normalize_address(&admitted_edge.to_address),
+                                    source_manifest_id: admitted_edge.source_manifest_id,
+                                    instance_provenance_json,
+                                    address_provenance_json,
+                                },
+                            );
+                            contract_instance_id
+                        }
                     }
                 };
                 admitted_edge.to_contract_instance_id = Some(to_contract_instance_id);
-                ensure_contract_instance_address_seed(
-                    executor,
-                    to_contract_instance_id,
-                    &admitted_edge.chain,
-                    &admitted_edge.to_address,
-                    Some(admitted_edge.source_manifest_id),
-                    &serde_json::json!({
-                        "source": "discovery_observation_seed",
-                        "edge_kind": admitted_edge.edge_kind,
-                        "discovery_source": admitted_edge.discovery_source,
-                    }),
-                )
-                .await?;
 
                 let provenance = discovery_edge_provenance(
                     &observation.provenance,
@@ -403,8 +413,8 @@ async fn resolve_reconciled_discovery_edge_specs(
                     provenance_json: serde_json::to_string(&provenance)
                         .context("failed to serialize reconciled discovery-edge provenance")?,
                 };
-                changed |= desired_edges.insert(desired_edge);
-                changed |= admitted_edges.insert(admitted_edge.clone());
+                desired_edges.insert(desired_edge);
+                admitted_edges.insert(admitted_edge.clone());
 
                 if admitted_edge.admission == REACHABLE_FROM_ROOT_ADMISSION
                     && discovery_edge_propagates_role(&admitted_edge.edge_kind)
@@ -416,18 +426,32 @@ async fn resolve_reconciled_discovery_edge_specs(
                         contract_instance_id: to_contract_instance_id,
                         address: admitted_edge.to_address.clone(),
                     };
-                    if !active_contracts.contains(&derived_contract) {
-                        active_contracts.push(derived_contract);
-                        changed = true;
+                    if active_contracts.insert(derived_contract.clone()) {
+                        let derived_contract_key = (
+                            derived_contract.chain.clone(),
+                            derived_contract.address.clone(),
+                        );
+                        active_contracts_by_address
+                            .entry(derived_contract_key.clone())
+                            .or_default()
+                            .push(derived_contract);
+                        if queued_contract_keys.insert(derived_contract_key.clone()) {
+                            pending_contract_keys.push_back(derived_contract_key);
+                        }
                     }
                 }
             }
         }
-
-        if !changed {
-            break;
-        }
     }
+
+    let mut pending_contract_instance_seeds = pending_contract_instance_seeds
+        .into_values()
+        .collect::<Vec<_>>();
+    pending_contract_instance_seeds.sort_by(|left, right| {
+        (left.chain.as_str(), left.address.as_str())
+            .cmp(&(right.chain.as_str(), right.address.as_str()))
+    });
+    insert_pending_contract_instance_seeds(executor, &pending_contract_instance_seeds).await?;
 
     let mut desired_edges = desired_edges.into_iter().collect::<Vec<_>>();
     desired_edges.sort_by(|left, right| {

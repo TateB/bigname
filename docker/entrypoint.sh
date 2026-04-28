@@ -7,6 +7,10 @@ if [ "${BIGNAME_INDEXER_CHAIN_RPC_URLS+x}" = "x" ] && [ -z "$BIGNAME_INDEXER_CHA
   unset BIGNAME_INDEXER_CHAIN_RPC_URLS
 fi
 
+if [ "${BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES+x}" = "x" ] && [ -z "$BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES" ]; then
+  unset BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES
+fi
+
 case "$command" in
   -*)
     exec bigname-api "$@"

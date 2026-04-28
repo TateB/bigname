@@ -17,7 +17,7 @@ use super::{
         build_last_change, build_provenance, build_selectors, build_unsupported_families,
         gap_value, resolver_family_pending_value,
     },
-    loading::{load_relevant_events, load_target_resource_ids},
+    loading::{load_all_relevant_events, load_relevant_events},
     profile::{ResolverProfileGate, resolver_local_source_family},
     types::{RecordInventoryCurrentRebuildSummary, RelevantEvent},
 };
@@ -33,12 +33,23 @@ pub(super) async fn rebuild_record_inventory_current(
 }
 
 async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
-    let profile_gate = ResolverProfileGate::load(pool).await?;
-    let resource_ids = load_target_resource_ids(pool).await?;
+    let events = load_all_relevant_events(pool).await?;
+    let profile_gate = ResolverProfileGate::load_for_events(pool, &events).await?;
 
-    let mut rows = Vec::with_capacity(resource_ids.len());
-    for resource_id in &resource_ids {
-        if let Some(row) = build_row(pool, &profile_gate, *resource_id).await? {
+    let mut rows = Vec::new();
+    let mut requested_resource_count = 0;
+    let mut index = 0;
+    while index < events.len() {
+        let resource_id = events[index].resource_id;
+        let start = index;
+        while index < events.len() && events[index].resource_id == resource_id {
+            index += 1;
+        }
+        requested_resource_count += 1;
+
+        if let Some(row) =
+            build_row_from_events(pool, &profile_gate, resource_id, &events[start..index]).await?
+        {
             rows.push(row);
         }
     }
@@ -48,7 +59,7 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
         .len();
     let deleted_row_count = delete_stale_record_inventory_current_rows(pool, &rows).await?;
     Ok(RecordInventoryCurrentRebuildSummary {
-        requested_resource_count: resource_ids.len(),
+        requested_resource_count,
         upserted_row_count,
         deleted_row_count,
     })
@@ -58,10 +69,21 @@ async fn rebuild_one_resource(
     pool: &PgPool,
     resource_id: &str,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
-    let profile_gate = ResolverProfileGate::load(pool).await?;
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
-    let Some(row) = build_row(pool, &profile_gate, resource_id).await? else {
+    let events = load_relevant_events(pool, resource_id).await?;
+    if events.is_empty() {
+        let deleted_row_count =
+            delete_record_inventory_rows_for_resource(pool, resource_id).await?;
+        return Ok(RecordInventoryCurrentRebuildSummary {
+            requested_resource_count: 1,
+            upserted_row_count: 0,
+            deleted_row_count,
+        });
+    };
+
+    let profile_gate = ResolverProfileGate::load_for_events(pool, &events).await?;
+    let Some(row) = build_row_from_events(pool, &profile_gate, resource_id, &events).await? else {
         let deleted_row_count =
             delete_record_inventory_rows_for_resource(pool, resource_id).await?;
         return Ok(RecordInventoryCurrentRebuildSummary {
@@ -168,12 +190,12 @@ async fn delete_stale_record_inventory_current_rows_for_resource(
     .map(|result| result.rows_affected())
 }
 
-async fn build_row(
+async fn build_row_from_events(
     pool: &PgPool,
     profile_gate: &ResolverProfileGate,
     resource_id: Uuid,
+    events: &[RelevantEvent],
 ) -> Result<Option<RecordInventoryCurrentRow>> {
-    let events = load_relevant_events(pool, resource_id).await?;
     if events.is_empty() {
         return Ok(None);
     }
@@ -182,13 +204,8 @@ async fn build_row(
         .iter()
         .rev()
         .find(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
-    if let Some(resolver_event) = latest_resolver_event
-        && profile_gate
-            .current_record_status(resolver_event)
-            .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
-    {
-        return build_pending_profile_row(pool, resource_id, resolver_event).await;
-    }
+    let latest_resolver_record_status = latest_resolver_event
+        .and_then(|resolver_event| profile_gate.current_record_status(resolver_event));
 
     let boundary_index = events.iter().rposition(|event| {
         event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED
@@ -213,6 +230,13 @@ async fn build_row(
             event.event_kind == EVENT_KIND_RECORD_CHANGED && profile_gate.allows_event(event)
         })
         .collect::<Vec<_>>();
+    if let Some(resolver_event) = latest_resolver_event
+        && latest_resolver_record_status
+            .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+        && record_change_events.is_empty()
+    {
+        return build_pending_profile_row(pool, resource_id, resolver_event, boundary_anchor).await;
+    }
     let provenance_events = scoped_events
         .iter()
         .filter(|event| {
@@ -225,8 +249,9 @@ async fn build_row(
 
     let selectors = build_selectors(&record_change_events)?;
     let explicit_gaps = build_explicit_gaps(&selectors);
-    let unsupported_families = build_unsupported_families(&record_change_events)?;
-    let entries = build_entries(&selectors);
+    let unsupported_families =
+        build_row_unsupported_families(latest_resolver_record_status, &record_change_events)?;
+    let entries = build_entries(&record_change_events, &selectors)?;
     let last_change = provenance_events
         .last()
         .map(build_last_change)
@@ -261,7 +286,11 @@ async fn build_row(
         last_change,
         entries: Value::Array(entries),
         provenance: build_provenance(&provenance_events)?,
-        coverage: build_coverage(&provenance_events),
+        coverage: build_row_coverage(
+            latest_resolver_record_status,
+            boundary_anchor,
+            &provenance_events,
+        ),
         chain_positions: build_chain_positions(
             &chain_position_events,
             supplemental_chain_positions,
@@ -284,14 +313,20 @@ async fn build_pending_profile_row(
     pool: &PgPool,
     resource_id: Uuid,
     resolver_event: &RelevantEvent,
+    boundary_anchor: &RelevantEvent,
 ) -> Result<Option<RecordInventoryCurrentRow>> {
+    let provenance_events = pending_profile_events(resolver_event, boundary_anchor);
     let supplemental_chain_positions =
-        load_basenames_transport_chain_positions(pool, std::slice::from_ref(resolver_event))
-            .await?;
+        load_basenames_transport_chain_positions(pool, &provenance_events).await?;
+    let has_record_version_boundary_pointer =
+        boundary_anchor.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED;
 
     Ok(Some(RecordInventoryCurrentRow {
         resource_id,
-        record_version_boundary: build_record_version_boundary(resolver_event, false)?,
+        record_version_boundary: build_record_version_boundary(
+            boundary_anchor,
+            has_record_version_boundary_pointer,
+        )?,
         enumeration_basis: json!({
             "observed_selectors": false,
             "capability_declared_families": true,
@@ -307,24 +342,89 @@ async fn build_pending_profile_row(
             resolver_family_pending_value(SUPPORTED_ADDR_RECORD_FAMILY),
             resolver_family_pending_value(SUPPORTED_TEXT_RECORD_FAMILY),
         ]),
-        last_change: Some(build_last_change(resolver_event)?),
+        last_change: Some(build_last_change(boundary_anchor)?),
         entries: Value::Array(vec![]),
-        provenance: build_provenance(std::slice::from_ref(resolver_event))?,
+        provenance: build_provenance(&provenance_events)?,
         coverage: json!({
             "status": "partial",
             "exhaustiveness": "best_effort",
-            "source_classes_considered": [resolver_event.source_family],
+            "source_classes_considered": provenance_events
+                .iter()
+                .map(|event| event.source_family.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
             "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
         }),
-        chain_positions: build_chain_positions(
-            std::slice::from_ref(resolver_event),
-            supplemental_chain_positions,
-        ),
-        canonicality_summary: build_canonicality_summary(std::slice::from_ref(resolver_event)),
-        manifest_version: resolver_event.manifest_version,
-        last_recomputed_at: resolver_event
-            .block_timestamp
+        chain_positions: build_chain_positions(&provenance_events, supplemental_chain_positions),
+        canonicality_summary: build_canonicality_summary(&provenance_events),
+        manifest_version: provenance_events
+            .iter()
+            .map(|event| event.manifest_version)
+            .max()
+            .unwrap_or(1),
+        last_recomputed_at: provenance_events
+            .iter()
+            .filter_map(|event| event.block_timestamp)
+            .max()
             .unwrap_or(OffsetDateTime::UNIX_EPOCH),
     }))
+}
+
+fn pending_profile_events(
+    resolver_event: &RelevantEvent,
+    boundary_anchor: &RelevantEvent,
+) -> Vec<RelevantEvent> {
+    let mut events = vec![resolver_event.clone()];
+    if boundary_anchor.normalized_event_id != resolver_event.normalized_event_id {
+        events.push(boundary_anchor.clone());
+    }
+    events
+}
+
+fn build_row_unsupported_families(
+    latest_resolver_record_status: Option<&str>,
+    record_change_events: &[&RelevantEvent],
+) -> Result<Vec<Value>> {
+    let mut unsupported_families = build_unsupported_families(record_change_events)?;
+    if latest_resolver_record_status
+        .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+    {
+        unsupported_families.push(resolver_family_pending_value(SUPPORTED_ADDR_RECORD_FAMILY));
+        unsupported_families.push(resolver_family_pending_value(SUPPORTED_TEXT_RECORD_FAMILY));
+    }
+    unsupported_families.sort_by(|left, right| {
+        left["record_family"]
+            .as_str()
+            .cmp(&right["record_family"].as_str())
+    });
+    unsupported_families.dedup_by(|left, right| left["record_family"] == right["record_family"]);
+    Ok(unsupported_families)
+}
+
+fn build_row_coverage(
+    latest_resolver_record_status: Option<&str>,
+    boundary_anchor: &RelevantEvent,
+    provenance_events: &[RelevantEvent],
+) -> Value {
+    if latest_resolver_record_status
+        .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+    {
+        return json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": provenance_events
+                .iter()
+                .map(|event| event.source_family.clone())
+                .chain(std::iter::once(boundary_anchor.source_family.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
+        });
+    }
+
+    build_coverage(provenance_events)
 }

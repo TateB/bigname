@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bigname_manifests::DiscoveryObservation;
 use bigname_storage::{
     NameSurface, NormalizedEvent, Resource, SurfaceBinding, TokenLineage, upsert_name_surfaces,
-    upsert_normalized_events, upsert_resources, upsert_token_lineages,
+    upsert_normalized_events_with_summary, upsert_resources, upsert_token_lineages,
 };
 use sqlx::PgPool;
 use sqlx::types::Uuid;
@@ -58,6 +58,7 @@ pub struct EnsV2RegistryResourceSurfaceSyncSummary {
     pub total_resource_count: usize,
     pub total_surface_binding_count: usize,
     pub total_normalized_event_count: usize,
+    pub total_normalized_event_inserted_count: usize,
     pub active_discovery_observation_count: usize,
     pub active_edge_count: usize,
     pub admitted_edge_count: usize,
@@ -75,6 +76,7 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
             total_resource_count: 0,
             total_surface_binding_count: 0,
             total_normalized_event_count: 0,
+            total_normalized_event_inserted_count: 0,
             active_discovery_observation_count: 0,
             active_edge_count: 0,
             admitted_edge_count: 0,
@@ -219,7 +221,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     upsert_resources(pool, &resources).await?;
     upsert_name_surfaces(pool, &surfaces).await?;
     upsert_surface_bindings_close_before_open(pool, &bindings).await?;
-    upsert_normalized_events(pool, &events).await?;
+    let normalized_event_upsert = upsert_normalized_events_with_summary(pool, &events).await?;
 
     Ok(EnsV2RegistryResourceSurfaceSyncSummary {
         scanned_log_count,
@@ -228,6 +230,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         total_resource_count: resources.len(),
         total_surface_binding_count: bindings.len(),
         total_normalized_event_count: events.len(),
+        total_normalized_event_inserted_count: normalized_event_upsert.inserted_count,
         active_discovery_observation_count: latest_observations
             .iter()
             .filter(|observation| normalize_address(&observation.to_address) != ZERO_ADDRESS)

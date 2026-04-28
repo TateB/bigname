@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
     decode::decode_raw_receipt,
@@ -18,6 +18,10 @@ pub async fn upsert_raw_receipts(
         return Ok(Vec::new());
     }
 
+    if receipts.len() >= BULK_RAW_RECEIPT_UPSERT_MIN_ROWS {
+        return upsert_raw_receipts_bulk(pool, receipts).await;
+    }
+
     let mut transaction = pool
         .begin()
         .await
@@ -33,6 +37,274 @@ pub async fn upsert_raw_receipts(
         .commit()
         .await
         .context("failed to commit raw receipt upsert")?;
+
+    Ok(snapshots)
+}
+
+/// Insert or refresh raw receipts without returning row snapshots.
+pub async fn upsert_raw_receipts_without_snapshots(
+    pool: &PgPool,
+    receipts: &[RawReceipt],
+) -> Result<()> {
+    if receipts.is_empty() {
+        return Ok(());
+    }
+
+    for raw_receipt in receipts {
+        validate_raw_receipt(raw_receipt)?;
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for raw receipt bulk upsert")?;
+
+    for chunk in receipts.chunks(BULK_RAW_RECEIPT_UPSERT_CHUNK_ROWS) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO raw_receipts (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state
+            )
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state::canonicality_state
+            FROM (
+            "#,
+        );
+
+        builder.push_values(chunk, |mut row, receipt| {
+            row.push_bind(&receipt.chain_id)
+                .push_bind(&receipt.block_hash)
+                .push_bind(receipt.block_number)
+                .push_bind(&receipt.transaction_hash)
+                .push_bind(receipt.transaction_index)
+                .push_bind(&receipt.contract_address)
+                .push_bind(receipt.status)
+                .push_bind(receipt.gas_used)
+                .push_bind(receipt.cumulative_gas_used)
+                .push_bind(&receipt.logs_bloom)
+                .push_bind(receipt.canonicality_state.as_str());
+        });
+
+        builder.push(
+            r#"
+            ) AS input (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state
+            )
+            ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
+            SET
+                canonicality_state = CASE
+                    WHEN raw_receipts.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
+                        AND raw_receipts.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
+                        THEN raw_receipts.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'safe'::canonicality_state
+                        AND raw_receipts.canonicality_state = 'finalized'::canonicality_state
+                        THEN raw_receipts.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'observed'::canonicality_state
+                        THEN raw_receipts.canonicality_state
+                    ELSE EXCLUDED.canonicality_state
+                END,
+                observed_at = now()
+            WHERE raw_receipts.transaction_hash = EXCLUDED.transaction_hash
+              AND raw_receipts.block_number = EXCLUDED.block_number
+              AND raw_receipts.contract_address IS NOT DISTINCT FROM EXCLUDED.contract_address
+              AND raw_receipts.status IS NOT DISTINCT FROM EXCLUDED.status
+              AND raw_receipts.gas_used IS NOT DISTINCT FROM EXCLUDED.gas_used
+              AND raw_receipts.cumulative_gas_used IS NOT DISTINCT FROM EXCLUDED.cumulative_gas_used
+              AND raw_receipts.logs_bloom IS NOT DISTINCT FROM EXCLUDED.logs_bloom
+            "#,
+        );
+
+        let result = builder
+            .build()
+            .execute(&mut *transaction)
+            .await
+            .context("failed to bulk upsert raw receipts")?;
+        if result.rows_affected() != chunk.len() as u64 {
+            anyhow::bail!(
+                "raw receipt identity mismatch while bulk upserting {} rows",
+                chunk.len()
+            );
+        }
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit raw receipt bulk upsert")?;
+
+    Ok(())
+}
+
+const BULK_RAW_RECEIPT_UPSERT_MIN_ROWS: usize = 128;
+const BULK_RAW_RECEIPT_UPSERT_CHUNK_ROWS: usize = 5_000;
+
+async fn upsert_raw_receipts_bulk(
+    pool: &PgPool,
+    receipts: &[RawReceipt],
+) -> Result<Vec<RawReceipt>> {
+    for raw_receipt in receipts {
+        validate_raw_receipt(raw_receipt)?;
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for raw receipt bulk upsert")?;
+    let mut snapshots = Vec::with_capacity(receipts.len());
+
+    for chunk in receipts.chunks(BULK_RAW_RECEIPT_UPSERT_CHUNK_ROWS) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO raw_receipts (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state
+            )
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state::canonicality_state
+            FROM (
+            "#,
+        );
+
+        builder.push_values(chunk, |mut row, receipt| {
+            row.push_bind(&receipt.chain_id)
+                .push_bind(&receipt.block_hash)
+                .push_bind(receipt.block_number)
+                .push_bind(&receipt.transaction_hash)
+                .push_bind(receipt.transaction_index)
+                .push_bind(&receipt.contract_address)
+                .push_bind(receipt.status)
+                .push_bind(receipt.gas_used)
+                .push_bind(receipt.cumulative_gas_used)
+                .push_bind(&receipt.logs_bloom)
+                .push_bind(receipt.canonicality_state.as_str());
+        });
+
+        builder.push(
+            r#"
+            ) AS input (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state
+            )
+            ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
+            SET
+                canonicality_state = CASE
+                    WHEN raw_receipts.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
+                        AND raw_receipts.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
+                        THEN raw_receipts.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'safe'::canonicality_state
+                        AND raw_receipts.canonicality_state = 'finalized'::canonicality_state
+                        THEN raw_receipts.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'observed'::canonicality_state
+                        THEN raw_receipts.canonicality_state
+                    ELSE EXCLUDED.canonicality_state
+                END,
+                observed_at = now()
+            WHERE raw_receipts.transaction_hash = EXCLUDED.transaction_hash
+              AND raw_receipts.block_number = EXCLUDED.block_number
+              AND raw_receipts.contract_address IS NOT DISTINCT FROM EXCLUDED.contract_address
+              AND raw_receipts.status IS NOT DISTINCT FROM EXCLUDED.status
+              AND raw_receipts.gas_used IS NOT DISTINCT FROM EXCLUDED.gas_used
+              AND raw_receipts.cumulative_gas_used IS NOT DISTINCT FROM EXCLUDED.cumulative_gas_used
+              AND raw_receipts.logs_bloom IS NOT DISTINCT FROM EXCLUDED.logs_bloom
+            RETURNING
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                contract_address,
+                status,
+                gas_used,
+                cumulative_gas_used,
+                logs_bloom,
+                canonicality_state::TEXT AS canonicality_state
+            "#,
+        );
+
+        let rows = builder
+            .build()
+            .fetch_all(&mut *transaction)
+            .await
+            .context("failed to bulk upsert raw receipts")?;
+        if rows.len() != chunk.len() {
+            anyhow::bail!(
+                "raw receipt identity mismatch while bulk upserting {} rows",
+                chunk.len()
+            );
+        }
+        snapshots.extend(
+            rows.into_iter()
+                .map(decode_raw_receipt)
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit raw receipt bulk upsert")?;
 
     Ok(snapshots)
 }

@@ -26,6 +26,25 @@ use super::preimage_observation::{
 };
 use super::types::{PreimageObservation, WatchedRawLogRow};
 
+pub(super) fn preimage_observed_topic0s() -> Vec<String> {
+    [
+        name_wrapped_topic0(),
+        registrar_name_registered_topic0(),
+        registrar_name_renewed_topic0(),
+        keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_LABEL_RESERVED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE),
+        keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE),
+        keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE),
+        keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE),
+    ]
+    .into_iter()
+    .collect()
+}
+
 pub(super) fn build_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {

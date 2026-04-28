@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use sqlx::{Executor, PgPool, Postgres, Row};
+use sqlx::{PgPool, Row};
 
 use super::{decode::decode_normalized_event, types::NormalizedEvent};
 
@@ -78,44 +78,4 @@ pub async fn load_normalized_event_counts_by_kind(
             ))
         })
         .collect()
-}
-
-pub(super) async fn load_normalized_event_by_identity<'e, E>(
-    executor: E,
-    event_identity: &str,
-) -> Result<Option<NormalizedEvent>>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let row = sqlx::query(
-        r#"
-        SELECT
-            event_identity,
-            namespace,
-            logical_name_id,
-            resource_id,
-            event_kind,
-            source_family,
-            manifest_version,
-            source_manifest_id,
-            chain_id,
-            block_number,
-            block_hash,
-            transaction_hash,
-            log_index,
-            raw_fact_ref,
-            derivation_kind,
-            canonicality_state::TEXT AS canonicality_state,
-            before_state,
-            after_state
-        FROM normalized_events
-        WHERE event_identity = $1
-        "#,
-    )
-    .bind(event_identity)
-    .fetch_optional(executor)
-    .await
-    .with_context(|| format!("failed to load normalized event {event_identity}"))?;
-
-    row.map(decode_normalized_event).transpose()
 }

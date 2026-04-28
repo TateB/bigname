@@ -28,13 +28,15 @@ pub(super) fn build_resolution_declared_state(
 ) -> JsonValue {
     let mut declared_state = empty_object();
     let topology = build_resolution_topology(row, record_inventory_row);
-    let mut record_cache = build_record_cache_section(
+    let mut record_cache = build_record_cache_section_for_name(
+        row,
         record_inventory_row,
         records,
         "declared resolution record cache is not yet projected",
     );
     if classify_supported_resolution_topology(&row.namespace, &row.logical_name_id, &topology)
         == Some(bigname_storage::VerifiedResolutionPathClass::BasenamesTransportDirect)
+        && !topology_terminates_with_no_declared_resolver(&topology)
     {
         mark_basenames_transport_direct_unretained_record_cache_values(&mut record_cache);
     }
@@ -42,13 +44,31 @@ pub(super) fn build_resolution_declared_state(
     insert_value_field(
         &mut declared_state,
         "record_inventory",
-        build_record_inventory_section(
+        build_record_inventory_section_for_name(
+            row,
             record_inventory_row,
             "declared resolution record inventory is not yet projected",
         ),
     );
     insert_value_field(&mut declared_state, "record_cache", record_cache);
     declared_state
+}
+
+fn topology_terminates_with_no_declared_resolver(topology: &JsonValue) -> bool {
+    let Some(resolver_hop) = provenance_field(topology, "resolver_path")
+        .and_then(JsonValue::as_array)
+        .and_then(|resolver_path| resolver_path.last())
+    else {
+        return false;
+    };
+
+    matches!(
+        provenance_field(resolver_hop, "chain_id"),
+        Some(JsonValue::Null)
+    ) && matches!(
+        provenance_field(resolver_hop, "address"),
+        Some(JsonValue::Null)
+    )
 }
 
 fn mark_basenames_transport_direct_unretained_record_cache_values(record_cache: &mut JsonValue) {

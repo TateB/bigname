@@ -15,7 +15,7 @@ use crate::{
         run_resumable_hash_pinned_backfill_job,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, generated_backfill_lease_token,
-    provider::{JsonRpcProvider, ProviderRegistry},
+    provider::{ChainProvider, ChainProviderOps, ProviderRegistry},
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
 
@@ -99,7 +99,7 @@ async fn run_ops_finalized_catchup_iteration(
                 catchup_status = "idle_missing_provider",
                 chain = %task.chain,
                 intake_address_count = task.addresses.len(),
-                "no RPC provider is configured for an active catch-up chain"
+                "no provider source is configured for an active catch-up chain"
             );
             continue;
         };
@@ -147,7 +147,7 @@ async fn run_ops_finalized_catchup_iteration(
 async fn run_ops_finalized_catchup_chunk(
     pool: &sqlx::PgPool,
     chain: &str,
-    provider: &JsonRpcProvider,
+    provider: &ChainProvider,
     config: &OpsCatchupConfig,
     chunk: &CatchupChunk,
     finalized_head_block_number: i64,
@@ -185,6 +185,7 @@ async fn run_ops_finalized_catchup_chunk(
         lease_token: generated_backfill_lease_token()?,
         lease_expires_at: backfill_lease_expires_at(config.lease_duration_secs)?,
         hash_pinned_chunk_blocks: crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        adapter_sync_mode: crate::backfill::BackfillAdapterSyncMode::Inline,
     };
     let record = create_hash_pinned_backfill_job(pool, &source_plan, &run_config).await?;
     if record.job.status == BackfillLifecycleStatus::Completed {

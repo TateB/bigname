@@ -4,6 +4,7 @@ mod read;
 mod types;
 mod validate;
 mod write;
+mod write_fast;
 mod write_rows;
 
 pub use orphan::{mark_identity_rows_range_orphaned, mark_surface_binding_range_orphaned};

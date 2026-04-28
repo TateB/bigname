@@ -11,7 +11,7 @@ use bigname_manifests::{
 };
 use tracing::{info, warn};
 
-use crate::provider::ProviderRegistry;
+use crate::provider::{ChainProviderKind, ProviderRegistry};
 
 use super::intake::{
     IntakeChainTask, ProviderAvailabilityStatus, checkpoint_mode, intake_runtime_state,
@@ -193,6 +193,7 @@ pub(crate) fn log_ens_v1_unwrapped_authority_sync_summary(
         && summary.total_resource_count == 0
         && summary.total_surface_binding_count == 0
         && summary.total_normalized_event_count == 0
+        && summary.total_normalized_event_inserted_count == 0
     {
         return;
     }
@@ -206,6 +207,7 @@ pub(crate) fn log_ens_v1_unwrapped_authority_sync_summary(
         identity_resource_count = summary.total_resource_count,
         identity_surface_binding_count = summary.total_surface_binding_count,
         identity_normalized_event_count = summary.total_normalized_event_count,
+        identity_normalized_event_inserted_count = summary.total_normalized_event_inserted_count,
         identity_event_kind_count = summary.by_kind.len(),
         "ENSv1 unwrapped authority synced from stored raw logs"
     );
@@ -269,6 +271,8 @@ pub(crate) fn log_ens_v1_subregistry_discovery_sync_summary(
         discovery_admitted_edge_count = summary.admitted_edge_count,
         discovery_inserted_edge_count = summary.inserted_edge_count,
         discovery_deactivated_edge_count = summary.deactivated_edge_count,
+        normalized_event_sync_total_count = summary.total_normalized_event_count,
+        normalized_event_inserted_total_count = summary.total_normalized_event_inserted_count,
         "ENSv1 registry discovery synced from stored raw logs"
     );
 }
@@ -282,6 +286,7 @@ pub(crate) fn log_ens_v2_registry_resource_surface_sync_summary(
         && summary.total_resource_count == 0
         && summary.total_surface_binding_count == 0
         && summary.total_normalized_event_count == 0
+        && summary.total_normalized_event_inserted_count == 0
         && summary.inserted_edge_count == 0
         && summary.deactivated_edge_count == 0
     {
@@ -297,6 +302,7 @@ pub(crate) fn log_ens_v2_registry_resource_surface_sync_summary(
         identity_resource_count = summary.total_resource_count,
         identity_surface_binding_count = summary.total_surface_binding_count,
         identity_normalized_event_count = summary.total_normalized_event_count,
+        identity_normalized_event_inserted_count = summary.total_normalized_event_inserted_count,
         discovery_active_observation_count = summary.active_discovery_observation_count,
         discovery_active_edge_count = summary.active_edge_count,
         discovery_admitted_edge_count = summary.admitted_edge_count,
@@ -469,7 +475,11 @@ pub(crate) fn log_provider_registry(
     info!(
         service = "indexer",
         stage,
-        rpc_configured_chain_count = availability.configured_chain_count,
+        provider_configured_chain_count = availability.configured_chain_count,
+        json_rpc_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
+        reth_db_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
         intake_chain_count = availability.intake_chain_count,
         provider_available_chain_count = availability.available_chain_count,
         provider_unavailable_chain_count = availability.unavailable_chain_count,
@@ -489,7 +499,7 @@ pub(crate) fn log_provider_registry(
                     .unavailable_reason
                     .map(|reason| reason.as_str()),
                 provider_backed_intake_status = "idle",
-                "provider-backed intake is idle for active chain because no RPC provider is configured"
+                "provider-backed intake is idle for active chain because no provider source is configured"
             );
         }
     }

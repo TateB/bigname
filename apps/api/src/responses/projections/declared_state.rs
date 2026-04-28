@@ -34,7 +34,8 @@ pub(super) fn build_name_declared_state(
     insert_value_field(
         &mut declared_state,
         "record_inventory",
-        build_record_inventory_section(
+        build_record_inventory_section_for_name(
+            row,
             record_inventory_row,
             "declared record inventory summary is not yet projected",
         ),

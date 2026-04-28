@@ -4,6 +4,11 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
 use crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+use crate::normalized_replay_catchup::{
+    DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS,
+    DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK,
+    DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS,
+};
 use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
     DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
@@ -50,11 +55,47 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
     #[arg(
+        long = "chain-reth-db-source",
+        env = "BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(
         long = "hash-pinned-chunk-blocks",
         env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS",
         default_value_t = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
     )]
     pub(crate) hash_pinned_chunk_blocks: i64,
+    #[arg(
+        long = "hash-pinned-adapter-sync",
+        env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC",
+        default_value = "auto"
+    )]
+    pub(crate) hash_pinned_adapter_sync: String,
+    #[arg(
+        long = "normalized-replay-catchup-enabled",
+        env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_ENABLED",
+        default_value_t = true
+    )]
+    pub(crate) normalized_replay_catchup_enabled: bool,
+    #[arg(
+        long = "normalized-replay-catchup-chunk-blocks",
+        env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS",
+        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS
+    )]
+    pub(crate) normalized_replay_catchup_chunk_blocks: i64,
+    #[arg(
+        long = "normalized-replay-catchup-max-logs-per-chunk",
+        env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK",
+        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK
+    )]
+    pub(crate) normalized_replay_catchup_max_logs_per_chunk: usize,
+    #[arg(
+        long = "normalized-replay-catchup-poll-interval-secs",
+        env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS",
+        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS
+    )]
+    pub(crate) normalized_replay_catchup_poll_interval_secs: u64,
 }
 
 #[derive(Args, Debug)]
@@ -73,6 +114,12 @@ pub(crate) struct BackfillArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long = "chain-reth-db-source",
+        env = "BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_reth_db_sources: Vec<String>,
     #[arg(long)]
     pub(crate) chain: String,
     #[arg(long)]
@@ -103,6 +150,12 @@ pub(crate) struct BackfillArgs {
         default_value_t = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
     )]
     pub(crate) hash_pinned_chunk_blocks: i64,
+    #[arg(
+        long = "hash-pinned-adapter-sync",
+        env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC",
+        default_value = "auto"
+    )]
+    pub(crate) hash_pinned_adapter_sync: String,
 }
 
 #[derive(Args, Debug)]
@@ -121,6 +174,12 @@ pub(crate) struct OpsCatchupArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long = "chain-reth-db-source",
+        env = "BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_reth_db_sources: Vec<String>,
     #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
     pub(crate) deployment_profile: Option<String>,
     #[arg(

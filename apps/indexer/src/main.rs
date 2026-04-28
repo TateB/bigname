@@ -8,6 +8,8 @@ mod backfill_tests;
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]
 mod cli;
+#[path = "main/normalized_replay_catchup.rs"]
+mod normalized_replay_catchup;
 #[path = "main/ops_catchup.rs"]
 mod ops_catchup;
 #[cfg(test)]
@@ -29,13 +31,16 @@ mod tests;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use backfill::{BackfillBlockRange, BackfillJobRunConfig, run_resumable_hash_pinned_backfill_job};
-use bigname_manifests::load_watched_source_selector_plan;
+use backfill::{
+    BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig,
+    run_resumable_hash_pinned_backfill_job,
+};
 #[cfg(test)]
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
     WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
 };
+use bigname_manifests::{WatchedSourceSelector, load_watched_source_selector_plan};
 #[allow(unused_imports)]
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, DatabaseConfig,
@@ -50,8 +55,11 @@ use cli::{
     BackfillArgs, Cli, Command, OpsCatchupArgs, ReplayArgs, ReplayCommand,
     ReplayNormalizedEventsArgs, RunArgs,
 };
+use normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup};
 #[allow(unused_imports)]
-use provider::{JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry};
+use provider::{
+    ChainProviderKind, JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry,
+};
 #[allow(unused_imports)]
 use reconciliation::*;
 pub(crate) use replay::{
@@ -65,7 +73,7 @@ use runtime::*;
 use sha3::{Digest, Keccak256};
 use tracing::info;
 
-const MAX_PARENT_FETCH_DEPTH: usize = 32;
+const MAX_PARENT_FETCH_DEPTH: usize = 16_384;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,8 +94,29 @@ async fn run(args: RunArgs) -> Result<()> {
     ensure_manifest_root_ready(&manifest_summary)?;
 
     let pool = bigname_storage::connect(&args.database).await?;
-    let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
-    sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
+    let runtime_watch_scope = match adapter_sync_mode {
+        BackfillAdapterSyncMode::Inline => RuntimeWatchScope::ActiveWatchedChain,
+        BackfillAdapterSyncMode::Auto | BackfillAdapterSyncMode::RawOnly => {
+            RuntimeWatchScope::ManifestDeclaredOnly
+        }
+    };
+    let manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
+        &pool,
+        &manifest_repository,
+        runtime_watch_scope,
+    )
+    .await?;
+    if adapter_sync_mode.syncs_before_startup_backfill() {
+        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    } else {
+        info!(
+            service = "indexer",
+            adapter_sync_mode = adapter_sync_mode.as_str(),
+            runtime_watch_scope = runtime_watch_scope.as_str(),
+            "startup adapter-owned raw-log sync deferred until bootstrap backfill drains"
+        );
+    }
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
     let watched_chain_plan_state =
@@ -96,7 +125,8 @@ async fn run(args: RunArgs) -> Result<()> {
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    let provider_registry =
+        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
     let bootstrap_backfill_outcome = run_startup_bootstrap_backfills(
@@ -105,8 +135,47 @@ async fn run(args: RunArgs) -> Result<()> {
         &intake_chain_tasks,
         &provider_registry,
         args.hash_pinned_chunk_blocks,
+        adapter_sync_mode.startup_hash_pinned_backfill_mode(),
+        adapter_sync_mode == BackfillAdapterSyncMode::Auto,
     )
     .await?;
+    if adapter_sync_mode.syncs_after_startup_backfill() {
+        info!(
+            service = "indexer",
+            adapter_sync_mode = adapter_sync_mode.as_str(),
+            effective_backfill_adapter_sync_mode = adapter_sync_mode
+                .startup_hash_pinned_backfill_mode()
+                .as_str(),
+            "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
+        );
+        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    }
+    let live_poll_adapter_sync_enabled = adapter_sync_mode != BackfillAdapterSyncMode::RawOnly;
+    let broad_runtime_refresh_enabled = adapter_sync_mode == BackfillAdapterSyncMode::Inline;
+    let normalized_replay_catchup_enabled = args.normalized_replay_catchup_enabled
+        && adapter_sync_mode == BackfillAdapterSyncMode::Auto;
+    if normalized_replay_catchup_enabled {
+        let catchup_config = NormalizedReplayCatchupConfig::new(
+            deployment_profile_from_manifest_root(&args.manifests_root),
+            intake_chain_tasks
+                .iter()
+                .map(|task| task.chain.clone())
+                .collect::<Vec<_>>(),
+            args.normalized_replay_catchup_chunk_blocks,
+            args.normalized_replay_catchup_max_logs_per_chunk,
+            args.normalized_replay_catchup_poll_interval_secs,
+        )?;
+        let catchup_pool = pool.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_normalized_replay_catchup(catchup_pool, catchup_config).await {
+                tracing::warn!(
+                    service = "indexer",
+                    error = ?error,
+                    "automatic normalized-event replay catch-up task exited"
+                );
+            }
+        });
+    }
 
     info!(
         service = "indexer",
@@ -160,7 +229,11 @@ async fn run(args: RunArgs) -> Result<()> {
         intake_resumable_chain_count = intake_runtime_state.resumable_chain_count,
         intake_safe_checkpoint_chain_count = intake_runtime_state.safe_checkpoint_chain_count,
         intake_finalized_checkpoint_chain_count = intake_runtime_state.finalized_checkpoint_chain_count,
-        rpc_configured_chain_count = provider_registry.configured_chain_count(),
+        provider_configured_chain_count = provider_registry.configured_chain_count(),
+        json_rpc_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
+        reth_db_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
         bootstrap_backfill_active_chain_count = bootstrap_backfill_outcome.active_chain_count,
         bootstrap_backfill_provider_configured_chain_count = bootstrap_backfill_outcome.provider_configured_chain_count,
         bootstrap_backfill_missing_provider_chain_count = bootstrap_backfill_outcome.missing_provider_chain_count,
@@ -171,9 +244,21 @@ async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
         bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
         hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks,
+        hash_pinned_adapter_sync = adapter_sync_mode.as_str(),
+        effective_hash_pinned_backfill_adapter_sync =
+            adapter_sync_mode.startup_hash_pinned_backfill_mode().as_str(),
+        live_poll_adapter_sync = live_poll_adapter_sync_enabled,
+        normalized_replay_catchup_enabled,
+        normalized_replay_catchup_chunk_blocks = args.normalized_replay_catchup_chunk_blocks,
+        normalized_replay_catchup_max_logs_per_chunk = args.normalized_replay_catchup_max_logs_per_chunk,
+        normalized_replay_catchup_poll_interval_secs = args.normalized_replay_catchup_poll_interval_secs,
+        adapter_sync_on_manifest_refresh = broad_runtime_refresh_enabled,
+        manifest_observation_refresh_enabled = broad_runtime_refresh_enabled,
+        discovery_refresh_enabled = broad_runtime_refresh_enabled,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
         adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
+        runtime_watch_scope = runtime_watch_scope.as_str(),
         "indexer booted"
     );
 
@@ -184,6 +269,11 @@ async fn run(args: RunArgs) -> Result<()> {
         intake_chain_tasks,
         &provider_registry,
         args.poll_interval_secs,
+        runtime_watch_scope,
+        broad_runtime_refresh_enabled,
+        live_poll_adapter_sync_enabled,
+        broad_runtime_refresh_enabled,
+        broad_runtime_refresh_enabled,
     )
     .await
 }
@@ -196,17 +286,29 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     ensure_manifest_root_ready(&manifest_summary)?;
 
     let pool = bigname_storage::connect(&args.database).await?;
-    let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
+    let selector = backfill_source_selector(&args)?;
+    let needs_full_runtime_plan =
+        matches!(selector, WatchedSourceSelector::WholeActiveWatchedChain);
+    let manifest_runtime_state = if needs_full_runtime_plan {
+        build_manifest_runtime_state(&pool, &manifest_repository).await?
+    } else {
+        build_manifest_runtime_state_with_watch_scope(
+            &pool,
+            &manifest_repository,
+            RuntimeWatchScope::ManifestDeclaredOnly,
+        )
+        .await?
+    };
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    let provider_registry =
+        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
     provider_registry.ensure_configured_chains_admitted(
         manifest_runtime_state
             .watched_chain_plan
             .iter()
             .map(|chain| chain.chain.as_str()),
     )?;
-    let selector = backfill_source_selector(&args)?;
     let source_plan = load_watched_source_selector_plan(
         &pool,
         &args.chain,
@@ -223,13 +325,18 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         selected_target_count = source_plan.selected_targets.len(),
         from_block = range.from_block,
         to_block = range.to_block,
-        rpc_configured_chain_count = provider_registry.configured_chain_count(),
+        provider_configured_chain_count = provider_registry.configured_chain_count(),
+        json_rpc_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
+        reth_db_provider_configured_chain_count =
+            provider_registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
         "provider registry loaded for hash-pinned backfill"
     );
 
     let provider = provider_registry.provider_for(&args.chain).ok_or_else(|| {
         anyhow::anyhow!(
-            "no RPC provider configured for watched chain {}; pass --chain-rpc-url {}=<url>",
+            "no provider source configured for watched chain {}; pass --chain-rpc-url {}=<url> or --chain-reth-db-source {}=<reth-datadir>",
+            args.chain,
             args.chain,
             args.chain
         )
@@ -246,6 +353,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         None => generated_backfill_lease_token()?,
     };
     let lease_expires_at = backfill_lease_expires_at(args.lease_duration_secs)?;
+    let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
     let config = BackfillJobRunConfig {
         deployment_profile,
         idempotency_key: args.idempotency_key,
@@ -254,6 +362,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         lease_token,
         lease_expires_at,
         hash_pinned_chunk_blocks: args.hash_pinned_chunk_blocks,
+        adapter_sync_mode: adapter_sync_mode.hash_pinned_backfill_mode(),
     };
 
     run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
@@ -274,7 +383,8 @@ async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {
     let intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("ops-catchup", &intake_chain_tasks);
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    let provider_registry =
+        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("ops-catchup", &intake_chain_tasks, &provider_registry);
 

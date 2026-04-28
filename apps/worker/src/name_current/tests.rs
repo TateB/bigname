@@ -2579,6 +2579,92 @@ async fn rebuild_is_idempotent() -> Result<()> {
 }
 
 #[tokio::test]
+async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stable = IdentityBinding::new("ens:stable.eth", "stable.eth", 0x8110, 0x8210, 0x8310);
+    let broken = IdentityBinding::new("ens:broken.eth", "broken.eth", 0x8120, 0x8220, 0x8320);
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xstable-grant", 411, 1_717_172_011),
+            raw_block("ethereum-mainnet", "0xbroken-grant", 412, 1_717_172_012),
+        ],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &stable,
+        "0xstable-grant",
+        411,
+        1_717_172_011,
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &broken,
+        "0xbroken-grant",
+        412,
+        1_717_172_012,
+    )
+    .await?;
+    upsert_name_current_rows(
+        database.pool(),
+        &[NameCurrentRow {
+            logical_name_id: stable.logical_name_id.clone(),
+            namespace: "ens".to_owned(),
+            canonical_display_name: "stable.eth".to_owned(),
+            normalized_name: "stable.eth".to_owned(),
+            namehash: "node:stable.eth".to_owned(),
+            surface_binding_id: None,
+            resource_id: None,
+            token_lineage_id: None,
+            binding_kind: None,
+            declared_summary: json!({"status": "stable-before-full-rebuild"}),
+            provenance: json!({"derivation_kind": NAME_CURRENT_DERIVATION_KIND}),
+            coverage: json!({"status": "supported"}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({
+                "status": "finalized",
+                "chains": {"ethereum-mainnet": "finalized"}
+            }),
+            manifest_version: 1,
+            last_recomputed_at: timestamp(1_717_172_011),
+        }],
+    )
+    .await?;
+    let mut broken_resolver = resolver_event(
+        &broken,
+        "resolver-missing-chain",
+        "0x0000000000000000000000000000000000000def",
+        "0xbroken-resolver",
+        413,
+        0,
+    );
+    broken_resolver.chain_id = None;
+    seed_events(database.pool(), &[broken_resolver]).await?;
+
+    let error = rebuild_name_current(database.pool(), None)
+        .await
+        .expect_err("full rebuild should fail when one projected row cannot be built");
+    assert!(error.to_string().contains("ResolverChanged event"));
+
+    let stable_row = load_name_current(database.pool(), &stable.logical_name_id)
+        .await?
+        .context("pre-existing row should remain visible after failed full rebuild")?;
+    assert_eq!(
+        stable_row.declared_summary["status"],
+        json!("stable-before-full-rebuild")
+    );
+    assert_eq!(
+        load_name_current(database.pool(), &broken.logical_name_id).await?,
+        None
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn keyed_rebuild_keeps_visible_row_when_projection_build_fails() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x8100, 0x8200, 0x8300);

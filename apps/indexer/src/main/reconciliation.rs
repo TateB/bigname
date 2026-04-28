@@ -19,11 +19,12 @@ mod types;
 pub(crate) use adapter_sync::{
     sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
+    sync_live_adapter_state_from_persisted_raw_payloads,
 };
 #[allow(unused_imports)]
 pub(crate) use canonical::{
-    orphan_canonical_branch, poll_provider_heads, reconcile_canonical_head,
-    reconcile_fetched_heads, reconcile_intake_chain_task,
+    orphan_canonical_branch, poll_provider_heads, poll_provider_heads_with_adapter_sync,
+    reconcile_canonical_head, reconcile_fetched_heads, reconcile_intake_chain_task,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

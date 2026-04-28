@@ -47,6 +47,15 @@ declares that payload class durable.
 
 Provider re-fetch is an explicit, fallible cache-fill path. For block-scoped payloads, it must be block-hash-scoped, verify the retained digest before any bytes are used, and fail closed if the digest is absent, the digest mismatches, or the provider cannot serve the exact historical payload. Provider re-fetch is not a substitute for retaining selected replay facts, lineage, normalized events, execution artifacts, or orphaned-branch audit truth.
 
+Local execution-client storage, including a same-host Reth database/static-file
+store, is a provider/cache substrate rather than a new storage family. Client
+table keys, row cursors, static-file offsets, or data-directory paths may appear
+only in operational source metadata or evictable cache metadata. They are not
+durable `raw_fact_ref` identities, normalized-event provenance, projection
+inputs, or replacements for selected raw logs, minimal transaction/receipt
+facts, lineage/header anchors, code-hash observations, call snapshots,
+execution artifacts, or orphaned-branch audit truth retained in Postgres.
+
 Retention windows and compaction cadence are operational policy. They do not change route coverage, API consistency semantics, manifest capability flags, rollout status, or consumer-replacement graduation.
 
 ## 3. ID Strategy
@@ -124,6 +133,7 @@ Use `bigint generated always as identity` for:
 | `chain_*` | intake | lineage and canonical block graph |
 | `raw_*` | intake | immutable hot replay facts plus payload-cache metadata for blockchain and execution inputs |
 | `backfill_*` | worker/backfill substrate | persisted backfill jobs, bounded range leases, and resumable range checkpoints; not chain head checkpoints |
+| `normalized_replay_*` | indexer/replay orchestration | operational replay cursors only; not canonicality, backfill, adapter, projection, or API state |
 | `manifest_*` | manifests/discovery | source manifests, declared contract admission, capability versions |
 | `discovery_*` | manifests/discovery | canonical reachable contract graph and watch-plan expansion keyed by `contract_instance_id` |
 | `manifest_alert_*` | worker/audit | persisted manifest-drift and proxy-alert observations; operational only, not manifest truth or public API state |
@@ -150,7 +160,7 @@ Basenames resolver-profile state is also separate from contract-instance admissi
 
 For ENSv2 identity rows and normalized event rows, adapters own the same boundary: they mint and reuse `resource_id`, `token_lineage_id`, and `surface_binding_id`, append `TokenResourceLinked`, `TokenRegenerated`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, permission events, and preimage observations from name-bearing events, and never write projection rows. Projection workers consume those events; they do not infer token-resource links, subregistry reachability, alias targets, wildcard coverage, EAC-derived effective powers, or exact-name support directly from raw logs, preimage observations, or manifest presence (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309).
 
-Raw-fact normalized-event replay does not introduce a new storage owner. The indexer-owned operational runner may select bounded canonical raw facts and ask the adapter-owned `normalized_events` boundary to perform an upsert-only resync for the corresponding rows; it must not let storage helpers, projections, API code, or inspection tooling synthesize normalized events directly. Replay reads canonical durable hot facts first. It may use a retained durable cold payload only when an explicitly retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. Replay does not delete stale `normalized_events` or replace existing payloads for an already persisted normalized-event identity; the storage upsert path inserts absent rows and refreshes canonicality for matching identities, while conflicting payloads remain mismatches. Replay must not mutate `chain_*`, `raw_*`, `backfill_*`, `projection_*`, `execution_*`, manifests, discovery rows, public API state, or checkpoint promotion state.
+Raw-fact normalized-event replay does not introduce a new event storage owner. The indexer-owned operational runner may select bounded canonical raw facts and ask the adapter-owned `normalized_events` boundary to perform an upsert-only resync for the corresponding rows; it may advance only its own `normalized_replay_*` operational cursor while doing so. It must not let storage helpers, projections, API code, or inspection tooling synthesize normalized events directly. Replay reads canonical durable hot facts first. It may use a retained durable cold payload only when an explicitly retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. Replay does not delete stale `normalized_events` or replace existing payloads for an already persisted normalized-event identity; the storage upsert path inserts absent rows and refreshes canonicality for matching identities, while conflicting payloads remain mismatches. Replay must not mutate `chain_*`, `raw_*`, `backfill_*`, `projection_*`, `execution_*`, manifests, discovery rows, public API state, or checkpoint promotion state.
 
 At minimum, manifests/discovery persistence must carry:
 
@@ -193,6 +203,16 @@ Backfill source selector storage freezes the job identity fields used by the sou
 - `selected_targets[*].effective_from_block`
 - `selected_targets[*].effective_to_block`
 - `source_identity_hash`: a digest of `selector_kind`, `source_family`, `requested_watched_targets`, and `selected_targets`; the canonical selector payload remains authoritative if a hash collision or payload mismatch is detected
+
+Very large source-family jobs may persist compact selector identity instead of a
+full `selected_targets` array in the job row. Compact identity sets
+`source_identity_payload_format=selected_targets_digest_v1` and carries
+`selected_target_count`, `selected_targets_digest_algorithm`,
+`selected_targets_digest`, a first/last `selected_targets_sample`, and
+`source_identity_hash`. The digest input is still the sorted canonical
+`selected_targets` tuple above; compact storage avoids making one operational
+JSONB row scale with every resolver instance while preserving immutable
+idempotency-key comparison.
 
 The selected target range fields are the intersection of the watched target's active range with the job's finite declared block range. `effective_to_block` is finite for every persisted selected target because backfill jobs are finite at creation time.
 
@@ -359,6 +379,7 @@ To keep parallel work safe:
 - execution workers own trace and step writes plus normal cache outcome writes
 - synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes or invalidations tied to orphaned block dependencies
 - raw-fact normalized-event replay is indexer-owned orchestration over the adapter-owned `normalized_events` boundary; it reads persisted canonical raw facts and may upsert only the corresponding `normalized_events` without stale-row purge or payload replacement
+- normalized replay cursor storage is indexer-owned operational state used only to resume bounded raw-fact normalized-event replay; it does not define canonicality, widen backfill jobs, or change adapter event ownership
 - intake owns durable hot raw-fact writes plus optional payload-cache metadata for block-scoped payloads; replay and inspection tooling may dereference object-backed cache or re-fetch provider payloads only through an explicit block-hash-scoped, retained-digest-checked, fail-closed boundary and must not refetch provider history as a substitute for retained replay inputs
 - API code must not query raw-fact tables directly except for explicit audit endpoints
 - canonicality, raw-fact, and stored lineage range inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route, infer missing lineage, or bypass the API boundary for user-facing reads

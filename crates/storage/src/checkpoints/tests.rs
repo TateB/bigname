@@ -14,9 +14,10 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    ChainLineageBlock, ChainPositions, SnapshotConsistency, SnapshotPositionRequirement,
-    SnapshotSelectionErrorKind, SnapshotSelectionScope, SnapshotSelectorInput,
-    default_database_url, resolve_exact_name_snapshot_selection, upsert_chain_lineage_blocks,
+    CanonicalityState, ChainLineageBlock, ChainPositions, SnapshotConsistency,
+    SnapshotPositionRequirement, SnapshotSelectionErrorKind, SnapshotSelectionScope,
+    SnapshotSelectorInput, default_database_url, resolve_exact_name_snapshot_selection,
+    upsert_chain_lineage_blocks,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -220,7 +221,7 @@ async fn empty_chain_set_is_a_no_op() -> Result<()> {
 }
 
 #[tokio::test]
-async fn advances_checkpoints_and_promotes_lineage_states() -> Result<()> {
+async fn advances_checkpoints_after_reconciled_lineage_states() -> Result<()> {
     let database = TestDatabase::new().await?;
     let base_timestamp = timestamp(1_717_171_717);
 
@@ -233,7 +234,7 @@ async fn advances_checkpoints_and_promotes_lineage_states() -> Result<()> {
                 None,
                 1,
                 base_timestamp,
-                CanonicalityState::Observed,
+                CanonicalityState::Finalized,
             ),
             lineage_block(
                 "eth-mainnet",
@@ -250,6 +251,49 @@ async fn advances_checkpoints_and_promotes_lineage_states() -> Result<()> {
                 3,
                 timestamp(1_717_171_741),
                 CanonicalityState::Observed,
+            ),
+        ],
+    )
+    .await?;
+
+    advance_chain_checkpoints(
+        database.pool(),
+        &ChainCheckpointUpdate {
+            chain_id: "eth-mainnet".to_owned(),
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+            safe: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+            finalized: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+        },
+    )
+    .await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                "eth-mainnet",
+                "0x002",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_729),
+                CanonicalityState::Safe,
+            ),
+            lineage_block(
+                "eth-mainnet",
+                "0x003",
+                Some("0x002"),
+                3,
+                timestamp(1_717_171_741),
+                CanonicalityState::Canonical,
             ),
         ],
     )
@@ -305,6 +349,93 @@ async fn advances_checkpoints_and_promotes_lineage_states() -> Result<()> {
             ("0x001".to_owned(), "finalized".to_owned()),
             ("0x002".to_owned(), "safe".to_owned()),
             ("0x003".to_owned(), "canonical".to_owned()),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn safe_and_finalized_checkpoint_updates_promote_stored_ancestry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                "eth-mainnet",
+                "0x001",
+                None,
+                1,
+                timestamp(1_717_171_717),
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "eth-mainnet",
+                "0x002",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_729),
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "eth-mainnet",
+                "0x003",
+                Some("0x002"),
+                3,
+                timestamp(1_717_171_741),
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "eth-mainnet",
+                "0x004",
+                Some("0x003"),
+                4,
+                timestamp(1_717_171_753),
+                CanonicalityState::Observed,
+            ),
+        ],
+    )
+    .await?;
+
+    advance_chain_checkpoints(
+        database.pool(),
+        &ChainCheckpointUpdate {
+            chain_id: "eth-mainnet".to_owned(),
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x004".to_owned(),
+                block_number: 4,
+            }),
+            safe: Some(CheckpointBlockRef {
+                block_hash: "0x003".to_owned(),
+                block_number: 3,
+            }),
+            finalized: Some(CheckpointBlockRef {
+                block_hash: "0x002".to_owned(),
+                block_number: 2,
+            }),
+        },
+    )
+    .await?;
+
+    let canonicality_by_hash = sqlx::query_as::<_, (String, String)>(
+        r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM chain_lineage
+            WHERE chain_id = 'eth-mainnet'
+            ORDER BY block_number
+            "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+
+    assert_eq!(
+        canonicality_by_hash,
+        vec![
+            ("0x001".to_owned(), "finalized".to_owned()),
+            ("0x002".to_owned(), "finalized".to_owned()),
+            ("0x003".to_owned(), "safe".to_owned()),
+            ("0x004".to_owned(), "canonical".to_owned()),
         ]
     );
 

@@ -4,19 +4,50 @@ use uuid::Uuid;
 
 use super::{constants::*, json::parse_canonicality_state, types::RelevantEvent};
 
-pub(super) async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
+pub(super) async fn load_all_relevant_events(pool: &PgPool) -> Result<Vec<RelevantEvent>> {
     let derivation_kinds = record_inventory_derivation_kinds();
     let resolver_event_namespaces = resolver_event_namespaces();
     let rows = sqlx::query(&format!(
         r#"
-        SELECT DISTINCT resource_id
-        FROM normalized_events
-        WHERE derivation_kind = ANY($1::TEXT[])
-          AND event_kind IN ($2, $3, $4)
-          AND (event_kind <> $4 OR namespace = ANY($5::TEXT[]))
-          AND resource_id IS NOT NULL
-          AND canonicality_state {CANONICAL_STATE_FILTER}
-        ORDER BY resource_id
+        SELECT
+            ne.normalized_event_id,
+            ne.logical_name_id,
+            ne.resource_id,
+            ne.event_kind,
+            ne.source_family,
+            ne.manifest_version,
+            ne.source_manifest_id,
+            ne.chain_id,
+            ne.block_number,
+            ne.block_hash,
+            ne.log_index,
+            rb.block_timestamp,
+            ne.raw_fact_ref,
+            ne.canonicality_state::TEXT AS canonicality_state,
+            ne.after_state,
+            LOWER(rl.emitting_address) AS emitting_address
+        FROM normalized_events ne
+        LEFT JOIN raw_blocks rb
+          ON rb.chain_id = ne.chain_id
+         AND rb.block_hash = ne.block_hash
+        LEFT JOIN raw_logs rl
+          ON rl.chain_id = ne.chain_id
+         AND rl.block_hash = ne.block_hash
+         AND rl.log_index = ne.log_index
+        WHERE ne.derivation_kind = ANY($1::TEXT[])
+          AND ne.event_kind IN ($2, $3, $4)
+          AND (ne.event_kind <> $4 OR ne.namespace = ANY($5::TEXT[]))
+          AND ne.resource_id IS NOT NULL
+          AND ne.logical_name_id IS NOT NULL
+          AND ne.chain_id IS NOT NULL
+          AND ne.block_number IS NOT NULL
+          AND ne.block_hash IS NOT NULL
+          AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ORDER BY
+            ne.resource_id ASC,
+            ne.block_number ASC,
+            ne.log_index ASC NULLS FIRST,
+            ne.normalized_event_id ASC
         "#
     ))
     .bind(&derivation_kinds)
@@ -26,11 +57,9 @@ pub(super) async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>>
     .bind(&resolver_event_namespaces)
     .fetch_all(pool)
     .await
-    .context("failed to load record_inventory_current rebuild targets")?;
+    .context("failed to load record_inventory_current events")?;
 
-    rows.into_iter()
-        .map(|row| row.try_get("resource_id").context("missing resource_id"))
-        .collect()
+    rows.into_iter().map(decode_relevant_event).collect()
 }
 
 pub(super) async fn load_relevant_events(

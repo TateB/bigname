@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::{
     MAX_PARENT_FETCH_DEPTH,
-    provider::{self, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
+    provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
     runtime::{IntakeChainTask, checkpoint_mode},
 };
 
@@ -27,10 +27,20 @@ use super::{
     types::{CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome},
 };
 
+#[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
     pool: &sqlx::PgPool,
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
+) -> Result<()> {
+    poll_provider_heads_with_adapter_sync(pool, tasks, provider_registry, true).await
+}
+
+pub(crate) async fn poll_provider_heads_with_adapter_sync(
+    pool: &sqlx::PgPool,
+    tasks: &mut Vec<IntakeChainTask>,
+    provider_registry: &ProviderRegistry,
+    adapter_sync_enabled: bool,
 ) -> Result<()> {
     let mut next_tasks = tasks.clone();
     let mut any_change = false;
@@ -40,7 +50,14 @@ pub(crate) async fn poll_provider_heads(
             continue;
         };
 
-        match reconcile_intake_chain_task(pool, task, provider).await {
+        match reconcile_intake_chain_task_with_adapter_sync(
+            pool,
+            task,
+            provider,
+            adapter_sync_enabled,
+        )
+        .await
+        {
             Ok(Some((next_task, outcome))) => {
                 log_chain_reconciliation_outcome(&outcome);
                 next_tasks[index] = next_task;
@@ -66,20 +83,42 @@ pub(crate) async fn poll_provider_heads(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) async fn reconcile_intake_chain_task(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
-    provider: &provider::JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
-    let heads = provider.fetch_chain_heads().await?;
-    reconcile_fetched_heads(pool, task, provider, &heads).await
+    reconcile_intake_chain_task_with_adapter_sync(pool, task, provider, true).await
 }
 
+pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    adapter_sync_enabled: bool,
+) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
+    let heads = provider.fetch_chain_heads().await?;
+    reconcile_fetched_heads_with_adapter_sync(pool, task, provider, &heads, adapter_sync_enabled)
+        .await
+}
+
+#[allow(dead_code)]
 pub(crate) async fn reconcile_fetched_heads(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
-    provider: &provider::JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
+) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
+    reconcile_fetched_heads_with_adapter_sync(pool, task, provider, heads, true).await
+}
+
+pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    adapter_sync_enabled: bool,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let canonical = reconcile_canonical_head(
         pool,
@@ -170,6 +209,7 @@ pub(crate) async fn reconcile_fetched_heads(
             heads,
             &canonical,
             head_change_set,
+            adapter_sync_enabled,
         )
         .await?;
     }
@@ -243,13 +283,14 @@ pub(crate) async fn reconcile_fetched_heads(
 
 pub(crate) async fn reconcile_canonical_head(
     pool: &sqlx::PgPool,
-    provider: &provider::JsonRpcProvider,
+    provider: &(impl ChainProviderOps + ?Sized),
     chain: &str,
     checkpoint: &ChainCheckpoint,
     latest_head: &ProviderBlock,
 ) -> Result<CanonicalReconciliation> {
     let latest_hash = latest_head.block_hash.as_str();
     let current_canonical_hash = checkpoint.canonical_block_hash.as_deref();
+    let current_canonical_number = checkpoint.canonical_block_number;
 
     if current_canonical_hash.is_none() {
         upsert_chain_lineage_blocks(
@@ -307,7 +348,10 @@ pub(crate) async fn reconcile_canonical_head(
         };
 
         if let Some(stored_parent) = load_chain_lineage_block(pool, chain, &parent_hash).await? {
-            if stored_parent.canonicality_state != CanonicalityState::Orphaned {
+            if stored_parent.canonicality_state != CanonicalityState::Orphaned
+                && current_canonical_number
+                    .is_some_and(|number| stored_parent.block_number <= number)
+            {
                 common_ancestor_hash = Some(stored_parent.block_hash.clone());
                 break;
             }

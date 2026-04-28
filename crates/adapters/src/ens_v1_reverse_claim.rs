@@ -48,7 +48,17 @@ impl EnsV1ReverseClaimSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes).await
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None).await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+    ) -> Result<Self> {
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, Some(source_scope))
+            .await
     }
 }
 
@@ -56,7 +66,7 @@ pub async fn sync_ens_v1_reverse_claim(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[]).await
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None).await
 }
 
 async fn sync_ens_v1_reverse_claim_with_scope(
@@ -64,8 +74,12 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     chain: &str,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
-    let active_emitters = load_active_emitters(pool, chain).await?;
+    let mut active_emitters = load_active_emitters(pool, chain).await?;
+    if let Some(source_scope) = source_scope {
+        active_emitters.retain(|emitter| reverse_scope_includes_emitter(source_scope, emitter));
+    }
     if active_emitters.is_empty() {
         return Ok(EnsV1ReverseClaimSyncSummary {
             scanned_log_count: 0,
@@ -82,6 +96,7 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         &active_emitters,
         restrict_to_block_hashes,
         block_hashes,
+        source_scope,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -124,7 +139,14 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing_event_identities);
     let synced_by_kind = count_events_by_kind(&events);
 
-    upsert_normalized_events(pool, &events).await?;
+    let events_to_upsert = events.iter().collect::<Vec<_>>();
+    for chunk in events_to_upsert.chunks(10_000) {
+        let chunk = chunk
+            .iter()
+            .map(|event| (*event).to_owned())
+            .collect::<Vec<_>>();
+        upsert_normalized_events(pool, &chunk).await?;
+    }
 
     let by_kind = synced_by_kind
         .into_iter()
@@ -147,6 +169,19 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         total_inserted_count: inserted_by_kind.values().sum(),
         by_kind,
     })
+}
+
+fn reverse_scope_includes_emitter(
+    source_scope: &[(String, String, i64, i64)],
+    emitter: &active_emitters::ActiveEmitter,
+) -> bool {
+    source_scope
+        .iter()
+        .any(|(source_family, address, from_block, to_block)| {
+            source_family == &emitter.source_family
+                && address.eq_ignore_ascii_case(&emitter.address)
+                && from_block <= to_block
+        })
 }
 
 async fn load_existing_event_identities(

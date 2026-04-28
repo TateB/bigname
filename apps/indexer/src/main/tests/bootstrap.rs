@@ -390,7 +390,7 @@ fn provider_registry_validation_accepts_missing_base_and_rejects_out_of_profile_
         .expect_err("configured provider outside selected profile must fail");
     assert!(
         error.to_string().contains(
-            "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+            "configured provider source chains outside selected/admitted runtime chain set: optimism-mainnet"
         ),
         "unexpected error: {error:#}"
     );
@@ -790,6 +790,8 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &intake_tasks,
         &provider_registry,
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
     )
     .await?;
     assert_eq!(outcome.active_chain_count, 2);
@@ -978,9 +980,11 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &intake_tasks,
         &provider_registry,
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
     )
     .await?;
-    assert_eq!(rerun.drained_job_count, 1);
+    assert_eq!(rerun.drained_job_count, 0);
     assert_eq!(rerun.reserved_range_count, 0);
     assert_eq!(rerun.completed_range_count, 0);
     assert_eq!(
@@ -1215,6 +1219,8 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         &intake_tasks,
         &provider_registry,
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
     )
     .await?;
     assert_eq!(outcome.drained_job_count, 1);
@@ -1282,6 +1288,118 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         2
     );
 
+    let block_5 = provider_block(
+        "0x5000000000000000000000000000000000000000000000000000000000000005",
+        Some(&block_4.block_hash),
+        5,
+    );
+    let block_6 = provider_block(
+        "0x6000000000000000000000000000000000000000000000000000000000000006",
+        Some(&block_5.block_hash),
+        6,
+    );
+    let catchup_requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (catchup_provider, catchup_server) = bootstrap_auto_backfill_provider(
+        vec![
+            ProviderBlockFixture {
+                block: block_1.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_1, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_2.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_2, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_3.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_3, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_4.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_4, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_5.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_5, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_6.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_6, address, 0)],
+            },
+        ],
+        Arc::clone(&catchup_requests),
+    )
+    .await?;
+    let catchup_provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={catchup_provider}")])?;
+
+    let catchup = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &catchup_provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
+    )
+    .await?;
+    assert_eq!(catchup.drained_job_count, 1);
+    assert_eq!(catchup.resolved_block_count, 2);
+    assert_eq!(catchup.raw_log_count, 2);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT range_start_block_number, range_end_block_number FROM backfill_jobs ORDER BY backfill_job_id"
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![(1, 4), (5, 6)]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT range_start_block_number, range_end_block_number FROM backfill_ranges ORDER BY backfill_range_id"
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![(1, 4), (5, 6)]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+            .fetch_one(database.pool())
+            .await?,
+        6
+    );
+    let catchup_job = sqlx::query_as::<_, (String, Value)>(
+        r#"
+        SELECT idempotency_key, source_identity
+        FROM backfill_jobs
+        ORDER BY backfill_job_id DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(catchup_job.0.contains("from=5:to=6"));
+    assert_eq!(
+        catchup_job
+            .1
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("effective_from_block"))
+            .and_then(Value::as_i64),
+        Some(5)
+    );
+    assert_eq!(
+        catchup_job
+            .1
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("effective_to_block"))
+            .and_then(Value::as_i64),
+        Some(6)
+    );
+
+    catchup_server.abort();
     server.abort();
     database.cleanup().await
 }

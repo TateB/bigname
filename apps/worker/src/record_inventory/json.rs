@@ -76,26 +76,52 @@ pub(super) fn build_unsupported_families(
         .collect())
 }
 
-pub(super) fn build_entries(selectors: &BTreeMap<String, RecordSelector>) -> Vec<Value> {
-    let mut entries = selectors
-        .values()
-        .map(|selector| {
-            json!({
-                "record_key": selector.record_key,
-                "record_family": selector.record_family,
-                "selector_key": selector.selector_key,
-                "status": "unsupported",
-                "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
+pub(super) fn build_entries(
+    record_change_events: &[&RelevantEvent],
+    selectors: &BTreeMap<String, RecordSelector>,
+) -> Result<Vec<Value>> {
+    let mut entries = Vec::new();
+    for selector in selectors.values() {
+        let mut latest_value = None;
+        for event in record_change_events.iter().rev() {
+            if parse_record_selector(event)? == *selector {
+                latest_value = event
+                    .after_state
+                    .as_object()
+                    .and_then(|object| object.get("value"))
+                    .cloned();
+                break;
+            }
+        }
+
+        let entry = latest_value
+            .map(|value| {
+                json!({
+                    "record_key": selector.record_key,
+                    "record_family": selector.record_family,
+                    "selector_key": selector.selector_key,
+                    "status": "success",
+                    "value": value,
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .unwrap_or_else(|| {
+                json!({
+                    "record_key": selector.record_key,
+                    "record_family": selector.record_family,
+                    "selector_key": selector.selector_key,
+                    "status": "unsupported",
+                    "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
+                })
+            });
+        entries.push(entry);
+    }
 
     entries.sort_by(|left, right| {
         left["record_key"]
             .as_str()
             .cmp(&right["record_key"].as_str())
     });
-    entries
+    Ok(entries)
 }
 
 pub(super) fn build_last_change(event: &RelevantEvent) -> Result<Value> {

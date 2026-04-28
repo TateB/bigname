@@ -85,24 +85,47 @@ Rules:
 ### Local Runtime Provider Configuration
 
 The local `bigname-indexer run` command selects one manifest root with
-`BIGNAME_INDEXER_MANIFESTS_ROOT` and reads provider endpoints from
-`BIGNAME_INDEXER_CHAIN_RPC_URLS`. The provider setting is a comma-delimited list
-of `<chain>=<url>` entries, and each chain name must match an active watched
-chain produced by the selected manifest/watch state. The checked-in local
+`BIGNAME_INDEXER_MANIFESTS_ROOT` and reads provider sources from
+`BIGNAME_INDEXER_CHAIN_RPC_URLS` and
+`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES`. Each setting is a comma-delimited list
+of `<chain>=<value>` entries, and each chain name must match an active watched
+chain produced by the selected manifest/watch state. JSON-RPC values are
+provider URLs. Reth DB values are local Reth data directories for deployments
+that have a same-host Reth database/static-file store. The checked-in local
 default selects `manifests`; the ENSv2 Sepolia dev profile is selected by
 setting `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests-sepolia-dev`.
 
-The provider list is an operational input, not a manifest admission rule. An
-unset provider list leaves manifest sync, watch-plan rebuild, and checkpoint row
-creation available, but provider-backed head fetch and live ingestion remain
-idle for every active watched chain. A selected manifest root may therefore
-declare active watched chains that are fully synchronized into manifest,
-discovery, watch-plan, and checkpoint setup while automatic bootstrap and live
-provider work stay idle until that chain has a configured provider. Current
-bootstrap provider support accepts `http://` JSON-RPC endpoints only.
+At most one provider source may be configured for a chain. JSON-RPC remains the
+portable source. A Reth DB source is an optional intake source, not a protocol
+adapter: ENS/Basenames adapters still consume bigname raw facts and append
+adapter-owned normalized events. The checked-in Reth DB reader currently targets
+Ethereum Mainnet Reth datadirs; other chains fail closed until they have a
+chain-specific reader. A Reth-backed reader must satisfy the same
+block-hash-first provider contract as JSON-RPC for heads, exact block payloads,
+selected logs, receipts, and block-anchored code/state observations. It must
+fail closed when the local Reth store is unavailable, pruned, inconsistent with
+the selected chain, or cannot surface the requested safe/finalized checkpoint or
+exact historical payload. Live execution, trace production, and fresh API-time
+reads remain outside this source boundary.
+
+The provider source list is an operational input, not a manifest admission rule.
+An unset provider source list leaves manifest sync, watch-plan rebuild, and
+checkpoint row creation available, but provider-backed head fetch and live
+ingestion remain idle for every active watched chain. A selected manifest root
+may therefore declare active watched chains that are fully synchronized into
+manifest, discovery, watch-plan, and checkpoint setup while automatic bootstrap
+and live provider work stay idle until that chain has a configured provider
+source. Current bootstrap JSON-RPC support accepts `http://` endpoints only.
+
+Local Reth database row keys, static-file offsets, or table handles must not
+replace bigname raw fact identities. They may be retained only as operational
+source metadata or evictable cache metadata. Durable selected logs,
+transactions, receipts, block/header anchors, code-hash observations, and
+normalized-event `raw_fact_ref` values remain keyed by bigname's chain/block/log
+identity and live in Postgres according to the storage contract.
 
 Provider availability is evaluated per selected profile and per active watched
-chain. A Base RPC endpoint is not a global startup prerequisite: an
+chain. A Base provider source is not a global startup prerequisite: an
 Ethereum-only profile must start without a Base provider, and a profile whose
 Base chain has no configured provider must leave Base provider-backed intake,
 automatic bootstrap, backfill catch-up, and live head following idle with an
@@ -215,7 +238,7 @@ Automatic bootstrap follows these rules:
 - active watched chains without configured providers remain idle after that setup; bootstrap must not create jobs for a chain whose provider cannot supply a finite bootstrap end
 - automatic bootstrap covers each eligible target from its manifest/discovery admitted start through the finite provider head observed at job creation time. It must not cap the start to an arbitrary recent window; full admitted history is the default startup work for configured chains.
 - each candidate target is the resolved watched target keyed by `contract_instance_id`, source family, chain, normalized address, and effective range; raw address is never accepted as durable source identity
-- the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill
+- the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill; very large selected target sets may use the compact digest form described below instead of embedding every target tuple in one JSONB value
 - a target with declared `start_block` is eligible only from that inclusive block, further narrowed by its active watch range and the finite bootstrap range end resolved at job creation time
 - a target with omitted `start_block` has unknown historical start and must be skipped explicitly with that reason; bootstrap must not infer the target start from block zero, the current job range start, manifest activation, provider history, or any default range
 - every created job must have finite declared range start and finite declared range end before insertion into `backfill_jobs`; open-ended historical catch-up remains live intake or a later explicit job, not automatic bootstrap
@@ -241,7 +264,7 @@ The source-scoped backfill runner selector has three mutually exclusive modes:
 - `source_family`: selected by `--source-family <family>`. The selected targets are only the active watched targets in that source family for the selected deployment profile and chain whose active watch range intersects the finite job range. Unknown families or families with no matching active targets fail before job creation rather than falling back to whole-chain backfill.
 - `watched_target_set`: selected by an explicit watched-target set. The request identifies watched targets by `contract_instance_id`; raw addresses alone are not accepted as durable target identity. The selected targets are exactly the supplied watched target identities after validation against the selected deployment profile, chain, and finite job range. The runner must not expand an explicit set to sibling targets, other targets in the same source family, or the whole active watch plan.
 
-The persisted source identity for any selector is the resolved target set, not the CLI spelling that produced it. It is stable and sorted by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Duplicate target identities must collapse only when the full canonical target tuple matches; if the same selector resolves conflicting metadata for the same target identity, job creation fails with an explicit source identity conflict. For idempotency-key reuse, the runner compares the persisted selector mode and resolved source identity. If the active watch plan has changed such that the same CLI selector now resolves to a different target set, the same idempotency key conflicts instead of mutating the existing job.
+The persisted source identity for any selector is the resolved target set, not the CLI spelling that produced it. It is stable and sorted by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Duplicate target identities must collapse only when the full canonical target tuple matches; if the same selector resolves conflicting metadata for the same target identity, job creation fails with an explicit source identity conflict. For idempotency-key reuse, the runner compares the persisted selector mode and resolved source identity. If the active watch plan has changed such that the same CLI selector now resolves to a different target set, the same idempotency key conflicts instead of mutating the existing job. When a selected target set is too large to retain safely as one JSONB payload, the persisted identity may use `source_identity_payload_format=selected_targets_digest_v1`: selector fields, requested target identities, selected target count, a digest algorithm, a digest of the sorted selected target tuples, a first/last target audit sample, and `source_identity_hash`. The sorted canonical target tuple remains the digest input; the runner does not downgrade to raw-address identity or make the selector mutable.
 
 Backfill intake for a source-scoped job is selected-target-only and block-hash-scoped. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that block-hash-scoped admission, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
 
@@ -276,7 +299,7 @@ Source-family backfill conformance intake for the shipped mainnet profile is lim
 - `basenames_l1_compat`: the active watched target is the Ethereum Mainnet Basenames L1 Resolver as compatibility transport for the `base.eth` 2LD; conformance keeps this source family separate from execution even when the normalized address is the same (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
 - `basenames_execution`: the active watched target is the same Ethereum Mainnet Basenames L1 Resolver as verified-resolution entrypoint selection; conformance may exercise the entrypoint boundary that routes `base.eth` through the root resolver and wildcard names through `OffchainLookup` / `resolveWithProof`, but the family remains shadow until a separate doc-first route and capability graduation lands (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc).
 
-For these conformance families, `source_identity` is the canonical resolved target tuple persisted by the job substrate. It must include the selector mode plus the sorted selected targets, and each target identity is keyed by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Same-address targets in `basenames_l1_compat` and `basenames_execution` are therefore distinct source identities, while repeated selection of the same full tuple remains idempotent. Replay coexistence means a completed source-family backfill job and a later raw-fact normalized-event replay over the same canonical facts can both upsert through their owned storage boundaries without mutating each other's checkpoints, raw facts, or public read surfaces.
+For these conformance families, `source_identity` is the canonical resolved target tuple persisted by the job substrate, or the compact digest form for large source-family target sets. Full payloads must include the selector mode plus the sorted selected targets, and each target identity is keyed by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Compact payloads must digest that same sorted target tuple and include the selector mode, source family, selected target count, digest metadata, and first/last target audit sample. Same-address targets in `basenames_l1_compat` and `basenames_execution` are therefore distinct source identities, while repeated selection of the same full tuple remains idempotent. Replay coexistence means a completed source-family backfill job and a later raw-fact normalized-event replay over the same canonical facts can both upsert through their owned storage boundaries without mutating each other's checkpoints, raw facts, or public read surfaces.
 
 Source-family backfill conformance is a non-graduation test. Passing it does not add or widen a public route, change route-level coverage, promote manifest capabilities from `shadow` or `unsupported`, add a capability group, graduate ENSv2 exact-name support, claim wrapper / migration history support, admit a fallback primary-name source, or change consumer-replacement meaning. It proves selector correctness, source-identity stability, bounded lifecycle persistence, selected-target-only intake, and replay coexistence only.
 
@@ -378,7 +401,7 @@ Cache dependencies must be tied to explicit block-hash-bearing chain positions o
 
 Raw-fact normalized-event replay is bounded operational tooling over already persisted canonical raw facts. A replay request selects a finite deployment profile, chain, and block range or explicit block-hash set. For selected blocks, canonical raw facts are rows whose block identity is `canonical`, `safe`, or `finalized`; `observed` and `orphaned` facts are excluded unless a later audit-only contract explicitly admits them.
 
-The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It may use a retained durable cold payload only when the retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. It must not re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
+The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It may advance its own indexer-owned `normalized_replay_*` operational cursor so automatic replay can resume after restart. It may use a retained durable cold payload only when the retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. It must not re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
 
 Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing normalized-event identities can only be refreshed through the storage upsert canonicality path; stale conflicting payloads remain a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage remain immutable, projection rebuild remains downstream worker-owned, and API responses continue to read projections and execution output rather than the replay runner.
 

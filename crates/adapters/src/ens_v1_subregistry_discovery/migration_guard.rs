@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::registry_migration_cache::MigratedRegistryNodes;
+
 use super::{
     CONTRACT_ROLE_REGISTRY, CONTRACT_ROLE_REGISTRY_OLD, ENS_V1_REGISTRY_SOURCE_FAMILY,
     assignment::{ObservedRegistryAssignment, RegistryDiscoveryKind},
@@ -20,7 +22,7 @@ pub(super) enum RegistryMigrationGuardAction {
 }
 
 impl RegistryMigrationGuardAction {
-    pub(super) fn suppressed_by(&self, migrated_nodes: &std::collections::HashSet<String>) -> bool {
+    pub(super) fn suppressed_by(&self, migrated_nodes: &MigratedRegistryNodes) -> bool {
         matches!(self, Self::SuppressIfMigrated(node) if migrated_nodes.contains(node))
     }
 

@@ -24,15 +24,17 @@ pub(super) fn observe_registrar_name_with_version(
         bail!("registrar label must not be empty");
     }
     let normalized_label = label.to_ascii_lowercase();
+    let safe_label = postgres_text_safe(label);
+    let safe_normalized_label = postgres_text_safe(&normalized_label);
     let (normalized_name, input_name, parent_labels) = match profile {
         AuthorityProfile::Ens => (
-            format!("{normalized_label}.eth"),
-            format!("{label}.eth"),
+            format!("{safe_normalized_label}.eth"),
+            format!("{safe_label}.eth"),
             vec![b"eth".to_vec()],
         ),
         AuthorityProfile::Basenames => (
-            format!("{normalized_label}.base.eth"),
-            format!("{label}.base.eth"),
+            format!("{safe_normalized_label}.base.eth"),
+            format!("{safe_label}.base.eth"),
             vec![b"base".to_vec(), b"eth".to_vec()],
         ),
     };
@@ -101,8 +103,16 @@ pub(super) fn observe_dns_encoded_name_with_reference(
         dns_name.extend_from_slice(label);
     }
     dns_name.push(0);
-    let normalized_name = normalized_labels.join(".");
-    let input_name = input_labels.join(".");
+    let normalized_name = normalized_labels
+        .iter()
+        .map(|label| postgres_text_safe(label))
+        .collect::<Vec<_>>()
+        .join(".");
+    let input_name = input_labels
+        .iter()
+        .map(|label| postgres_text_safe(label))
+        .collect::<Vec<_>>()
+        .join(".");
     Ok(NameMetadata {
         namespace: reference.namespace.clone(),
         logical_name_id: format!("{}:{normalized_name}", reference.namespace),
@@ -110,13 +120,14 @@ pub(super) fn observe_dns_encoded_name_with_reference(
         canonical_display_name: normalized_name.clone(),
         normalized_name,
         dns_encoded_name: dns_name,
-        namehash: namehash_hex(&normalized_label_bytes),
-        labelhashes: normalized_label_bytes
-            .iter()
-            .map(|label| keccak256_hex(label))
-            .collect(),
+        namehash: namehash_hex(&labels),
+        labelhashes: labels.iter().map(|label| keccak256_hex(label)).collect(),
         normalizer_version: normalizer_version.to_owned(),
     })
+}
+
+fn postgres_text_safe(text: &str) -> String {
+    text.replace('\0', "\\u0000")
 }
 
 fn decode_dns_encoded_labels(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {

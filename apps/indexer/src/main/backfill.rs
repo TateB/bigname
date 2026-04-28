@@ -15,6 +15,10 @@ use sqlx::types::time::OffsetDateTime;
 
 #[allow(unused_imports)]
 pub(crate) use fetching::run_hash_pinned_backfill_range;
+#[cfg(test)]
+pub(crate) use reservation_execution::{
+    COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD, backfill_job_source_identity_payload,
+};
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, create_hash_pinned_backfill_job,
     run_resumable_hash_pinned_backfill_job,
@@ -45,6 +49,57 @@ impl BackfillBlockRange {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum BackfillAdapterSyncMode {
+    #[default]
+    Auto,
+    Inline,
+    RawOnly,
+}
+
+impl BackfillAdapterSyncMode {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value.trim() {
+            "" | "auto" => Ok(Self::Auto),
+            "inline" => Ok(Self::Inline),
+            "raw-only" | "raw_only" => Ok(Self::RawOnly),
+            value => bail!(
+                "hash-pinned backfill adapter sync mode must be auto, inline, or raw-only, got {value}"
+            ),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Inline => "inline",
+            Self::RawOnly => "raw-only",
+        }
+    }
+
+    pub(crate) fn hash_pinned_backfill_mode(self) -> Self {
+        match self {
+            Self::Auto => Self::Inline,
+            Self::Inline | Self::RawOnly => self,
+        }
+    }
+
+    pub(crate) fn startup_hash_pinned_backfill_mode(self) -> Self {
+        match self {
+            Self::Auto => Self::RawOnly,
+            Self::Inline | Self::RawOnly => self,
+        }
+    }
+
+    pub(crate) fn syncs_before_startup_backfill(self) -> bool {
+        self == Self::Inline
+    }
+
+    pub(crate) fn syncs_after_startup_backfill(self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillJobRunConfig {
     pub(crate) deployment_profile: String,
@@ -54,6 +109,7 @@ pub(crate) struct BackfillJobRunConfig {
     pub(crate) lease_token: String,
     pub(crate) lease_expires_at: OffsetDateTime,
     pub(crate) hash_pinned_chunk_blocks: i64,
+    pub(crate) adapter_sync_mode: BackfillAdapterSyncMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,5 +172,37 @@ impl BackfillJobRunOutcome {
         self.raw_receipt_count += outcome.raw_receipt_count;
         self.raw_log_count += outcome.raw_log_count;
         self.raw_code_hash_count += outcome.raw_code_hash_count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_sync_auto_uses_inline_for_manual_hash_pinned_backfill() -> Result<()> {
+        let auto = BackfillAdapterSyncMode::parse("")?;
+
+        assert_eq!(auto, BackfillAdapterSyncMode::Auto);
+        assert_eq!(
+            BackfillAdapterSyncMode::parse("auto")?.hash_pinned_backfill_mode(),
+            BackfillAdapterSyncMode::Inline
+        );
+        assert_eq!(
+            BackfillAdapterSyncMode::parse("auto")?.startup_hash_pinned_backfill_mode(),
+            BackfillAdapterSyncMode::RawOnly
+        );
+        assert!(!BackfillAdapterSyncMode::Auto.syncs_after_startup_backfill());
+        assert!(!BackfillAdapterSyncMode::Auto.syncs_before_startup_backfill());
+        assert_eq!(
+            BackfillAdapterSyncMode::Inline.hash_pinned_backfill_mode(),
+            BackfillAdapterSyncMode::Inline
+        );
+        assert_eq!(
+            BackfillAdapterSyncMode::RawOnly.hash_pinned_backfill_mode(),
+            BackfillAdapterSyncMode::RawOnly
+        );
+
+        Ok(())
     }
 }

@@ -95,15 +95,17 @@ pub use identity::{
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, load_chain_lineage_block,
     mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    upsert_chain_lineage_blocks_without_snapshots,
 };
 pub use name_current::{
     NameCurrentRow, clear_name_current, delete_name_current, load_name_current,
     load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    upsert_name_current_rows,
+    replace_name_current_rows, upsert_name_current_rows,
 };
 pub use normalized_events::{
-    NormalizedEvent, load_normalized_event_counts_by_kind, load_normalized_events_by_namespace,
-    mark_block_derived_normalized_events_range_orphaned, upsert_normalized_events,
+    NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
+    load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
+    upsert_normalized_events, upsert_normalized_events_with_summary,
 };
 pub use permissions::{
     PermissionScope, PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor,
@@ -125,6 +127,7 @@ pub use raw::{
     RawBlock, RawLogReplayInput, list_canonical_raw_log_replay_inputs,
     list_canonical_raw_log_replay_inputs_for_block_hashes, load_raw_block,
     load_raw_blocks_by_hashes, mark_raw_block_range_orphaned, upsert_raw_blocks,
+    upsert_raw_blocks_without_snapshots,
 };
 pub use raw_calls::{
     RawCallSnapshot, load_raw_call_snapshots_by_block_hash, upsert_raw_call_snapshots,
@@ -132,7 +135,9 @@ pub use raw_calls::{
 };
 pub use raw_children::{
     RawFactOrphanCounts, RawLog, RawReceipt, RawTransaction, mark_raw_block_facts_range_orphaned,
-    upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
+    upsert_raw_logs, upsert_raw_logs_without_snapshots, upsert_raw_receipts,
+    upsert_raw_receipts_without_snapshots, upsert_raw_transactions,
+    upsert_raw_transactions_without_snapshots,
 };
 pub use raw_code::{
     RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,

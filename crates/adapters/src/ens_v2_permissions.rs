@@ -21,7 +21,7 @@ use normalized::{
     build_resource, count_events_by_kind, count_inserted_events_by_kind, permission_changed_event,
     remember_hint_and_resource,
 };
-use types::{PermissionsObservation, ResolverResourceHint};
+use types::{ActiveEmitter, PermissionsObservation, ResolverResourceHint};
 use util::resource_is_root;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,7 +46,17 @@ impl EnsV2PermissionsSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes).await
+        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes, None).await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+    ) -> Result<Self> {
+        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes, Some(source_scope))
+            .await
     }
 }
 
@@ -54,7 +64,7 @@ pub async fn sync_ens_v2_permissions(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2PermissionsSyncSummary> {
-    sync_ens_v2_permissions_with_scope(pool, chain, false, &[]).await
+    sync_ens_v2_permissions_with_scope(pool, chain, false, &[], None).await
 }
 
 async fn sync_ens_v2_permissions_with_scope(
@@ -62,8 +72,12 @@ async fn sync_ens_v2_permissions_with_scope(
     chain: &str,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV2PermissionsSyncSummary> {
-    let active_emitters = load_active_emitters(pool, chain).await?;
+    let mut active_emitters = load_active_emitters(pool, chain).await?;
+    if let Some(source_scope) = source_scope {
+        active_emitters.retain(|emitter| permissions_scope_includes_emitter(source_scope, emitter));
+    }
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
@@ -74,6 +88,7 @@ async fn sync_ens_v2_permissions_with_scope(
         &active_emitters,
         restrict_to_block_hashes,
         block_hashes,
+        source_scope,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -188,6 +203,19 @@ async fn sync_ens_v2_permissions_with_scope(
         total_inserted_count: inserted_by_kind.values().sum(),
         by_kind,
     })
+}
+
+fn permissions_scope_includes_emitter(
+    source_scope: &[(String, String, i64, i64)],
+    emitter: &ActiveEmitter,
+) -> bool {
+    source_scope
+        .iter()
+        .any(|(source_family, address, from_block, to_block)| {
+            source_family == &emitter.source_family
+                && address.eq_ignore_ascii_case(&emitter.address)
+                && from_block <= to_block
+        })
 }
 
 fn empty_summary(scanned_log_count: usize) -> EnsV2PermissionsSyncSummary {

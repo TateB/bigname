@@ -127,12 +127,30 @@ pub(crate) async fn resolve_contract_instance_by_address(
     contract_kind: &str,
     provenance: &serde_json::Value,
 ) -> Result<Uuid> {
+    Ok(resolve_contract_instance_by_address_with_status(
+        executor,
+        chain,
+        address,
+        contract_kind,
+        provenance,
+    )
+    .await?
+    .0)
+}
+
+pub(crate) async fn resolve_contract_instance_by_address_with_status(
+    executor: &mut sqlx::postgres::PgConnection,
+    chain: &str,
+    address: &str,
+    contract_kind: &str,
+    provenance: &serde_json::Value,
+) -> Result<(Uuid, bool)> {
     let normalized_address = normalize_address(address);
 
     if let Some(contract_instance_id) =
         find_contract_instance_by_address(executor, chain, &normalized_address).await?
     {
-        return Ok(contract_instance_id);
+        return Ok((contract_instance_id, false));
     }
 
     let contract_instance_id = Uuid::new_v4();
@@ -162,7 +180,7 @@ pub(crate) async fn resolve_contract_instance_by_address(
         )
     })?;
 
-    Ok(contract_instance_id)
+    Ok((contract_instance_id, true))
 }
 
 async fn find_contract_instance_by_address(

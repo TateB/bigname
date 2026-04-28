@@ -40,6 +40,9 @@ pub(super) fn record_changed_after_state(
     if let Some(raw_name) = event.raw_name.as_ref() {
         state.insert("raw_name".to_owned(), Value::String(raw_name.clone()));
     }
+    if let Some(value) = event.value.as_ref() {
+        state.insert("value".to_owned(), value.clone());
+    }
     if let Some(claim_source) = claim_source {
         state.insert("primary_claim_source".to_owned(), claim_source.as_value());
     }

@@ -12,6 +12,7 @@ mod ens_v2_registrar;
 mod ens_v2_registry;
 mod ens_v2_resolver;
 mod manifest_normalized_events;
+mod registry_migration_cache;
 
 /// Current adapter bootstrap status.
 pub const fn bootstrap_status() -> &'static str {
@@ -21,6 +22,7 @@ pub const fn bootstrap_status() -> &'static str {
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
     sync_block_derived_normalized_events,
+    sync_block_derived_normalized_events_with_scanned_log_count,
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,

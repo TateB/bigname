@@ -2,7 +2,6 @@ mod coverage;
 mod decode;
 mod json;
 mod load;
-mod persist;
 mod project;
 mod resolution;
 mod supplemental;
@@ -10,20 +9,22 @@ mod types;
 mod wildcard;
 
 use anyhow::Result;
-use bigname_storage::{NameCurrentRow, delete_name_current, upsert_name_current_rows};
+use bigname_storage::{
+    NameCurrentRow, delete_name_current, replace_name_current_rows, upsert_name_current_rows,
+};
 use coverage::build_exact_name_coverage;
 use json::{build_declared_summary, build_provenance};
 use load::{
     load_canonical_name_surface, load_canonical_name_surfaces, load_current_binding_context,
     load_history_heads, load_relevant_events,
 };
-use persist::delete_stale_name_current_rows;
 use project::{build_canonicality_summary, build_chain_positions, max_timestamp, project_facts};
 use resolution::build_supported_resolution_projection;
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use supplemental::{
     load_active_basenames_execution_manifest, load_supplemental_chain_observations,
 };
+use tokio::task::JoinSet;
 use types::{NameSurfaceSeed, WildcardSourceContext};
 use wildcard::load_wildcard_source_context;
 
@@ -68,6 +69,7 @@ const VERIFIED_RESOLUTION_CAPABILITY: &str = "verified_resolution";
 const BASENAMES_V1_DEPLOYMENT_EPOCH: &str = "basenames_v1";
 const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
 const NAME_CURRENT_DERIVATION_KIND: &str = "name_current_rebuild";
+const NAME_CURRENT_REBUILD_CONCURRENCY: usize = 32;
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
@@ -117,22 +119,64 @@ pub async fn rebuild_name_current(
 
 async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSummary> {
     let names = load_canonical_name_surfaces(pool).await?;
-    let mut rows = Vec::with_capacity(names.len());
-    for name in &names {
-        rows.push(build_name_current_row(pool, name).await?);
+    let requested_name_count = names.len();
+    let logical_name_ids = names
+        .iter()
+        .map(|name| name.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(requested_name_count);
+    let mut completed_name_count = 0usize;
+    let mut names = names.into_iter();
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..NAME_CURRENT_REBUILD_CONCURRENCY {
+        let Some(name) = names.next() else {
+            break;
+        };
+        spawn_name_current_rebuild_task(&mut tasks, pool, name);
     }
 
-    let upserted_row_count = upsert_name_current_rows(pool, &rows).await?.len();
-    let logical_name_ids = rows
-        .iter()
-        .map(|row| row.logical_name_id.clone())
-        .collect::<Vec<_>>();
-    let deleted_row_count = delete_stale_name_current_rows(pool, &logical_name_ids).await?;
+    while let Some(result) = tasks.join_next().await {
+        rows.push(result??);
+        completed_name_count += 1;
+        if completed_name_count % 5_000 == 0 {
+            tracing::info!(
+                projection = "name_current",
+                requested_name_count,
+                completed_name_count,
+                "name_current rebuild rows built"
+            );
+        }
+        if let Some(name) = names.next() {
+            spawn_name_current_rebuild_task(&mut tasks, pool, name);
+        }
+    }
+
+    rows.sort_by(|left, right| left.logical_name_id.cmp(&right.logical_name_id));
+    let (upserted_row_count, deleted_row_count) =
+        replace_name_current_rows(pool, &rows, &logical_name_ids).await?;
+    tracing::info!(
+        projection = "name_current",
+        requested_name_count,
+        completed_name_count,
+        upserted_row_count,
+        deleted_row_count,
+        "name_current rebuild replacement published"
+    );
     Ok(NameCurrentRebuildSummary {
-        requested_name_count: names.len(),
+        requested_name_count,
         upserted_row_count,
         deleted_row_count,
     })
+}
+
+fn spawn_name_current_rebuild_task(
+    tasks: &mut JoinSet<Result<bigname_storage::NameCurrentRow>>,
+    pool: &PgPool,
+    name: NameSurfaceSeed,
+) {
+    let pool = pool.clone();
+    tasks.spawn(async move { build_name_current_row(&pool, &name).await });
 }
 
 async fn rebuild_one_name_current(

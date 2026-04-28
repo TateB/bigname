@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn apply_observation(
+pub(super) fn apply_observation(
     history: &mut NameHistory,
     observation: AuthorityObservation,
     block_index: &CanonicalBlockIndex,

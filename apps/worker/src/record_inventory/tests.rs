@@ -1153,6 +1153,93 @@ async fn rebuild_keeps_unadmitted_basenames_dynamic_resolver_inventory_explicit(
 }
 
 #[tokio::test]
+async fn rebuild_keeps_newer_record_version_boundary_for_pending_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9815);
+    let resolver_address = "0x0000000000000000000000000000000000009816";
+
+    seed_basenames_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("base-mainnet", "0xbase-rec1070", 1070, 1_776_200_070),
+            raw_block("base-mainnet", "0xbase-rec1071", 1071, 1_776_200_071),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            basenames_resolver_changed_event(
+                "base-pending-resolver-before-boundary",
+                "basenames:pending-boundary.base.eth",
+                resource_id,
+                resolver_address,
+                1070,
+                0,
+            ),
+            basenames_record_version_changed_event(
+                "base-newer-record-version-boundary",
+                "basenames:pending-boundary.base.eth",
+                resource_id,
+                2,
+                1071,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(summary.requested_resource_count, 1);
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "basenames:pending-boundary.base.eth",
+            resource_id,
+            Some(2),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1071,
+            "0xbase-rec1071",
+            1_776_200_071,
+            "base-mainnet",
+        ),
+    )
+    .await?
+    .context("pending resolver row must keep the newer record-version boundary")?;
+
+    assert_eq!(
+        row.last_change
+            .as_ref()
+            .and_then(|value| value.get("event_kind")),
+        Some(&json!(EVENT_KIND_RECORD_VERSION_CHANGED))
+    );
+    assert_eq!(
+        row.chain_positions.pointer("/base/block_hash"),
+        Some(&json!("0xbase-rec1071"))
+    );
+    assert_eq!(
+        row.unsupported_families,
+        json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            }
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_basenames_dynamic_resolver_inventory_gates_supported_pending_and_unsupported_targets()
 -> Result<()> {
     let database = TestDatabase::new().await?;

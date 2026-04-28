@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
     decode::decode_raw_transaction,
@@ -20,6 +20,10 @@ pub async fn upsert_raw_transactions(
         return Ok(Vec::new());
     }
 
+    if transactions.len() >= BULK_RAW_TRANSACTION_UPSERT_MIN_ROWS {
+        return upsert_raw_transactions_bulk(pool, transactions).await;
+    }
+
     let mut transaction = pool
         .begin()
         .await
@@ -35,6 +39,241 @@ pub async fn upsert_raw_transactions(
         .commit()
         .await
         .context("failed to commit raw transaction upsert")?;
+
+    Ok(snapshots)
+}
+
+/// Insert or refresh raw transactions without returning row snapshots.
+pub async fn upsert_raw_transactions_without_snapshots(
+    pool: &PgPool,
+    transactions: &[RawTransaction],
+) -> Result<()> {
+    if transactions.is_empty() {
+        return Ok(());
+    }
+
+    for raw_transaction in transactions {
+        validate_raw_transaction(raw_transaction)?;
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for raw transaction bulk upsert")?;
+
+    for chunk in transactions.chunks(BULK_RAW_TRANSACTION_UPSERT_CHUNK_ROWS) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO raw_transactions (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state
+            )
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state::canonicality_state
+            FROM (
+            "#,
+        );
+
+        builder.push_values(chunk, |mut row, transaction| {
+            row.push_bind(&transaction.chain_id)
+                .push_bind(&transaction.block_hash)
+                .push_bind(transaction.block_number)
+                .push_bind(&transaction.transaction_hash)
+                .push_bind(transaction.transaction_index)
+                .push_bind(&transaction.from_address)
+                .push_bind(&transaction.to_address)
+                .push_bind(transaction.canonicality_state.as_str());
+        });
+
+        builder.push(
+            r#"
+            ) AS input (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state
+            )
+            ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
+            SET
+                canonicality_state = CASE
+                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
+                        AND raw_transactions.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
+                        THEN raw_transactions.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'safe'::canonicality_state
+                        AND raw_transactions.canonicality_state = 'finalized'::canonicality_state
+                        THEN raw_transactions.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'observed'::canonicality_state
+                        THEN raw_transactions.canonicality_state
+                    ELSE EXCLUDED.canonicality_state
+                END,
+                observed_at = now()
+            WHERE raw_transactions.transaction_hash = EXCLUDED.transaction_hash
+              AND raw_transactions.block_number = EXCLUDED.block_number
+              AND raw_transactions.from_address = EXCLUDED.from_address
+              AND raw_transactions.to_address IS NOT DISTINCT FROM EXCLUDED.to_address
+            "#,
+        );
+
+        let result = builder
+            .build()
+            .execute(&mut *transaction)
+            .await
+            .context("failed to bulk upsert raw transactions")?;
+        if result.rows_affected() != chunk.len() as u64 {
+            anyhow::bail!(
+                "raw transaction identity mismatch while bulk upserting {} rows",
+                chunk.len()
+            );
+        }
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit raw transaction bulk upsert")?;
+
+    Ok(())
+}
+
+const BULK_RAW_TRANSACTION_UPSERT_MIN_ROWS: usize = 128;
+const BULK_RAW_TRANSACTION_UPSERT_CHUNK_ROWS: usize = 5_000;
+
+async fn upsert_raw_transactions_bulk(
+    pool: &PgPool,
+    transactions: &[RawTransaction],
+) -> Result<Vec<RawTransaction>> {
+    for raw_transaction in transactions {
+        validate_raw_transaction(raw_transaction)?;
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for raw transaction bulk upsert")?;
+    let mut snapshots = Vec::with_capacity(transactions.len());
+
+    for chunk in transactions.chunks(BULK_RAW_TRANSACTION_UPSERT_CHUNK_ROWS) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO raw_transactions (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state
+            )
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state::canonicality_state
+            FROM (
+            "#,
+        );
+
+        builder.push_values(chunk, |mut row, transaction| {
+            row.push_bind(&transaction.chain_id)
+                .push_bind(&transaction.block_hash)
+                .push_bind(transaction.block_number)
+                .push_bind(&transaction.transaction_hash)
+                .push_bind(transaction.transaction_index)
+                .push_bind(&transaction.from_address)
+                .push_bind(&transaction.to_address)
+                .push_bind(transaction.canonicality_state.as_str());
+        });
+
+        builder.push(
+            r#"
+            ) AS input (
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state
+            )
+            ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
+            SET
+                canonicality_state = CASE
+                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
+                        AND raw_transactions.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
+                        THEN raw_transactions.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'safe'::canonicality_state
+                        AND raw_transactions.canonicality_state = 'finalized'::canonicality_state
+                        THEN raw_transactions.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'observed'::canonicality_state
+                        THEN raw_transactions.canonicality_state
+                    ELSE EXCLUDED.canonicality_state
+                END,
+                observed_at = now()
+            WHERE raw_transactions.transaction_hash = EXCLUDED.transaction_hash
+              AND raw_transactions.block_number = EXCLUDED.block_number
+              AND raw_transactions.from_address = EXCLUDED.from_address
+              AND raw_transactions.to_address IS NOT DISTINCT FROM EXCLUDED.to_address
+            RETURNING
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                from_address,
+                to_address,
+                canonicality_state::TEXT AS canonicality_state
+            "#,
+        );
+
+        let rows = builder
+            .build()
+            .fetch_all(&mut *transaction)
+            .await
+            .context("failed to bulk upsert raw transactions")?;
+        if rows.len() != chunk.len() {
+            anyhow::bail!(
+                "raw transaction identity mismatch while bulk upserting {} rows",
+                chunk.len()
+            );
+        }
+        snapshots.extend(
+            rows.into_iter()
+                .map(decode_raw_transaction)
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit raw transaction bulk upsert")?;
 
     Ok(snapshots)
 }

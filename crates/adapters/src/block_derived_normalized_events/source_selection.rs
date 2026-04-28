@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContractSource, load_watched_contracts};
+use bigname_manifests::{
+    WatchedContractSource, load_manifest_declared_watched_contracts, load_watched_contracts,
+};
 use sqlx::{PgPool, Row};
 
 use super::types::{ActiveEmitter, ActiveManifestMetadata, RawLogSourceScopeTarget};
@@ -29,9 +31,15 @@ pub(super) async fn load_active_emitters(
     chain: &str,
     scoped_emitter_identities: Option<&HashSet<(String, String)>>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_watched_contracts(pool)
-        .await
-        .context("failed to load watched contracts for adapter emitter attribution")?;
+    let watched_contracts = if scoped_emitter_identities.is_some() {
+        load_manifest_declared_watched_contracts(pool)
+            .await
+            .context("failed to load manifest-declared watched contracts for scoped adapter emitter attribution")?
+    } else {
+        load_watched_contracts(pool)
+            .await
+            .context("failed to load watched contracts for adapter emitter attribution")?
+    };
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)

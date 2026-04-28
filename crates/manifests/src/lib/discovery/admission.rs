@@ -48,11 +48,46 @@ impl DiscoveryAdmissionState {
     ) -> Vec<AdmittedDiscoveryEdge> {
         let normalized_from_address = normalize_address(candidate.from_address);
         let normalized_to_address = normalize_address(candidate.to_address);
+        self.admit_candidate_against_matching_contracts(
+            active_contracts.iter().filter(|contract| {
+                contract.chain == candidate.chain && contract.address == normalized_from_address
+            }),
+            candidate,
+            &normalized_from_address,
+            &normalized_to_address,
+        )
+    }
+
+    pub(super) fn admit_candidate_against_contract_lookup(
+        &self,
+        active_contracts_by_address: &HashMap<(String, String), Vec<StoredActiveContract>>,
+        candidate: &DiscoveryCandidate<'_>,
+    ) -> Vec<AdmittedDiscoveryEdge> {
+        let normalized_from_address = normalize_address(candidate.from_address);
+        let normalized_to_address = normalize_address(candidate.to_address);
+        let key = (candidate.chain.to_owned(), normalized_from_address.clone());
+        let Some(active_contracts) = active_contracts_by_address.get(&key) else {
+            return Vec::new();
+        };
+
+        self.admit_candidate_against_matching_contracts(
+            active_contracts.iter(),
+            candidate,
+            &normalized_from_address,
+            &normalized_to_address,
+        )
+    }
+
+    fn admit_candidate_against_matching_contracts<'a>(
+        &self,
+        active_contracts: impl Iterator<Item = &'a StoredActiveContract>,
+        candidate: &DiscoveryCandidate<'_>,
+        normalized_from_address: &str,
+        normalized_to_address: &str,
+    ) -> Vec<AdmittedDiscoveryEdge> {
         let mut admitted_edges = HashSet::new();
 
-        for contract in active_contracts.iter().filter(|contract| {
-            contract.chain == candidate.chain && contract.address == normalized_from_address
-        }) {
+        for contract in active_contracts {
             if !self
                 .active_root_manifest_ids
                 .contains(&contract.manifest_id)
@@ -73,10 +108,10 @@ impl DiscoveryAdmissionState {
                     from_contract_instance_id: contract.contract_instance_id,
                     to_contract_instance_id: self
                         .known_contract_instances_by_address
-                        .get(&(candidate.chain.to_owned(), normalized_to_address.clone()))
+                        .get(&(candidate.chain.to_owned(), normalized_to_address.to_owned()))
                         .copied(),
-                    from_address: normalized_from_address.clone(),
-                    to_address: normalized_to_address.clone(),
+                    from_address: normalized_from_address.to_owned(),
+                    to_address: normalized_to_address.to_owned(),
                     edge_kind: candidate.edge_kind.to_owned(),
                     discovery_source: candidate.discovery_source.to_owned(),
                     admission: rule.admission.clone(),

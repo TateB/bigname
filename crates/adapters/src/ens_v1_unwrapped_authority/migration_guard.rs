@@ -1,4 +1,5 @@
 use super::*;
+use crate::registry_migration_cache::MigratedRegistryNodes;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RegistryMigrationGuardAction {
@@ -8,7 +9,7 @@ pub(super) enum RegistryMigrationGuardAction {
 }
 
 impl RegistryMigrationGuardAction {
-    pub(super) fn suppressed_by(&self, migrated_nodes: &HashSet<String>) -> bool {
+    pub(super) fn suppressed_by(&self, migrated_nodes: &MigratedRegistryNodes) -> bool {
         matches!(self, Self::SuppressIfMigrated(node) if migrated_nodes.contains(node))
     }
 

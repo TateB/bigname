@@ -224,6 +224,29 @@ admission = "reachable_from_root"
     )
 }
 
+fn simple_contract_start_block_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_reverse_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "reverse_registrar"
+address = "0x0000000000000000000000000000000000000042"
+proxy_kind = "none"
+start_block = 4242
+"#
+    .to_owned()
+}
+
 fn registry_manifest_contents(rollout_status: &str) -> String {
     format!(
         r#"
@@ -1786,6 +1809,45 @@ async fn syncs_start_blocks_into_watch_plan_and_bootstrap_targets() -> Result<()
 }
 
 #[tokio::test]
+async fn simple_contract_start_block_persists_to_active_address_row() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_reverse_l1",
+        "v1",
+        &simple_contract_start_block_manifest_contents(),
+    )?;
+
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let active_from_block_number = query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT active_from_block_number
+        FROM contract_instance_addresses
+        WHERE chain_id = 'ethereum-mainnet'
+          AND address = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind("0x0000000000000000000000000000000000000042")
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load simple contract active start block")?;
+    assert_eq!(active_from_block_number, Some(4242));
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    let watched_contract = watched_contracts
+        .iter()
+        .find(|contract| contract.address == "0x0000000000000000000000000000000000000042")
+        .expect("simple contract must enter the watched plan");
+    assert_eq!(watched_contract.active_from_block_number, Some(4242));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_conflicting_active_start_blocks_for_same_contract_instance() -> Result<()> {
     let database = TestDatabase::new().await?;
     let test_dir = TestDir::new()?;
@@ -2507,6 +2569,122 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
             matched_code_hash: None,
             matched_contract_instance_id: None,
         },
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_resolver_l1",
+        "v1",
+        &checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?,
+    )?;
+
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let public_resolver_seed_address = "0xF29100983E058B709F3D539b0c765937B804AC15";
+    let admitted_resolver_address = "0x0000000000000000000000000000000000000241";
+    let unadmitted_resolver_address = "0x0000000000000000000000000000000000000242";
+    let public_resolver_code_hash = "keccak256:ens-v1-scoped-public-resolver-compatible";
+
+    let seed_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        public_resolver_seed_address,
+    )
+    .await?;
+    let admitted_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: admitted_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(140),
+            active_from_block_hash: Some(
+                "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "scoped-supported-resolver",
+            }),
+        },
+    )
+    .await?;
+    let admitted_contract_instance_id = admitted_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("admitted resolver discovery must create a target");
+
+    for (block_number, address) in [
+        (100, public_resolver_seed_address),
+        (140, admitted_resolver_address),
+        (150, unadmitted_resolver_address),
+    ] {
+        let block_hash = format!("0x{block_number:064x}");
+        insert_raw_code_hash_observation(
+            database.pool(),
+            RawCodeHashObservation {
+                chain: "ethereum-mainnet",
+                block_hash: &block_hash,
+                block_number,
+                contract_address: address,
+                code_hash: public_resolver_code_hash,
+                code_byte_length: 1,
+                canonicality_state: "canonical",
+            },
+        )
+        .await?;
+    }
+
+    let admissions = load_ens_v1_public_resolver_profile_admissions_for_targets(
+        database.pool(),
+        &[
+            (
+                "ethereum-mainnet".to_owned(),
+                admitted_resolver_address.to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                unadmitted_resolver_address.to_owned(),
+            ),
+        ],
+    )
+    .await?;
+
+    assert_eq!(admissions.len(), 3);
+    assert_profile_admission_rows(
+        &admissions,
+        EnsV1ProfileAdmissionExpectation {
+            address: admitted_resolver_address,
+            status: "supported",
+            admission_basis: "code_hash_match",
+            contract_instance_id: admitted_contract_instance_id,
+            observed_code_hash: Some(public_resolver_code_hash),
+            matched_code_hash: Some(public_resolver_code_hash),
+            matched_contract_instance_id: Some(seed_contract_instance_id),
+        },
+    );
+    assert!(
+        admissions
+            .iter()
+            .all(|admission| admission.address != normalize_address(unadmitted_resolver_address)),
+        "unadmitted target must not graduate to a scoped resolver profile"
     );
 
     database.cleanup().await?;

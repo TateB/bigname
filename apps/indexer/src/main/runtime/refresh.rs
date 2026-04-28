@@ -1,12 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigname_manifests::{WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary};
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::intake::{IntakeChainTask, sync_intake_chain_tasks};
-use super::logging::{
-    log_ens_v1_subregistry_discovery_sync_summary,
-    log_ens_v2_registry_resource_surface_sync_summary,
-};
 use super::manifest::ManifestRuntimeState;
 
 pub(crate) async fn refresh_manifest_normalized_events_from_storage(
@@ -52,34 +48,13 @@ pub(crate) async fn refresh_runtime_state_from_storage_discovery(
     pool: &sqlx::PgPool,
     manifest_runtime_state: &ManifestRuntimeState,
 ) -> Result<Option<(ManifestRuntimeState, Vec<IntakeChainTask>)>> {
-    for chain in &manifest_runtime_state.watched_chain_plan {
-        let summary = bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-        log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
-
-        let summary = bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 registry discovery from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-        log_ens_v2_registry_resource_surface_sync_summary(&chain.chain, &summary);
-    }
+    sync_adapter_owned_raw_log_state(pool, &manifest_runtime_state.watched_chain_plan).await?;
 
     let Some(next_watched_chain_plan) =
         refresh_watched_chain_plan(pool, &manifest_runtime_state.watched_chain_plan).await?
     else {
         return Ok(None);
     };
-    sync_adapter_owned_raw_log_state(pool, &next_watched_chain_plan).await?;
     let next_intake_chain_tasks = sync_intake_chain_tasks(pool, &next_watched_chain_plan).await?;
     let mut next_manifest_runtime_state = manifest_runtime_state.clone();
     next_manifest_runtime_state.watched_contract_summary =

@@ -125,6 +125,7 @@ mod tests {
             database: DatabaseConfig::default(),
             manifests_root: PathBuf::from("manifests"),
             chain_rpc_urls: Vec::new(),
+            chain_reth_db_sources: Vec::new(),
             chain: "ethereum-mainnet".to_owned(),
             from_block: 1,
             to_block: 2,
@@ -136,6 +137,7 @@ mod tests {
             lease_token: None,
             lease_duration_secs: 300,
             hash_pinned_chunk_blocks: crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+            hash_pinned_adapter_sync: "inline".to_owned(),
         }
     }
 

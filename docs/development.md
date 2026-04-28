@@ -24,7 +24,7 @@ Stop the local services with `docker compose down`. Add `-v` if you also want to
 `bigname-indexer run`, and starts the worker. On startup the indexer loads the
 selected manifest root, syncs manifest state into PostgreSQL, rebuilds the
 stored watch plan, creates persisted chain checkpoint rows for active watched
-chains, and then polls configured RPC providers.
+chains, and then polls configured provider sources.
 
 Set `BIGNAME_INDEXER_MANIFESTS_ROOT` to select one runtime profile. The default
 is `manifests` for the shipped mainnet profile. Use `manifests-sepolia-dev` only
@@ -38,11 +38,23 @@ Set `BIGNAME_INDEXER_CHAIN_RPC_URLS` to a comma-delimited list of
 BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545,base-mainnet=http://127.0.0.1:9545
 ```
 
-If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, `./scripts/dev-up` still boots the
+If both provider source settings are unset, `./scripts/dev-up` still boots the
 processes and the indexer still syncs manifest/watch state, but provider-backed
 head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
 `http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
 providers that expose only HTTPS.
+
+Deployments with a local Reth database can also set
+`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to a comma-delimited list of
+`<chain>=<reth-datadir>` entries. Configure at most one source per chain. The
+Reth source is optional and operational: it must feed the same raw-fact intake
+contract as JSON-RPC, and Reth-local table references do not replace bigname raw
+fact refs or Postgres replay facts.
+Native Reth database support is compiled only when the indexer is built with
+the `reth-db` feature, for example
+`cargo check -p bigname-indexer --features reth-db`. That opt-in build requires
+Clang/libclang development headers for Reth's RocksDB/MDBX bindings. Default
+workspace checks do not build those native dependencies.
 
 `BIGNAME_INDEXER_POLL_INTERVAL_SECS` controls the local indexer poll interval
 and defaults to `5`.

@@ -1,12 +1,16 @@
 use super::*;
 
 pub(super) fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
-    String::from_utf8(decode_first_dynamic_bytes(data)?)
-        .context("dynamic string payload is not valid UTF-8")
+    decode_nth_dynamic_string(data, 0)
 }
 
 pub(super) fn decode_first_dynamic_bytes(data: &[u8]) -> Result<Vec<u8>> {
     decode_nth_dynamic_bytes(data, 0)
+}
+
+pub(super) fn decode_nth_dynamic_string(data: &[u8], parameter_index: usize) -> Result<String> {
+    String::from_utf8(decode_nth_dynamic_bytes(data, parameter_index)?)
+        .context("dynamic string payload is not valid UTF-8")
 }
 
 pub(super) fn decode_nth_dynamic_bytes(data: &[u8], parameter_index: usize) -> Result<Vec<u8>> {
@@ -31,6 +35,10 @@ pub(super) fn decode_nth_dynamic_bytes(data: &[u8], parameter_index: usize) -> R
         bail!("event data does not contain the full dynamic bytes payload");
     }
     Ok(data[bytes_start..bytes_end].to_vec())
+}
+
+pub(super) fn abi_word_to_usize(word: &[u8]) -> Result<usize> {
+    word_to_usize(word)
 }
 
 fn word_to_usize(word: &[u8]) -> Result<usize> {

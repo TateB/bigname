@@ -23,6 +23,52 @@ fn required_fetched_block(
         .with_context(|| format!("provider did not return fetched block {block_hash}"))
 }
 
+fn validate_resolved_bundle_scope(
+    resolved_block: &ProviderResolvedBlock,
+    bundle: &ProviderBlockBundle,
+) -> Result<()> {
+    if bundle.block.block_hash != resolved_block.block_hash {
+        bail!(
+            "provider returned block {} for requested hash {}",
+            bundle.block.block_hash,
+            resolved_block.block_hash
+        );
+    }
+    if bundle.block.block_number != resolved_block.block_number {
+        bail!(
+            "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+            resolved_block.block_number,
+            resolved_block.block_hash,
+            bundle.block.block_number
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_bundle_transactions(bundle: &ProviderBlockBundle) -> Result<()> {
+    for transaction in &bundle.transactions {
+        if transaction.block_hash != bundle.block.block_hash {
+            bail!(
+                "provider returned transaction {} for block {} with mismatched block hash {}",
+                transaction.transaction_hash,
+                bundle.block.block_hash,
+                transaction.block_hash
+            );
+        }
+        if transaction.block_number != bundle.block.block_number {
+            bail!(
+                "provider returned transaction {} for block {} with mismatched block number {}",
+                transaction.transaction_hash,
+                bundle.block.block_hash,
+                transaction.block_number
+            );
+        }
+    }
+
+    Ok(())
+}
+
 impl JsonRpcProvider {
     pub async fn fetch_chain_heads(&self) -> Result<ProviderHeadSnapshot> {
         let head_hashes = self.fetch_chain_head_hashes().await?;
@@ -151,6 +197,56 @@ impl JsonRpcProvider {
         Ok(block)
     }
 
+    pub async fn fetch_block_headers_by_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlock>> {
+        let mut blocks = Vec::with_capacity(resolved_blocks.len());
+
+        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            let calls = chunk
+                .iter()
+                .map(|resolved_block| JsonRpcBatchCall {
+                    method: "eth_getBlockByHash",
+                    params: vec![
+                        Value::String(resolved_block.block_hash.clone()),
+                        Value::Bool(false),
+                    ],
+                })
+                .collect::<Vec<_>>();
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+
+            for (resolved_block, result) in chunk.iter().zip(results) {
+                let block = result
+                    .with_context(|| {
+                        format!(
+                            "provider did not return block {}",
+                            resolved_block.block_hash
+                        )
+                    })
+                    .and_then(ProviderBlock::from_value)?;
+                if block.block_hash != resolved_block.block_hash {
+                    bail!(
+                        "provider returned block {} for requested hash {}",
+                        block.block_hash,
+                        resolved_block.block_hash
+                    );
+                }
+                if block.block_number != resolved_block.block_number {
+                    bail!(
+                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+                        resolved_block.block_number,
+                        resolved_block.block_hash,
+                        block.block_number
+                    );
+                }
+                blocks.push(block);
+            }
+        }
+
+        Ok(blocks)
+    }
+
     pub async fn fetch_block_bundles_by_hashes(
         &self,
         resolved_blocks: &[ProviderResolvedBlock],
@@ -186,23 +282,34 @@ impl JsonRpcProvider {
         let mut bundles = Vec::with_capacity(resolved_blocks.len());
 
         for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
-            for resolved_block in chunk {
-                let bundle = self
-                    .fetch_block_bundle_by_hash_with_log_fetch(
-                        &resolved_block.block_hash,
-                        ProviderBlockLogFetch::Skip,
+            let calls = chunk
+                .iter()
+                .map(|resolved_block| JsonRpcBatchCall {
+                    method: "eth_getBlockByHash",
+                    params: vec![
+                        Value::String(resolved_block.block_hash.clone()),
+                        Value::Bool(true),
+                    ],
+                })
+                .collect::<Vec<_>>();
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+            let mut chunk_bundles = Vec::with_capacity(chunk.len());
+
+            for (resolved_block, result) in chunk.iter().zip(results) {
+                let block_value = result.with_context(|| {
+                    format!(
+                        "provider did not return block {}",
+                        resolved_block.block_hash
                     )
-                    .await?;
-                if bundle.block.block_number != resolved_block.block_number {
-                    bail!(
-                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
-                        resolved_block.block_number,
-                        resolved_block.block_hash,
-                        bundle.block.block_number
-                    );
-                }
-                bundles.push(bundle);
+                })?;
+                let bundle = ProviderBlockBundle::from_value(block_value)?;
+                validate_resolved_bundle_scope(resolved_block, &bundle)?;
+                validate_bundle_transactions(&bundle)?;
+                chunk_bundles.push(bundle);
             }
+
+            self.fill_batched_block_receipts(&mut chunk_bundles).await?;
+            bundles.extend(chunk_bundles);
         }
 
         Ok(bundles)
@@ -285,6 +392,62 @@ impl JsonRpcProvider {
         bundle.receipts = receipts.receipts;
 
         Ok(bundle)
+    }
+
+    async fn fill_batched_block_receipts(&self, bundles: &mut [ProviderBlockBundle]) -> Result<()> {
+        let calls = bundles
+            .iter()
+            .map(|bundle| JsonRpcBatchCall {
+                method: "eth_getBlockReceipts",
+                params: vec![Value::String(bundle.block.block_hash.clone())],
+            })
+            .collect::<Vec<_>>();
+
+        match self.fetch_json_rpc_batch_results(calls).await {
+            Ok(results) => {
+                for (bundle, result) in bundles.iter_mut().zip(results) {
+                    let receipts = result.with_context(|| {
+                        format!(
+                            "provider returned null receipts for exact block hash lookup {}",
+                            bundle.block.block_hash
+                        )
+                    })?;
+                    let receipts = receipts
+                        .as_array()
+                        .context("expected receipts array in JSON-RPC result")?
+                        .iter()
+                        .map(super::ProviderReceipt::from_value)
+                        .collect::<Result<Vec<_>>>()?;
+                    bundle.receipts = self.order_receipts_by_transaction_hash(
+                        &bundle.block.block_hash,
+                        bundle.block.block_number,
+                        receipts,
+                        &bundle.transactions,
+                    )?;
+                }
+            }
+            Err(batch_error) => {
+                for bundle in bundles {
+                    let receipts = self
+                        .fetch_receipts_by_block_hash(
+                            &bundle.block.block_hash,
+                            bundle.block.block_number,
+                            &bundle.transactions,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "batched block-scoped receipt fetch failed ({batch_error}); individual receipt fetch for {} also failed",
+                                bundle.block.block_hash
+                            )
+                        })?;
+                    bundle.raw_payloads.extend(receipts.cache_metadata);
+                    bundle.receipts = receipts.receipts;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code, reason = "staged cache-fill helper covered by tests")]
