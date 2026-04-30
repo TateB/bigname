@@ -81,8 +81,9 @@ container-managed Reth datadirs are commonly `root:root`; operators may set a
 less-privileged UID/GID after granting that identity write access to
 the Reth datadir's MDBX lock files. The override also raises `nofile` because
 Reth's read-only RocksDB provider can keep thousands of SST files open.
-It bypasses the image's `tini` entrypoint so the indexer process owns PID 1;
-Reth's live MDBX read-only open can fail from the default `tini` child process.
+It uses the host PID/IPC namespaces and bypasses the image's `tini` entrypoint
+so the indexer process owns PID 1; Reth's live MDBX read-only open can fail
+from the default `tini` child process.
 High-volume bootstrap defaults to
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
 hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while
@@ -121,6 +122,16 @@ creation time. It does not cap work to a recent window. This is still
 operational intake work: completing bootstrap alone is not consumer-replacement
 or route-coverage evidence without the relevant projection, route, conformance,
 and rollout gates.
+
+Automatic bootstrap partitions large job segments into child range leases for
+internal workers. `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS=0` selects an
+automatic worker count capped at 4; set a positive value to pin the count.
+`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_RANGE_BLOCKS` controls the child range size
+and defaults to `50000` blocks. The worker pool is inside one normal
+`bigname-indexer run` process; operators do not need to launch extra indexer
+containers for parallel bootstrap. Parallel bootstrap applies to the effective
+raw-only startup path used by `auto` / `raw-only`; explicit `inline` adapter sync
+keeps startup bootstrap sequential so normalized-event writes remain ordered.
 
 Hash-pinned backfill execution batches each reserved range into
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS`-sized chunks. The default

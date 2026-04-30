@@ -140,6 +140,8 @@ async fn run(args: RunArgs) -> Result<()> {
         adapter_sync_mode.startup_hash_pinned_backfill_mode(),
         adapter_sync_mode == BackfillAdapterSyncMode::Auto,
         header_audit_mode,
+        args.bootstrap_backfill_workers,
+        args.bootstrap_backfill_range_blocks,
     )
     .await?;
     if adapter_sync_mode.syncs_after_startup_backfill() {
@@ -247,6 +249,9 @@ async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_reserved_range_count = bootstrap_backfill_outcome.reserved_range_count,
         bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
         bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
+        bootstrap_backfill_workers = bootstrap_backfill_outcome.requested_worker_count,
+        effective_bootstrap_backfill_workers = bootstrap_backfill_outcome.effective_worker_count,
+        bootstrap_backfill_range_blocks = bootstrap_backfill_outcome.range_partition_block_count,
         hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks,
         hash_pinned_adapter_sync = adapter_sync_mode.as_str(),
         header_audit_mode = header_audit_mode.as_str(),

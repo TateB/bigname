@@ -4,6 +4,9 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
 use crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+use crate::bootstrap_backfill::{
+    DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS, DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+};
 use crate::normalized_replay_catchup::{
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS,
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK,
@@ -73,6 +76,18 @@ pub(crate) struct RunArgs {
         default_value = "auto"
     )]
     pub(crate) hash_pinned_adapter_sync: String,
+    #[arg(
+        long = "bootstrap-backfill-workers",
+        env = "BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS",
+        default_value_t = DEFAULT_BOOTSTRAP_BACKFILL_WORKERS
+    )]
+    pub(crate) bootstrap_backfill_workers: usize,
+    #[arg(
+        long = "bootstrap-backfill-range-blocks",
+        env = "BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_RANGE_BLOCKS",
+        default_value_t = DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS
+    )]
+    pub(crate) bootstrap_backfill_range_blocks: i64,
     #[arg(
         long = "normalized-replay-catchup-enabled",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_ENABLED",

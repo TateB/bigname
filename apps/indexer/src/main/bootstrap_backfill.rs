@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, thread};
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::{
     backfill::{
         BackfillAdapterSyncMode, BackfillBlockRange, backfill_job_source_identity_payload,
-        run_resumable_hash_pinned_backfill_job,
+        hash_pinned_backfill_range_specs, run_resumable_hash_pinned_backfill_job_concurrently,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
@@ -39,6 +39,9 @@ use planning::{
 };
 
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
+pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_WORKERS: usize = 0;
+pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS: i64 = 50_000;
+const MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS: usize = 4;
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
@@ -63,6 +66,9 @@ pub(crate) struct BootstrapBackfillOutcome {
     pub(crate) normalized_replay_job_count: usize,
     pub(crate) normalized_replay_synced_count: usize,
     pub(crate) normalized_replay_inserted_count: usize,
+    pub(crate) requested_worker_count: usize,
+    pub(crate) effective_worker_count: usize,
+    pub(crate) range_partition_block_count: i64,
 }
 
 impl BootstrapBackfillOutcome {
@@ -88,12 +94,21 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     adapter_sync_mode: BackfillAdapterSyncMode,
     replay_completed_raw_ranges: bool,
     header_audit_mode: HeaderAuditMode,
+    bootstrap_backfill_workers: usize,
+    bootstrap_backfill_range_blocks: i64,
 ) -> Result<BootstrapBackfillOutcome> {
     validate_provider_registry_for_intake_tasks(intake_chain_tasks, provider_registry)?;
     let deployment_profile = deployment_profile_from_manifest_root(manifests_root);
     let lease_owner = format!("{}:bootstrap-backfill", default_backfill_lease_owner());
+    let requested_worker_count =
+        resolve_bootstrap_backfill_worker_count(bootstrap_backfill_workers);
+    let effective_worker_count =
+        effective_bootstrap_backfill_worker_count(requested_worker_count, adapter_sync_mode);
     let mut outcome = BootstrapBackfillOutcome {
         active_chain_count: intake_chain_tasks.len(),
+        requested_worker_count,
+        effective_worker_count,
+        range_partition_block_count: bootstrap_backfill_range_blocks,
         ..BootstrapBackfillOutcome::default()
     };
 
@@ -150,6 +165,9 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             provider_head_block,
             bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
             hash_pinned_chunk_blocks,
+            bootstrap_backfill_workers = requested_worker_count,
+            effective_bootstrap_backfill_workers = effective_worker_count,
+            bootstrap_backfill_range_blocks,
             eligible_bootstrap_target_count = bootstrap_targets.len(),
             skipped_unknown_start_target_count = outcome.skipped_unknown_start_target_count,
             "manifest-declared bootstrap targets loaded"
@@ -309,13 +327,26 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             )?;
 
             let source_identity_hash = source_identity_hash_for_backfill(&source_plan)?;
-            let idempotency_key = bootstrap_backfill_idempotency_key(
-                &deployment_profile,
-                manifests_root,
-                &task.chain,
-                &source_identity_hash,
-                segment_range,
-            );
+            let range_specs =
+                hash_pinned_backfill_range_specs(segment_range, bootstrap_backfill_range_blocks)?;
+            let idempotency_key = if range_specs.len() == 1 {
+                bootstrap_backfill_idempotency_key(
+                    &deployment_profile,
+                    manifests_root,
+                    &task.chain,
+                    &source_identity_hash,
+                    segment_range,
+                )
+            } else {
+                partitioned_bootstrap_backfill_idempotency_key(
+                    &deployment_profile,
+                    manifests_root,
+                    &task.chain,
+                    &source_identity_hash,
+                    segment_range,
+                    bootstrap_backfill_range_blocks,
+                )
+            };
             let config = crate::backfill::BackfillJobRunConfig {
                 deployment_profile: deployment_profile.clone(),
                 idempotency_key,
@@ -330,9 +361,15 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 header_audit_mode,
             };
 
-            let job_outcome =
-                run_resumable_hash_pinned_backfill_job(pool, &source_plan, provider, config)
-                    .await?;
+            let job_outcome = run_resumable_hash_pinned_backfill_job_concurrently(
+                pool,
+                &source_plan,
+                provider,
+                config,
+                range_specs,
+                effective_worker_count,
+            )
+            .await?;
             outcome.add_job(&job_outcome);
             if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
                 let replay_outcome = replay_raw_fact_normalized_events(
@@ -377,6 +414,9 @@ pub(crate) async fn run_startup_bootstrap_backfills(
         skipped_future_target_count = outcome.skipped_future_target_count,
         bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
         hash_pinned_chunk_blocks,
+        bootstrap_backfill_workers = outcome.requested_worker_count,
+        effective_bootstrap_backfill_workers = outcome.effective_worker_count,
+        bootstrap_backfill_range_blocks = outcome.range_partition_block_count,
         reserved_range_count = outcome.reserved_range_count,
         completed_range_count = outcome.completed_range_count,
         resolved_block_count = outcome.resolved_block_count,
@@ -392,6 +432,28 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     );
 
     Ok(outcome)
+}
+
+pub(crate) fn resolve_bootstrap_backfill_worker_count(configured_worker_count: usize) -> usize {
+    if configured_worker_count != DEFAULT_BOOTSTRAP_BACKFILL_WORKERS {
+        return configured_worker_count.max(1);
+    }
+
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS)
+}
+
+fn effective_bootstrap_backfill_worker_count(
+    requested_worker_count: usize,
+    adapter_sync_mode: BackfillAdapterSyncMode,
+) -> usize {
+    if adapter_sync_mode == BackfillAdapterSyncMode::RawOnly {
+        requested_worker_count
+    } else {
+        1
+    }
 }
 
 fn replay_source_scope_from_source_plan(
@@ -454,6 +516,22 @@ pub(crate) fn bootstrap_backfill_idempotency_key(
 ) -> String {
     format!(
         "indexer-bootstrap-backfill:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
+        manifests_root.display(),
+        range.from_block,
+        range.to_block
+    )
+}
+
+fn partitioned_bootstrap_backfill_idempotency_key(
+    deployment_profile: &str,
+    manifests_root: &Path,
+    chain: &str,
+    source_identity_hash: &str,
+    range: BackfillBlockRange,
+    range_blocks: i64,
+) -> String {
+    format!(
+        "indexer-bootstrap-backfill:v2:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}:range_blocks={range_blocks}",
         manifests_root.display(),
         range.from_block,
         range.to_block

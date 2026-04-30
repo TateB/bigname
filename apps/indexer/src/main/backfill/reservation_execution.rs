@@ -34,6 +34,19 @@ pub(crate) async fn create_hash_pinned_backfill_job(
     source_plan: &WatchedSourceSelectorPlan,
     config: &BackfillJobRunConfig,
 ) -> Result<BackfillJobRecord> {
+    let ranges = vec![BackfillRangeSpec {
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+    }];
+    create_hash_pinned_backfill_job_with_ranges(pool, source_plan, config, ranges).await
+}
+
+pub(crate) async fn create_hash_pinned_backfill_job_with_ranges(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    ranges: Vec<BackfillRangeSpec>,
+) -> Result<BackfillJobRecord> {
     create_backfill_job(
         pool,
         &BackfillJobCreate {
@@ -44,13 +57,40 @@ pub(crate) async fn create_hash_pinned_backfill_job(
             range_start_block_number: config.range.from_block,
             range_end_block_number: config.range.to_block,
             idempotency_key: config.idempotency_key.clone(),
-            ranges: vec![BackfillRangeSpec {
-                range_start_block_number: config.range.from_block,
-                range_end_block_number: config.range.to_block,
-            }],
+            ranges,
         },
     )
     .await
+}
+
+pub(crate) fn hash_pinned_backfill_range_specs(
+    range: BackfillBlockRange,
+    range_blocks: i64,
+) -> Result<Vec<BackfillRangeSpec>> {
+    if range_blocks <= 0 {
+        bail!("hash-pinned backfill range blocks must be positive, got {range_blocks}");
+    }
+
+    let mut ranges = Vec::new();
+    let mut range_start = range.from_block;
+    while range_start <= range.to_block {
+        let range_end = range_start
+            .checked_add(range_blocks - 1)
+            .unwrap_or(range.to_block)
+            .min(range.to_block);
+        ranges.push(BackfillRangeSpec {
+            range_start_block_number: range_start,
+            range_end_block_number: range_end,
+        });
+        if range_end == range.to_block {
+            break;
+        }
+        range_start = range_end
+            .checked_add(1)
+            .context("hash-pinned backfill range start overflowed while partitioning")?;
+    }
+
+    Ok(ranges)
 }
 
 pub(crate) fn backfill_job_source_identity_payload(
@@ -295,7 +335,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     );
 }
 
-async fn run_reserved_hash_pinned_backfill_range(
+pub(super) async fn run_reserved_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
     provider: &(impl ChainProviderOps + ?Sized),
@@ -418,7 +458,7 @@ async fn run_reserved_hash_pinned_backfill_range(
     Ok(())
 }
 
-fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
+pub(super) fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
     if chunk_blocks <= 0 {
         bail!("hash-pinned backfill chunk blocks must be positive, got {chunk_blocks}");
     }
@@ -426,7 +466,7 @@ fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
     Ok(())
 }
 
-fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
+pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
     let duration_secs = lease_expires_at
         .unix_timestamp()
         .checked_sub(OffsetDateTime::now_utc().unix_timestamp())
@@ -438,7 +478,7 @@ fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64>
     Ok(duration_secs)
 }
 
-fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
+pub(super) fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
     let deadline = OffsetDateTime::now_utc()
         .unix_timestamp()
         .checked_add(duration_secs)

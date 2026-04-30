@@ -1,3 +1,5 @@
+#[path = "backfill/concurrent_execution.rs"]
+mod concurrent_execution;
 #[path = "backfill/failure_recording.rs"]
 mod failure_recording;
 #[path = "backfill/fetching.rs"]
@@ -15,13 +17,15 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::HeaderAuditMode;
 
+pub(crate) use concurrent_execution::run_resumable_hash_pinned_backfill_job_concurrently;
 #[allow(unused_imports)]
 pub(crate) use fetching::run_hash_pinned_backfill_range;
 #[cfg(test)]
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
-    create_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job,
+    create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
+    run_resumable_hash_pinned_backfill_job,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

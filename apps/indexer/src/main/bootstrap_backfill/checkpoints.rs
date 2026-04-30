@@ -16,14 +16,14 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
     target_ids: &BTreeSet<String>,
 ) -> Result<Option<i64>> {
     let idempotency_key_pattern = format!(
-        "indexer-bootstrap-backfill:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
+        "indexer-bootstrap-backfill:%:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
         manifests_root.display()
     );
     let rows = sqlx::query(
         r#"
         SELECT
             bj.source_identity,
-            bj.range_start_block_number AS range_start_block_number,
+            br.range_start_block_number AS range_start_block_number,
             br.checkpoint_block_number AS checkpoint_block_number
         FROM backfill_jobs bj
         JOIN backfill_ranges br ON br.backfill_job_id = bj.backfill_job_id
@@ -38,8 +38,8 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
                 OR br.lease_expires_at < now()
           )
           AND bj.idempotency_key LIKE $3
-          AND bj.range_start_block_number >= $4
-          AND bj.range_start_block_number <= $5
+          AND br.range_start_block_number <= $5
+          AND br.range_end_block_number >= $4
           AND bj.range_end_block_number >= $4
         "#,
     )
@@ -57,22 +57,23 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
         )
     })?;
 
-    let mut checkpoint = None;
+    let mut checkpoint_rows = Vec::new();
     for row in rows {
         let source_identity = row
             .try_get::<Value, _>("source_identity")
             .context("failed to read bootstrap source_identity")?;
-        if source_identity_requested_target_ids(&source_identity).as_ref() != Some(target_ids) {
-            continue;
-        }
-        let row_checkpoint = row
-            .try_get::<i64, _>("checkpoint_block_number")
-            .context("failed to read bootstrap checkpoint_block_number")?;
-        checkpoint =
-            Some(checkpoint.map_or(row_checkpoint, |current: i64| current.max(row_checkpoint)));
+        checkpoint_rows.push(BootstrapTargetCheckpointRow {
+            range_start_block_number: row
+                .try_get("range_start_block_number")
+                .context("failed to read bootstrap range_start_block_number")?,
+            checkpoint_block_number: row
+                .try_get("checkpoint_block_number")
+                .context("failed to read bootstrap checkpoint_block_number")?,
+            source_identity,
+        });
     }
 
-    Ok(checkpoint)
+    contiguous_bootstrap_segment_checkpoint(checkpoint_rows, range, target_ids)
 }
 
 pub(super) async fn load_bootstrap_target_checkpoint(
@@ -84,14 +85,14 @@ pub(super) async fn load_bootstrap_target_checkpoint(
     target_id: &str,
 ) -> Result<Option<i64>> {
     let idempotency_key_pattern = format!(
-        "indexer-bootstrap-backfill:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
+        "indexer-bootstrap-backfill:%:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
         manifests_root.display()
     );
     let rows = sqlx::query(
         r#"
         SELECT
             bj.source_identity,
-            bj.range_start_block_number AS range_start_block_number,
+            br.range_start_block_number AS range_start_block_number,
             br.checkpoint_block_number AS checkpoint_block_number
         FROM backfill_jobs bj
         JOIN backfill_ranges br ON br.backfill_job_id = bj.backfill_job_id
@@ -106,9 +107,10 @@ pub(super) async fn load_bootstrap_target_checkpoint(
                 OR br.lease_expires_at < now()
           )
           AND bj.idempotency_key LIKE $3
-          AND bj.range_start_block_number <= $5
+          AND br.range_start_block_number <= $5
+          AND br.range_end_block_number >= $4
           AND bj.range_end_block_number >= $4
-        ORDER BY bj.range_start_block_number ASC, br.checkpoint_block_number ASC
+        ORDER BY br.range_start_block_number ASC, br.checkpoint_block_number ASC
         "#,
     )
     .bind(deployment_profile)
@@ -176,19 +178,37 @@ struct BootstrapTargetCheckpointRow {
 }
 
 fn contiguous_bootstrap_target_checkpoint(
-    mut rows: Vec<BootstrapTargetCheckpointRow>,
+    rows: Vec<BootstrapTargetCheckpointRow>,
     range: BackfillBlockRange,
     target_id: &str,
+) -> Result<Option<i64>> {
+    contiguous_bootstrap_checkpoint(rows, range, |source_identity| {
+        source_identity_requested_target_ids(source_identity)
+            .is_some_and(|target_ids| target_ids.contains(target_id))
+    })
+}
+
+fn contiguous_bootstrap_segment_checkpoint(
+    rows: Vec<BootstrapTargetCheckpointRow>,
+    range: BackfillBlockRange,
+    target_ids: &BTreeSet<String>,
+) -> Result<Option<i64>> {
+    contiguous_bootstrap_checkpoint(rows, range, |source_identity| {
+        source_identity_requested_target_ids(source_identity).as_ref() == Some(target_ids)
+    })
+}
+
+fn contiguous_bootstrap_checkpoint(
+    mut rows: Vec<BootstrapTargetCheckpointRow>,
+    range: BackfillBlockRange,
+    mut accepts_source_identity: impl FnMut(&Value) -> bool,
 ) -> Result<Option<i64>> {
     rows.sort_by_key(|row| (row.range_start_block_number, row.checkpoint_block_number));
 
     let mut next_required_block = range.from_block;
     let mut checkpoint = None;
     for row in rows {
-        let Some(target_ids) = source_identity_requested_target_ids(&row.source_identity) else {
-            continue;
-        };
-        if !target_ids.contains(target_id) {
+        if !accepts_source_identity(&row.source_identity) {
             continue;
         }
         if row.range_start_block_number > next_required_block {
@@ -205,7 +225,7 @@ fn contiguous_bootstrap_target_checkpoint(
         }
         next_required_block = row_checkpoint.checked_add(1).with_context(|| {
             format!(
-                "bootstrap target checkpoint {row_checkpoint} overflowed while walking contiguous coverage"
+                "bootstrap checkpoint {row_checkpoint} overflowed while walking contiguous coverage"
             )
         })?;
     }
@@ -251,6 +271,26 @@ mod tests {
                 rows,
                 BackfillBlockRange::new(1, 30)?,
                 target_id,
+            )?,
+            Some(10)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn segment_checkpoint_ignores_non_contiguous_parallel_range_progress() -> Result<()> {
+        let target_id = "00000000-0000-0000-0000-000000000001";
+        let target_ids = BTreeSet::from([target_id.to_owned()]);
+        let rows = vec![
+            checkpoint_row(1, 10, &[target_id]),
+            checkpoint_row(21, 30, &[target_id]),
+        ];
+
+        assert_eq!(
+            contiguous_bootstrap_segment_checkpoint(
+                rows,
+                BackfillBlockRange::new(1, 40)?,
+                &target_ids,
             )?,
             Some(10)
         );

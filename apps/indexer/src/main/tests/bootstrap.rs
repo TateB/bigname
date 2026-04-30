@@ -793,6 +793,8 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.active_chain_count, 2);
@@ -984,6 +986,8 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(rerun.drained_job_count, 0);
@@ -1294,6 +1298,8 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
         crate::backfill::BackfillAdapterSyncMode::RawOnly,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.eligible_target_count, 3);
@@ -1421,6 +1427,8 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
         crate::backfill::BackfillAdapterSyncMode::RawOnly,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(rerun.drained_job_count, 0);
@@ -1545,6 +1553,8 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.drained_job_count, 1);
@@ -1665,6 +1675,8 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
         HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
     )
     .await?;
     assert_eq!(catchup.drained_job_count, 1);
@@ -1725,6 +1737,133 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
     );
 
     catchup_server.abort();
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bootstrap_auto_backfill_partitions_ranges_for_internal_workers() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let manifest_root = PathBuf::from("manifests");
+    let contract_instance_id = Uuid::from_u128(9_600);
+    let address = "0x0000000000000000000000000000000000000960";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        960,
+        "ens",
+        "ethereum-mainnet",
+        "ens_bootstrap_registry",
+        json!({
+            "contracts": [
+                {
+                    "role": "registry",
+                    "address": address,
+                    "start_block": 1
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        address,
+        Some(960),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        960,
+        "registry",
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let blocks = (1..=4)
+        .map(|block_number| {
+            provider_block(
+                &format!("0x{block_number:064x}"),
+                Some(&format!("0x{:064x}", block_number - 1)),
+                block_number,
+            )
+        })
+        .collect::<Vec<_>>();
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider(
+        blocks
+            .iter()
+            .map(|block| ProviderBlockFixture {
+                block: block.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(block, address, 0)],
+            })
+            .collect(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={provider}")])?;
+
+    let outcome = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+        2,
+        2,
+    )
+    .await?;
+    assert_eq!(outcome.drained_job_count, 1);
+    assert_eq!(outcome.requested_worker_count, 2);
+    assert_eq!(outcome.effective_worker_count, 2);
+    assert_eq!(outcome.reserved_range_count, 2);
+    assert_eq!(outcome.completed_range_count, 2);
+    assert_eq!(outcome.resolved_block_count, 4);
+    assert_eq!(outcome.raw_log_count, 4);
+
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, String)>(
+            r#"
+            SELECT range_start_block_number, range_end_block_number, status::TEXT
+            FROM backfill_ranges
+            ORDER BY range_start_block_number
+            "#
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (1, 2, "completed".to_owned()),
+            (3, 4, "completed".to_owned())
+        ]
+    );
+    let idempotency_key = sqlx::query_scalar::<_, String>(
+        "SELECT idempotency_key FROM backfill_jobs ORDER BY backfill_job_id",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(idempotency_key.starts_with("indexer-bootstrap-backfill:v2:"));
+    assert!(idempotency_key.contains("range_blocks=2"));
+
     server.abort();
     database.cleanup().await
 }
