@@ -130,6 +130,14 @@ pub(super) async fn preload_restricted_name_histories(
         load_latest_resolver_state_before_block(pool, &logical_name_ids, boundary_block).await?;
     let record_versions =
         load_latest_record_versions_before_block(pool, &logical_name_ids, boundary_block).await?;
+    let preload_block_index = block_index_with_preloaded_registrar_release_boundaries(
+        pool,
+        chain,
+        &rows,
+        &registrar_state,
+        block_index,
+    )
+    .await?;
 
     for row in rows {
         let name = name_metadata_from_preload_row(&row)?;
@@ -204,7 +212,7 @@ pub(super) async fn preload_restricted_name_histories(
                 surface_binding_id,
                 active_to,
                 registrar_state.get(&logical_name_id),
-                block_index,
+                &preload_block_index,
             )?,
             "wrapper" => preload_wrapper_history(
                 history,
@@ -224,6 +232,165 @@ pub(super) async fn preload_restricted_name_histories(
     }
 
     Ok(())
+}
+
+async fn block_index_with_preloaded_registrar_release_boundaries(
+    pool: &PgPool,
+    chain: &str,
+    rows: &[sqlx::postgres::PgRow],
+    registrar_state: &HashMap<String, PreloadedRegistrarState>,
+    block_index: &CanonicalBlockIndex,
+) -> Result<CanonicalBlockIndex> {
+    let Some(replay_head) = block_index.blocks.last() else {
+        return Ok(block_index.clone());
+    };
+    let mut release_timestamps = Vec::new();
+    let mut release_namespaces = Vec::new();
+
+    for row in rows {
+        let resource_provenance: Value = row
+            .try_get("resource_provenance")
+            .context("missing resource_provenance")?;
+        if resource_provenance
+            .get("authority_kind")
+            .and_then(Value::as_str)
+            != Some("registrar")
+        {
+            continue;
+        }
+
+        let logical_name_id: String = row
+            .try_get("logical_name_id")
+            .context("missing logical_name_id")?;
+        let expiry = if let Some(expiry) = registrar_state
+            .get(&logical_name_id)
+            .and_then(|state| state.expiry)
+        {
+            expiry
+        } else {
+            let active_to = row
+                .try_get("active_to")
+                .context("missing binding active_to")?;
+            let expiry =
+                registrar_expiry_from_provenance_or_binding_end(&resource_provenance, active_to)?;
+            OffsetDateTime::from_unix_timestamp(expiry)
+                .context("preloaded registrar expiry is not a valid unix timestamp")?
+        };
+        let release_timestamp = release_after_grace(expiry)?;
+        if release_timestamp <= replay_head.block_timestamp {
+            release_timestamps.push(release_timestamp);
+            release_namespaces.push(row.try_get("namespace").context("missing namespace")?);
+        }
+    }
+
+    if release_timestamps.is_empty() {
+        return Ok(block_index.clone());
+    }
+
+    let release_blocks = load_release_boundary_blocks_for_timestamps(
+        pool,
+        chain,
+        &release_timestamps,
+        &release_namespaces,
+        replay_head,
+    )
+    .await?;
+    if release_blocks.is_empty() {
+        return Ok(block_index.clone());
+    }
+
+    let mut blocks = block_index.blocks.clone();
+    blocks.extend(release_blocks);
+    sort_and_dedup_blocks(&mut blocks);
+    Ok(CanonicalBlockIndex { blocks })
+}
+
+async fn load_release_boundary_blocks_for_timestamps(
+    pool: &PgPool,
+    chain: &str,
+    release_timestamps: &[OffsetDateTime],
+    release_namespaces: &[String],
+    replay_head: &RawBlockSnapshot,
+) -> Result<Vec<RawBlockSnapshot>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (requested.release_timestamp, requested.namespace)
+            rb.chain_id,
+            rb.block_hash,
+            rb.block_number,
+            rb.block_timestamp,
+            rb.canonicality_state::TEXT AS canonicality_state
+        FROM unnest($2::TIMESTAMPTZ[], $3::TEXT[]) AS requested(
+            release_timestamp,
+            namespace
+        )
+        JOIN LATERAL (
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_timestamp >= requested.release_timestamp
+              AND block_timestamp <= $4
+              AND block_number <= $5
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY block_timestamp, block_number
+            LIMIT 1
+        ) rb ON TRUE
+        ORDER BY requested.release_timestamp, requested.namespace, rb.block_timestamp, rb.block_number
+        "#,
+    )
+    .bind(chain)
+    .bind(release_timestamps)
+    .bind(release_namespaces)
+    .bind(replay_head.block_timestamp)
+    .bind(replay_head.block_number)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load ENSv1 preloaded registrar release boundary blocks for chain {chain}"
+        )
+    })?;
+
+    rows.into_iter().map(raw_block_snapshot_from_row).collect()
+}
+
+fn sort_and_dedup_blocks(blocks: &mut Vec<RawBlockSnapshot>) {
+    blocks.sort_by(|left, right| {
+        left.block_number
+            .cmp(&right.block_number)
+            .then(left.block_hash.cmp(&right.block_hash))
+    });
+    blocks.dedup_by(|left, right| {
+        left.chain_id == right.chain_id
+            && left.block_hash == right.block_hash
+            && left.block_number == right.block_number
+    });
+}
+
+fn raw_block_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<RawBlockSnapshot> {
+    Ok(RawBlockSnapshot {
+        chain_id: row.try_get("chain_id").context("missing chain_id")?,
+        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        block_number: row
+            .try_get("block_number")
+            .context("missing block_number")?,
+        block_timestamp: row
+            .try_get("block_timestamp")
+            .context("missing block_timestamp")?,
+        canonicality_state: parse_canonicality_state(
+            &row.try_get::<String, _>("canonicality_state")
+                .context("missing canonicality_state")?,
+        )?,
+    })
 }
 
 async fn load_latest_registrar_state_before_block(

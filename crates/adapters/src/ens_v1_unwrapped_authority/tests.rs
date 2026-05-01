@@ -2779,7 +2779,9 @@ async fn block_hash_replay_preserves_same_transaction_registry_resolver_before_r
     let grant_block_hash = "0x7575757575757575757575757575757575757575757575757575757575757575";
     let resolver_block_hash = "0x7676767676767676767676767676767676767676767676767676767676767676";
     let selected_block_hash = "0x7777777777777777777777777777777777777777777777777777777777777777";
+    let later_block_hash = "0x7878787878787878787878787878787878787878787878787878787878787878";
     let selected_tx_hash = "0xtx77777777777777777777777777777777777777777777777777777777777777";
+    let later_tx_hash = "0xtx78787878787878787878787878787878787878787878787878787878787878";
 
     insert_active_contract_fixture(
         database.pool(),
@@ -2964,6 +2966,61 @@ async fn block_hash_replay_preserves_same_transaction_registry_resolver_before_r
     .await?;
     assert_eq!(replayed.matched_log_count, 3);
     assert_eq!(replayed.total_normalized_event_inserted_count, 0);
+
+    let bob = observe_registrar_eth_name_with_version("bob", ENS_NORMALIZER_VERSION)?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            later_block_hash,
+            Some(selected_block_hash),
+            78,
+            release_timestamp + 12,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: later_block_hash.to_owned(),
+            block_number: 78,
+            transaction_hash: later_tx_hash.to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                bob.labelhashes[0].clone(),
+                hex_string(&abi_word_address(new_registrant)),
+            ],
+            data: encode_registrar_name_registered_log_data("bob", new_expiry),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let broad_replay = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[selected_block_hash.to_owned(), later_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(broad_replay.matched_log_count, 4);
+
+    let resolver_resource_id_after_broad_replay = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'ResolverChanged'
+           AND block_number = 77
+           AND log_index = 1",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        resolver_resource_id_after_broad_replay,
+        registry_resource_id
+    );
 
     database.cleanup().await
 }
