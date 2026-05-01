@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::SurfaceBindingKind;
 
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
+
+const NAME_CURRENT_REPLACEMENT_BATCH_SIZE: usize = 2_000;
 
 /// Insert or replace projection rows for exact-name current reads.
 pub async fn upsert_name_current_rows(
@@ -31,23 +33,220 @@ pub async fn upsert_name_current_rows(
 pub async fn replace_name_current_rows(
     pool: &PgPool,
     rows: &[NameCurrentRow],
-    logical_name_ids: &[String],
+    _logical_name_ids: &[String],
 ) -> Result<(usize, u64)> {
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for name_current replacement")?;
-    let upserted_row_count = upsert_name_current_rows_in_transaction(&mut transaction, rows)
-        .await?
-        .len();
+    stage_name_current_replacement_rows(&mut transaction, rows).await?;
+    let upserted_row_count = publish_name_current_replacement_rows(&mut transaction).await?;
     let deleted_row_count =
-        delete_stale_name_current_rows_in_transaction(&mut transaction, logical_name_ids).await?;
+        delete_stale_name_current_rows_from_replacement(&mut transaction).await?;
     transaction
         .commit()
         .await
         .context("failed to commit name_current replacement")?;
 
     Ok((upserted_row_count, deleted_row_count))
+}
+
+async fn stage_name_current_replacement_rows(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[NameCurrentRow],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE name_current_replacement (
+            LIKE name_current INCLUDING DEFAULTS
+        ) ON COMMIT DROP
+        "#,
+    )
+    .execute(&mut **executor)
+    .await
+    .context("failed to create temporary name_current replacement table")?;
+
+    for chunk in rows.chunks(NAME_CURRENT_REPLACEMENT_BATCH_SIZE) {
+        insert_name_current_replacement_chunk(executor, chunk).await?;
+    }
+
+    sqlx::query(
+        "CREATE INDEX name_current_replacement_logical_name_id_idx
+         ON name_current_replacement (logical_name_id)",
+    )
+    .execute(&mut **executor)
+    .await
+    .context("failed to index temporary name_current replacement table")?;
+
+    sqlx::query("ANALYZE name_current_replacement")
+        .execute(&mut **executor)
+        .await
+        .context("failed to analyze temporary name_current replacement table")?;
+
+    Ok(())
+}
+
+struct EncodedNameCurrentRow<'a> {
+    row: &'a NameCurrentRow,
+    declared_summary: String,
+    provenance: String,
+    coverage: String,
+    chain_positions: String,
+    canonicality_summary: String,
+}
+
+fn encode_name_current_row(row: &NameCurrentRow) -> Result<EncodedNameCurrentRow<'_>> {
+    validate_name_current_row(row)?;
+    Ok(EncodedNameCurrentRow {
+        row,
+        declared_summary: serde_json::to_string(&row.declared_summary)
+            .context("failed to serialize name_current declared_summary")?,
+        provenance: serde_json::to_string(&row.provenance)
+            .context("failed to serialize name_current provenance")?,
+        coverage: serde_json::to_string(&row.coverage)
+            .context("failed to serialize name_current coverage")?,
+        chain_positions: serde_json::to_string(&row.chain_positions)
+            .context("failed to serialize name_current chain_positions")?,
+        canonicality_summary: serde_json::to_string(&row.canonicality_summary)
+            .context("failed to serialize name_current canonicality_summary")?,
+    })
+}
+
+async fn insert_name_current_replacement_chunk(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[NameCurrentRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let encoded_rows = rows
+        .iter()
+        .map(encode_name_current_row)
+        .collect::<Result<Vec<_>>>()?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO name_current_replacement (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        "#,
+    );
+
+    builder.push_values(encoded_rows.iter(), |mut row_builder, encoded| {
+        row_builder
+            .push_bind(&encoded.row.logical_name_id)
+            .push_bind(&encoded.row.namespace)
+            .push_bind(&encoded.row.canonical_display_name)
+            .push_bind(&encoded.row.normalized_name)
+            .push_bind(&encoded.row.namehash)
+            .push_bind(encoded.row.surface_binding_id)
+            .push_bind(encoded.row.resource_id)
+            .push_bind(encoded.row.token_lineage_id)
+            .push_bind(encoded.row.binding_kind.map(SurfaceBindingKind::as_str))
+            .push_bind(&encoded.declared_summary)
+            .push("::jsonb")
+            .push_bind(&encoded.provenance)
+            .push("::jsonb")
+            .push_bind(&encoded.coverage)
+            .push("::jsonb")
+            .push_bind(&encoded.chain_positions)
+            .push("::jsonb")
+            .push_bind(&encoded.canonicality_summary)
+            .push("::jsonb")
+            .push_bind(encoded.row.manifest_version)
+            .push_bind(encoded.row.last_recomputed_at);
+    });
+
+    builder
+        .build()
+        .execute(&mut **executor)
+        .await
+        .context("failed to stage name_current replacement chunk")?;
+
+    Ok(())
+}
+
+async fn publish_name_current_replacement_rows(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<usize> {
+    let rows_affected = sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        SELECT
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM name_current_replacement
+        ON CONFLICT (logical_name_id) DO UPDATE
+        SET
+            namespace = EXCLUDED.namespace,
+            canonical_display_name = EXCLUDED.canonical_display_name,
+            normalized_name = EXCLUDED.normalized_name,
+            namehash = EXCLUDED.namehash,
+            surface_binding_id = EXCLUDED.surface_binding_id,
+            resource_id = EXCLUDED.resource_id,
+            token_lineage_id = EXCLUDED.token_lineage_id,
+            binding_kind = EXCLUDED.binding_kind,
+            declared_summary = EXCLUDED.declared_summary,
+            provenance = EXCLUDED.provenance,
+            coverage = EXCLUDED.coverage,
+            chain_positions = EXCLUDED.chain_positions,
+            canonicality_summary = EXCLUDED.canonicality_summary,
+            manifest_version = EXCLUDED.manifest_version,
+            last_recomputed_at = EXCLUDED.last_recomputed_at
+        "#,
+    )
+    .execute(&mut **executor)
+    .await
+    .context("failed to publish staged name_current replacement rows")?
+    .rows_affected();
+
+    usize::try_from(rows_affected).context("name_current replacement row count exceeds usize")
 }
 
 async fn upsert_name_current_rows_in_transaction(
@@ -88,29 +287,18 @@ pub async fn clear_name_current(pool: &PgPool) -> Result<u64> {
         .map(|result| result.rows_affected())
 }
 
-async fn delete_stale_name_current_rows_in_transaction(
+async fn delete_stale_name_current_rows_from_replacement(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    logical_name_ids: &[String],
 ) -> Result<u64> {
-    if logical_name_ids.is_empty() {
-        return sqlx::query("DELETE FROM name_current")
-            .execute(&mut **executor)
-            .await
-            .context("failed to clear name_current rows during replacement")
-            .map(|result| result.rows_affected());
-    }
-
     sqlx::query(
         r#"
         DELETE FROM name_current current
         WHERE NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($1::TEXT[]) AS replacement(logical_name_id)
+            SELECT 1 FROM name_current_replacement replacement
             WHERE replacement.logical_name_id = current.logical_name_id
         )
         "#,
     )
-    .bind(logical_name_ids)
     .execute(&mut **executor)
     .await
     .context("failed to delete stale name_current rows during replacement")
