@@ -128,8 +128,9 @@ fn apply_authority_observation(
             .context("learned name preimage is missing a first labelhash")?;
         let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
         for pending_observation in pending {
-            apply_authority_observation_for_labelhash(
+            apply_authority_observation_for_history_key(
                 pending_observation,
+                &name.namehash,
                 &labelhash,
                 Some(name.clone()),
                 name_ref.clone(),
@@ -144,7 +145,8 @@ fn apply_authority_observation(
         }
     }
 
-    let labelhash = if let Some(namehash) = observation_namehash(&observation) {
+    if let Some(namehash) = observation_namehash(&observation) {
+        let normalized_namehash = namehash.to_ascii_lowercase();
         let defer_to_same_tx_intro = should_defer_preloaded_namehash_observation(
             &observation,
             same_tx_name_intro_positions,
@@ -152,14 +154,31 @@ fn apply_authority_observation(
             namehash_to_labelhash,
         );
         if !defer_to_same_tx_intro
-            && let Some(labelhash) = namehash_to_labelhash.get(namehash).cloned()
+            && let Some(labelhash) = namehash_to_labelhash.get(&normalized_namehash).cloned()
         {
-            labelhash
+            let known_name = known_names_by_namehash.get(&normalized_namehash).cloned();
+            let known_name_ref = known_name_refs_by_namehash
+                .get(&normalized_namehash)
+                .cloned();
+            return apply_authority_observation_for_history_key(
+                observation,
+                &normalized_namehash,
+                &labelhash,
+                known_name,
+                known_name_ref,
+                histories,
+                known_names_by_namehash,
+                known_name_refs_by_namehash,
+                namehash_to_labelhash,
+                pending_namehash_observations,
+                same_tx_name_intro_positions,
+                block_index,
+            );
         } else if !defer_to_same_tx_intro
-            && let Some(claim_source) = reverse_claim_sources.get(namehash).cloned()
+            && let Some(claim_source) = reverse_claim_sources.get(&normalized_namehash).cloned()
         {
             let history = reverse_histories
-                .entry(namehash.to_owned())
+                .entry(normalized_namehash)
                 .or_insert_with(|| ReverseClaimSourceHistory {
                     claim_source,
                     current_resolver: None,
@@ -170,38 +189,131 @@ fn apply_authority_observation(
             return Ok(());
         } else {
             pending_namehash_observations
-                .entry(namehash.to_owned())
+                .entry(normalized_namehash)
                 .or_default()
                 .push(observation);
             return Ok(());
         }
     } else {
-        observation_labelhash(&observation)
-    };
-    let known_name = observation_namehash(&observation)
-        .and_then(|namehash| known_names_by_namehash.get(namehash))
-        .cloned();
-    let known_name_ref = observation_namehash(&observation)
-        .and_then(|namehash| known_name_refs_by_namehash.get(namehash))
-        .cloned();
-
-    apply_authority_observation_for_labelhash(
-        observation,
-        &labelhash,
-        known_name,
-        known_name_ref,
-        histories,
-        known_names_by_namehash,
-        known_name_refs_by_namehash,
-        namehash_to_labelhash,
-        pending_namehash_observations,
-        same_tx_name_intro_positions,
-        block_index,
-    )
+        let LabelhashObservationTarget {
+            history_key,
+            labelhash,
+            known_name,
+            known_name_ref,
+        } = labelhash_observation_target(&observation, known_names_by_namehash)?;
+        return apply_authority_observation_for_history_key(
+            observation,
+            &history_key,
+            &labelhash,
+            known_name,
+            known_name_ref,
+            histories,
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            pending_namehash_observations,
+            same_tx_name_intro_positions,
+            block_index,
+        );
+    }
 }
 
-fn apply_authority_observation_for_labelhash(
+struct LabelhashObservationTarget {
+    history_key: String,
+    labelhash: String,
+    known_name: Option<NameMetadata>,
+    known_name_ref: Option<ObservationRef>,
+}
+
+fn labelhash_observation_target(
+    observation: &AuthorityObservation,
+    known_names_by_namehash: &HashMap<String, NameMetadata>,
+) -> Result<LabelhashObservationTarget> {
+    match observation {
+        AuthorityObservation::RegistrationGranted(value) => {
+            let name = observe_registrar_name_with_reference(
+                &value.label,
+                &value.reference,
+                ENS_NORMALIZER_VERSION,
+            )?;
+            Ok(LabelhashObservationTarget {
+                history_key: name.namehash.clone(),
+                labelhash: value.labelhash.clone(),
+                known_name: Some(name),
+                known_name_ref: Some(value.reference.clone()),
+            })
+        }
+        AuthorityObservation::RegistrationRenewed(value) => {
+            let name = observe_registrar_name_with_reference(
+                &value.label,
+                &value.reference,
+                ENS_NORMALIZER_VERSION,
+            )?;
+            Ok(LabelhashObservationTarget {
+                history_key: name.namehash.clone(),
+                labelhash: value.labelhash.clone(),
+                known_name: Some(name),
+                known_name_ref: Some(value.reference.clone()),
+            })
+        }
+        AuthorityObservation::TokenTransferred(value) => {
+            let history_key = registrar_child_namehash(&value.reference, &value.labelhash)?;
+            Ok(LabelhashObservationTarget {
+                known_name: known_names_by_namehash.get(&history_key).cloned(),
+                known_name_ref: None,
+                history_key,
+                labelhash: value.labelhash.clone(),
+            })
+        }
+        AuthorityObservation::RegistryOwnerChanged(value) => {
+            let history_key = registrar_child_namehash(&value.reference, &value.labelhash)?;
+            Ok(LabelhashObservationTarget {
+                known_name: known_names_by_namehash.get(&history_key).cloned(),
+                known_name_ref: None,
+                history_key,
+                labelhash: value.labelhash.clone(),
+            })
+        }
+        AuthorityObservation::WrapperNameWrapped(value) => {
+            let labelhash = value
+                .name
+                .labelhashes
+                .first()
+                .cloned()
+                .context("wrapper name observation must include a first labelhash")?;
+            Ok(LabelhashObservationTarget {
+                history_key: value.name.namehash.clone(),
+                labelhash,
+                known_name: Some(value.name.clone()),
+                known_name_ref: Some(value.reference.clone()),
+            })
+        }
+        AuthorityObservation::ResolverChanged(_)
+        | AuthorityObservation::RecordChanged(_)
+        | AuthorityObservation::RecordVersionChanged(_)
+        | AuthorityObservation::WrapperNameUnwrapped(_)
+        | AuthorityObservation::WrapperFusesSet(_)
+        | AuthorityObservation::WrapperExpiryExtended(_)
+        | AuthorityObservation::WrapperTokenTransferred(_) => {
+            unreachable!("namehash observations must be resolved before use")
+        }
+    }
+}
+
+fn registrar_child_namehash(reference: &ObservationRef, labelhash: &str) -> Result<String> {
+    let profile =
+        authority_profile_for_source_family(&reference.source_family).with_context(|| {
+            format!(
+                "unsupported authority source family {}",
+                reference.source_family
+            )
+        })?;
+    child_namehash_hex(&profile.root_node(), labelhash)
+}
+
+fn apply_authority_observation_for_history_key(
     observation: AuthorityObservation,
+    history_key: &str,
     labelhash: &str,
     known_name: Option<NameMetadata>,
     known_name_ref: Option<ObservationRef>,
@@ -214,7 +326,7 @@ fn apply_authority_observation_for_labelhash(
     block_index: &CanonicalBlockIndex,
 ) -> Result<()> {
     let history = histories
-        .entry(labelhash.to_owned())
+        .entry(history_key.to_owned())
         .or_insert_with(|| NameHistory {
             name: known_name.clone(),
             labelhash: labelhash.to_owned(),
@@ -249,8 +361,9 @@ fn apply_authority_observation_for_labelhash(
         if let Some(pending) = pending_namehash_observations.remove(&name.namehash) {
             let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
             for pending_observation in pending {
-                apply_authority_observation_for_labelhash(
+                apply_authority_observation_for_history_key(
                     pending_observation,
+                    &name.namehash,
                     labelhash,
                     Some(name.clone()),
                     name_ref.clone(),
@@ -325,8 +438,8 @@ fn should_defer_preloaded_namehash_observation(
     if !has_later_same_tx_intro {
         return false;
     }
-    if let Some(labelhash) = namehash_to_labelhash.get(&normalized_namehash)
-        && let Some(history) = histories.get(labelhash)
+    if namehash_to_labelhash.contains_key(&normalized_namehash)
+        && let Some(history) = histories.get(&normalized_namehash)
         && history_has_authority_at_observation(history, observation)
     {
         return false;

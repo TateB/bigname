@@ -1087,6 +1087,65 @@ fn preload_registrar_history_recovers_binding_authority_provenance() -> Result<(
 }
 
 #[test]
+fn registrar_renewal_observation_replaces_same_label_subdomain_preload_name() -> Result<()> {
+    let labelhash = keccak256_hex(b"palimpsest");
+    let raw_log = registrar_raw_log(
+        vec![unwrapped_name_renewed_topic0(), labelhash.clone()],
+        encode_controller_label_event_log_data("palimpsest", &[1, 1_814_474_767, 3]),
+        373,
+    );
+    let reference = raw_log.reference();
+    let wrong_name = observe_text_name_with_reference(
+        "palimpsest.holer.eth",
+        &reference,
+        ENS_NORMALIZER_VERSION,
+    )?;
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(wrong_name));
+    history.current_registration = Some(RegistrationLease {
+        authority_key: format!(
+            "registrar:ethereum-mainnet:1:{labelhash}:{}:7",
+            reference.block_hash
+        ),
+        labelhash: labelhash.clone(),
+        registrant: ZERO_ADDRESS.to_owned(),
+        expiry: OffsetDateTime::from_unix_timestamp(1_782_938_767)?,
+        release_ref: None,
+        start_ref: reference.clone(),
+    });
+
+    apply_registration_renewed(
+        &mut history,
+        NameRenewalObservation {
+            label: "palimpsest".to_owned(),
+            labelhash,
+            expiry: OffsetDateTime::from_unix_timestamp(1_814_474_767)?,
+            reference,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+
+    assert_eq!(
+        history
+            .name
+            .as_ref()
+            .map(|name| name.logical_name_id.as_str()),
+        Some("ens:palimpsest.eth")
+    );
+    assert!(history.events.iter().any(|event| {
+        event.event_kind == EVENT_KIND_REGISTRATION_RENEWED
+            && event.logical_name_id.as_deref() == Some("ens:palimpsest.eth")
+    }));
+    assert!(
+        !history
+            .events
+            .iter()
+            .any(|event| { event.logical_name_id.as_deref() == Some("ens:palimpsest.holer.eth") })
+    );
+
+    Ok(())
+}
+
+#[test]
 fn build_authority_observation_skips_malformed_resolver_text_payloads() -> Result<()> {
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let resolver_address = "0x00000000000000000000000000000000000000cc";

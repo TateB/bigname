@@ -38,6 +38,24 @@ pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
     hex_string(&node)
 }
 
+pub(super) fn child_namehash_hex(parent_node: &str, labelhash: &str) -> Result<String> {
+    let mut bytes = [0u8; 64];
+    bytes[..32].copy_from_slice(&decode_hex_32(parent_node)?);
+    bytes[32..].copy_from_slice(&decode_hex_32(labelhash)?);
+    Ok(keccak256_hex(&bytes))
+}
+
+fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
+    let normalized = normalize_hex_32(value)?;
+    let mut output = [0u8; 32];
+    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).context("hex topic chunk must be utf-8")?;
+        output[index] =
+            u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
+    }
+    Ok(output)
+}
+
 pub(super) fn eth_node() -> String {
     namehash_hex(&[b"eth".to_vec()])
 }

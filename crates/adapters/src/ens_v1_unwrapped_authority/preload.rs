@@ -216,7 +216,7 @@ pub(super) async fn preload_restricted_name_histories(
         let resource_id = row.try_get("resource_id").context("missing resource_id")?;
 
         let history = histories
-            .entry(labelhash.clone())
+            .entry(name.namehash.clone())
             .or_insert_with(|| empty_preloaded_history(labelhash.clone(), Some(name.clone())));
         if history.name.is_none() {
             history.name = Some(name.clone());
@@ -716,7 +716,7 @@ fn preload_latent_resolver_histories(
             .entry(name.namehash.clone())
             .or_insert_with(|| labelhash.clone());
         let history = histories
-            .entry(labelhash.clone())
+            .entry(name.namehash.clone())
             .or_insert_with(|| empty_preloaded_history(labelhash, Some(name.clone())));
         if history.name.is_none() {
             history.name = Some(name.clone());

@@ -118,16 +118,15 @@ pub(super) fn apply_registration_renewed(
     event: NameRenewalObservation,
     block_index: &CanonicalBlockIndex,
 ) -> Result<()> {
-    if history.name.is_none() {
-        history.name = Some(observe_registrar_name_with_reference(
-            &event.label,
-            &event.reference,
-            ENS_NORMALIZER_VERSION,
-        )?);
-        history
-            .first_name_ref
-            .get_or_insert(event.reference.clone());
-    }
+    let observed_name = observe_registrar_name_with_reference(
+        &event.label,
+        &event.reference,
+        ENS_NORMALIZER_VERSION,
+    )?;
+    history.name = Some(observed_name);
+    history
+        .first_name_ref
+        .get_or_insert(event.reference.clone());
 
     if history.current_registration.is_none() {
         let name = history
