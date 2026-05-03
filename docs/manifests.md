@@ -1,36 +1,26 @@
 # Source Manifests
 
-Status: Phase 0 baseline
+Manifests pin watched contracts, capability ownership, and rollout state per source family. They are part of the truth model, not deploy-time configuration. The wider model lives in [`architecture.md`](architecture.md); persistence in [`storage.md`](storage.md); intake in [`chain-intake.md`](chain-intake.md); execution in [`execution.md`](execution.md).
 
-This document freezes how `bigname` represents source manifests, capability flags, and discovery admission.
+## File format and location
 
-## 1. Purpose
-
-Manifests make watched contracts, capability support, and rollout state explicit. They are part of the truth model, not deploy-time configuration only.
-
-## 2. File Format And Location
-
-Manifests live in the repository as TOML:
+Manifests are TOML files at:
 
 ```text
 manifests/<namespace>/<source_family>/<version>.toml
 ```
 
-Alternate deployment profiles use the same schema under a profile-specific repository root. The first ENSv2 alternate profile is `sepolia-dev`:
+Alternate deployment profiles use the same schema under a profile-specific root. The first ENSv2 alternate profile is `sepolia-dev`:
 
 ```text
 manifests-sepolia-dev/<namespace>/<source_family>/v1.toml
 ```
 
-One runtime selects exactly one manifest root at startup, such as `manifests/` for the shipped mainnet profile or `manifests-sepolia-dev/` for the ENSv2 Sepolia dev profile. Profile selection is not a manifest schema change, and a selected runtime must not load both roots into one canonical corpus, watch plan, discovery graph, or projection set.
+One runtime selects exactly one manifest root at startup — `manifests/` for the shipped mainnet profile, `manifests-sepolia-dev/` for the ENSv2 Sepolia dev profile. Profile selection is not a manifest schema change. A runtime never loads two roots into the same canonical corpus, watch plan, discovery graph, or projection set.
 
-Reasons for TOML:
+TOML is chosen for deterministic diffs, hand-editing, and straightforward Rust parsing.
 
-- deterministic diffs
-- easy hand-editing during protocol bootstrap
-- straightforward Rust parsing
-
-## 3. Required Fields
+## Required fields
 
 Each manifest contains:
 
@@ -39,47 +29,28 @@ Each manifest contains:
 - `source_family`
 - `chain`
 - `deployment_epoch`
-- `rollout_status`
+- `rollout_status` — `draft` | `shadow` | `active` | `deprecated`
 - `normalizer_version`
 - `capability_flags`
 - `roots`
 - `contracts`
 - `discovery_rules`
 
-Each `[[roots]]` and `[[contracts]]` entry may also declare `start_block`.
-`start_block` is an optional unsigned integer whose value is the inclusive
-first historical block for that manifest-declared target. Omitted
-`start_block` means the historical start is unknown for that target; consumers
-must preserve that unknown state rather than inferring block zero, the current
-job range start, the manifest version activation height, or any other fallback.
+Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`. `start_block` is the inclusive first historical block for that target. Omitted means unknown — adapters preserve that state rather than inferring zero, the current job range, the manifest activation height, or any other fallback.
 
-For `[[contracts]]`, `proxy_kind` is required on every entry. `proxy_kind = "none"` must omit `implementation`; any non-`none` `proxy_kind` must include `implementation` as the current implementation address for that manifest version.
+For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the current implementation address for that manifest version.
 
-For `[[discovery_rules]]`, the currently shipped schema freezes `admission` to one authorable literal: `reachable_from_root`. That literal means the discovered edge is authoritative only while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal persistence admissions such as `manifest_declared` and `manifest_successor` are storage/discovery labels, not legal `[[discovery_rules]]` literals.
-
-### `rollout_status`
-
-- `draft`
-- `shadow`
-- `active`
-- `deprecated`
+For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels like `manifest_declared` and `manifest_successor` are storage tags, not authored values.
 
 ### `capability_flags`
 
-Capabilities are named and versioned. Each flag records:
-
-- capability name
-- status: `unsupported`, `shadow`, `supported`
-- optional notes
+Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.
 
 ### `chain`
 
-- `chain` names the authority chain for that manifest within the selected deployment profile
-- the shipped baseline uses mainnet chain IDs such as `ethereum-mainnet` and `base-mainnet`
-- later Sepolia and `sepolia-dev` support is additive as a separate manifest root and chain-ID set, not a concurrent extension of the same runtime
-- one runtime loads manifests from exactly one deployment profile at a time; it must not combine mainnet and Sepolia / `sepolia-dev` manifests in one canonical corpus, watch plan, discovery graph, or projection set
+`chain` names the authority chain for that manifest within the selected profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia and `sepolia-dev` support is additive as a separate manifest root and chain-ID set.
 
-## 4. Example Shape
+## Example shape
 
 ```toml
 manifest_version = 1
@@ -101,7 +72,6 @@ start_block = 123456
 role = "registry"
 address = "0x0000000000000000000000000000000000000000"
 proxy_kind = "none"
-# Omit `implementation` when `proxy_kind = "none"`.
 start_block = 123456
 
 [[discovery_rules]]
@@ -113,240 +83,262 @@ admission = "reachable_from_root"
 declared_children = "supported"
 ```
 
-Capability ownership is source-family specific. For ENS verified resolution on Ethereum Mainnet, the authoritative execution manifest is `ens_execution`, not `ens_v1_registry_l1`. Its canonical contract entry is the ENS Universal Resolver.
+## Capability ownership
 
-Relevant manifest fields for that execution family:
+Capability ownership attaches to the declaring `source_family`. It is never implied by another family's presence.
 
-```toml
-source_family = "ens_execution"
-chain = "ethereum-mainnet"
+### ENS mainnet
 
-[[contracts]]
-role = "universal_resolver"
-address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the route-facing entry is the proxy address. Shadow execution traces and cache ownership do not enable public verified-resolution reads.
 
-[capability_flags]
-verified_resolution = "shadow"
-```
+The ENS primary-name route does not introduce a second manifest capability. `ens_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback through the existing `verified_resolution = "shadow"` flag.
 
-That freeze attaches `verified_resolution` ownership to `ens_execution`. It uses the official ENS Universal Resolver proxy address for the manifest entrypoint (official ENS docs: https://docs.ens.domains/resolvers/universal/). The pinned ENSv1 deployment artifact remains the implementation / ABI anchor for the source family, not the route-facing proxy address. The freeze allows shadow execution traces and cache ownership without implying that public verified-resolution reads are already shipped (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L8 @ ens_v1@91c966f).
+`ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for the exact-tuple persisted-readback contract.
 
-The shipped Phase 7 ENS primary-name slices do not add a second execution capability flag here. `ens_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback, but the route-level coverage contract is frozen in the API, execution, and projection docs rather than through a dedicated `verified_primary_name` manifest flag. The existing `verified_resolution = "shadow"` flag admits the shared shadow execution substrate only; it does not silently widen into a second manifest capability or address-wide primary-name coverage. If a later milestone needs dedicated manifest gating for verified primary-name reads, that flag would be an additive doc-first change.
+`ens_v1_registry_l1` owns the current ENS registry at `0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E` with `start_block = 9380380`,[^subgraph-l15] plus `ENSRegistryOld` at `0x314159265dd8dbb310642f98f50c066173c1259b` with `start_block = 3327417` as a migration-aware input.[^subgraph-l39][^subgraph-l44] Old-registry logs do not union with current logs by latest block: a current-registry `NewOwner` marks the node migrated; later old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` updates for that node are suppressed.[^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246] Root-resolver updates from the old registry are the one frozen exception.[^v1-ensregfb-l40]
 
-ENS reverse-claim intake follows the same source-family discipline. For Ethereum Mainnet, declared primary-claim intake is anchored to `ens_v1_reverse_l1`, not `ens_v1_registry_l1` or `ens_v1_resolver_l1`. Its canonical contract entry is the Ethereum `addr.reverse` Reverse Registrar (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L19 @ ens_v1@91c966f).
+`ens_v1_registrar_l1` owns `.eth` BaseRegistrar at `start_block = 9380410`[^subgraph-l122] plus the legacy, wrapped, and current ETHRegistrarController contracts as label-bearing intake (LegacyEthRegistrarController `9380471`,[^subgraph-l145] WrappedETHRegistrarController `16925618`,[^v1-wrapethrc-l640] current ETHRegistrarController `22764821`).[^v1-ethrc-l706] Controllers do not split into a separate source-family owner.
 
-Relevant manifest fields for that reverse family:
+`ens_v1_wrapper_l1` owns NameWrapper at `0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401` with `start_block = 16925608`,[^v1-namewrapper-deploy] for wrapper authority, fuse/expiry, wrapper-revealed names, and wrapper-driven registry changes.[^v1-iname-l27][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38]
 
-```toml
-source_family = "ens_v1_reverse_l1"
-chain = "ethereum-mainnet"
+`ens_v1_resolver_l1` owns ENS Labs PublicResolver-generation profile admission. The seed entry is the latest PublicResolver at `0xF29100983E058B709F3D539b0c765937B804AC15` with `start_block = 22764828`.[^v1-publicresolver-deploy] Resolver-profile admission is the gate for complete record-family coverage, resolver-overview support, latest-only behavior, and event-to-call parity. Unadmitted resolvers stay `pending` or `unsupported`.
 
-[[contracts]]
-role = "reverse_registrar"
-address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
-```
+Admitted ENS Labs PublicResolver generations on Ethereum Mainnet (first-party app-known data):[^v1-app-resolvers]
 
-That freeze fixes the authoritative reverse entrypoint, source-family owner, and reverse-only intake precedence for ENS primary-claim support. It does not define a new capability flag, does not add manifest schema, does not authorize fallback to registry-, resolver-, or other claim-setting surfaces, and does not by itself widen public primary-name reads beyond the exact-tuple persisted-readback contract frozen at the route level (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f).
+| Address | Profile | Limitations |
+| --- | --- | --- |
+| `0xF29100983E058B709F3D539b0c765937B804AC15` | latest: address, multicoin, default coin-type fallback, name, ABI, text, contenthash, DNS, interface, name-wrapper-aware, VersionableResolver | no pubkey or `DataResolver` |
+| `0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63` | as latest minus default coin-type fallback | no pubkey or `DataResolver` |
+| `0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41` | address, multicoin, name, ABI, text, contenthash, DNS, interface | no name-wrapper, no fallback, no Versionable, no pubkey/`DataResolver` |
+| `0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA` | same as `0x4976...` | same |
+| `0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8` | legacy: address, multicoin, name, ABI, text, contenthash, interface | no DNS, no name-wrapper, no fallback, no Versionable, no pubkey/`DataResolver` |
+| `0x5FfC014343cd971B7eb70732021E26C35B744cc4` | older legacy: ETH-address, name, ABI, text, interface | no multicoin, contenthash, DNS, name-wrapper, fallback, Versionable, pubkey/`DataResolver` |
+| `0x1da022710dF5002339274AaDEe8D58218e9D6AB5` | oldest legacy: ETH-address, name, ABI, interface | no text, contenthash, multicoin, DNS, name-wrapper, fallback, Versionable, pubkey/`DataResolver` |
 
-Within the claimed-vs-verified primary-name contract, that reverse family owns only the declared claim intake. The truth split stays explicit: `ens_v1_reverse_l1` admits the authoritative reverse claim source, while any verified primary-name result remains execution-derived through the execution owner already frozen above. The current reverse manifest may therefore be `rollout_status = "active"` with no dedicated primary-name capability flag at all. That combination is sufficient for the namespace-local ENS exact-tuple persisted-readback coverage class when paired with persisted `ens_execution` readback, but it must not widen coverage beyond that requested tuple, imply address-wide or app-parity primary-name support, admit fallback claim sources, or combine the admitted reverse tuple with resolver-backed or execution-derived name identity to fill richer ENS `claimed_primary_name` payloads (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f).
+Older rows do not inherit latest-only behavior. Unsupported interfaces and pending profiles surface explicitly through `coverage`, `UnsupportedSummary`, `resolver_family_pending`, or `resolver_family_unsupported`. They are never reported as absent records.
 
-That absence is intentional for the shipped Phase 7 route: `ens_v1_reverse_l1` does not need a dedicated `claimed_primary_name`, `primary_name_claim`, or similar capability flag to admit the declared reverse-claim tuple, and `ens_execution` does not need a dedicated `verified_primary_name` flag for persisted exact-tuple readback. Later primary-name capability flagging, if ever needed, would be additive and would have to preserve the existing truth split between reverse-owned declared intake, execution-derived verification, and route-local exact-tuple coverage.
+Address-specific resolver `start_block`s come from ENSNode datasource pins where available: `0x1da0...` `3648359`, `0x5FfC...` `3733668`, `0x2261...` `8659893`, `0x4976...` `9412610`, `0x231b...` `16925619`.[^ensnode-mainnet] `0xDaaF...` has no pinned datasource; it uses the current ENSRegistry epoch `9380380` as a conservative bootstrap basis. The OffchainDNSResolver and ExtendedDNSResolver app-known maps remain deferred — they are not PublicResolver-generation profile admissions.
 
-Phase 9 freezes `start_block` as shared-interface, doc-first manifest schema
-for automatic bootstrap-backfill planning. Known values may be declared only
-when backed by the pinned sources below:
+Resolver discovery from registry `NewResolver(node, resolver)` admits the resolver as a `contract_instance_id` in `ens_v1_resolver_l1` and updates the node-to-resolver binding.[^v1-ens-l12][^v1-ensreg-l89][^v1-ensreg-l174] Zero-address observations close only that binding. Generic resolver-local events (`AddrChanged`, `AddressChanged`, `TextChanged`, `VersionChanged`) feed observed selector/cache facts; they do not graduate profile support.
 
-- ENSv1 current registry may use `start_block = 9380380` as an `ens_subgraph` reference candidate for the current ENS registry only, not as original ENS history or as an authoritative deployment receipt (upstream: .refs/ens_subgraph/subgraph.yaml:L10 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L13 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
-- ENSv1 `ENSRegistryOld` may use `start_block = 3327417` only as an `ens_subgraph` reference candidate for the old registry address `0x314159265dd8dbb310642f98f50c066173c1259b`, not as a naive union with the current registry or as an authoritative deployment receipt (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6).
-- ENSv1 `.eth` BaseRegistrar may use `start_block = 9380410` as an `ens_subgraph` reference candidate only, not as an authoritative deployment receipt (upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6).
-- ENSv1 `.eth` label-bearing registrar-controller intake stays inside `ens_v1_registrar_l1`: LegacyEthRegistrarController may use `start_block = 9380471` from the pinned ENS subgraph; WrappedETHRegistrarController may use `start_block = 16925618` from ENSv1 deployment metadata; and the current unwrapped ETHRegistrarController may use `start_block = 22764821` from ENSv1 deployment metadata. These controller contracts admit label-bearing registration and renewal observations for the registrar source family; they do not create a separate source-family owner or graduate registrar capability flags beyond the existing shadow exact-name intake (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L148 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L150 @ ens_subgraph@723f1b6) (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L640 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/mainnet/ETHRegistrarController.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/mainnet/ETHRegistrarController.json:L706 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f).
-- ENSv1 NameWrapper may use `start_block = 16925608` from the authoritative deployment receipt, with `ens_subgraph` agreement (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f) (upstream: .refs/ens_subgraph/subgraph.yaml:L200 @ ens_subgraph@723f1b6).
-- ENSv1 latest PublicResolver may use `start_block = 22764828` from the authoritative deployment receipt (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f). Older app-known ENS Labs PublicResolver-generation addresses admitted from the app's known resolver data should use address-specific pinned ENSNode mainnet resolver datasource starts when available: `0x1da022710dF5002339274AaDEe8D58218e9D6AB5` starts at `3648359`, `0x5FfC014343cd971B7eb70732021E26C35B744cc4` starts at `3733668`, `0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8` starts at `8659893`, `0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41` starts at `9412610`, and `0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63` starts at `16925619` (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L343 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L346 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L350 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L353 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L357 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L360 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L365 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L368 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L374 @ ensnode@9b8f590) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L377 @ ensnode@9b8f590). `0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA`, which has no address-specific pinned mainnet resolver datasource, may use the current ENSRegistry epoch `startBlock = 9380380` as a conservative resolver-event bootstrap basis; this is bootstrap metadata only and does not widen any resolver profile beyond its explicitly admitted interfaces (upstream: .refs/ens_subgraph/subgraph.yaml:L13 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
-- ENSv1 ReverseRegistrar may use `start_block = 16925606` from the authoritative deployment receipt (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f).
-- ENSv2 `sepolia-dev` RootRegistry may use `start_block = 10462881`, decoded from receipt block `0x9fa6a1` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309).
-- ENSv2 `sepolia-dev` ETHRegistry may use `start_block = 10462895`, decoded from receipt block `0x9fa6af` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309).
-- ENSv2 `sepolia-dev` ETHRegistrar may use `start_block = 10462909`, decoded from receipt block `0x9fa6bd` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+`PubkeyChanged` is ignored by the current admission model. `DataResolver`-shaped events are unsupported on admitted generations and `pending` on unknown profiles. The generic `resolver_record` fact is an observation bucket; it does not act as a catch-all for unknown families.
 
-Basenames mainnet source families and the ENS UniversalResolver remain
-unknown for `start_block` in this freeze. Manifests must omit `start_block` for
-those targets until a later doc-first update cites a pinned upstream source;
-automatic bootstrap must skip them explicitly rather than inventing values.
-This schema freeze does not graduate capability flags, API coverage, or
-consumer-replacement claims.
+### ENSv2 (`sepolia-dev` profile)
 
-ENSv1 Phase 4 NameWrapper and PublicResolver admission is frozen to explicit source-family owners and known resolver-generation profiles:
+The `sepolia-dev` profile admits four families under `manifests-sepolia-dev/ens/`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
-- `ens_v1_wrapper_l1` owns the Ethereum Mainnet NameWrapper contract role `name_wrapper` at `0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401`, wrapper-backed authority observations, wrapper owner / fuse / expiry facts, wrapper-revealed DNS-encoded names, and wrapper-driven registry owner / resolver / TTL changes for currently admitted ENSv1 names. The upstream wrapper exposes `NameWrapped`, `NameUnwrapped`, `FusesSet`, and `ExpiryExtended` events, plus wrap, unwrap, fuse, subnode, resolver, TTL, `ownerOf`, and `getData` functions; those surfaces are admitted as adapter input only (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L54 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L80 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L90 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L102 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L138 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L140 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L142 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L148 @ ens_v1@91c966f).
-- `ens_v1_resolver_l1` owns ENS Labs PublicResolver-generation profile admission for admitted ENSv1 resolver instances. Resolver profiles are semantic admissions for complete family coverage, resolver overview support, latest-only behaviors, and event-to-onchain-call parity claims; they are not the default address set for generic ENSv1 resolver-event intake. The Ethereum Mainnet manifest-declared `public_resolver` seed remains the latest PublicResolver at `0xF29100983E058B709F3D539b0c765937B804AC15`, but resolver-profile admission may also match the known-generation profiles listed below rather than only that latest deployment. The app-known admission set tracks address, multicoin address, name, ABI, text, contenthash, DNS, interface, name-wrapper awareness, default coin-type fallback, and VersionableResolver support; it does not claim pubkey or `DataResolver` support unless a later profile admits those interfaces. The latest upstream resolver composes the cited resolver mixins, stores its NameWrapper dependency in the constructor, and authorizes either trusted controllers / reverse registrar, the registry owner, the wrapped owner, an approved operator, or an approved delegate (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L7 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L11 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114 @ ens_v1@91c966f).
+- `ens_v2_root_l1` — `RootRegistry` at `0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3`, `start_block = 10462881`. Tokenized, resource-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
+- `ens_v2_registry_l1` — `ETHRegistry` at `0x796fff2e907449be8d5921bcc215b1b76d89d080`, `start_block = 10462895`, plus discovered `UserRegistry` proxy instances. `UserRegistryImpl` at `0xea93aff7375e8176053ab6ab36b57cab53cbf702` is implementation metadata, not a separate owner.[^v2-userreg-l15]
+- `ens_v2_registrar_l1` — `ETHRegistrar` at `0x68586418353b771cf2425ed14a07512aa880c532`, `start_block = 10462909`. Registrar events and commit/renew facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
+- `ens_v2_resolver_l1` — `PermissionedResolver` resolver state, alias events, record-version events, resolver-scoped EAC permissions. `PermissionedResolverImpl` at `0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c` is the initial implementation artifact.[^v2-pres-l38][^v2-pres-l70]
 
-Those admissions are Phase 4 declared-state input boundaries only. `ens_v1_wrapper_l1` may append identity, preimage, authority, fuse, expiry, permission, resolver-change, and wrapper-token lineage normalized events; `ens_v1_resolver_l1` may append resolver record, record-version, and resolver authorization normalized events. Neither family writes projection rows, mutates manifest capability state from observed logs, graduates route coverage, admits wrapper upgrade / migration history, adds a public route, or claims consumer replacement by source-family presence alone. Any later wrapper migration / upgrade support, fallback primary-claim source, route coverage graduation, or new public read surface is additive and doc-first.
+Exact-name profile promotion is profile-scoped: only `exact_name_profile = "supported"` on `ens_v2_registrar_l1` in the `sepolia-dev` root graduates `.eth` exact-name declared reads, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The promotion does not apply to mainnet, other Sepolia profiles, or any runtime that has not selected `sepolia-dev`. Active rollout, raw preimage observations, resolver admission, or backfill completion do not graduate any other capability.
 
-ENSv1 dynamic resolver indexing is required for consumer-usable declared record coverage. The mainnet PublicResolver manifest entry is a bootstrap seed, not the complete ENSv1 resolver universe. The admitted resolver discovery rule from the ENSv1 registry source to `ens_v1_resolver_l1` treats each canonical nonzero `NewResolver(node, resolver)` observation from an admitted registry emitter as both a node-to-resolver binding update and resolver contract-instance admission through a discovery edge; a zero-address resolver observation closes only that node-to-resolver binding. The upstream registry exposes `NewResolver(bytes32 indexed node, address resolver)`, emits it from `setResolver`, and also emits it when `setRecord` / `setSubnodeRecord` change resolver state through `_setResolverAndTTL` (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f). Resolver discovery admission is not resolver-profile support: a registry-selected arbitrary address may be represented as a `contract_instance_id`, but generic retained resolver-local events such as `AddrChanged`, `AddressChanged`, `TextChanged`, and `VersionChanged` may still feed observed selector/cache and version-boundary facts when the emitter and node match the selected resolver binding. Supported resolver profiles are required before bigname claims complete record-family coverage, resolver overview completeness, resolver-local authorization semantics, latest-only behavior such as default coin fallback or name-wrapper awareness, VersionableResolver support, or parity between observed event payloads and supported onchain resolver calls (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f).
+Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] These are adapter semantics, not manifest schema fields.
 
-Known ENS Labs PublicResolver-generation profile admission is profile-exact. The concrete generation rows below are first-party app known-resolver data from pinned ENS app v3 metadata, except where another upstream anchor is shown (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32 @ ens_app_v3@7175858) (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L33 @ ens_app_v3@7175858). Rows without a pinned `.refs` deployment artifact are bigname admission metadata, intentionally wider than latest-only admission and intentionally narrower than arbitrary upstream resolver behavior. In the checked-in `manifests/` root, only the Ethereum Mainnet rows are active manifest admissions; Sepolia rows preserve the app-known profile data for a future ENSv1 Sepolia manifest root and must not be loaded into the current mainnet runtime.
+Other `sepolia-dev` artifacts (`UniversalResolverV2`, `ReverseRegistry`, `DNSAliasResolver`, `WrapperRegistryImpl`, `LockedMigrationController`, `HCAFactory`, `StandardRentPriceOracle`, `BatchRegistrar`, `MockUSDC`, `MockDAI`) remain outside admission until a doc-first update.
 
-| Chain | Resolver address | Profile support | Explicit limitations | Admission basis |
-| --- | --- | --- | --- | --- |
-| Ethereum Mainnet | `0xF29100983E058B709F3D539b0c765937B804AC15` | latest app-known PublicResolver profile: address, multicoin address, default EVM coin-type fallback, name, ABI, text, contenthash, DNS record / zonehash, interface, name-wrapper-aware authorization, and VersionableResolver record boundaries | no unsupported interface is inherited beyond the admitted app-known profile; pubkey and `DataResolver` are not admitted in this profile table | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L35 @ ens_app_v3@7175858); upstream address and profile composition (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L29 @ ens_v1@91c966f) |
-| Ethereum Mainnet | `0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63` | PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, interface, name-wrapper-aware authorization, and VersionableResolver record boundaries | no default coin-type fallback; pubkey and `DataResolver` are not admitted unless separately added | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L53 @ ens_app_v3@7175858) |
-| Ethereum Mainnet | `0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41` | PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, and interface support | no name-wrapper awareness, no default coin-type fallback, no VersionableResolver record boundaries, and no pubkey / `DataResolver` admission | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858) |
-| Ethereum Mainnet | `0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA` | PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, and interface support | no name-wrapper awareness, no default coin-type fallback, no VersionableResolver record boundaries, and no pubkey / `DataResolver` admission | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L88 @ ens_app_v3@7175858) |
-| Ethereum Mainnet | `0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8` | legacy PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, and interface support | no DNS record / zonehash support, no name-wrapper awareness, no default coin-type fallback, no VersionableResolver record boundaries, and no pubkey / `DataResolver` admission | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L105 @ ens_app_v3@7175858) |
-| Ethereum Mainnet | `0x5FfC014343cd971B7eb70732021E26C35B744cc4` | outdated legacy PublicResolver generation with ETH-address, name, ABI, text, and interface support | no multicoin address support, no contenthash support, no DNS record / zonehash support, no name-wrapper awareness, no default coin-type fallback, no VersionableResolver record boundaries, and no pubkey / `DataResolver` admission | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121 @ ens_app_v3@7175858) |
-| Ethereum Mainnet | `0x1da022710dF5002339274AaDEe8D58218e9D6AB5` | oldest admitted legacy PublicResolver generation with ETH-address, name, ABI, and interface support only | no text, contenthash, multicoin address, DNS record / zonehash, name-wrapper awareness, default coin-type fallback, VersionableResolver record boundaries, pubkey, or `DataResolver` admission | active mainnet manifest admission; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L135 @ ens_app_v3@7175858) |
-| Sepolia | `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5` | latest app-known PublicResolver profile: address, multicoin address, default EVM coin-type fallback, name, ABI, text, contenthash, DNS record / zonehash, interface, name-wrapper-aware authorization, and VersionableResolver record boundaries | no unsupported interface is inherited beyond the admitted app-known profile; pubkey and `DataResolver` are not admitted in this profile table | deferred until an ENSv1 Sepolia manifest root exists; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L149 @ ens_app_v3@7175858); upstream address and shared latest profile composition (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L29 @ ens_v1@91c966f) |
-| Sepolia | `0x8948458626811dd0c23EB25Cc74291247077cC51` | PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, interface, name-wrapper-aware authorization, and VersionableResolver record boundaries | no default coin-type fallback; pubkey and `DataResolver` are not admitted unless separately added | deferred until an ENSv1 Sepolia manifest root exists; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L168 @ ens_app_v3@7175858) |
-| Sepolia | `0x8FADE66B79cC9f707aB26799354482EB93a5B7dD` | PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, interface, name-wrapper-aware authorization, and VersionableResolver record boundaries | no default coin-type fallback; pubkey and `DataResolver` are not admitted unless separately added | deferred until an ENSv1 Sepolia manifest root exists; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L186 @ ens_app_v3@7175858) |
-| Sepolia | `0x0CeEC524b2807841739D3B5E161F5bf1430FFA48` | legacy PublicResolver generation with address, multicoin address, name, ABI, text, contenthash, DNS record / zonehash, and interfaces through InterfaceResolver | no VersionableResolver record boundaries, no name-wrapper awareness, no default coin-type fallback, and no pubkey / `DataResolver` admission | deferred until an ENSv1 Sepolia manifest root exists; ENS app known resolver row (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L204 @ ens_app_v3@7175858); upstream address anchor plus first-party app profile data (upstream: .refs/ens_v1/deployments/sepolia/LegacyPublicResolver.json:L2 @ ens_v1@91c966f) |
+### Basenames mainnet
 
-The first-party app-known OffchainDNSResolver and ExtendedDNSResolver maps supplied for this change are not `ens_v1_resolver_l1` PublicResolver-generation profile admissions. Mainnet `0xF142B308cF687d4358410a4cB885513b30A42025` / Sepolia `0x179Be112b24Ad4cFC392eF8924DfA08C20Ad8583` OffchainDNSResolver and mainnet `0x238A8F792dFA6033814B18618aD4100654aeef01` / Sepolia `0x0EF1aF80c24B681991d675176D9c07d8C9236B9a` ExtendedDNSResolver remain deferred until a doc-first DNS/offchain resolver source-family admission defines their ownership, record families, and execution behavior (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L20 @ ens_app_v3@7175858) (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L26 @ ens_app_v3@7175858).
+Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l33][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70]
 
-Support is per admitted resolver profile and per record family. Older rows do not inherit latest-only name-wrapper awareness, default coin-type fallback, VersionableResolver record boundaries, pubkey / `DataResolver`, DNS record support, contenthash support, text support, ABI support, name support, or interface support from newer rows. Unsupported interfaces, unadmitted resolver-family states, and profile states that are still `pending` must surface explicitly through coverage, `UnsupportedSummary`, `resolver_family_pending`, `resolver_family_unsupported`, or a typed unsupported status; they must not be treated as absent records or completed latest-PublicResolver coverage.
+- `basenames_base_registry` — `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95` (Base). Per-node owner/resolver/ttl state.[^bn-registry-l10][^bn-registry-l100][^bn-registry-l113][^bn-registry-l132]
+- `basenames_base_registrar` — `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a` (Base). Tokenized authority owning `base.eth`, minting `*.base.eth` subdomains.[^bn-baseregistrar-l15][^bn-baseregistrar-l17][^bn-baseregistrar-l237][^bn-baseregistrar-l327]
+- `basenames_base_resolver` — `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` (Base). Default `L2Resolver` profile seed.[^bn-l2resolver-l22][^bn-l2resolver-l49][^bn-l2resolver-l52][^bn-l2resolver-l193]
+- `basenames_base_primary` — `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` (Base). Declared primary-claim intake only.[^bn-revreg-l12][^bn-revreg-l150][^bn-revreg-l193]
+- `basenames_l1_compat` — `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (Ethereum). L1 compatibility transport for the `base.eth` domain.[^bn-l1resolver-l13]
+- `basenames_execution` — `l1_resolver` at the same Ethereum address with `verified_resolution = "supported"` for the exact-surface transport-assisted direct-path class only. Execution entrypoint that initiates `OffchainLookup` and completes through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-ENSv1 observed resolver-family evidence has three explicit Phase 4 outcomes. `PubkeyChanged` is ignored by the PublicResolver-generation admission model for now: it must not create supported family coverage, unsupported family output, selector/cache claims, or resolver-overview support until a later doc-first pubkey admission exists. `DataResolver`-shaped events are not ignored, but no current known PublicResolver-generation profile admits that family; for a known admitted generation the family remains explicitly unsupported, and for an unknown discovered resolver implementation the family remains pending / unknown until explicit profile evidence admits or rejects it. The generic `resolver_record` fact is an observation bucket only; it must not act as a catch-all that upgrades unknown ENSv1 record families to supported profile coverage.
+The L1 Resolver address appears in both `basenames_l1_compat` and `basenames_execution`. Transport ownership stays with `basenames_l1_compat`; execution entrypoint and verified-resolution routing stay with `basenames_execution`.
 
-ENSv1 `ENSRegistryOld`, when admitted, belongs to `ens_v1_registry_l1` as an explicitly allow-listed migration-epoch registry input. It is not a separate current source-family owner and must not be unioned with the current registry by latest-log order. Current-registry `NewOwner` handling marks the affected subnode migrated; after that point, old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` observations for the same node must not overwrite current topology. The old-registry root resolver is the only frozen exception: an old-registry `NewResolver` for `ROOT_NODE` may still update the root resolver binding and feed resolver discovery. The pinned subgraph encodes this by setting `isMigrated` from current `NewOwner`, guarding old-registry handlers with `!isMigrated`, and allowing root `NewResolver` through despite migration state (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L230 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L252 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L259 @ ens_subgraph@723f1b6). The current ENS registry fallback contract also reads owner, resolver, and TTL from the old registry only when the current registry has no record for that node (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L40 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153 @ ens_v1@91c966f).
+`basenames_execution` v2 promotes only the path class where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `alias.final_target = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`. Alias-participating, wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
 
-The Phase 4 dynamic ENSv1 supported-profile gate is narrow and ENS Labs PublicResolver-generation-compatible only. A discovered resolver instance may move from pending / unsupported profile state to supported profile state only when the resolver-profile admission logic explicitly matches it to one of the admitted known-generation profiles above for the relevant fact families through stored code-hash facts, implementation-edge facts, first-party known-resolver admission, or another explicit non-schema admission rule. The latest app-known profile remains compatible with the admitted PublicResolver address, resolver mixins, ERC165 support, and `ResolverBase` record-versioning, but pubkey / `DataResolver` and older-generation unsupported interfaces remain out of this admission until separately added; older admitted generations expose only their listed subset and must not inherit latest-only behavior (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L75 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f). Unknown dynamic resolver profile state must stay explicit `pending` or `unsupported`, and unobserved selectors remain `resolver_family_pending` or unsupported until a later doc-first admission supports them. Retained generic resolver-local record events may still feed observed selector/cache facts for the current resolver, but ENSv1 record inventory, record cache, and resolver overview must not claim complete family support or consumer replacement for names whose current resolver lacks supported PublicResolver-generation profile admission for the requested family. Basenames resolver-profile admission is governed by the separate Phase 8 Basenames gate in this section.
+`verified_primary_name` for Basenames runs through `basenames_execution` under the same flag. The matching `primary_names_current(address, coin_type, namespace)` row is the only claim-side anchor; `verified_primary_name.provenance` carries `{execution_trace_id, manifest_versions}` matching the top-level `execution_trace_id`.
 
-ENSv2 Phase 5 source-family ownership for the `sepolia-dev` alternate profile is frozen to four admitted families under `manifests-sepolia-dev/ens/...`:
+Basenames Base-side resolver discovery from registry `NewResolver` admits resolver instances and updates bindings. Resolver-local fact consumption requires `L2Resolver`-compatible profile admission for the emitted family. The Base-side discovery rule does not discover the L1 Resolver and does not admit offchain gateways.[^bn-registry-l19][^bn-registry-l223][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l209][^bn-l2resolver-l225]
 
-- `ens_v2_root_l1` owns the `RootRegistry` manifest root at `0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3` and the root-registry event surface needed to seed registry discovery and parent graph state; the upstream registry is a tokenized, resource-scoped permissioned registry with separate resource and token version counters (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L22 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L28 @ ens_v2@554c309).
-- `ens_v2_registry_l1` owns the `ETHRegistry` manifest root at `0x796fff2e907449be8d5921bcc215b1b76d89d080` plus discovered `UserRegistry` proxy instances admitted through registry discovery edges; the checked-in `UserRegistryImpl` deployment at `0xea93aff7375e8176053ab6ab36b57cab53cbf702` is implementation metadata for proxy-backed user registries, not a separate public source-family owner (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/UserRegistryImpl.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L59 @ ens_v2@554c309).
-- `ens_v2_registrar_l1` owns the `.eth` registrar deployment `ETHRegistrar` at `0x68586418353b771cf2425ed14a07512aa880c532`; registrar events and commit/renew facts stay in this family, while the actual registered-name resource identity is linked back to the permissioned registry resource emitted by the registry (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L173 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309).
-- `ens_v2_resolver_l1` owns `PermissionedResolver` resolver state, alias events, record-version events, and resolver-scoped EAC permission facts; `PermissionedResolverImpl` at `0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c` is the initial implementation artifact for discovered resolver instances, while resolver instances themselves enter the source graph through manifest or discovery admission (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221 @ ens_v2@554c309).
+`basenames_offchain` is reserved for later gateway admission. It is not part of the current split.
 
-The ENSv2 exact-name profile promotion is scoped to the selected `sepolia-dev` deployment profile only. In that profile, `ens_v2_registrar_l1` may carry `exact_name_profile = "supported"` to graduate the declared exact-name profile read for `.eth` names backed by the admitted `ETHRegistry` and `ETHRegistrar` sources; the registry deployment supplies the resource/token state and token-resource linkage, while the registrar deployment supplies commit, registration, renewal, and label-bearing lifecycle facts (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L22 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309). The promotion does not apply to the shipped mainnet profile, any other Sepolia profile, or any runtime that has not selected the `sepolia-dev` manifest root. It also does not graduate ENSv2 resolver-profile support, universal-resolver / execution support, reverse support, DNS support, wrapper support, migration support, history coverage, verified resolution, primary-name support, or consumer replacement for those capabilities. `rollout_status = "active"`, registry admission, registrar admission, resolver-family admission, preimage observations, and backfill completion are intake readiness inputs; outside an explicit `exact_name_profile = "supported"` capability on `ens_v2_registrar_l1` for the selected `sepolia-dev` profile, exact-name profile reads must remain unsupported or shadow as declared by the active manifest.
+## Contract instance admission and continuity
 
-The Phase 5 split maps upstream `TokenResource(tokenId, resource)` logs to normalized `TokenResourceLinked`, upstream `TokenRegenerated(oldTokenId, newTokenId)` logs to normalized `TokenRegenerated`, upstream `SubregistryUpdated` logs to normalized `SubregistryChanged`, upstream `ParentUpdated` logs to normalized `ParentChanged`, upstream `AliasChanged` logs to normalized `AliasChanged`, and upstream `EACRolesChanged` logs to resource- or resolver-scoped permission events. Those mappings are adapter semantics, not manifest schema fields (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309).
+Manifest loading admits source-graph nodes as `contract_instance_id`s, not raw addresses. Each active `[[roots]]` and `[[contracts]]` entry resolves to one admitted instance.
 
-This freeze does not create current source-family owners for the additional `sepolia-dev` deployment artifacts such as the ENSv2 universal resolver, reverse registries, DNS resolvers, wrapper implementation, migration controllers, factory contracts, oracle contracts, batch registrars, or payment mocks. Later admission of those surfaces would be additive and doc-first (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/UniversalResolverV2.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ReverseRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/DNSAliasResolver.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/WrapperRegistryImpl.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/LockedMigrationController.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/HCAFactory.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/StandardRentPriceOracle.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/BatchRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockUSDC.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockDAI.json:L2 @ ens_v2@554c309).
+- `[[roots]]` seed canonical graph and watch-plan expansion; otherwise they follow the same identity rules as `[[contracts]]`.
+- Reusing the same address on the same chain across manifest versions, even across an inactive gap, carries forward the existing `contract_instance_id` and appends a new non-overlapping active range.
+- Changing a declared address closes the prior active range and admits a new instance. Continuity to the predecessor uses a `migration` edge, not ID reuse.
+- `proxy_kind = "none"` resolves the declared address directly; `implementation` is omitted.
+- `proxy_kind != "none"` requires `implementation`. The proxy and implementation are separate instances linked by a time-ranged proxy/implementation edge.
+- Changing only `implementation` keeps the proxy's identity. The implementation instance is reused if its address reappears, otherwise a new one is minted.
 
-Basenames source-family ownership on the shipped mainnet profile is frozen across six admitted families (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc):
+Contract addresses persist as time-ranged attributes for raw-fact matching and watch-plan expansion.
 
-- `basenames_base_registry` owns registry-controlled declared authority through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95` on Base Mainnet because the upstream Registry stores per-node owner / resolver / ttl state and authorizes owner-controlled subnode and resolver updates there (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L10 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L100 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
-- `basenames_base_registrar` owns tokenized registrar authority through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a` on Base Mainnet because the upstream BaseRegistrar owns `base.eth`, mints `*.base.eth` subdomains, and can reclaim Base registry ownership after token transfers (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L15 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L17 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L423 @ basenames@1809bbc)
-- `basenames_base_resolver` owns Base-native declared resolver state through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` on Base Mainnet because the upstream `L2Resolver` is the default Base resolver and authorizes the registrar controller, reverse registrar, and name owners / delegates to modify resolver records (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L49 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L52 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
-- `basenames_base_primary` owns declared primary-claim intake through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` on Base Mainnet because the upstream ReverseRegistrar establishes reverse records and writes the claimed `name()` value there (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
-- `basenames_l1_compat` owns L1 compatibility transport through contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` on Ethereum Mainnet because upstream assigns cross-chain resolution for the `base.eth` domain to the Ethereum Mainnet `L1Resolver` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
-- `basenames_execution` owns verified-resolution entrypoint selection through contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` on Ethereum Mainnet with active v2 `verified_resolution = "supported"` only for the exact-surface transport-assisted direct-path class because the same upstream `L1Resolver` is the execution entrypoint that initiates `OffchainLookup` and completes the verified callback through `resolveWithProof` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+## Discovery admission
 
-That freeze maps declared authority to the Base registry / registrar / resolver families, declared primary to `basenames_base_primary`, compatibility transport to `basenames_l1_compat`, and execution entrypoint selection to `basenames_execution` (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc).
-
-Basenames dynamic resolver indexing follows the same manifest/discovery rule on Base Mainnet. `basenames_base_resolver` starts with the upstream default `L2Resolver`, but it must not be treated as the only possible Base-side resolver for consumer replacement. The admitted resolver discovery rule from `basenames_base_registry` to `basenames_base_resolver` treats each canonical nonzero registry `NewResolver(node, resolver)` observation as both a node-to-resolver binding update and Base resolver contract-instance admission through a discovery edge; a zero-address resolver observation closes only that node-to-resolver binding. Upstream Basenames registry stores resolver addresses per node, emits `NewResolver` from `setResolver`, and emits it when `setRecord` / `setSubnodeRecord` change resolver state through `_setResolverAndTTL` (upstream: .refs/basenames/src/L2/Registry.sol:L19 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L223 @ basenames@1809bbc). Resolver discovery admission is not resolver-profile support: a registry-selected arbitrary address may be watched and represented as a `contract_instance_id`, but typed record and resolver-local authorization facts may be appended only after a supported resolver profile is admitted for that instance and record family through an explicit mechanism such as code-hash / implementation allow-listing, ERC165 interface probing, ABI-family admission, or supported resolver-event observation. The static `L2Resolver` support profile is the current cited profile seed (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc). This Base-side discovery rule does not discover or widen the separate Ethereum Mainnet L1 resolver used by `basenames_l1_compat` / `basenames_execution`, and it does not admit offchain gateways. Basenames record inventory, record cache, and resolver overview must not claim consumer replacement for names whose current Base-side resolver lacks supported profile admission, even when the resolver address itself has been discovery-admitted and watched.
-
-The Phase 8 Basenames supported-profile gate is separate from the ENSv1 PublicResolver-generation profile gate and is `L2Resolver`-compatible only for Base-side resolver facts. A Base resolver instance may move from pending / unsupported profile state to supported profile state only when resolver-profile admission explicitly matches it to the Basenames `L2Resolver`-compatible profile for the relevant fact families through stored code-hash facts, implementation-edge facts, ERC165 probing, ABI-family admission, or supported resolver-event evidence. That profile is compatible with the upstream `L2Resolver` surface that composes ABI, address, contenthash, DNS, interface, name, pubkey, text, multicall, and extended-resolution profiles; stores the Base registry, registrar-controller, and reverse-registrar dependencies; authorizes the registrar controller, reverse registrar, registry owner, approved operator, or approved delegate for record writes; and exposes ERC165 support over those profiles (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L46 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L49 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L52 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc). Unknown Base-side dynamic resolvers keep explicit `pending` or `unsupported` resolver-profile state, and Basenames typed records, resolver-local authorization facts, record inventory, record cache, and resolver overview must not claim consumer replacement for names whose current Base resolver lacks supported `L2Resolver`-compatible profile admission. This profile gate does not reuse the ENSv1 PublicResolver-generation profiles, does not admit Ethereum Mainnet `L1Resolver` transport or execution behavior, does not admit offchain gateways, and does not change manifest schema, capability flag vocabulary, storage shape, shared enums, API route shape, or route-level coverage by itself.
-
-Active `basenames_execution` v2 promotes only the exact-surface transport-assisted direct-path class where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, and `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`. Historical v1 was the pre-promotion shadow manifest state; v2 does not move transport ownership away from `basenames_l1_compat` and does not support alias-participating, wildcard-derived, linked-subregistry, transport-free, or offchain-gateway path classes (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc).
-
-The same Ethereum Mainnet L1 Resolver address may therefore be declared in both `basenames_l1_compat` and `basenames_execution`. That duplication is intentional: transport ownership remains with `basenames_l1_compat`, while execution entrypoint ownership and supported verified-resolution routing remain with `basenames_execution` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
-
-The first Basenames `verified_primary_name` support class does not add a second execution capability flag either. `basenames_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback on `GET /v1/primary-names/{address}` under stable execution identity `request_type=verified_primary_name` and request-key identity `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row remains the only claim-side lookup / invalidation anchor, and the public `verified_primary_name.provenance` surface stays limited to `{execution_trace_id, manifest_versions}`; `verified_primary_name.provenance.execution_trace_id` must equal top-level `provenance.execution_trace_id`, and `manifest_versions` must narrow that same persisted verification trace. The active `verified_resolution = "supported"` flag remains the single execution capability flag for the exact transport-assisted resolution class; it does not create a second primary-name manifest capability. Route-level exact-tuple coverage support is frozen over `basenames_base_primary` plus `basenames_execution` and must not widen beyond exact-tuple persisted readback, because upstream keeps reverse-name writes on the Base ReverseRegistrar while the separate Ethereum Mainnet `L1Resolver` remains the execution owner (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
-
-`basenames_offchain` remains a reserved catalog family for later explicit gateway admission and is not part of the current admitted Basenames split; upstream documents the off-chain gateway as a separate category from the shipped L1 resolver and Base authority contracts (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc).
-
-This freeze does not create separate current source-family owners for registrar-controller, oracle, migration, proxy-admin, or offchain-gateway deployment artifacts. Later admission of those surfaces would be additive and doc-first.
-
-## 5. Contract Instance Admission And Continuity
-
-Manifest loading admits source-graph nodes as `contract_instance_id`s, not as raw addresses.
-
-A manifest-declared root or contract instance keeps its ID only while the same declared contract address remains admitted on the same chain.
-
-Rules:
-
-- each active `[[roots]]` and `[[contracts]]` entry resolves to one admitted `contract_instance_id`
-- `[[roots]]` seed canonical graph expansion and watch-plan expansion, but otherwise follow the same identity and continuity rules as `[[contracts]]`
-- reusing the same declared address on the same chain across manifest versions, including after an inactive gap, carries forward the existing `contract_instance_id` and records a new non-overlapping active range
-- changing a root or contract entry's own declared address closes the prior instance active range and admits a new `contract_instance_id`; any continuity to the predecessor is expressed by a `migration` edge, not by ID reuse
-- when `proxy_kind = "none"`, the declared address resolves directly to the admitted contract instance for that role and `implementation` must be omitted
-- when `proxy_kind != "none"`, `implementation` must be present and the proxy address plus the `implementation` address refer to separate contract instances linked by a time-ranged proxy / implementation edge
-- changing only `implementation` keeps the proxy's `contract_instance_id`; reuse the prior implementation instance if that implementation address reappears, otherwise mint a new implementation instance
-
-Contract addresses remain stored as time-ranged attributes for raw-fact matching and watch-plan expansion.
-
-## 6. Discovery Admission Rules
-
-A discovered contract becomes authoritative only if one of the following is true:
+A discovered contract is authoritative when one of these holds:
 
 - it is declared directly in an active manifest
-- it is reachable from an active manifest root through an allowed discovery rule
-- it is explicitly allow-listed by manifest version for a migration epoch
+- it is reachable from an active manifest root through an allowed `discovery_rules` edge
+- it is explicitly allow-listed by a manifest version for a migration epoch
 
-Every admitted discovery edge stores:
+Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`, source manifest version, edge kind, discovery source, active range, and provenance.
 
-- `from_contract_instance_id`
-- `to_contract_instance_id`
-- source manifest version
-- edge kind
-- discovery source
-- active range
-- provenance
+Discovery resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the edge. Re-admitting an address that was previously admitted on the same chain reuses the prior `contract_instance_id` and appends a new range; a new ID is minted only for addresses never admitted on that chain. Manifest-declared and discovered proxy/implementation links share the same edge and active-range rules.
 
-Discovery uses raw addresses only as lookup inputs. It resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the canonical edge.
+## Manifest change propagation
 
-If discovery re-admits an address that was admitted previously on the same chain and later became inactive, it reuses the prior `contract_instance_id` and records a new non-overlapping active range. It mints a new `contract_instance_id` only when that address has never been admitted on that chain.
+Manifest changes produce normalized events: `SourceManifestUpdated`, `ProxyImplementationChanged`, `CapabilityChanged`. They update discovery admission, invalidate execution cache entries, and trigger projection recomputation where capability boundaries change.
 
-Manifest-declared and discovered proxy / implementation links use the same edge and active-range rules.
+Live manifest drift and proxy-upgrade alerting is a worker-owned operational loop. The worker computes drift candidates from admitted manifests, code-hash facts, proxy/implementation edges, and watch-plan state, and persists them to the worker-owned alert observation family. The worker does not write `normalized_events`, mutate manifests, mutate discovery admission, change capability flags, write projections, or expose a public route. Remediation is an explicit manifest or discovery change that produces the normal events above.
 
-## 7. Manifest Change Propagation
+`bigname-worker manifest-drift audit --json` computes candidates, persists alert observations, and renders the persisted view alongside live counts. `--fail-on-alert --json` returns nonzero when actionable persisted alerts remain. `bigname-worker inspect manifest-drift --json` is read-only over already persisted observations.
 
-Manifest changes produce normalized events:
+## Watch-plan expansion
 
-- `SourceManifestUpdated`
-- `ProxyImplementationChanged`
-- `CapabilityChanged`
+Watch-plan expansion starts from active manifest roots by `contract_instance_id` and traverses active discovery edges by ID.
 
-They also:
+- The chain-intake watch target is the address range attached to each active contract instance at the requested time.
+- If a manifest target carries `start_block`, the materialized watch range starts at that inclusive block unless a later active-range boundary narrows it.
+- If `start_block` is omitted, the historical start is unknown. Live watch may still produce a target; automatic historical bootstrap treats it as unbootstrapable until a finite start is declared.
+- Watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`.
+- Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 
-- update discovery admission
-- invalidate relevant execution cache entries
-- trigger projection recomputation where capability boundaries change
+`bigname-worker inspect watch-plan --json` exposes active watched contracts with source kind (`manifest_root`, `manifest_contract`, `discovery_edge`), source families, contract instance IDs, chain addresses, source manifest IDs, and active block ranges. It is read-only over existing state.
 
-Live manifest drift and proxy-upgrade alerting is worker-owned operational observation in Phase 10. The worker-owned audit job may compute and persist manifest/proxy alert observations from admitted manifests, stored code-hash facts, stored proxy / implementation edges, and derived watch-plan state into the worker-owned alert observation family. It must not write adapter-owned `normalized_events`, mutate manifest truth, mutate discovery admission, admit contracts, rewrite discovery edges, change capability flags, update watch-plan inputs, write projections, expose public API state, or claim consumer replacement. Alert state is derived from the already admitted source graph; remediation stays an explicit manifest or discovery change that produces the normal `SourceManifestUpdated`, `ProxyImplementationChanged`, or `CapabilityChanged` event.
+## Capability policy
 
-Manifest-drift and proxy-alert inspection is operational JSON over persisted worker-owned alert observations. The inspection surface may list stored drift or proxy alert rows with their manifest version, source family, chain, contract-instance references, expected and observed code-hash or implementation-edge material, derived watch-plan metadata, timestamps, lifecycle status, and nullable remediation metadata. `manifest-drift audit --json` computes live manifest-drift and proxy-implementation candidates, persists worker-owned manifest alert observations, then renders the persisted observation view along with live candidate counts and persistence metadata. `manifest-drift audit --fail-on-alert --json` renders the same persisted observation view and returns a nonzero status when actionable persisted alerts remain. Audit persistence is limited to the worker-owned alert observation family: it must not mutate manifests, discovery rules, source instances, contract instances, normalized events, projections, adapter-owned facts, alert lifecycle remediation state, capability flags, watch-plan inputs, public `v1` API state, or consumer-replacement claims. Remediation remains explicit manifest, discovery, or source-family work that produces the normal `SourceManifestUpdated`, `ProxyImplementationChanged`, or `CapabilityChanged` event. Read-only `inspect manifest-drift --json` remains the inspection-only surface over already persisted observations.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities write facts and traces without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
 
-## 8. Watch-Plan Expansion
+## Ownership
 
-Watch-plan expansion starts from active manifest roots by `contract_instance_id` and traverses active discovery edges by `contract_instance_id`.
+- Manifest/discovery owners maintain the TOML files.
+- Adapter owners consume manifest versions as inputs.
+- Execution owners depend on manifest versions for cache keys and invalidation.
+- Schema changes require a doc-first update to this file.
 
-Rules:
+---
 
-- the chain-intake watch target is the address range attached to each active contract instance at the requested time
-- if a manifest-declared `[[roots]]` or `[[contracts]]` target carries `start_block`, the materialized watch range starts at that inclusive block unless a later active-range boundary narrows it
-- if `start_block` is omitted, the watch target's historical start remains unknown; watch-plan expansion may still produce a live watch target, but automatic historical bootstrap must treat that target as unbootstrapable until a finite start is declared
-- watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root -> discovery edge(s) -> contract_instance_id`
-- address-only watch state is derived and may be rebuilt from manifests, contract-instance address attributes, and active discovery edges
+## Bootstrap `start_block` provenance
 
-Read-only runtime watch-plan inspection is operational JSON over existing admitted watch-plan state through `bigname-worker inspect watch-plan --json`. The inspection surface exposes active watched contracts / watch-plan entries with their source kind (`manifest_root`, `manifest_contract`, or `discovery_edge`), source families, contract instance IDs, chain addresses, source manifest IDs when available, and active block ranges. It uses existing manifest/discovery state only and must not perform fresh chain comparison, admit contracts, mutate discovery edges, change capability flags, update watch-plan inputs, write projections, expose a public `v1` route, or claim consumer replacement.
+Known historical starts cite a pinned upstream source. Targets without a pinned source omit `start_block`; automatic bootstrap skips them rather than inventing values. Basenames mainnet families and the ENS Universal Resolver remain unknown.
 
-## 9. Capability Policy
+| Target | `start_block` | Source |
+| --- | --- | --- |
+| ENSv1 ENSRegistry | `9380380` | [^subgraph-l15] |
+| ENSv1 ENSRegistryOld | `3327417` | [^subgraph-l39] |
+| ENSv1 BaseRegistrar | `9380410` | [^subgraph-l122] |
+| LegacyEthRegistrarController | `9380471` | [^subgraph-l145] |
+| WrappedETHRegistrarController | `16925618` | [^v1-wrapethrc-l640] |
+| ETHRegistrarController | `22764821` | [^v1-ethrc-l706] |
+| ENSv1 NameWrapper | `16925608` | [^v1-namewrapper-deploy] |
+| ENSv1 PublicResolver (latest) | `22764828` | [^v1-publicresolver-deploy] |
+| ENSv1 ReverseRegistrar | `16925606` | [^v1-revreg-deploy-l379] |
+| ENSv2 RootRegistry (`sepolia-dev`) | `10462881` | [^v2-deploy-root] |
+| ENSv2 ETHRegistry (`sepolia-dev`) | `10462895` | [^v2-deploy-ethreg] |
+| ENSv2 ETHRegistrar (`sepolia-dev`) | `10462909` | [^v2-deploy-ethrc] |
 
-Capabilities gate behavior, not public-contract existence.
+---
 
-Rules:
+[^ens-docs-univ]: <https://docs.ens.domains/resolvers/universal/>
+[^v1-app-resolvers]: (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32 @ ens_app_v3@7175858)
+[^ensnode-mainnet]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L343 @ ensnode@9b8f590)
 
-- an unsupported capability must surface as `coverage.unsupported_reason` or a typed error
-- shadow capabilities may write facts and traces without being enabled for general reads
-- capability ownership attaches to the manifest-declared `source_family`; it is never implied by another family's presence
-- ENSv1 old-registry admission is source-family-local to `ens_v1_registry_l1` and migration-aware: admitting `ENSRegistryOld` at `0x314159265dd8dbb310642f98f50c066173c1259b` from `start_block = 3327417` does not create a second registry capability owner, does not widen current-registry `start_block = 9380380` into original ENS history, does not graduate exact-name, child, history, resolver overview, or consumer-replacement coverage, and does not authorize latest-log-wins unioning across old and current registry emitters (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
-- ENSv1 Phase 4 wrapper and resolver admission is source-family-local: `ens_v1_wrapper_l1` admission does not imply resolver support, `ens_v1_resolver_l1` admission does not imply wrapper authority support, and neither admission graduates exact-name, history, resolver overview, primary-name, or verified-resolution public coverage without a later doc-first API / projection / capability update
-- ENSv1 resolver discovery admission is source-family-local: registry `NewResolver` observations may admit resolver contract instances and node bindings, and retained generic resolver-local record events may feed observed selector/cache facts, but neither topology nor observed selectors graduate resolver-profile support, complete typed-record family coverage, resolver overview coverage, or consumer replacement without explicit supported ENS Labs PublicResolver-generation profile admission for the requested family; unknown dynamic resolvers and unsupported interfaces on older generations remain explicit unsupported / pending family states rather than inheriting latest-PublicResolver coverage (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)
-- Basenames resolver discovery admission is source-family-local and is not widened by the ENSv1 PublicResolver-generation profile gate: registry `NewResolver` observations may admit resolver contract instances and node bindings, but they do not graduate resolver-profile support, typed resolver records, resolver overview coverage, or consumer replacement without explicit Base-side `L2Resolver`-compatible supported-profile admission for the emitted fact family; that gate is separate from Basenames L1 transport / execution and from offchain-gateway admission (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
-- ENSv2 Phase 5 capability ownership on the `sepolia-dev` alternate profile is source-family-local: registry admission does not imply registrar support, registrar admission does not imply resolver support, and resolver admission does not imply universal-resolver / execution support
-- ENSv2 `sepolia-dev` exact-name profile support is profile-scoped: only `exact_name_profile = "supported"` on `ens_v2_registrar_l1` in the selected `sepolia-dev` manifest root graduates that profile's exact-name declared read; active rollout, raw preimage observations, resolver admission, backfill completion, or the presence of `ETHRegistry` / `ETHRegistrar` contracts do not graduate any other profile or capability (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
-- ENS verified resolution on Ethereum Mainnet is owned by `ens_execution` through contract role `universal_resolver` at the official ENS Universal Resolver proxy address `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, not by `ens_v1_registry_l1` (official ENS docs: https://docs.ens.domains/resolvers/universal/) (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L8 @ ens_v1@91c966f)
-- ENS reverse-claim intake on Ethereum Mainnet is anchored to `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`, not by `ens_v1_registry_l1` or `ens_v1_resolver_l1` (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L19 @ ens_v1@91c966f)
-- ENS primary-name truth on Ethereum Mainnet is intentionally split across those owners: `ens_v1_reverse_l1` owns declared reverse-claim intake, while verification stays execution-derived rather than becoming a second manifest-owned claim surface (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
-- that reverse-family ownership freezes only the current reverse-only ENS claim surface; any later fallback claim-setting surface would need its own manifest-owned source family and a later doc-first contract update (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
-- the shipped Phase 7 ENS primary-name route does not require dedicated `claimed_primary_name` or `verified_primary_name` capability flags on either owner; reverse admission plus execution-owned persisted readback are enough for the exact-tuple persisted-readback contract
-- `rollout_status` and `capability_flags` are source-family-local readiness inputs; they do not by themselves widen ENS claim precedence, combine reverse tuple intake with resolver-backed name payloads, collapse claimed and verified primary-name truth into one manifest capability, or widen public coverage beyond local exact-tuple persisted readback (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
-- adding a new capability is additive if it does not change prior semantics
+[^v1-ens-l12]: (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+[^v1-ensreg-l89]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)
+[^v1-ensreg-l174]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f)
+[^v1-ensregfb-l40]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L40 @ ens_v1@91c966f)
 
-## 10. Ownership And Workflow
+[^v1-iname-l27]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
+[^v1-iname-l35]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
+[^v1-iname-l37]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
+[^v1-iname-l38]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
 
-- manifest/discovery owners maintain the TOML files
-- adapter owners consume manifest versions as inputs, not hidden configuration
-- execution owners depend on manifest versions for cache keys and invalidation
-- any manifest schema change requires a doc-first update to this file
+[^v1-namewrapper-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f)
+[^v1-publicresolver-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f)
+[^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+[^v1-revreg-deploy-l379]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f)
+[^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v1-ursol-l8]: (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L8 @ ens_v1@91c966f)
+
+[^v1-wrapethrc-l640]: (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L640 @ ens_v1@91c966f)
+[^v1-ethrc-l706]: (upstream: .refs/ens_v1/deployments/mainnet/ETHRegistrarController.json:L706 @ ens_v1@91c966f)
+
+[^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
+[^v1-revreg-l19]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L19 @ ens_v1@91c966f)
+
+[^subgraph-l15]: (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6)
+[^subgraph-l39]: (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6)
+[^subgraph-l44]: (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6)
+[^subgraph-l122]: (upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6)
+[^subgraph-l145]: (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
+[^subgraph-ts-l134]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6)
+[^subgraph-ts-l230]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L230 @ ens_subgraph@723f1b6)
+[^subgraph-ts-l238]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6)
+[^subgraph-ts-l246]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
+
+[^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309)
+[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309)
+
+[^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@554c309)
+[^v2-ethrc-l49]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L49 @ ens_v2@554c309)
+[^v2-ethrc-l173]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L173 @ ens_v2@554c309)
+
+[^v2-pr-l22]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L22 @ ens_v2@554c309)
+[^v2-pr-l28]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L28 @ ens_v2@554c309)
+
+[^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
+[^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309)
+
+[^v2-iperm-l22]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L22 @ ens_v2@554c309)
+[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
+[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
+[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
+
+[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309)
+[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309)
+
+[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309)
+
+[^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
+[^bn-readme-l28]: (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
+[^bn-readme-l29]: (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc)
+[^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
+[^bn-readme-l34]: (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+[^bn-readme-l69]: (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
+[^bn-readme-l70]: (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+[^bn-readme-l71]: (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
+
+[^bn-l1resolver-l13]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+[^bn-l1resolver-l154]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)
+[^bn-l1resolver-l173]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
+[^bn-l1resolver-l191]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+
+[^bn-registry-l10]: (upstream: .refs/basenames/src/L2/Registry.sol:L10 @ basenames@1809bbc)
+[^bn-registry-l19]: (upstream: .refs/basenames/src/L2/Registry.sol:L19 @ basenames@1809bbc)
+[^bn-registry-l100]: (upstream: .refs/basenames/src/L2/Registry.sol:L100 @ basenames@1809bbc)
+[^bn-registry-l113]: (upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)
+[^bn-registry-l132]: (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
+[^bn-registry-l223]: (upstream: .refs/basenames/src/L2/Registry.sol:L223 @ basenames@1809bbc)
+
+[^bn-baseregistrar-l15]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L15 @ basenames@1809bbc)
+[^bn-baseregistrar-l17]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L17 @ basenames@1809bbc)
+[^bn-baseregistrar-l237]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
+[^bn-baseregistrar-l327]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327 @ basenames@1809bbc)
+
+[^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
+[^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)
+[^bn-l2resolver-l22]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+[^bn-l2resolver-l29]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc)
+[^bn-l2resolver-l49]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L49 @ basenames@1809bbc)
+[^bn-l2resolver-l52]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L52 @ basenames@1809bbc)
+[^bn-l2resolver-l182]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)
+[^bn-l2resolver-l193]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
+[^bn-l2resolver-l209]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
+[^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
+
+[^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
+[^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+[^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)

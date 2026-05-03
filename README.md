@@ -1,80 +1,76 @@
 # bigname
 
-Status: Phase 1 bootstrap
+A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
 
-`bigname` is a replayable, auditable indexing and read platform for ENSv1, ENSv2, and Basenames.
+bigname turns onchain state from Ethereum and Base into a versioned `v1` REST contract that answers point-in-time, provenance-tagged questions about names, addresses, resolvers, primary names, and verified resolution. Raw facts are immutable; projections are rebuildable; verified answers come from durable execution traces, not opportunistic onchain calls.
 
-The docs remain the source of truth for product semantics, storage boundaries, API shape, and rollout criteria. The checked-in Rust workspace now provides the bootstrap needed to start implementation against those frozen interfaces.
+## What's here
 
-## Read Order
+- `apps/api` — the read API (`/v1/...`, `/healthz`, `/docs`)
+- `apps/indexer` — chain intake, manifest sync, backfill, head-following
+- `apps/worker` — projections, replay, verified execution, inspection commands
+- `crates/` — domain types, storage, manifests, adapters (ENSv1, ENSv2, Basenames), execution
+- `manifests/` — checked-in mainnet source manifests for ENS and Basenames
+- `manifests-sepolia-dev/` — alternate ENSv2 dev profile (selected at runtime, not loaded together)
+- `migrations/` — Postgres schema
+- `docs/` — how it works
+- `tests/conformance/` — TypeScript conformance harness
 
-1. `docs/architecture.md`
-2. `docs/development-plan.md`
-3. `docs/chain-intake.md`
-4. `docs/api-v1.md`
-5. `docs/storage.md`
-6. `docs/manifests.md`
-7. `docs/projections.md`
-8. `docs/execution.md`
-9. `docs/consumer-capabilities.md`
-10. `docs/workstreams.md`
-11. `docs/adrs/`
+## Local development
 
-## Workspace
+```sh
+cp .env.example .env                       # optional, for custom ports/creds
+docker compose up -d                       # Postgres + MinIO
+./scripts/migrate                          # apply migrations
+./scripts/dev-up                           # boot api + indexer + worker
+```
 
-- `apps/api`: native `v1` read API bootstrap with an internal `/healthz` route
-- `apps/indexer`: intake and adapter process bootstrap
-- `apps/worker`: replay, backfill, execution, and migration entrypoint bootstrap
-- `crates/domain`: narrow shared domain bootstrap surface
-- `crates/storage`: PostgreSQL connection and migration support
-- `crates/manifests`: manifest and discovery bootstrap surface
-- `crates/adapters`: adapter bootstrap surface
-- `crates/execution`: verified execution bootstrap surface
-- `tests/conformance`: reserved for the TypeScript conformance harness
+The API binds to `127.0.0.1:3000` by default. Hit `http://127.0.0.1:3000/docs` for OpenAPI, `/healthz` for readiness.
 
-## Quickstart
-
-1. Copy `.env.example` to `.env` if you want to customize local ports or credentials.
-2. Start local dependencies with `docker compose up -d`.
-3. Apply the checked-in migration with `./scripts/migrate`.
-4. Boot all three processes with `./scripts/dev-up`.
-
-Useful cargo aliases:
+Useful one-shots:
 
 - `cargo api -- serve`
 - `cargo indexer -- run`
 - `cargo worker -- run`
 - `cargo worker -- migrate`
 
-The API process also exposes a private, non-`/v1` readiness check at
-`GET /healthz` on its bind address. In local development that is
-`http://127.0.0.1:3000/healthz` by default; see `docs/development.md` for
-the operator response contract.
+To enable live ingestion and live verified ENS resolution, set `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_API_CHAIN_RPC_URLS`. See [`docs/development.md`](docs/development.md).
 
-## Container Deployment
+## Container
 
-The production image is published as `ghcr.io/tateb/bigname`. It contains the
-API, indexer, and worker binaries and can run each process by command:
+Published as `ghcr.io/tateb/bigname`. The image entrypoint takes a service name (`api`, `indexer`, `worker`, or `migrate`).
 
-- `docker run ghcr.io/tateb/bigname:latest api`
-- `docker run ghcr.io/tateb/bigname:latest indexer`
-- `docker run ghcr.io/tateb/bigname:latest worker`
-- `docker run ghcr.io/tateb/bigname:latest migrate`
-
-For a fresh server, copy `.env.server.example` to `.env.server`, update the
-secrets, then run:
+For server deployment:
 
 ```sh
+cp .env.server.example .env.server         # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-See `docs/deployment.md` for image tags, service configuration, and manual GHCR
-publish commands.
+The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` as long-running services. One-shot invocations (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm ghcr.io/tateb/bigname:latest <command>`.
+
+See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
+
+## Reading the docs
+
+Start with [`docs/architecture.md`](docs/architecture.md) for the model, then dive into the area you care about:
+
+- [`docs/api-v1.md`](docs/api-v1.md) — the public read contract; per-route reference in [`docs/api-v1-routes.md`](docs/api-v1-routes.md)
+- [`docs/storage.md`](docs/storage.md) — schema and write ownership
+- [`docs/manifests.md`](docs/manifests.md) — source manifests and discovery
+- [`docs/chain-intake.md`](docs/chain-intake.md) — block intake, lineage, reorgs, backfill
+- [`docs/projections.md`](docs/projections.md) — current-state read models
+- [`docs/execution.md`](docs/execution.md) — verified resolution and primary names
+- [`docs/consumer-capabilities.md`](docs/consumer-capabilities.md) — what each capability covers
+- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md) — running it
+- [`docs/upstream.md`](docs/upstream.md) — pinned upstream refs and intentional divergences
+- [`docs/adrs/`](docs/adrs/) — architecture decisions
+
+Internal planning notes (implementation sequencing, parallel workstreams) live under [`docs/internal/`](docs/internal/) and are not required reading to use or deploy bigname.
 
 ## Guardrails
 
-- treat the Phase 0 docs as the interface freeze
-- update docs first when changing public semantics, shared IDs, storage invariants, or manifest meaning
-- use `docs/workstreams.md` to split work without shared-interface drift
-- keep adapter output limited to identity rows and normalized events
-- keep the API read-only over projections and execution output
+- adapters write identity rows and normalized events, not projection rows
+- the API reads projections and execution output, not raw facts
+- raw facts are immutable; projections are rebuildable; verified answers are durable
+- update the relevant doc before changing public semantics, shared IDs, manifest schema, or coverage meaning

@@ -1,288 +1,232 @@
 # Projections
 
-Status: Phase 0 baseline
+Projections are read models. Normalized events are the source of truth; projection rows exist to serve stable reads at predictable cost. They carry no semantics that aren't already in the event stream — they replay deterministically from canonical events, and they're disposable.
 
-This document freezes the read-model boundaries between normalized events, current-state projections, and API reads.
+This document defines the shipped projection set, replay semantics, invalidation, and worker ownership. Wire shapes live in [`api-v1.md`](api-v1.md); event taxonomy and identity rules live in [`architecture.md`](architecture.md); persistence in [`storage.md`](storage.md).
 
-The exact-name explain routes for surface-binding and authority-control now ship in the API binary. The primary-name route family also ships there as a mixed route: tuple-backed declared `claimed_primary_name` readback is wired, the admitted public claimed-local surfaces are exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and exact-tuple `raw_claim_name` for `invalid_name`, and route-level coverage is `partial` only for the frozen exact-tuple ENS/Basenames persisted-readback classes while out-of-class tuples remain `unsupported`. Its projection boundaries are nevertheless normative here so later support can land without changing the shared contract: `primary_names_current` stays claim-local, `claimed_primary_name.name` stays limited to the exact requested tuple row's declared normalized claim-identity source under the current reverse-only claim precedence, and the frozen `verified_primary_name.provenance` invariant stays verification-local under the same top-level `execution_trace_id` rather than becoming a projection-owned join. No separate history-explain route is queued: the shipped history routes remain the declared history answer, and exact-name `history` only stores head pointers into that contract. ENS reverse-only claim precedence is anchored to the Ethereum Mainnet Reverse Registrar and its reverse-record write path (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f).
+## Rules
 
-## 1. Projection Rules
+- Projections rebuild from canonical facts and normalized events.
+- Every row carries provenance, manifest version, and chain-position context.
+- Only projection workers write projection tables. Adapters never do.
+- Exact-name reads resolve `at`, `chain_positions`, `consistency` first; the selected positions then key one coherent join across `name_current`, `address_names_current`, `permissions_current`, `record_inventory_current`, `resolver_current`.
+- A reader fails closed when the selected positions can't be served from current rows. It does not patch a missing snapshot from raw facts, adapter internals, or a newer projection row.
+- A row with an older stored chain-position context may serve a later snapshot only when the reader can prove no newer canonical input exists for the row's keys through those positions. Otherwise the worker rebuilds it.
+- Source-scoped raw-fact replay is an indexer rule. Projections still consume only canonical normalized events. Coverage, support, and gaps are never inferred from replay scope.
+- Compact app-facing routes read the same projections as their full counterparts. Compact DTOs may omit provenance, coverage, and internal identifiers, but the underlying rows still carry them for `meta=full`, explain routes, and rebuilds.
+- Verified-resolution output is execution-owned. Projections do not synthesize verified answers, do not fall back to declared cache when verified output is missing, and do not cache verified bodies.
 
-- projections are rebuildable from canonical facts and normalized events
-- projections exist to serve stable reads, not to invent semantics
-- every projection row carries provenance, manifest version, and chain position context
-- only projection workers write projection tables
-- exact-name public reads resolve `at`, explicit `chain_positions`, and `consistency` before reading projections; the selected positions then key one coherent `name_current`, `coverage_current`, `surface_bindings_current`, `permissions_current`, `record_inventory_current`, and execution-output join for that response
-- projection readers must fail closed with the API's selector error state when the selected positions cannot be served from current projection rows; they must not patch a missing snapshot by reading raw facts, adapter internals, or a newer projection row
-- execution output remains execution-owned: when matching verified-resolution output is absent, the mixed resolution API may ask the execution owner to run supported ENS verified-resolution selectors on demand at the selected exact-name snapshot, persist the trace/outcome, and then join that persisted output; projections do not synthesize verified answers or fall back to declared cache
-- a current-state row with an older stored chain-position context may serve a later selected snapshot only when the projection reader can prove that no newer canonical projection input for that row's keys exists through the selected positions; otherwise the row is stale and must be rebuilt by the projection worker
-- source-scoped or per-target raw-fact replay/backfill is an indexer operational selection rule only: it may reduce which persisted raw logs are replayed into adapter-owned normalized events, but projections still consume only canonical normalized events and must not infer coverage, support, or gaps from the replay scope itself. Automatic normalized-event catch-up uses all-source block-ordered replay before projection rebuilds so cross-family adapter histories remain coherent. For ENSv1 resolver events, targeted replay mode is not the default semantic model and does not turn resolver profiles into an address filter for generic resolver-event facts.
-- implemented compact app-facing REST routes read the same projection families and execution outputs as the full routes. Compact DTOs may omit provenance, coverage, raw normalized-event payloads, and internal identifiers by default, but projection workers still carry the same provenance, manifest version, and chain position context needed for `meta=full`, `view=full`, explain routes, stale checks, and rebuilds.
-
-## 2. Projection Families
+## Families
 
 | Projection | Primary key | Primary read | Source events |
 | --- | --- | --- | --- |
-| `name_current` | `logical_name_id` | exact name lookup | identity, registration, control, resolver, history heads, coverage |
-| `surface_bindings_current` | `surface_binding_id` | exact lookup, explain | `SurfaceBound`, `SurfaceUnbound`, migration events |
-| `address_names_current` | `(address, logical_name_id, relation)` | address collections (shipped) | authority, control, reverse, primary claim events |
-| `children_current` | `(parent_logical_name_id, child_logical_name_id, surface_class)` | child collections | registration, subregistry, alias, wildcard events |
-| `permissions_current` | `(resource_id, subject, scope)` | resource permissions reads (shipped) | permission, permission-scope, and transfer events |
-| `resolver_current` | `(chain_id, resolver_address)` | resolver overview (shipped) | resolver, alias, permission, inventory events |
-| `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution inventory + cache | record and version-boundary events |
-| `primary_names_current` | `(address, coin_type, namespace)` | exact-tuple declared `claimed_primary_name` readback + exact-tuple declared normalized claim identity for `claimed_primary_name.name` + exact-tuple declared claim provenance + optional exact-tuple `invalid_name` `raw_claim_name` + invalidation context | reverse, primary claim, verified primary events |
-| `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
+| `name_current` | `logical_name_id` | exact-name lookup | identity, registration, control, resolver, history heads |
+| `address_names_current` | `(address, logical_name_id, relation)` | address-to-names | authority, control, reverse, primary claim |
+| `children_current` | `(parent_logical_name_id, child_logical_name_id, surface_class)` | name-to-children | registration, subregistry, alias, wildcard |
+| `permissions_current` | `(resource_id, subject, scope)` | resource permissions | permission, scope-modifier, transfer |
+| `resolver_current` | `(chain_id, resolver_address)` | resolver overview | resolver, alias, permission, inventory |
+| `record_inventory_current` | `(resource_id, record_version_boundary_key)` | record inventory + cache | record, version-boundary |
+| `primary_names_current` | `(address, coin_type, namespace)` | primary-name claim anchor | reverse, primary claim, verified primary |
 
-History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. The shipped address-history view composes address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
+`surface_bindings` is an immutable history table — exact-name reads pull the active row by `logical_name_id` and `tstzrange`, not from a `_current` projection. Coverage, surface bindings, and execution traces are not separate projection families. The all-current replay summary lists `coverage_current` and `surface_bindings_current` as zero-row placeholders for forward compatibility.
 
-The implemented app-facing compact routes do not introduce new truth families:
+History reads consume canonical normalized events plus thin cursor support. There is no separate denormalized history table.
 
-| App-facing route | Projection or execution owner |
+### App-facing route to projection
+
+| Route | Owner |
 | --- | --- |
-| `GET /v1/names` | `name_current` for exact/search rows; `address_names_current` for account/relation membership; `children_current` and `record_inventory_current` only for requested compact counts |
-| `GET /v1/addresses/{address}/names/count` | `address_names_current`, with the same name/search joins as `GET /v1/names` when filters require them |
-| `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections remain execution-owned |
-| `GET /v1/events` and history `view=compact` | canonical normalized events plus the existing history anchor selection rules |
-| `GET /v1/roles` and `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`, with `name_current` only for name-to-resource lookup |
-| `GET /v1/resources/lookup` | `name_current` current resource identity |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | `resolver_current` for resolver fan-in summaries; `permissions_current` and normalized events only when the section declares that join |
+| `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
+| `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
+| `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
+| `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
+| `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`; `name_current` only for name-to-resource lookup |
+| `GET /v1/resources/lookup` | `name_current` |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | `resolver_current`; `permissions_current` and normalized events join in for sections that declare it |
 
-## 3. Collection Semantics
+## Exact-name lookup
 
-### Exact name lookup
+`name_current` is keyed by `logical_name_id` and is the API join root for exact-name reads. Handlers may join other families by the selected exact-name identity and positions; they never rebuild exact-name state from raw facts.
 
-- keyed by `logical_name_id`
-- authoritative for supported source classes
-- exact-name lookup is snapshot-selected: current binding, registration, authority, control, resolver, record-inventory summary, history pointers, provenance, coverage, chain positions, and consistency must all describe the same selected `ChainPositions` object for `GET /v1/names/{namespace}/{name}` and the exact-name explain routes
-- `name_current` rows are the API join root for exact-name reads; API handlers may join other projection families by the selected exact-name identity and positions, but must not rebuild exact-name state from normalized events or raw facts
-- for ENSv1, reverse / primary resolver `NameChanged` text may provide only a preimage for a forward surface. Projection workers may use that preimage to release already-pending forward-node registry and resolver observations into `name_current` and record projections, but the reverse claim itself remains claim-side intake only and cannot synthesize exact-name authority, resolver topology, or primary-name truth without matching forward-node inputs (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
-- for `namespace=ens` on the selected ENSv2 `sepolia-dev` profile, `name_current` may publish supported declared exact-name profile rows only from the admitted `ens_v2_registry_l1` and `ens_v2_registrar_l1` source classes. The registry projection inputs are the upstream label state, token-resource link, label lifecycle, resolver-target, and token-regeneration surfaces; the registrar projection inputs are the upstream `.eth` registration and renewal lifecycle surfaces (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L21 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L41 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L47 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L63 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L21 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L45 @ ens_v2@554c309)
-- that ENSv2 `sepolia-dev` exact-name projection support does not create rows for the mainnet profile, reverse or primary-name reads, wrapper-derived authority, migration history, universal-resolver entrypoints, verified resolution, execution explain, or resolver-local record/cache/overview facts that are outside the exact-name profile support class
-- for `namespace=basenames`, `name_current` remains a Base-authority read family: exact-name declared truth comes from `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` is claim-intake-only, and `basenames_l1_compat` plus `basenames_execution` do not become alternate exact-name truth because upstream keeps the registry / registrar / resolver stack on Base while reverse claims stay on the separate ReverseRegistrar surface (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
-- returns the current binding plus fixed declared summary sections for registration, authority, control, resolver, record inventory, and history
-- unsupported declared summary sections stay explicit in the read model; they are not omitted silently
-- authority may fall back to binding identifiers when a richer authority summary is not yet projected
-- `control` is the exact-name summary form of current resource-anchored control facts and, in the initial contract, carries only `registrant`, `registry_owner`, and `latest_event_kind`; it is narrower than both the internal `ControlVector` and `permissions_current`
-- `resolver` is the exact-name summary form of the current resolver target and, in the initial contract, carries `chain_id`, `address`, and `latest_event_kind`; `chain_id=null` and `address=null` mean the current binding has no declared resolver rather than that the resolver summary itself is unsupported
-- for ENSv1 and Basenames, the exact-name resolver summary identifies the declared target only. For ENSv1, retained generic resolver-local record events may feed observed selector/cache facts before resolver-profile support is known, but complete resolver-local record/cache coverage and resolver-overview facts require supported profile admission for the relevant record or overview family. ENSv1 supported profile admission is per admitted ENS Labs PublicResolver-generation profile, not latest-PublicResolver-only and not latest-capability inheritance for legacy resolvers (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f). Basenames resolver-local record, cache, or resolver-overview facts remain profile-gated by the separate Base-side rule (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
-- `history` is a pair of head pointers derived from canonical normalized events: `surface_head` and `resource_head`, each pointing at the first row the dedicated name-history route would return for the same target under `scope=surface` or `scope=resource`
-- `history` summary stays in `name_current` only as these scope-specific head pointers; paginated history rows and `scope=both` union ordering remain on the dedicated history reads and do not create a separate history projection
-- Phase 6 does not add an explain-only history route or projection family; shipped history routes remain the explainable declared answer, and `name_current.history` only links callers into those rows
-- the shipped explain routes `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are thin reads over the same exact-name target, `surface_bindings_current`, `name_current`, and `permissions_current` truth families; they do not add explain-specific projection families or ledgers
+Rows return the current binding plus fixed declared sections for registration, authority, control, resolver, record inventory, and history. Unsupported sections stay explicit. Authority falls back to binding identifiers when a richer summary isn't projected. `control` carries `registrant`, `registry_owner`, `latest_event_kind` — narrower than `ControlVector` and `permissions_current`. `resolver` carries `chain_id`, `address`, `latest_event_kind`; both addresses are `null` when the binding has no declared resolver. `history` is two head pointers (`surface_head`, `resource_head`) into the canonical history rows.
 
-### Coverage by exact name
+For ENSv1, reverse / primary `NameChanged` text supplies a forward-name preimage only.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130] Workers may use that preimage to release pending forward-node observations into `name_current`; the reverse claim itself never synthesizes authority, resolver topology, or primary-name truth.
 
-- keyed by `logical_name_id`
-- serves the shared `Coverage` object for both `GET /v1/names/{namespace}/{name}` inline coverage and `GET /v1/coverage/{namespace}/{name}`
-- coverage reads use the same exact-name snapshot selector as exact-name lookup; for the same `{namespace, name}` and selected `ChainPositions`, `GET /v1/coverage/{namespace}/{name}` and the inline exact-name `coverage` field must read the same `coverage_current` answer
-- for the promoted ENSv2 `sepolia-dev` exact-name profile, `coverage_current` stores the shared supported summary for that exact-name profile class: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, and `unsupported_reason=null` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
-- that coverage row is scoped to declared exact-name profile support only and does not store supported coverage for mainnet, reverse or primary-name reads, wrapper-derived authority, migration history, universal-resolver entrypoints, verified resolution, execution explain, or resolver-local sections outside the promoted exact-name profile class
-- the dedicated coverage route adds declared explain detail for that same single-name answer; it does not introduce separate coverage enums or defaults
-- `CoverageChanged` updates this shared single-name coverage state; capability changes may invalidate or recompute it, but do not create a second coverage truth system
+For `namespace=ens` on the `sepolia-dev` profile, declared exact-name profile rows come from `ens_v2_registry_l1` and `ens_v2_registrar_l1`.[^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-iperm-l34][^v2-events-l15][^v2-events-l30][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iethreg-l32][^v2-iethreg-l53] That profile produces no rows for mainnet, reverse or primary, wrapper authority, migration history, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local facts.
 
-### Address to names
+For `namespace=basenames`, exact-name truth comes from `basenames_base_registry`, `basenames_base_registrar`, `basenames_base_resolver`. `basenames_base_primary` is claim-intake only; `basenames_l1_compat` and `basenames_execution` do not become alternate exact-name truth.[^bn-readme-l70][^bn-revreg-l12]
 
-- default unit is the surface, not the resource
-- `GET /v1/names` without an address relation filter reads `name_current` as the row universe; with `owner`, `registrant`, or `account` filters it uses `address_names_current` membership first and joins back to `name_current` only for compact display, sort, and optional count fields
-- `owner` is the app-facing token-holder / owner filter; `account` plus `relation` is the generalized relation filter; `relation=any` is the deduped union of `registrant`, `token_holder`, and `effective_controller` rows for the same `(namespace, normalized_name)`
-- for `namespace=basenames`, `address_names_current` membership and relation facets derive from the same Base-side authority/control truth as exact-name lookup; reverse-claim intake and L1 compatibility transport do not create membership rows or widen relation facets because upstream separates Base-side name ownership / resolver state from reverse claims and the Ethereum Mainnet `L1Resolver` transport (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
-- the initial declared-state relation vocabulary is `registrant`, `token_holder`, and `effective_controller`
-- callers may request `dedupe_by=resource`
-- default sort is `display_name_asc`
-- `include=role_summary` is additive and adds only `role_summary`, `subname_count`, `record_count`, `status`, and `expiry`
-- `include=role_summary` does not change supported filters, default grouping, default sort, cursor semantics, or route-level coverage meaning
-- `role_summary` derives from the current item `resource_id` plus the existing resource-permissions truth family; it does not require a second address-role projection or ledger
-- `role_summary` is the per-resource summary form of `permissions_current`: group current rows by `subject`, keep each grouped subject's `scope` plus `effective_powers`, and leave row-granular grant lineage on `permissions_current`
-- `subname_count` reuses `children_current` under the declared direct-child surface rule; linked, alias-derived, and wildcard-observed child buckets stay separate
-- `status` and `expiry` are resource-derived control fields for the current `resource_id`; they mirror the current `ControlVector` values rather than any address-list-local state
-- `record_count` counts the distinct stable declared record selectors for the current `resource_id` at its current version boundary, using the same declared inventory semantics as `Resolution.record_inventory`; it must not be implemented as an address-list-only counter, a raw slot count, or a verified-query count
-- ENSv1 PublicResolver-compatible `TextChanged` events that carry a key and value produce selector-specific declared text records such as `text:avatar` and retain the emitted value in `record_inventory_current.entries`; they must not be collapsed into a generic `text` selector when the key is available (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L21 @ ens_v1@91c966f)
-- app-facing `GET /v1/names` sort keys `name`, `expiry_date`, `registration_date`, and `created_at` must be projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`
-- app-facing total counts and `GET /v1/addresses/{address}/names/count` count the filtered projection row universe before cursor slicing; unsupported filter/count combinations must be explicit unsupported rather than raw fact scans
-- `resolved_address` filtering is deferred unless a declared record-value equality projection exists for the namespace and selector family. Existing `record_inventory_current` and `record_cache` can serve per-name record summaries, but they are not by themselves a global address-to-name equality index.
+The exact-name `resolver` summary identifies the declared target only. Retained ENSv1 generic resolver-local record events feed observed selector and cache facts before profile admission, but full coverage and resolver-overview facts require supported profile admission. ENSv1 admission is per ENS Labs PublicResolver-generation profile, not latest-only.[^v1-ens-l12][^v1-iaddrres-l6][^v1-iaddressres-l6][^v1-itextres-l5] Basenames resolver-local facts are gated by the separate Base-side profile rule.[^bn-registry-l132]
 
-### Name to children
+The shipped explain routes `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` read the same exact-name target plus `surface_bindings`, `name_current`, `permissions_current`. They add no explain-specific projection.
 
-- default unit is declared direct child surfaces
-- compact child rows for `GET /v1/names/{namespace}/{name}/children` are read from `children_current` joined to the child's current `name_current` summary. The compact row fields are child display name, normalized name, parent-relative label, labelhash where projected, namehash, owner, registrant where available, and direct `subname_count` where projected.
-- for `namespace=ens` on the ENSv2 `sepolia-dev` profile, declared direct child and linked-subregistry buckets are driven by normalized `SubregistryChanged` and `ParentChanged` graph events, not by token ID enumeration alone; upstream emits `SubregistryUpdated(tokenId, subregistry, sender)` and `ParentUpdated(parent, label, sender)` as registry events (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L131 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L151 @ ens_v2@554c309)
-- for `namespace=basenames`, `children_current` remains a Base-authority family: declared direct child rows come from the admitted Base registry / registrar / resolver split, not from primary-claim intake or L1 compatibility transport because upstream places `*.base.eth` subdomain registration on the Base registry / registrar stack while reverse claims and the L1 resolver stay separate (upstream: .refs/basenames/README.md:L8 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
-- linked, alias-derived, and wildcard-observed children are separate `surface_class` buckets
-- default sort is `display_name_asc`
-- app-facing `include=counts` uses the declared direct-child count for the child surface only; linked, alias-derived, and wildcard-observed counts remain deferred and must not be folded into the default count
+## Coverage
 
-### History
+The shared `Coverage` object is read inline on `GET /v1/names/{namespace}/{name}` and as the body of `GET /v1/coverage/{namespace}/{name}`. Both reads use the same exact-name snapshot selector and return the same answer for the same `{namespace, name}` and selected positions.
 
-- default sort is `chain_position_desc`
-- `scope=surface|resource|both` maps onto normalized-event filters, not different truth systems
-- name-history resource scope resolves across every resource ever bound to the requested surface
-- resource-history surface scope resolves across every surface ever bound to the requested resource
-- shipped `Address.history` resolves address-derived surface and resource anchor sets across current and historical matches first, then applies the same `scope=surface|resource|both` history contract over normalized events
-- `view=compact` on history routes and `GET /v1/events` are presentation views over canonical normalized events. They may remap event kinds into compact `type` aliases and compact `data`, but they must not create a second history projection, include observed/orphaned rows by default, or read raw facts directly.
-- `GET /v1/events` block filters apply to canonical normalized-event chain positions after the route has selected name, address, or opaque resource anchors. Selector-specific record history beyond event type filters is deferred until a selector-backed history projection or normalized-event index is explicitly documented.
+For the ENSv2 `sepolia-dev` exact-name profile: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, `unsupported_reason=null`.[^v2-deploy-ethreg][^v2-deploy-ethrc] That row is scoped to declared exact-name profile support only — it does not cover mainnet, reverse, primary, wrapper, migration, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local sections.
 
-### Resource permissions
+`CoverageChanged` updates this state. Capability changes may invalidate or recompute it.
 
-- keyed by `(resource_id, subject, scope)`
-- default unit is the effective permission row for one resource-anchored subject and scope
-- resolver-scoped permissions remain rows in this family; resolver overview reads summarize them but do not replace them
-- `PermissionScopeChanged` is a modifier input for the same `resource_id`, not a subject grant and not a separate permissions ledger. Projection workers must apply the latest canonical scope modifier at or before the row's chain-position context after selecting the current `PermissionChanged` row for `(resource_id, subject, scope)`, and they must include the modifier event in provenance, chain positions, and canonicality summaries when it changes the published row.
-- For ENSv1 wrapper-backed resources, `PermissionScopeChanged` carries the active NameWrapper fuse value observed from wrapper events. Upstream defines the fuse bits including `CANNOT_UNWRAP`, `CANNOT_BURN_FUSES`, `CANNOT_TRANSFER`, `CANNOT_SET_RESOLVER`, `CANNOT_SET_TTL`, `CANNOT_CREATE_SUBDOMAIN`, `CANNOT_APPROVE`, and `PARENT_CANNOT_CONTROL`, and upstream emits `NameWrapped` and `FusesSet` with fuse values (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L11 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L14 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f).
-- ENSv1 wrapper fuse application is a mask over `effective_powers`: powers that depend on a wrapper operation prohibited by the active fuse set are omitted from the row. In particular, resolver-target mutation depends on `CANNOT_SET_RESOLVER`; TTL mutation depends on `CANNOT_SET_TTL`; subname creation depends on `CANNOT_CREATE_SUBDOMAIN` and child `PARENT_CANNOT_CONTROL`; transfer depends on `CANNOT_TRANSFER`; unwrap depends on `CANNOT_UNWRAP`; fuse burning depends on `CANNOT_BURN_FUSES`; and wrapper token approval depends on `CANNOT_APPROVE` (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L427 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L647 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L679 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L686 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L723 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L727 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L827 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L832 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f).
-- If a coarse ENSv1 power such as `resource_control` would imply one or more prohibited wrapper operations, the projection must drop that coarse power rather than publish an overbroad effective-power claim. A later doc-first change may split coarse ENSv1 wrapper powers into finer powers, but it must preserve the fail-closed rule that a burned fuse cannot appear as an available public power.
-- Masked ENSv1 wrapper powers are supported declared-state behavior, not an unsupported annotation and not a second projection. `coverage.status=full` remains valid only when the current wrapper fuse modifier for the row's snapshot was considered; if the worker cannot prove the current fuse state for a wrapper-backed resource, it must not publish unmasked powers or mark the affected permission answer as fully authoritative.
-- for ENSv2, `permissions_current` consumes normalized permission events derived from upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)` and must retain whether an effective power is resource-specific or root-derived because upstream root roles satisfy resource-level `hasRoles` checks through root fallback (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L176 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L181 @ ens_v2@554c309)
-- ENSv2 registry permissions are keyed to the bigname `resource_id` linked to the upstream registry EAC resource; `TokenRegenerated` updates token attributes and invalidates token-facing summaries without moving permission rows to a successor resource (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309)
-- ENSv2 resolver-scoped permissions are keyed by resolver contract instance plus the upstream resolver EAC resource for a whole name, text key, or coin type, as emitted by `NamedResource`, `NamedTextResource`, and `NamedAddrResource` before the corresponding EAC role change (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L132 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L137 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L239 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L257 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L282 @ ens_v2@554c309)
-- `GET /v1/resources/lookup` reads `name_current` only to expose the current opaque `resource_id` for an exact `{namespace, name}`. `resource_hex` remains nullable and deferred unless a stable projected field is documented; workers must not derive it from `resource_id`, `namehash`, token ID, or calldata.
-- `GET /v1/roles` and `GET /v1/names/{namespace}/{name}/roles` are compact reads over `permissions_current`. They may expose `role_bitmap` only when the projection retained a stable bitmap for that row; `effective_powers` remains the API-owned public power list and must not be inferred client-side from the bitmap.
-- role compact provenance is a section summary derived from the same current permission row provenance. Row-granular grant source, revocation source, inheritance path, and transfer behavior remain on `GET /v1/resources/{resource_id}/permissions`.
+## Address to names
 
-### Resolver overview
+Default unit is the surface, not the resource. `GET /v1/names` without an address relation filter reads `name_current` as the row universe; with `owner`, `registrant`, or `account` filters it reads `address_names_current` membership first and joins back to `name_current` for compact display, sort, and counts.
 
-- keyed by `(chain_id, resolver_address)`
-- serves declared summary sections for bindings, aliases, permissions, role holders, and event/count summaries
-- supported `aliases` reuses the same supported `{status, count, items}` envelope as `bindings`, with `items` sourced only from current resolver-linked bindings whose `binding_kind=resolver_alias_path`
-- resolver-overview alias support stays within `resolver_current`; it does not add an alias-only projection family, historical alias ledger, or second resolver-binding truth system
-- for ENSv1 PublicResolver-generation targets admitted through the supported resolver-profile gate, `resolver_current.bindings`, `resolver_current.aliases`, and resolver event fan-in summaries do not enumerate the current names pointing at that shared resolver address; those sections return `UnsupportedSummary` with `unsupported_reason="resolver_binding_enumeration_not_projected"` because shared PublicResolver fan-in is unbounded. Exact-name resolver state remains available through `name_current` and resolution projections.
-- for full `resolver_current` rebuilds, resolver binding, alias, permission, role-holder, and event fan-in may be treated as non-enumerable for bootstrap safety. The worker may publish explicit unsupported resolver-overview sections for those summaries instead of materializing the unbounded current-name or resolver-scoped permission fan-in; point rebuilds may still inspect the current binding and permission set for targeted repair and audit, and resource-level permission truth remains available through `permissions_current`. Unsupported profile state must remain explicit rather than becoming a zero-count supported resolver overview.
-- for ENSv2, resolver alias mappings are sourced from normalized `AliasChanged` events emitted by admitted `PermissionedResolver` instances; the resolver rewrites by longest matching suffix, so `resolver_current.aliases.items` must preserve both the source and final target DNS-encoded names used to build the public path (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L230 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L650 @ ens_v2@554c309)
-- for ENSv1 and Basenames, `resolver_current` may summarize a resolver only after that resolver address is direct manifest-admitted or resolver discovery-admitted into the relevant resolver source family and admitted as a supported resolver profile for the relevant overview section; a current topology edge observed from registry state alone does not create a supported resolver overview. ENSv1 legacy PublicResolver-generation profiles expose only their admitted sections, so unsupported sections stay explicit rather than appearing as latest-PublicResolver zero-count summaries (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
-- unsupported declared summary sections stay explicit until the corresponding overview detail is projected
-- `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` is the compact DTO over this same family. `counts`, `nodes`, `aliases`, `roles`, and `events` may be populated only from `resolver_current`, `permissions_current`, or canonical normalized-event joins explicitly owned by the route.
-- if `resolver_current` lacks a fan-in section, the compact overview marks that section unsupported and keeps the section `null`; it must not publish zero as a substitute for unknown or unprojected fan-in.
+`owner` is the token-holder filter; `account` plus `relation` is the generalized relation filter; `relation=any` is the deduped union of `registrant`, `token_holder`, `effective_controller` for the same `(namespace, normalized_name)`. Initial relation vocabulary: `registrant`, `token_holder`, `effective_controller`. Callers may request `dedupe_by=resource`. Default sort is `display_name_asc`.
 
-### Resolution
+For `namespace=basenames`, membership and relation facets derive from the same Base-side authority and control as exact-name lookup; reverse-claim intake and L1 compatibility transport do not create membership rows.[^bn-readme-l70][^bn-revreg-l12]
 
-- `GET /v1/resolutions/{namespace}/{name}` uses the same exact-name snapshot selector for its exact-name `data`, declared topology, route-level coverage, record-inventory/cache joins, verified support checks, and verified execution target selection
-- persisted verified resolution output may join the public response only when its stored requested chain positions exactly match the selected exact-name `ChainPositions`; output for a different snapshot remains in execution storage but is not eligible for this response
-- in `mode=verified|both`, missing persisted output for supported ENS Universal Resolver selectors is resolved by API-triggered execution at the selected exact-name snapshot; the resulting trace and outcome must be persisted before the response joins them, and no `at` / no `chain_positions` means the selected target is `consistency=head` at the latest stored checkpoint (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
-- declared `topology` freezes the fixed subdocument `{registry_path, subregistry_path, resolver_path, wildcard, alias, version_boundaries, transport}`; it remains part of the resolution read contract rather than a second topology ledger
-- for ENSv2, `topology.subregistry_path` and `topology.registry_path` consume normalized `SubregistryChanged` and `ParentChanged`, `topology.alias` consumes normalized `AliasChanged`, and `topology.wildcard` is populated only by observed extended-resolution evidence with a concrete source resolver and matched labels; manifest presence or resolver deployment alone must not synthesize wildcard coverage (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L412 @ ens_v2@554c309)
-- for `namespace=basenames`, declared `topology` keeps Base-side authority on `registry_path` and `resolver_path` while publishing the separate compatibility hop in `transport`; the current Basenames `verified_resolution=supported` class is the exact-surface transport-assisted direct-path class where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, and `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
-- for ENSv1 and Basenames, `record_inventory_current` and `record_cache` may consume retained resolver-local record events from the current resolver as event-evidenced selector/cache facts even while resolver-profile admission is still pending; for ENSv1 this includes generic resolver-event topics rather than only events from individually profile-admitted known resolver targets. Only decoded normalized resolver events are projection inputs: a retained generic topic collision whose indexed fields or ABI payload do not match the ENSv1 resolver event shape does not create a selector, cache value, gap, or coverage signal. Unobserved selectors in a pending family remain explicit `resolver_family_pending`, while selectors in an explicitly unsupported profile family remain `resolver_family_unsupported`; neither state is treated as absent or complete (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L10 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
-- ENSv1 generic resolver-event observation is not a projection support fallback. Projection workers must ignore pubkey evidence until a later doc-first admission exists, must keep `DataResolver` evidence unsupported for known PublicResolver-generation profiles, and must keep `DataResolver` evidence pending / unknown for unknown resolver implementations. A generic `resolver_record` observation may preserve evidence, but it must not make an unlisted ENSv1 record family appear supported.
-- for ENSv1 discovered resolver instances, the Phase 4 supported dynamic profile set is ENS Labs PublicResolver-generation-compatible and profile-exact. Projection workers may promote complete family coverage, resolver-overview, resolver-authorization, latest-only behavior, and onchain-call parity only when the resolver-profile state for the resolver `contract_instance_id` is `supported` for the emitted fact family on that admitted generation; `pending` or `unsupported` profile state keeps non-event-evidenced family coverage partial. Latest PublicResolver compatibility is anchored to the upstream PublicResolver mixin surface, ERC165 support, and ResolverBase record-versioning, but older admitted generations must not inherit latest-only name-wrapper awareness, default coin-type fallback, VersionableResolver boundaries, DNS records, text, contenthash, ABI, name, or interface support beyond their manifest-admitted profile. Basenames projections use the separate Base-side resolver-profile gate in the next bullet (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f)
-- for Basenames discovered Base-side resolver instances, the only complete Phase 8 supported dynamic profile is `L2Resolver`-compatible. Projection workers may promote complete family coverage and resolver-authorization facts only when the resolver-profile state for the resolver `contract_instance_id` is `supported` for the emitted fact family; `pending` or `unsupported` profile state keeps non-event-evidenced family coverage partial. `L2Resolver` compatibility is anchored to the upstream `L2Resolver` resolver-profile mixins, extended-resolution and ERC165 support, and authorization model, and this rule does not reuse the ENSv1 PublicResolver-generation profile gate or widen Basenames L1 transport / execution projections (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
-- `GET /v1/names/{namespace}/{name}/records` is a compact read over the exact same resolver summary, `record_inventory_current`, and `record_cache` join as `GET /v1/resolutions/{namespace}/{name}`. Known text keys, avatar, content hash, and coin-type inventory are declared inventory/cache facts by default; verified values remain execution-owned and may appear only in explicit verified sections for requested selectors.
-- `record_inventory_current` is keyed by `(resource_id, version_boundary)` and serves both declared `record_inventory` and declared `record_cache`
-- `record_inventory` and `record_cache` are two declared subdocuments over the same selector space and version boundary; they are not separate truth systems
-- every version-boundary object exposed by declared resolution uses the fixed fields `{logical_name_id, resource_id, normalized_event_id, event_kind, chain_position}`
-- `topology.version_boundaries.record_version_boundary`, `record_inventory.record_version_boundary`, and `record_cache.record_version_boundary` must stay identical for the same declared answer
-- `record_inventory` carries the fixed fields `{record_version_boundary, enumeration_basis, selectors, explicit_gaps, unsupported_families, last_change}`
-- `record_inventory.enumeration_basis` is the fixed object `{observed_selectors, capability_declared_families, globally_enumerable}`
-- `record_inventory.selectors[*]` and `record_cache.entries[*]` share the selector identity tuple `{record_key, record_family, selector_key}`; callers round-trip `record_key` in `records`
-- `selector_key` is `null` for scalar families and a string for parameterized families, so numeric selector domains such as coin types stay textual on the wire
-- `record_inventory` carries selector space, explicit gaps, and unsupported families
-- `record_cache` carries the fixed fields `{record_version_boundary, entries}` and each entry uses `{record_key, record_family, selector_key, status}` plus conditional `value` or `unsupported_reason` keyed by `status`
-- `record_cache.entries[*]` use the `ResultStatus` subset `success|not_found|unsupported`; if narrowed by `records`, entry order follows request order, otherwise `record_key` ascending
-- `record_cache` carries last-known values for cacheable selectors at that same boundary and may be narrowed to requested selectors without changing the projection family
-- after a `record_inventory_current` rebuild, the worker may run a bounded text-value hydration pass for observed ENSv1 `text:<key>` selectors whose current resolver is admitted as a supported PublicResolver-compatible text profile. The pass batches `text(bytes32,string)` calls through Multicall3 at provider `latest`, writes only `success` / `not_found` values back into `record_inventory_current.entries`, leaves failed calls as explicit `unsupported`, and does not create execution traces or move verified-resolution ownership into projections.
-- `verified_queries` remain execution output keyed by the explicit selector request, including output produced on demand and persisted before a mixed resolution response returns; projection rows do not become a second verified-resolution ledger
-- for that supported Basenames class, execution output may carry persisted CCIP-participating traces because the upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`; those traces join the public verified surface only for the exact transport-assisted direct class, while other Basenames path classes remain execution-local `unsupported` until a later contract update broadens support (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+`include=role_summary` adds `role_summary`, `subname_count`, `record_count`, `status`, `expiry` per item. It does not change supported filters, default grouping, default sort, cursor semantics, or route-level coverage.
 
-### Primary names
+- `role_summary` groups current `permissions_current` rows for the row's `resource_id` by `subject`, keeping each subject's `scope` and `effective_powers`. Row-granular grant lineage stays on `permissions_current`.
+- `subname_count` reuses `children_current` under the declared direct-child rule.
+- `status` and `expiry` mirror the current `ControlVector` for the row's `resource_id`.
+- `record_count` counts distinct stable declared record selectors at the current version boundary using the same semantics as `Resolution.record_inventory`. It is not a raw slot count or a verified-query count.
 
-- keyed by `(address, coin_type, namespace)`
-- serves the exact-tuple declared claim anchor plus the invalidation context needed for current exact-tuple handling and any later additive claimed-local readback
-- for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1`; missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces, and admitting those fallback sources remains deferred (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
-- for Basenames on the shipped mainnet profile, `basenames_base_primary` is the declared primary-claim intake owner only; `primary_names_current(address, coin_type, namespace)` may carry claim-local lookup and invalidation inputs for that intake, but it does not become the declared truth family for exact-name, address-name, or children reads because upstream exposes reverse-name claims through the dedicated ReverseRegistrar rather than the Base authority stack (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
-- the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
-- for Basenames as well as ENS, projection-owned claim state and execution-owned verification state stay distinct: Base authority projections do not synthesize public primary-name payloads from exact-name/address-name/children truth, and `primary_names_current` does not persist or backfill `verified_primary_name` because upstream keeps reverse-name writes on the Base ReverseRegistrar while verified resolution enters through the separate Ethereum Mainnet `L1Resolver` (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
-- projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name`; richer claimed payload fields remain additive-only except exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and the exact-tuple `invalid_name` `raw_claim_name` allowance
-- for ENS on Ethereum Mainnet in Phase 7, the shipped projection is the exact-tuple claim anchor plus declared claim-side inputs only: reverse tuple admission supplies lookup and invalidation state, and it does not join resolver-backed or execution-derived name identity into public `claimed_primary_name` fields (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
-- `primary_names_current(address, coin_type, namespace)` is the frozen exact-tuple claim-side lookup / invalidation anchor only for this route family; it owns the declared claim-side inputs and invalidation context for the requested tuple, not verified result publication
-- that identity stays tied to the exact requested tuple and may own `claim_status`, `raw_claim_name`, the declared normalized claim-identity source for `claimed_primary_name.name`, and the claim-local provenance inputs for `claimed_primary_name.provenance` plus request-matching invalidation hooks; it does not own fallback-source selection beyond the admitted reverse-only surface, execution `request_type`, execution `request key`, `execution_trace_id`, verified status, verified name identity, verification-local failure payloads, or the route-level join between claim-side and verification-side provenance (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
-- primary-name route coverage is a route-local API contract, not a `coverage_current` exact-name row; `primary_names_current` may supply claim-side inputs used by the exact-tuple readback class, but it does not persist a coverage row or make coverage exhaustive
-- the frozen first Basenames exact-tuple `verified_primary_name` support class stays execution-derived under `basenames_execution`: it uses the same route tuple, the exact request-key string `{namespace}:{normalized_address}:{coin_type}`, and execution identity `request_type=verified_primary_name`, keeps the matching `primary_names_current(address, coin_type, namespace)` row as the only claim-side lookup / invalidation anchor, does not require a second primary-name manifest capability flag, and still does not let projection rows own `execution_trace_id`, verified status, verified name identity, or verification-local provenance because upstream keeps reverse-name writes on the Base ReverseRegistrar while verified resolution enters through the separate Ethereum Mainnet `L1Resolver` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
-- the exact-tuple persisted-readback class is the only primary-name coverage support class in this freeze: ENS uses `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]` and Basenames uses `source_classes_considered=["basenames_base_primary","basenames_execution"]`; both publish route-level `status=partial`, `exhaustiveness=non_enumerable`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason=null` only for the requested tuple (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
-- out-of-class primary-name tuples, fallback claim sources, fresh verified-primary execution, and broader address or namespace coverage stay explicit `unsupported` with `source_classes_considered=[]` and do not derive support from tuple presence or from `coverage_current`
-- the admitted public claimed-local fields beyond bare status are exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and `raw_claim_name`
-- when the route publishes `claimed_primary_name.provenance`, it is exact-tuple declared-only provenance sourced from the requested `primary_names_current(address, coin_type, namespace)` row's claim-local provenance inputs; it must strip any `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material before publication and must omit `execution_trace_id`
-- when the route publishes `raw_claim_name`, it is copied verbatim from `primary_names_current.raw_claim_name` for the same exact `(address, coin_type, namespace)` tuple and only when `claim_status=invalid_name`
-- blank or whitespace-only raw claim names are treated as `not_found`; `invalid_name` is reserved for nonblank raw claim names that cannot be normalized
-- `claimed_primary_name.name`, when present, comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple, aligned with the currently admitted reverse-only claim precedence (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
-- it must not be synthesized or backfilled from manifest presence, resolver-backed identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source
-- `claimed_primary_name.name` remains distinct from execution-derived `verified_primary_name.name`; this clarification does not change when `verified_primary_name.name` appears, and it does not by itself widen the exact-tuple primary-name coverage contract above
-- tuple presence is a lookup and invalidation hook only; it does not by itself widen claim precedence, admit fallback sources, change route-level coverage outside the exact-tuple persisted-readback support class, or imply richer tuple-present claimed payload support beyond exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and the exact-tuple `invalid_name` `raw_claim_name` allowance (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
-- `raw_claim_name` is projection-owned claim state only; it exists to preserve the declared raw input when normalization fails and must not be copied into `verified_primary_name`
-- projection rows do not own verified-only states or failure payloads: `mismatch`, `execution_failed`, and verification-local `failure_reason` stay execution-derived even when the tuple row exists
-- claim-local provenance inputs remain projection-owned lookup / invalidation material; the public `claimed_primary_name.provenance` surface is the exact-tuple declared-only projection-backed slice of those inputs, stripped of `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material and with no `execution_trace_id`
-- the now-frozen `verified_primary_name.provenance` invariant is additive to public publication rather than projection-owned state: when admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement for the same exact tuple over execution output only
-- `verified_primary_name.provenance` may publish only `execution_trace_id` plus `manifest_versions` for that same persisted verification trace; `verified_primary_name.provenance.execution_trace_id` must equal top-level `provenance.execution_trace_id`
-- `verified_primary_name.provenance` must not publish `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material, restate `claimed_primary_name.provenance`, introduce a second lookup / invalidation identity for the tuple, or publish other `Provenance` fields
-- top-level `provenance` remains the only route-level join between declared claim inputs and the persisted verification trace; projection rows do not own that join, verified status, or verified payload publication
-- `verified_primary_name` in `mode=verified|both`, including the frozen first Basenames exact-tuple persisted-readback support class and any later `verified_primary_name.provenance` publication, remains execution-derived even when verified-primary normalized events are also projected for lookup and invalidation support
+ENSv1 `TextChanged` events that carry a key and value produce selector-specific records (`text:avatar`, etc.) and retain the emitted value in `record_inventory_current.entries`. They are never collapsed into a generic `text` selector.[^v1-itextres-l5][^v1-textres-l21]
 
-## 4. Invalidation Rules
+Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`. App-facing total counts and `GET /v1/addresses/{address}/names/count` count the filtered projection row universe before cursor slicing. Unsupported filter and count combinations are explicit; they never fall back to raw fact scans.
 
-Projection invalidation happens on:
+`resolved_address` filtering is deferred until a declared record-value equality projection exists for the namespace and selector family.
+
+## Name to children
+
+Default unit is declared direct child surfaces. Compact rows for `GET /v1/names/{namespace}/{name}/children` come from `children_current` joined to the child's current `name_current` summary: child display name, normalized name, parent-relative label, labelhash where projected, namehash, owner, registrant where available, direct `subname_count` where projected.
+
+For ENSv2 `sepolia-dev`, declared direct child and linked-subregistry buckets come from `SubregistryChanged` and `ParentChanged` graph events, not token ID enumeration.[^v2-events-l49][^v2-events-l75][^v2-pr-l131][^v2-pr-l151] For Basenames, declared direct child rows come from the admitted Base registry / registrar / resolver split, not primary-claim intake or L1 compatibility transport.[^bn-readme-l8][^bn-readme-l69][^bn-readme-l70][^bn-revreg-l12]
+
+Linked, alias-derived, and observed-wildcard children are separate `surface_class` buckets. Default sort is `display_name_asc`. `include=counts` uses the declared direct-child count only; other buckets stay deferred.
+
+## History
+
+Default sort is `chain_position_desc`. `scope=surface|resource|both` maps to normalized-event filters, not different truth systems. Name-history resource scope resolves across every resource ever bound to the requested surface; resource-history surface scope resolves across every surface ever bound to the requested resource. `Address.history` resolves address-derived surface and resource anchor sets first, then applies the same scope contract.
+
+`view=compact` and `GET /v1/events` are presentation views over canonical normalized events. They may remap event kinds into compact `type` aliases and `data`, but they do not introduce a second history projection, include observed or orphaned rows by default, or read raw facts. `GET /v1/events` block filters apply to canonical normalized-event chain positions after the route has selected name, address, or opaque resource anchors. Selector-specific record history is deferred.
+
+## Resource permissions
+
+Keyed by `(resource_id, subject, scope)`. Default unit is the effective permission row for one subject and scope. Resolver-scoped permissions are rows in this family; resolver overview reads summarize them but do not replace them.
+
+`PermissionScopeChanged` is a modifier input for the same `resource_id`, not a subject grant and not a separate ledger. Workers apply the latest canonical scope modifier at or before the row's chain-position context after selecting the current `PermissionChanged` row, and they include the modifier in provenance and chain positions when it changes the published row.
+
+For ENSv1 wrapper-backed resources, `PermissionScopeChanged` carries the active NameWrapper fuse value observed from wrapper events. Upstream defines `CANNOT_UNWRAP`, `CANNOT_BURN_FUSES`, `CANNOT_TRANSFER`, `CANNOT_SET_RESOLVER`, `CANNOT_SET_TTL`, `CANNOT_CREATE_SUBDOMAIN`, `CANNOT_APPROVE`, `PARENT_CANNOT_CONTROL`, and emits `NameWrapped` and `FusesSet` carrying fuse values.[^v1-iname-l10][^v1-iname-l11][^v1-iname-l12][^v1-iname-l13][^v1-iname-l14][^v1-iname-l15][^v1-iname-l16][^v1-iname-l18][^v1-iname-l31][^v1-iname-l37]
+
+Fuse application masks `effective_powers`: any power that depends on a wrapper operation prohibited by the active fuse set is omitted. Resolver-target mutation depends on `CANNOT_SET_RESOLVER`; TTL on `CANNOT_SET_TTL`; subname creation on `CANNOT_CREATE_SUBDOMAIN` and child `PARENT_CANNOT_CONTROL`; transfer on `CANNOT_TRANSFER`; unwrap on `CANNOT_UNWRAP`; fuse burning on `CANNOT_BURN_FUSES`; wrapper token approval on `CANNOT_APPROVE`.[^v1-nw-l421][^v1-nw-l637][^v1-nw-l666][^v1-nw-l686][^v1-nw-l827][^v1-nw-l1022][^v1-nw-l132] If a coarse ENSv1 power would imply a prohibited operation, the projection drops the coarse power rather than publish an overbroad claim. A burned fuse never appears as an available public power. `coverage.status=full` for a wrapper-backed resource is valid only when the worker considered the current fuse modifier; without that proof, unmasked powers must not be published as fully authoritative.
+
+For ENSv2, `permissions_current` consumes events derived from upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)` and retains whether each effective power is resource-specific or root-derived, because root roles satisfy resource-level `hasRoles` checks through root fallback.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181] Registry permissions key to the bigname `resource_id` linked to the upstream registry EAC resource; `TokenRegenerated` updates token attributes without moving permission rows to a successor resource.[^v2-iperm-l34][^v2-events-l69][^v2-pr-l451] Resolver-scoped permissions key by resolver contract instance plus the upstream resolver EAC resource for a whole name, text key, or coin type, as emitted by `NamedResource`, `NamedTextResource`, `NamedAddrResource`.[^v2-iperm-resolver-l14][^v2-pres-l132][^v2-pres-l142][^v2-pres-l153][^v2-pres-l239][^v2-pres-l257][^v2-pres-l282]
+
+`GET /v1/resources/lookup` reads `name_current` only to expose the current opaque `resource_id` for an exact `{namespace, name}`. `resource_hex` is nullable and deferred. `GET /v1/roles` and `GET /v1/names/{namespace}/{name}/roles` are compact reads over `permissions_current` and may expose `role_bitmap` only when the projection retained a stable bitmap. `effective_powers` stays API-owned. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+
+## Resolver overview
+
+Keyed by `(chain_id, resolver_address)`. Sections: bindings, aliases, permissions, role holders, event and count summaries.
+
+`aliases` reuses the `{status, count, items}` envelope of `bindings`. Items come from current resolver-linked bindings whose `binding_kind=resolver_alias_path`. Resolver-overview alias support stays inside `resolver_current`.
+
+For ENSv1 PublicResolver-generation targets, `bindings`, `aliases`, and event fan-in summaries do not enumerate the current names pointing at a shared resolver address. Those sections return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected` because shared PublicResolver fan-in is unbounded. Exact-name resolver state stays available through `name_current` and resolution projections.
+
+For full `resolver_current` rebuilds, binding, alias, permission, role-holder, and event fan-in may be treated as non-enumerable for bootstrap safety. The worker may publish explicit unsupported sections rather than materialize unbounded fan-in. Point rebuilds may still inspect the current binding and permission set.
+
+For ENSv2, alias mappings come from `AliasChanged` emitted by admitted `PermissionedResolver` instances. The resolver rewrites by longest matching suffix, so `aliases.items` preserves both source and final target DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l56][^v2-pres-l230][^v2-pres-l650]
+
+For ENSv1 and Basenames, `resolver_current` summarizes a resolver only after that resolver address is manifest-admitted or resolver-discovery-admitted into the relevant resolver source family and admitted as a supported profile.[^v1-ens-l12][^bn-registry-l132] A topology edge observed from registry state alone does not create a supported resolver overview.
+
+`GET /v1/resolvers/{chain_id}/{resolver_address}/overview` is the compact DTO over this family. `counts`, `nodes`, `aliases`, `roles`, `events` populate only from `resolver_current`, `permissions_current`, or canonical normalized-event joins explicitly owned by the route. Missing fan-in produces an unsupported section with `null` body — never zero as a substitute for unknown.
+
+## Resolution
+
+`GET /v1/resolutions/{namespace}/{name}` uses the same exact-name snapshot selector for `data`, declared topology, route-level coverage, record-inventory and cache joins, verified support checks, and verified execution target selection.
+
+Persisted verified output joins the public response only when its stored requested chain positions exactly match the selected exact-name `ChainPositions`. In `mode=verified|both`, missing persisted output for supported ENS Universal Resolver selectors triggers API-driven execution at the selected snapshot; the trace and outcome persist before the response joins them. No `at` and no `chain_positions` means `consistency=head` at the latest stored checkpoint.[^v1-iuniv-l44][^v1-iuniv-l52]
+
+Declared `topology` carries the fixed subdocument `{registry_path, subregistry_path, resolver_path, wildcard, alias, version_boundaries, transport}`.
+
+For ENSv2, `subregistry_path` and `registry_path` consume `SubregistryChanged` and `ParentChanged`; `alias` consumes `AliasChanged`; `wildcard` populates only from observed extended-resolution evidence with a concrete source resolver and matched labels.[^v2-events-l49][^v2-events-l75][^v2-iperm-resolver-l14][^v2-pres-l412]
+
+For Basenames, `topology` keeps Base-side authority on `registry_path` and `resolver_path` and publishes the compatibility hop in `transport`. The current `verified_resolution=supported` class is exact-surface transport-assisted direct path: `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source=null`, `alias.final_target=null`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`.[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70]
+
+`record_inventory_current` is keyed by `(resource_id, version_boundary)` and serves both declared `record_inventory` and declared `record_cache`. They are two declared subdocuments over the same selector space and version boundary; `record_version_boundary` is identical across `topology.version_boundaries`, `record_inventory`, and `record_cache`. `record_inventory.selectors[*]` and `record_cache.entries[*]` share the selector identity tuple `{record_key, record_family, selector_key}`. `selector_key` is `null` for scalar families and a string for parameterized families, so coin types stay textual. `record_cache.entries[*]` use `success|not_found|unsupported`.
+
+For ENSv1 and Basenames, `record_inventory_current` and `record_cache` may consume retained resolver-local record events from the current resolver as event-evidenced selector and cache facts even while resolver-profile admission is pending. Only decoded normalized resolver events are projection inputs.[^v1-ens-l12][^v1-iaddrres-l6][^v1-iaddressres-l6][^v1-itextres-l5][^v1-itextres-l10][^bn-registry-l132][^bn-addrres-l61] Unobserved selectors in a pending family stay `resolver_family_pending`; selectors in an explicitly unsupported family stay `resolver_family_unsupported`. ENSv1 generic resolver-event observation is not a profile fallback: workers ignore pubkey evidence, keep `DataResolver` evidence unsupported for known PublicResolver-generation profiles and pending for unknown implementations, and never use a generic `resolver_record` observation to promote an unlisted family to supported.
+
+For ENSv1 discovered resolver instances, the supported dynamic profile set is ENS Labs PublicResolver-generation-compatible and profile-exact.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l131][^v1-pres-l150][^v1-resbase-l17][^v1-resbase-l23] Older admitted generations do not inherit latest-only NameWrapper awareness, default coin-type fallback, VersionableResolver boundaries, DNS records, text, contenthash, ABI, name, or interface support. For Basenames discovered Base-side resolver instances, the only complete supported dynamic profile is `L2Resolver`-compatible.[^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l22][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
+
+After a `record_inventory_current` rebuild, the worker may run a bounded text-value hydration pass for observed ENSv1 `text:<key>` selectors whose current resolver is admitted as a supported PublicResolver-compatible text profile. The pass batches `text(bytes32,string)` calls through Multicall3 at provider `latest`, writes only `success` and `not_found` into `record_inventory_current.entries`, leaves failed calls as explicit `unsupported`, and creates no execution traces.
+
+`GET /v1/names/{namespace}/{name}/records` is a compact read over the same resolver summary, `record_inventory_current`, `record_cache` join. Verified values stay execution-owned. `verified_queries` for the supported Basenames class can include persisted CCIP-participating traces only for the exact transport-assisted direct class.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Other Basenames path classes stay execution-local `unsupported`.
+
+## Primary names
+
+Keyed by `(address, coin_type, namespace)`. The row is the exact-tuple declared claim anchor plus invalidation context for current exact-tuple handling.
+
+For ENS on Ethereum Mainnet, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Missing or unsupported reverse claims do not fall back to registry, resolver, or other claim-setting surfaces. For Basenames, `basenames_base_primary` is the declared primary-claim intake owner. `primary_names_current` carries claim-local lookup and invalidation inputs; it does not become the declared truth family for exact-name, address-name, or children reads.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150]
+
+Route-level `claimed_primary_name` and `verified_primary_name` share `ResultStatus` but stay distinct: declared claim state and verified execution state never collapse into one projection-owned field. `primary_names_current` does not persist or backfill `verified_primary_name`.[^bn-l1resolver-l13]
+
+Projection-owned `claimed_primary_name` is limited to `success|not_found|unsupported|invalid_name`. Public claimed-local fields beyond bare status are exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and `raw_claim_name` for `invalid_name`.
+
+- `claimed_primary_name.name` comes only from the requested row's declared normalized claim-identity source, aligned with the current reverse-only claim precedence.[^v1-revreg-l100][^v1-revreg-l123][^v1-revreg-l129][^v1-revreg-l130] It is not synthesized from manifest presence, resolver identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source. It stays distinct from execution-derived `verified_primary_name.name`.
+- `claimed_primary_name.provenance`, when published, is exact-tuple declared-only provenance from the requested row's claim-local inputs. The worker strips any `verified_primary_name_lookup` or `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
+- `raw_claim_name` is copied verbatim from `primary_names_current.raw_claim_name` for the same exact tuple and only when `claim_status=invalid_name`. Blank or whitespace-only raw claim names are `not_found`; `invalid_name` is reserved for nonblank raw claim names that cannot be normalized. It is never copied into `verified_primary_name`.
+
+The row owns claim-side inputs and invalidation context only — not fallback-source selection beyond reverse-only, execution `request_type`, execution request key, `execution_trace_id`, verified status, verified name identity, verification-local failure payloads, or the route-level join between claim-side and verification-side provenance.
+
+The exact-tuple persisted-readback class is the only primary-name coverage support class. ENS uses `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]`; Basenames uses `["basenames_base_primary","basenames_execution"]`. Both publish route-level `status=partial`, `exhaustiveness=non_enumerable`, `enumeration_basis=primary_name_lookup`, `unsupported_reason=null` only for the requested tuple.[^v1-revreg-deploy][^v1-ur-deploy][^bn-readme-l22][^bn-readme-l33] Out-of-class tuples, fallback claim sources, fresh verified-primary execution, and broader address or namespace coverage stay explicit `unsupported` with `source_classes_considered=[]`.
+
+The Basenames exact-tuple `verified_primary_name` support class stays execution-derived under `basenames_execution`. It uses the same route tuple, the request key `{namespace}:{normalized_address}:{coin_type}`, and execution identity `request_type=verified_primary_name`. The matching `primary_names_current` row is the only claim-side anchor.[^bn-revreg-l193][^bn-l1resolver-l13]
+
+The `verified_primary_name.provenance` invariant is additive to public publication. When admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement over execution output: `execution_trace_id` plus `manifest_versions` only, with `verified_primary_name.provenance.execution_trace_id` equal to top-level `provenance.execution_trace_id`. Top-level `provenance` stays the only route-level join between declared claim inputs and the persisted verification trace.
+
+Tuple presence is a lookup and invalidation hook only. It does not widen claim precedence, admit fallback sources, change route-level coverage outside the exact-tuple class, or imply richer claimed payload support.
+
+## Invalidation
+
+Projection invalidation fires on:
 
 - canonicality change
 - manifest version change that affects a consumed capability
 - normalized event insertion for a relevant key
-- execution invalidation signals where a projection stores declared cache summaries
+- execution invalidation signal where the projection stores a declared cache summary
 
-Invalidation must be deterministic and key-scoped. No projection is refreshed by broad time-based polling alone.
+Invalidation is deterministic and key-scoped. No projection refreshes from broad time-based polling.
 
-## 5. Rebuild Strategy
+## Rebuild
 
-Every projection supports:
+Every projection supports point rebuild by key, range rebuild by chain position, and full rebuild from canonical events. Worker modes: continuous apply, backfill apply, reorg repair, one-shot rebuild.
 
-- point rebuild by key
-- range rebuild by chain position
-- full rebuild from canonical events
+Fresh normalized replay may defer normalized-event indexes used only by projection or API readback while current projection tables are empty. Rebuild tooling treats those indexes as part of its readiness boundary: before full current-state rebuilds count as ready for API reads, the deferred indexes must exist again.
 
-Fresh normalized replay may defer normalized-event indexes used only by projection/API readback while current projection tables are empty. Projection rebuild tooling must treat those indexes as part of its readiness boundary: before full current-state rebuilds are considered ready for API reads, the deferred normalized-event projection/read indexes must exist again.
+### Replay status tracking
 
-Automatic all-current projection replay may store durable worker-owned completion markers per projection family after a family publishes successfully. On worker restart, automatic replay may skip a marked family when the marker's replay version matches; the recorded normalized target block is operational metadata, not the skip condition, because the chain head can advance while a bootstrap replay is in flight. Explicit one-shot rebuild commands remain force rebuilds and must clear any stale marker before rebuilding a family, so a failed rebuild cannot leave a misleading completion marker behind.
+`current_projection_replay_status` records durable worker-owned completion markers per projection family after a family publishes successfully. Columns: `projection`, `replay_version`, `completed_normalized_target_block`, `requested_key_count`, `upserted_row_count`, `deleted_row_count`, `completed_at`.
 
-Required worker modes:
+On worker restart, automatic replay skips a family when its marker's `replay_version` matches the current code's replay version. The recorded `completed_normalized_target_block` is operational metadata, not the skip condition — the chain head can advance while a bootstrap replay is in flight.
 
-- continuous apply
-- backfill apply
-- reorg repair
-- one-shot rebuild
+Explicit one-shot rebuild commands are force rebuilds. They clear any stale marker before rebuilding so a failed rebuild cannot leave a misleading completion marker behind.
 
-### Replay operational summary
+### Replay summary (operational tooling)
 
-`bigname-worker replay all-current-projections` is worker-owned operational tooling for projection rebuilds. Its `--json` summary is worker-owned operational output only. It does not expose a public `v1` API, publish a machine-readable API contract, graduate manifest capabilities, change route-level coverage, or claim consumer replacement.
-
-When invoked without `--json`, the command keeps its existing non-JSON behavior. Human-readable progress, logging, and terminal formatting remain operational output with no stable machine-readable contract.
-
-When invoked as `bigname-worker replay all-current-projections --json`, stdout is one JSON object with this stable shape:
+`bigname-worker replay all-current-projections` is worker-owned operational tooling. Its `--json` output is operational, not a public `v1` API contract.
 
 ```json
 {
   "command": "all-current-projections",
   "projections": [
-    {
-      "projection": "address_names_current",
-      "requested": 0,
-      "upserted": 0,
-      "deleted": 0
-    }
+    { "projection": "address_names_current", "requested": 0, "upserted": 0, "deleted": 0 }
   ],
-  "totals": {
-    "requested": 0,
-    "upserted": 0,
-    "deleted": 0
-  }
+  "totals": { "requested": 0, "upserted": 0, "deleted": 0 }
 }
 ```
 
-Rules:
+- `command` is always `all-current-projections`.
+- `projections` lists one object per current family in stable identifier order: `address_names_current`, `children_current`, `coverage_current`, `name_current`, `permissions_current`, `primary_names_current`, `record_inventory_current`, `resolver_current`, `surface_bindings_current`. Families with no shipped rebuild orchestrator (`coverage_current`, `surface_bindings_current`) appear with zero counts.
+- Each projection object carries exactly `projection`, `requested`, `upserted`, `deleted`, all non-negative integers.
+- `totals` carries `requested`, `upserted`, `deleted` summed across the per-projection counts.
+- The summary describes the completed worker command attempt only. It is not stored as projection truth and is not a replay checkpoint.
 
-- `command` is always `all-current-projections`
-- `projections` contains one object per current projection family in stable projection identifier order: `address_names_current`, `children_current`, `coverage_current`, `name_current`, `permissions_current`, `primary_names_current`, `record_inventory_current`, `resolver_current`, `surface_bindings_current`
-- each projection object has exactly `projection`, `requested`, `upserted`, and `deleted`
-- `requested`, `upserted`, and `deleted` are non-negative integer counts for that projection replay attempt
-- `totals` has exactly `requested`, `upserted`, and `deleted`, and each value is the sum of the corresponding per-projection counts
-- the JSON summary describes the completed worker command attempt only; it is not stored as projection truth and is not a replay checkpoint
+## Index baseline
 
-## 6. Index Baseline
-
-Start with indexes that match the public contract:
+Indexes that match the public contract:
 
 - `name_current(logical_name_id)`
 - `address_names_current(address, namespace, canonical_display_name, logical_name_id)`
@@ -291,13 +235,124 @@ Start with indexes that match the public contract:
 - `resolver_current(chain_id, resolver_address)`
 - `primary_names_current(address, coin_type, namespace)`
 
-Add more only after measured query evidence.
+More indexes land only after measured query evidence. Compact routes may need additional measured indexes — they do not create new truth families. Candidates: name search over `(namespace, normalized_name)`; address relation filters over `(address, relation, namespace)`; sort support for expiry, registration, `created_at`; normalized-event filters for `GET /v1/events`; permission filters over `(subject, resource_id)` plus any projected `role_bitmap`.
 
-The app-facing compact routes may require additional measured indexes as traffic and conformance coverage grow, but those indexes do not create new truth families. Candidate measured indexes include name search over `(namespace, normalized_name)`, address relation filters over `(address, relation, namespace)`, sort support for expiry/registration/created timestamps, normalized-event filters for `GET /v1/events`, and permission filters over `(subject, resource_id)` plus any projected `role_bitmap`.
+## Ownership
 
-## 7. Ownership Boundaries
+- Adapters emit normalized events. They never write projection rows.
+- Projection workers read normalized events and manifests. They own every projection write.
+- API handlers read projections and execution output. They never write either.
+- Execution workers may publish invalidation signals but do not mutate declared projections outside their owned cache summaries.
 
-- adapters emit normalized events and never write projection rows directly
-- projection workers read normalized events and manifests
-- API handlers read projections and execution output only
-- execution workers may publish invalidation signals but do not mutate declared projections outside their owned cache summaries
+Workers own one family each: `name_current`, `address_names_current`, `children_current`, `permissions_current`, `record_inventory_current`, `resolver_current`, `primary_names_current`. Each lives under `apps/worker/src/<family>/` with its own projection, rebuild, and tests. Replay orchestration lives in `apps/worker/src/replay/` and runs the families in the order above so cross-family inputs are stable when later families read them.
+
+---
+
+[^bn-readme-l8]: (upstream: .refs/basenames/README.md:L8 @ basenames@1809bbc)
+[^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
+[^bn-readme-l28]: (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
+[^bn-readme-l29]: (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc)
+[^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
+[^bn-readme-l34]: (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+[^bn-readme-l69]: (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
+[^bn-readme-l70]: (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+
+[^bn-l1resolver-l13]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+[^bn-l1resolver-l154]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)
+[^bn-l1resolver-l173]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
+[^bn-l1resolver-l191]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+
+[^bn-registry-l132]: (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
+[^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
+[^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)
+[^bn-l2resolver-l22]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+[^bn-l2resolver-l29]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc)
+[^bn-l2resolver-l182]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)
+[^bn-l2resolver-l193]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
+[^bn-l2resolver-l209]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
+[^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
+[^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
+[^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+[^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+[^bn-addrres-l61]: (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
+
+[^v1-ens-l12]: (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+[^v1-iaddrres-l6]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
+[^v1-iaddressres-l6]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f)
+[^v1-itextres-l5]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
+[^v1-itextres-l10]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L10 @ ens_v1@91c966f)
+[^v1-textres-l21]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L21 @ ens_v1@91c966f)
+[^v1-namechanged-l10]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L10 @ ens_v1@91c966f)
+[^v1-namechanged-l18]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f)
+
+[^v1-pres-l20]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f)
+[^v1-pres-l31]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f)
+[^v1-pres-l131]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f)
+[^v1-pres-l150]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f)
+[^v1-resbase-l17]: (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)
+[^v1-resbase-l23]: (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f)
+
+[^v1-iname-l10]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+[^v1-iname-l11]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L11 @ ens_v1@91c966f)
+[^v1-iname-l12]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L12 @ ens_v1@91c966f)
+[^v1-iname-l13]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L13 @ ens_v1@91c966f)
+[^v1-iname-l14]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L14 @ ens_v1@91c966f)
+[^v1-iname-l15]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L15 @ ens_v1@91c966f)
+[^v1-iname-l16]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L16 @ ens_v1@91c966f)
+[^v1-iname-l18]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
+[^v1-iname-l31]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L31 @ ens_v1@91c966f)
+[^v1-iname-l37]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
+
+[^v1-nw-l132]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
+[^v1-nw-l421]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421 @ ens_v1@91c966f)
+[^v1-nw-l637]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637 @ ens_v1@91c966f)
+[^v1-nw-l666]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666 @ ens_v1@91c966f)
+[^v1-nw-l686]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L686 @ ens_v1@91c966f)
+[^v1-nw-l827]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L827 @ ens_v1@91c966f)
+[^v1-nw-l1022]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022 @ ens_v1@91c966f)
+
+[^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+[^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
+[^v1-revreg-l74]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
+[^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
+[^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
+[^v1-revreg-l100]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f)
+[^v1-revreg-l123]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
+[^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
+[^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+
+[^v1-iuniv-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
+[^v1-iuniv-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
+
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
+
+[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
+[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
+[^v2-events-l30]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309)
+[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309)
+[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
+[^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+
+[^v2-pr-l131]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L131 @ ens_v2@554c309)
+[^v2-pr-l151]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L151 @ ens_v2@554c309)
+[^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309)
+
+[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
+[^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309)
+[^v2-pres-l132]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L132 @ ens_v2@554c309)
+[^v2-pres-l142]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@554c309)
+[^v2-pres-l153]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2@554c309)
+[^v2-pres-l230]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L230 @ ens_v2@554c309)
+[^v2-pres-l239]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L239 @ ens_v2@554c309)
+[^v2-pres-l257]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L257 @ ens_v2@554c309)
+[^v2-pres-l282]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L282 @ ens_v2@554c309)
+[^v2-pres-l412]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L412 @ ens_v2@554c309)
+[^v2-pres-l650]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L650 @ ens_v2@554c309)
+
+[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309)
+[^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L176 @ ens_v2@554c309)
+[^v2-eac-l181]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L181 @ ens_v2@554c309)

@@ -1,12 +1,8 @@
 # Development Plan
 
-Status: Phase 0 baseline
+Internal reference. This is the phased implementation plan that drove bigname's bootstrap and first vertical slices. It is preserved as historical record and forward-looking structure for work that hasn't shipped yet. The shipped behavior of the system is described in the top-level `docs/` files; this plan is not the source of truth for what works today.
 
-Normative scope: milestone goals, phase deliverables, exit criteria, and the companion docs referenced here are normative for repository bootstrap and the first vertical slices.
-
-This document translates the revised architecture into an implementation sequence.
-
-It keeps early work ordered around the decisions that are hardest to change later:
+It orders work around the decisions that are hardest to change later:
 
 - public semantics
 - surface / resource identity
@@ -15,10 +11,7 @@ It keeps early work ordered around the decisions that are hardest to change late
 - replay model
 - verified execution model
 
-The plan assumes a modular monolith for the first production version.
-Parallel execution and ownership boundaries live in [Parallel Workstreams](./workstreams.md).
-
-Implementation detail should stay subordinate to one rule: build the native `v1` contract we actually want, not a disguised legacy indexer.
+The plan assumes a modular monolith for the first production version. Parallel execution and ownership boundaries live in [`workstreams.md`](./workstreams.md).
 
 ---
 

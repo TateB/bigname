@@ -1,8 +1,6 @@
 # Parallel Workstreams
 
-Status: Phase 0 baseline
-
-This document defines how implementation should be split so multiple engineers can work concurrently without fighting over semantics or storage boundaries.
+Internal reference. Companion to [`development-plan.md`](./development-plan.md). Describes how implementation work splits so multiple engineers can move concurrently without fighting over semantics or storage boundaries.
 
 ## 1. Freeze Before Forking Work
 
