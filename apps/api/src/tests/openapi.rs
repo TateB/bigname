@@ -170,6 +170,8 @@ fn openapi_document_publishes_only_shipped_routes() {
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));
+    assert!(!openapi_paths(&document).contains_key("/openapi.json"));
+    assert!(!openapi_paths(&document).contains_key("/docs"));
 }
 
 #[test]
@@ -946,4 +948,63 @@ fn openapi_document_matches_checked_in_artifact() {
     let checked_in: Value =
         serde_json::from_str(&checked_in).expect("checked-in OpenAPI artifact must be valid JSON");
     assert!(!openapi_paths(&checked_in).contains_key("/healthz"));
+    assert!(!openapi_paths(&checked_in).contains_key("/openapi.json"));
+    assert!(!openapi_paths(&checked_in).contains_key("/docs"));
+}
+
+#[tokio::test]
+async fn openapi_json_route_serves_generated_contract() -> Result<()> {
+    let response = app_router(openapi_docs_test_state())
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload, openapi_document());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn openapi_docs_route_serves_viewer() -> Result<()> {
+    let response = app_router(openapi_docs_test_state())
+        .oneshot(
+            Request::builder()
+                .uri("/docs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .context("failed to read OpenAPI docs body")?;
+    let body = String::from_utf8(body.to_vec()).context("OpenAPI docs body must be UTF-8")?;
+
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains("bigname API docs"));
+    assert!(body.contains("/openapi.json"));
+
+    Ok(())
+}
+
+fn openapi_docs_test_state() -> AppState {
+    AppState {
+        phase: "test",
+        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+            .expect("OpenAPI helper route tests only need a lazily parsed pool"),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    }
 }

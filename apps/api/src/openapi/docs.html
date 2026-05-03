@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>bigname API docs</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f8fafc;
+        --panel: #ffffff;
+        --text: #101828;
+        --muted: #667085;
+        --line: #d0d5dd;
+        --soft: #eef2f6;
+        --accent: #0f766e;
+        --accent-soft: #ccfbf1;
+        --warn: #b54708;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111827;
+          --panel: #182230;
+          --text: #f9fafb;
+          --muted: #98a2b3;
+          --line: #344054;
+          --soft: #202939;
+          --accent: #5eead4;
+          --accent-soft: #134e4a;
+          --warn: #fdb022;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        line-height: 1.5;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      main,
+      .topbar {
+        width: min(1120px, calc(100vw - 32px));
+        margin: 0 auto;
+      }
+
+      .topbar {
+        display: grid;
+        gap: 16px;
+        padding: 28px 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .meta,
+      .summary,
+      .empty,
+      .error,
+      .description {
+        color: var(--muted);
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+      }
+
+      input[type="search"] {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font: inherit;
+        padding: 10px 12px;
+      }
+
+      .json-link {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--text);
+        padding: 10px 12px;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      main {
+        display: grid;
+        gap: 16px;
+        padding: 24px 0 48px;
+      }
+
+      section.operation {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        overflow: hidden;
+      }
+
+      .operation-header {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+        padding: 18px;
+      }
+
+      .method {
+        border-radius: 6px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 4px 8px;
+        text-transform: uppercase;
+      }
+
+      .path {
+        overflow-wrap: anywhere;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .summary {
+        margin-top: 4px;
+      }
+
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .tag {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 2px 8px;
+      }
+
+      details {
+        border-top: 1px solid var(--line);
+        padding: 0 18px 16px;
+      }
+
+      summary {
+        cursor: pointer;
+        font-weight: 650;
+        padding: 14px 0;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        border-top: 1px solid var(--line);
+        padding: 9px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 650;
+      }
+
+      code {
+        border-radius: 6px;
+        background: var(--soft);
+        padding: 2px 5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.92em;
+      }
+
+      .response-list {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+      }
+
+      .response-list li {
+        display: grid;
+        grid-template-columns: 68px minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+      }
+
+      .status-code {
+        color: var(--warn);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-weight: 700;
+      }
+
+      .empty,
+      .error {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 18px;
+      }
+
+      @media (max-width: 640px) {
+        main,
+        .topbar {
+          width: min(100vw - 20px, 1120px);
+        }
+
+        .toolbar,
+        .operation-header,
+        .response-list li {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="topbar">
+        <div>
+          <h1 id="title">bigname API docs</h1>
+          <div class="meta" id="meta">Loading OpenAPI document...</div>
+        </div>
+        <div class="toolbar">
+          <input id="filter" type="search" autocomplete="off" placeholder="Filter routes">
+          <a class="json-link" href="/openapi.json">OpenAPI JSON</a>
+        </div>
+      </div>
+    </header>
+    <main id="content">
+      <div class="empty">Loading routes...</div>
+    </main>
+    <script>
+      const specUrl = "/openapi.json";
+      const content = document.getElementById("content");
+      const title = document.getElementById("title");
+      const meta = document.getElementById("meta");
+      const filter = document.getElementById("filter");
+      let spec = null;
+
+      const methodOrder = {
+        get: 0,
+        post: 1,
+        put: 2,
+        patch: 3,
+        delete: 4,
+        options: 5,
+        head: 6,
+        trace: 7
+      };
+
+      function text(value) {
+        return value === undefined || value === null ? "" : String(value);
+      }
+
+      function appendText(parent, value) {
+        parent.textContent = text(value);
+        return parent;
+      }
+
+      function schemaLabel(schema) {
+        if (!schema) return "";
+        if (schema.$ref) return schema.$ref.split("/").pop();
+        if (schema.enum) return schema.enum.join(" | ");
+        if (schema.type === "array") return `${schemaLabel(schema.items) || "value"}[]`;
+        if (Array.isArray(schema.type)) return schema.type.join(" | ");
+        return schema.type || "";
+      }
+
+      function operationEntries(paths) {
+        return Object.entries(paths || {})
+          .flatMap(([path, item]) => Object.entries(item || {})
+            .filter(([method]) => methodOrder[method] !== undefined)
+            .map(([method, operation]) => ({ path, method, operation })))
+          .sort((left, right) => {
+            const pathOrder = left.path.localeCompare(right.path);
+            if (pathOrder !== 0) return pathOrder;
+            return methodOrder[left.method] - methodOrder[right.method];
+          });
+      }
+
+      function matchesFilter(entry, term) {
+        if (!term) return true;
+        const operation = entry.operation || {};
+        const haystack = [
+          entry.method,
+          entry.path,
+          operation.summary,
+          operation.description,
+          operation.operationId,
+          ...(operation.tags || [])
+        ].join(" ").toLowerCase();
+        return haystack.includes(term);
+      }
+
+      function renderTable(parameters) {
+        const table = document.createElement("table");
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        ["Name", "In", "Required", "Type", "Description"].forEach((label) => {
+          headRow.appendChild(appendText(document.createElement("th"), label));
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+        parameters.forEach((parameter) => {
+          const row = document.createElement("tr");
+          [
+            parameter.name,
+            parameter.in,
+            parameter.required ? "yes" : "no",
+            schemaLabel(parameter.schema),
+            parameter.description
+          ].forEach((value, index) => {
+            const cell = document.createElement("td");
+            const node = index === 0 || index === 3 ? document.createElement("code") : cell;
+            appendText(node, value);
+            if (node !== cell) cell.appendChild(node);
+            row.appendChild(cell);
+          });
+          tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        return table;
+      }
+
+      function renderResponses(responses) {
+        const list = document.createElement("ul");
+        list.className = "response-list";
+        Object.entries(responses || {}).forEach(([status, response]) => {
+          const item = document.createElement("li");
+          const code = document.createElement("span");
+          code.className = "status-code";
+          appendText(code, status);
+          item.appendChild(code);
+          item.appendChild(appendText(document.createElement("span"), response.description || ""));
+          list.appendChild(item);
+        });
+        return list;
+      }
+
+      function renderOperation(entry) {
+        const operation = entry.operation || {};
+        const section = document.createElement("section");
+        section.className = "operation";
+
+        const header = document.createElement("div");
+        header.className = "operation-header";
+        header.appendChild(appendText(document.createElement("span"), entry.method));
+        header.lastChild.className = "method";
+
+        const identity = document.createElement("div");
+        identity.appendChild(appendText(document.createElement("div"), entry.path));
+        identity.lastChild.className = "path";
+        if (operation.summary) {
+          identity.appendChild(appendText(document.createElement("div"), operation.summary));
+          identity.lastChild.className = "summary";
+        }
+        if (operation.tags && operation.tags.length > 0) {
+          const tags = document.createElement("div");
+          tags.className = "tags";
+          operation.tags.forEach((tag) => {
+            const chip = appendText(document.createElement("span"), tag);
+            chip.className = "tag";
+            tags.appendChild(chip);
+          });
+          identity.appendChild(tags);
+        }
+        header.appendChild(identity);
+        section.appendChild(header);
+
+        const parameters = operation.parameters || [];
+        if (parameters.length > 0) {
+          const details = document.createElement("details");
+          details.open = true;
+          details.appendChild(appendText(document.createElement("summary"), "Parameters"));
+          details.appendChild(renderTable(parameters));
+          section.appendChild(details);
+        }
+
+        const responses = operation.responses || {};
+        if (Object.keys(responses).length > 0) {
+          const details = document.createElement("details");
+          details.appendChild(appendText(document.createElement("summary"), "Responses"));
+          details.appendChild(renderResponses(responses));
+          section.appendChild(details);
+        }
+
+        return section;
+      }
+
+      function render() {
+        const term = filter.value.trim().toLowerCase();
+        const entries = operationEntries(spec.paths).filter((entry) => matchesFilter(entry, term));
+        content.replaceChildren();
+        if (entries.length === 0) {
+          content.appendChild(appendText(document.createElement("div"), "No routes match the current filter."));
+          content.lastChild.className = "empty";
+          return;
+        }
+        entries.forEach((entry) => content.appendChild(renderOperation(entry)));
+      }
+
+      async function load() {
+        try {
+          const response = await fetch(specUrl, { headers: { accept: "application/json" } });
+          if (!response.ok) throw new Error(`OpenAPI request failed with ${response.status}`);
+          spec = await response.json();
+          title.textContent = spec.info?.title || "OpenAPI docs";
+          meta.textContent = `${spec.openapi || "OpenAPI"} | ${spec.info?.version || "unversioned"} | ${operationEntries(spec.paths).length} routes`;
+          render();
+        } catch (error) {
+          content.replaceChildren();
+          const failure = appendText(document.createElement("div"), error.message || "Unable to load OpenAPI document.");
+          failure.className = "error";
+          content.appendChild(failure);
+          meta.textContent = "OpenAPI document unavailable";
+        }
+      }
+
+      filter.addEventListener("input", () => {
+        if (spec) render();
+      });
+
+      load();
+    </script>
+  </body>
+</html>

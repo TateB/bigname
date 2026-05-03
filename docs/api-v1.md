@@ -614,6 +614,8 @@ Phase 6 freezes `docs/api-v1.openapi.json` as the publication location for futur
 
 When generated, that artifact covers only the `v1` routes currently shipped by `apps/api/src/main.rs`.
 
+The running API also serves helper documentation routes outside the frozen `v1` contract: `GET /openapi.json` returns the same generated OpenAPI document, and `GET /docs` renders that document as a browser-readable OpenAPI page. These helper routes are operational publication surfaces for the contract, not `v1` business routes, and they must not be inserted into `docs/api-v1.openapi.json` as path entries.
+
 No prose-only app-facing REST routes remain in the table above. The app-facing compact handlers have shipped; this document remains the source of truth for route names, defaults, DTO fields, coverage, unsupported behavior, and pagination.
 
 `GET /v1/explain/resolutions/{namespace}/{name}/execution` is now shipped and published in `docs/api-v1.openapi.json`. Its generated contract matches the current handler surface: path parameters `{namespace}` and `{name}` plus required `records`.

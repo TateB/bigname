@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use axum::{Json, response::Html, routing::get};
 use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
 use tracing::info;
@@ -9,6 +10,8 @@ use crate::{
 };
 
 use super::schemas::openapi_components;
+
+const OPENAPI_DOCS_HTML: &str = include_str!("docs.html");
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
@@ -44,7 +47,18 @@ pub(crate) fn app_router(state: AppState) -> Router {
         .iter()
         .copied()
         .fold(Router::new(), |router, route| route.register(router))
+        .route("/openapi.json", get(openapi_json))
+        .route("/docs", get(openapi_docs))
+        .route("/docs/", get(openapi_docs))
         .with_state(state)
+}
+
+async fn openapi_json() -> Json<JsonValue> {
+    Json(openapi_document())
+}
+
+async fn openapi_docs() -> Html<&'static str> {
+    Html(OPENAPI_DOCS_HTML)
 }
 
 pub(crate) fn render_openapi_document() -> String {
