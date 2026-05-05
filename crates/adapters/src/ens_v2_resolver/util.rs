@@ -5,9 +5,7 @@ use crate::ens_v2_common::keccak256_hex;
 use crate::evm_abi::namehash_hex;
 
 use super::types::{PreimageObservation, ResolverRawLogRow};
-pub(super) use crate::ens_v2_common::{
-    dns_decode_optional, hex_string, keccak_signature_hex, normalize_hex_32,
-};
+pub(super) use crate::ens_v2_common::{dns_decode_optional, hex_string, keccak_signature_hex};
 
 pub(super) fn event_position_timestamp(raw_log: &ResolverRawLogRow) -> OffsetDateTime {
     raw_log.event_position_timestamp

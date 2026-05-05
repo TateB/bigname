@@ -1,14 +1,12 @@
+use alloy_sol_types::sol_data::{Bytes as SolBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
-use crate::evm_abi::{
-    dynamic_bytes as decode_dynamic_bytes, dynamic_string as decode_dynamic_string,
-    u64_word as decode_u64_word, u256_word_decimal as decode_u256_word_decimal,
-};
+use crate::evm_abi::{abi_decode_params, normalize_hex_32, u256_decimal};
 
 use super::{
     constants::*,
     types::{ResolverObservation, ResolverRawLogRow},
-    util::{keccak_signature_hex, normalize_hex_32},
+    util::keccak_signature_hex,
 };
 
 pub(super) fn build_resolver_observation(
@@ -25,12 +23,14 @@ pub(super) fn build_resolver_observation(
                 .get(1)
                 .context("AddressChanged missing node topic")?,
         )?;
-        let coin_type = decode_u256_word_decimal(&raw_log.data, 0)?;
-        let address_bytes = decode_dynamic_bytes(&raw_log.data, 1)?;
+        let (coin_type, address_bytes) = abi_decode_params::<(Uint<256>, SolBytes)>(
+            &raw_log.data,
+            "AddressChanged data is malformed",
+        )?;
         return Ok(Some(ResolverObservation::AddressChanged {
             node,
-            coin_type,
-            address_bytes,
+            coin_type: u256_decimal(coin_type),
+            address_bytes: address_bytes.to_vec(),
         }));
     }
 
@@ -41,8 +41,10 @@ pub(super) fn build_resolver_observation(
                 .get(1)
                 .context("TextChanged missing node topic")?,
         )?;
-        let key = decode_dynamic_string(&raw_log.data, 0)?;
-        let value = decode_dynamic_string(&raw_log.data, 1)?;
+        let (key, value) = abi_decode_params::<(SolString, SolString)>(
+            &raw_log.data,
+            "TextChanged data is malformed",
+        )?;
         return Ok(Some(ResolverObservation::TextChanged { node, key, value }));
     }
 
@@ -53,8 +55,14 @@ pub(super) fn build_resolver_observation(
                 .get(1)
                 .context("ContenthashChanged missing node topic")?,
         )?;
-        let hash = decode_dynamic_bytes(&raw_log.data, 0)?;
-        return Ok(Some(ResolverObservation::ContenthashChanged { node, hash }));
+        let (hash,) = abi_decode_params::<(SolBytes,)>(
+            &raw_log.data,
+            "ContenthashChanged data is malformed",
+        )?;
+        return Ok(Some(ResolverObservation::ContenthashChanged {
+            node,
+            hash: hash.to_vec(),
+        }));
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAME_CHANGED_SIGNATURE)) {
@@ -64,7 +72,8 @@ pub(super) fn build_resolver_observation(
                 .get(1)
                 .context("NameChanged missing node topic")?,
         )?;
-        let name = decode_dynamic_string(&raw_log.data, 0)?;
+        let (name,) =
+            abi_decode_params::<(SolString,)>(&raw_log.data, "NameChanged data is malformed")?;
         return Ok(Some(ResolverObservation::NameChanged { node, name }));
     }
 
@@ -75,32 +84,47 @@ pub(super) fn build_resolver_observation(
                 .get(1)
                 .context("VersionChanged missing node topic")?,
         )?;
-        let version = decode_u64_word(&raw_log.data, 0)?;
-        return Ok(Some(ResolverObservation::VersionChanged { node, version }));
+        let (version,) =
+            abi_decode_params::<(Uint<64>,)>(&raw_log.data, "VersionChanged data is malformed")?;
+        return Ok(Some(ResolverObservation::VersionChanged {
+            node,
+            version: i64::try_from(version).context("VersionChanged version exceeds i64")?,
+        }));
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ALIAS_CHANGED_SIGNATURE)) {
-        let from_name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        let to_name = decode_dynamic_bytes(&raw_log.data, 1)?;
+        let (from_name, to_name) = abi_decode_params::<(SolBytes, SolBytes)>(
+            &raw_log.data,
+            "AliasChanged data is malformed",
+        )?;
         return Ok(Some(ResolverObservation::AliasChanged {
-            from_name,
-            to_name,
+            from_name: from_name.to_vec(),
+            to_name: to_name.to_vec(),
         }));
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_RESOURCE_SIGNATURE)) {
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        return Ok(Some(ResolverObservation::NamedResource { name }));
+        let (name,) =
+            abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedResource data is malformed")?;
+        return Ok(Some(ResolverObservation::NamedResource {
+            name: name.to_vec(),
+        }));
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE)) {
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        return Ok(Some(ResolverObservation::NamedTextResource { name }));
+        let (name,) =
+            abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedTextResource data is malformed")?;
+        return Ok(Some(ResolverObservation::NamedTextResource {
+            name: name.to_vec(),
+        }));
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_ADDR_RESOURCE_SIGNATURE)) {
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        return Ok(Some(ResolverObservation::NamedAddrResource { name }));
+        let (name,) =
+            abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedAddrResource data is malformed")?;
+        return Ok(Some(ResolverObservation::NamedAddrResource {
+            name: name.to_vec(),
+        }));
     }
 
     Ok(None)

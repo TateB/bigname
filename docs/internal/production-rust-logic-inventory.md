@@ -68,6 +68,10 @@ Addressed slices:
 - `crates/adapters/src/ens_v2_registrar/decoding.rs` is the first adapter
   decoder converted from manual ABI word walking to `alloy-sol-types`
   `sol_data` tuple decoding.
+- `crates/adapters/src/ens_v2_{registry,permissions,resolver}/decode.rs`
+  now use `alloy-sol-types` `sol_data` tuple decoding for event bodies while
+  preserving existing topic handling and storage-facing normalized output
+  shapes.
 - `crates/storage/src/projection_helpers.rs` now owns the storage keyset
   page split/truncate/next-cursor pattern used by address names, children, and
   permissions.
@@ -92,7 +96,7 @@ Addressed slices:
 
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
 | --- | --- | --- | --- |
-| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, and child-namehash helpers; `ens_v2_registrar/decoding.rs` now uses `alloy-sol-types` for event data decoding. Remaining duplicates are in adapter decode/event builders, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
+| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, child-namehash, Alloy tuple decode, address formatting, and `U256` formatting helpers; ENSv2 registrar, registry, permissions, and resolver decoders now use `alloy-sol-types` for event data decoding. Remaining duplicates are in adapter event builders, ENSv1 observation decoding, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs` now has local helpers for JSON-RPC object/field reads, optional hex parsing, and normalized optional hashes/addresses; remaining manual decoding lives in provider transport/bundle readers and `reth_db` conversion boundaries | Keep current transport initially, continue shrinking repeated `serde_json::Value` object walking, then deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
 | Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
@@ -115,20 +119,19 @@ The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
   and typed ABI encode/decode.
 - `crates/execution/src/ens_resolution_abi.rs` uses Alloy primitive ABI helpers
   but still keeps local selector constants, DNS/namehash helpers, and hex helpers.
-- `crates/adapters/src/evm_abi.rs` centralizes some manual ABI word parsing for
-  adapters, but many adapter modules still match topic0 strings and decode
-  topics/data field-by-field.
+- `crates/adapters/src/evm_abi.rs` centralizes manual ABI-word fallbacks and
+  Alloy tuple decoding for adapters. ENSv2 registrar, registry, permissions,
+  and resolver decode event bodies through Alloy, while several adapter modules
+  still match topic0 strings and decode topics field-by-field.
 - `apps/indexer/src/provider/reth_db/convert.rs` uses Alloy/Reth primitives for
   DB-backed provider data, while `apps/indexer/src/provider/decode.rs` manually
   walks JSON-RPC `serde_json::Value` objects.
 
 Near-term replacement candidates:
 
-- Replace manual event data decoders in `crates/adapters/src/ens_v2_registry/decode.rs`,
-  `crates/adapters/src/ens_v2_resolver/decode.rs`,
-  `crates/adapters/src/ens_v2_permissions/decode.rs`, and
-  `crates/adapters/src/ens_v2_registrar/decoding.rs` with local `sol!` event
-  definitions and `SolEvent` decoding.
+- Convert ENSv2 topic handling from signature strings and positional topic
+  reads to local `sol!` event definitions and `SolEvent` decoding where doing
+  so does not tighten behavior for indexed dynamic fields.
 - Replace topic hash functions like `keccak_signature_hex`, `*_topic0`, and
   signature arrays with constants derived from the `sol!` event types where the
   generated type exposes the selector/topic.

@@ -11,9 +11,7 @@ use crate::adapter_manifest::{
     ensure_watched_contract_manifest_chain, load_active_manifest_metadata,
     load_latest_active_manifest_metadata_for_source_family, watched_contract_manifest_ids,
 };
-pub(crate) use crate::evm_abi::{
-    keccak_signature_hex, keccak256_bytes, keccak256_hex, normalize_hex_32,
-};
+pub(crate) use crate::evm_abi::{keccak_signature_hex, keccak256_bytes, keccak256_hex};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveEmitter {

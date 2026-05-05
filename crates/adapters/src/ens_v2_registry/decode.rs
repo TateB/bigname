@@ -1,7 +1,8 @@
+use alloy_sol_types::sol_data::{Address as SolAddress, String as SolString, Uint};
 use anyhow::{Context, Result};
 
 use crate::evm_abi::{
-    address_word_hex, dynamic_string, normalize_hex_32, topic_address_hex, u64_topic, u64_word,
+    abi_decode_params, address_hex, normalize_hex_32, topic_address_hex, u64_topic,
 };
 
 use super::{
@@ -37,15 +38,16 @@ pub(super) fn build_registry_observation(
                 .get(3)
                 .context("LabelRegistered missing sender topic")?,
         )?;
-        let label = dynamic_string(&raw_log.data, 0)?;
-        let owner = address_word_hex(&raw_log.data, 1)?;
-        let expiry = u64_word(&raw_log.data, 2)?;
+        let (label, owner, expiry) = abi_decode_params::<(SolString, SolAddress, Uint<64>)>(
+            &raw_log.data,
+            "LabelRegistered data is malformed",
+        )?;
         return Ok(Some(RegistryObservation::LabelRegistered {
             token_id,
             labelhash,
             label,
-            owner,
-            expiry,
+            owner: address_hex(owner),
+            expiry: i64::try_from(expiry).context("LabelRegistered expiry exceeds i64")?,
             sender,
             reference,
         }));
@@ -70,13 +72,15 @@ pub(super) fn build_registry_observation(
                 .get(3)
                 .context("LabelReserved missing sender topic")?,
         )?;
-        let label = dynamic_string(&raw_log.data, 0)?;
-        let expiry = u64_word(&raw_log.data, 1)?;
+        let (label, expiry) = abi_decode_params::<(SolString, Uint<64>)>(
+            &raw_log.data,
+            "LabelReserved data is malformed",
+        )?;
         return Ok(Some(RegistryObservation::LabelReserved {
             token_id,
             labelhash,
             label,
-            expiry,
+            expiry: i64::try_from(expiry).context("LabelReserved expiry exceeds i64")?,
             sender,
             reference,
         }));
@@ -236,7 +240,8 @@ pub(super) fn build_registry_observation(
                 .get(2)
                 .context("ParentUpdated missing sender topic")?,
         )?;
-        let label = dynamic_string(&raw_log.data, 0)?;
+        let (label,) =
+            abi_decode_params::<(SolString,)>(&raw_log.data, "ParentUpdated data is malformed")?;
         return Ok(Some(RegistryObservation::ParentUpdated {
             parent,
             label,

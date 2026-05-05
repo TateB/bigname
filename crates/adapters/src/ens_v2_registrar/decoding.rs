@@ -1,9 +1,11 @@
-use alloy_primitives::U256;
-use alloy_sol_types::{SolType, sol_data};
+use alloy_sol_types::sol_data::{Address as SolAddress, FixedBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
 pub(super) use crate::ens_v2_common::{hex_string, keccak_signature_hex, normalize_address};
-use crate::evm_abi::{hex_string as prefixed_hex_string, normalize_hex_32};
+use crate::evm_abi::{
+    abi_decode_params, address_hex, hex_string as prefixed_hex_string, normalize_hex_32,
+    u256_word_hex,
+};
 
 use super::{NAME_REGISTERED_SIGNATURE, NAME_RENEWED_SIGNATURE, raw_logs::RegistrarRawLogRow};
 
@@ -46,26 +48,25 @@ pub(super) fn build_registrar_observation(
                 .context("NameRegistered missing tokenId topic")?,
         )?;
         let (label, owner, subregistry, resolver, duration, payment_token, referrer, base, premium) =
-            <(
-                sol_data::String,
-                sol_data::Address,
-                sol_data::Address,
-                sol_data::Address,
-                sol_data::Uint<64>,
-                sol_data::Address,
-                sol_data::FixedBytes<32>,
-                sol_data::Uint<256>,
-                sol_data::Uint<256>,
-            )>::abi_decode_params_validate(&raw_log.data)
-            .context("NameRegistered data is malformed")?;
+            abi_decode_params::<(
+                SolString,
+                SolAddress,
+                SolAddress,
+                SolAddress,
+                Uint<64>,
+                SolAddress,
+                FixedBytes<32>,
+                Uint<256>,
+                Uint<256>,
+            )>(&raw_log.data, "NameRegistered data is malformed")?;
         return Ok(Some(RegistrarObservation::NameRegistered {
             token_id,
             label,
-            owner: prefixed_hex_string(owner.as_slice()),
-            subregistry: prefixed_hex_string(subregistry.as_slice()),
-            resolver: prefixed_hex_string(resolver.as_slice()),
+            owner: address_hex(owner),
+            subregistry: address_hex(subregistry),
+            resolver: address_hex(resolver),
             duration: i64::try_from(duration).context("NameRegistered duration exceeds i64")?,
-            payment_token: prefixed_hex_string(payment_token.as_slice()),
+            payment_token: address_hex(payment_token),
             referrer: prefixed_hex_string(referrer.as_slice()),
             base: u256_word_hex(base),
             premium: u256_word_hex(premium),
@@ -80,29 +81,24 @@ pub(super) fn build_registrar_observation(
                 .context("NameRenewed missing tokenId topic")?,
         )?;
         let (label, duration, new_expiry, payment_token, referrer, base) =
-            <(
-                sol_data::String,
-                sol_data::Uint<64>,
-                sol_data::Uint<64>,
-                sol_data::Address,
-                sol_data::FixedBytes<32>,
-                sol_data::Uint<256>,
-            )>::abi_decode_params_validate(&raw_log.data)
-            .context("NameRenewed data is malformed")?;
+            abi_decode_params::<(
+                SolString,
+                Uint<64>,
+                Uint<64>,
+                SolAddress,
+                FixedBytes<32>,
+                Uint<256>,
+            )>(&raw_log.data, "NameRenewed data is malformed")?;
         return Ok(Some(RegistrarObservation::NameRenewed {
             token_id,
             label,
             duration: i64::try_from(duration).context("NameRenewed duration exceeds i64")?,
             new_expiry: i64::try_from(new_expiry).context("NameRenewed expiry exceeds i64")?,
-            payment_token: prefixed_hex_string(payment_token.as_slice()),
+            payment_token: address_hex(payment_token),
             referrer: prefixed_hex_string(referrer.as_slice()),
             base: u256_word_hex(base),
         }));
     }
 
     Ok(None)
-}
-
-fn u256_word_hex(value: U256) -> String {
-    prefixed_hex_string(value.to_be_bytes::<32>())
 }

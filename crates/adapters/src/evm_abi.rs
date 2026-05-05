@@ -1,7 +1,23 @@
 use alloy_primitives::{Address, U256, hex, keccak256};
+use alloy_sol_types::{SolType, abi::TokenSeq};
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
+
+pub(crate) fn abi_decode_params<'de, T>(
+    data: &'de [u8],
+    context: &'static str,
+) -> Result<T::RustType>
+where
+    T: SolType,
+    T::Token<'de>: TokenSeq<'de>,
+{
+    T::abi_decode_params_validate(data).context(context)
+}
+
+pub(crate) fn address_hex(address: Address) -> String {
+    hex_string(address.as_slice())
+}
 
 pub(crate) fn dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {
     String::from_utf8(dynamic_bytes(data, offset_word_index)?)
@@ -37,14 +53,6 @@ pub(crate) fn topic_address_hex(value: &str) -> Result<String> {
     address_hex_from_word(&hex_32(value)?)
 }
 
-pub(crate) fn word_hex(word: &[u8]) -> Result<String> {
-    Ok(format!("0x{}", hex::encode(exact_word(word)?)))
-}
-
-pub(crate) fn u64_word(data: &[u8], word_index: usize) -> Result<i64> {
-    i64_from_u64_word(word_at(data, word_index)?)
-}
-
 pub(crate) fn u64_topic(value: &str) -> Result<i64> {
     i64_from_u64_word(&hex_32(value)?)
 }
@@ -69,8 +77,12 @@ pub(crate) fn usize_from_word(word: &[u8]) -> Result<usize> {
     usize::try_from(u64::from_be_bytes(bytes)).context("ABI word does not fit in usize")
 }
 
-pub(crate) fn u256_word_decimal(data: &[u8], word_index: usize) -> Result<String> {
-    Ok(U256::from_be_bytes(*word_at(data, word_index)?).to_string())
+pub(crate) fn u256_decimal(value: U256) -> String {
+    value.to_string()
+}
+
+pub(crate) fn u256_word_hex(value: U256) -> String {
+    hex_string(value.to_be_bytes::<ABI_WORD_BYTES>())
 }
 
 pub(crate) fn u256_topic_decimal(value: &str) -> Result<String> {

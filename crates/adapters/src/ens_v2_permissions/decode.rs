@@ -1,14 +1,16 @@
+use alloy_sol_types::sol_data::{Bytes as SolBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
+
+use crate::evm_abi::{
+    abi_decode_params, normalize_hex_32, topic_address_hex, u256_topic_decimal, u256_word_hex,
+};
 
 use super::constants::{
     EAC_ROLES_CHANGED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE, NAMED_RESOURCE_SIGNATURE,
     NAMED_TEXT_RESOURCE_SIGNATURE,
 };
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
-use super::util::{
-    decode_dynamic_bytes, decode_dynamic_string, decode_u256_topic_decimal, keccak_signature_hex,
-    normalize_hex_32, normalize_hex_32_word, normalize_topic_address, word_at,
-};
+use super::util::keccak_signature_hex;
 
 pub(super) fn build_permissions_observation(
     raw_log: &PermissionsRawLogRow,
@@ -24,10 +26,11 @@ pub(super) fn build_permissions_observation(
                 .get(1)
                 .context("NamedResource missing resource topic")?,
         )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
+        let (name,) =
+            abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedResource data is malformed")?;
         return Ok(Some(PermissionsObservation::NamedResource {
             resource,
-            name,
+            name: name.to_vec(),
         }));
     }
 
@@ -44,11 +47,13 @@ pub(super) fn build_permissions_observation(
                 .get(2)
                 .context("NamedTextResource missing key hash topic")?,
         )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        let key = decode_dynamic_string(&raw_log.data, 1)?;
+        let (name, key) = abi_decode_params::<(SolBytes, SolString)>(
+            &raw_log.data,
+            "NamedTextResource data is malformed",
+        )?;
         return Ok(Some(PermissionsObservation::NamedTextResource {
             resource,
-            name,
+            name: name.to_vec(),
             key_hash,
             key,
         }));
@@ -61,16 +66,17 @@ pub(super) fn build_permissions_observation(
                 .get(1)
                 .context("NamedAddrResource missing resource topic")?,
         )?;
-        let coin_type = decode_u256_topic_decimal(
+        let coin_type = u256_topic_decimal(
             raw_log
                 .topics
                 .get(2)
                 .context("NamedAddrResource missing coin type topic")?,
         )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
+        let (name,) =
+            abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedAddrResource data is malformed")?;
         return Ok(Some(PermissionsObservation::NamedAddrResource {
             resource,
-            name,
+            name: name.to_vec(),
             coin_type,
         }));
     }
@@ -82,19 +88,21 @@ pub(super) fn build_permissions_observation(
                 .get(1)
                 .context("EACRolesChanged missing resource topic")?,
         )?;
-        let account = normalize_topic_address(
+        let account = topic_address_hex(
             raw_log
                 .topics
                 .get(2)
                 .context("EACRolesChanged missing account topic")?,
         )?;
-        let old_role_bitmap = normalize_hex_32_word(word_at(&raw_log.data, 0)?)?;
-        let new_role_bitmap = normalize_hex_32_word(word_at(&raw_log.data, 1)?)?;
+        let (old_role_bitmap, new_role_bitmap) = abi_decode_params::<(Uint<256>, Uint<256>)>(
+            &raw_log.data,
+            "EACRolesChanged data is malformed",
+        )?;
         return Ok(Some(PermissionsObservation::EacRolesChanged {
             resource,
             account,
-            old_role_bitmap,
-            new_role_bitmap,
+            old_role_bitmap: u256_word_hex(old_role_bitmap),
+            new_role_bitmap: u256_word_hex(new_role_bitmap),
         }));
     }
 
