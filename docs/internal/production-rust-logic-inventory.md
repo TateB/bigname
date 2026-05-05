@@ -86,6 +86,11 @@ Addressed slices:
 - `apps/indexer/src/provider/decode.rs` now owns local JSON-RPC object,
   required-field, optional-hex, and normalization helpers for provider payload
   decoding instead of repeating object walking at every field.
+- `apps/indexer/src/provider/decode.rs` now decodes provider block,
+  transaction, receipt, and log payloads through typed serde DTOs backed by
+  Alloy primitives for quantities, addresses, hashes, and bytes. Block hash/root
+  strings stay permissive at the provider boundary to preserve sparse fixture
+  and cache-fill behavior.
 - `apps/api/src/openapi/parameters.rs` now owns small string/enum/boolean/UUID
   schema builders used by both core and app-facing OpenAPI parameter lists.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` now reuses
@@ -97,7 +102,7 @@ Addressed slices:
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
 | --- | --- | --- | --- |
 | EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, child-namehash, Alloy tuple decode, address formatting, and `U256` formatting helpers; ENSv2 registrar, registry, permissions, and resolver decoders now use `alloy-sol-types` for event data decoding. Remaining duplicates are in adapter event builders, ENSv1 observation decoding, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
-| Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs` now has local helpers for JSON-RPC object/field reads, optional hex parsing, and normalized optional hashes/addresses; remaining manual decoding lives in provider transport/bundle readers and `reth_db` conversion boundaries | Keep current transport initially, continue shrinking repeated `serde_json::Value` object walking, then deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
+| Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs` now uses typed serde DTOs with Alloy `U256`, `Address`, `B256`, and `Bytes` for quantities, transaction/receipt/log hashes, addresses, topics, byte blobs, and log data. Block hash/root strings remain normalized strings because existing provider fixtures and raw-payload cache-fill paths intentionally accept sparse or placeholder values. Remaining manual decoding lives in provider transport/bundle readers, request filter construction, and `reth_db` conversion boundaries | Keep current transport initially; evaluate narrower typed request/filter structs next, and only move to full `alloy-rpc-types-eth` block/receipt/log types if cache payloads and fixture contracts can tolerate their stricter headers | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code while avoiding accidental behavior tightening |
 | Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
@@ -124,8 +129,10 @@ The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
   and resolver decode event bodies through Alloy, while several adapter modules
   still match topic0 strings and decode topics field-by-field.
 - `apps/indexer/src/provider/reth_db/convert.rs` uses Alloy/Reth primitives for
-  DB-backed provider data, while `apps/indexer/src/provider/decode.rs` manually
-  walks JSON-RPC `serde_json::Value` objects.
+  DB-backed provider data. `apps/indexer/src/provider/decode.rs` now uses
+  typed serde DTOs backed by Alloy primitives for JSON-RPC quantities,
+  transaction/receipt/log hashes, addresses, topics, and byte fields while
+  preserving string-normalized block hash/root compatibility.
 
 Near-term replacement candidates:
 
@@ -143,8 +150,10 @@ Near-term replacement candidates:
 
 Provider-side candidates:
 
-- Introduce typed JSON-RPC response structs from `alloy-rpc-types-eth` while
-  preserving the current `JsonRpcProvider` request/batch transport.
+- Continue typed JSON-RPC response structs around the current
+  `JsonRpcProvider` request/batch transport; prefer narrow DTOs where
+  `alloy-rpc-types-eth` full block or receipt types would reject sparse cached
+  payloads.
 - Normalize once at conversion boundaries: `alloy` typed response to existing
   `ProviderBlock`, `ProviderTransaction`, `ProviderReceipt`, and `ProviderLog`.
 - After typed decoding is stable, consider whether `alloy-provider` can replace

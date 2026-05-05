@@ -1,6 +1,7 @@
-use alloy_primitives::{hex, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
 use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value};
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::{
     ProviderBlock, ProviderBlockBundle, ProviderLog, ProviderReceipt, ProviderTransaction,
@@ -9,33 +10,34 @@ use super::{
 
 impl ProviderBlock {
     pub(super) fn from_value(value: Value) -> Result<Self> {
-        let block_hash = block_hash_from_value(&value)?;
-        let object = rpc_object(&value, "block")?;
-        let parent_hash = normalize_parent_hash(required_str(object, "parentHash", "parent hash")?);
-        let block_number = required_hex_i64(object, "number", "block number")?;
-        let block_timestamp_unix_secs = required_hex_i64(object, "timestamp", "block timestamp")?;
+        Self::from_rpc_block(decode_rpc_value(value, "block")?)
+    }
 
+    fn from_rpc_block(block: RpcBlock) -> Result<Self> {
         Ok(Self {
-            block_hash,
-            parent_hash,
-            block_number,
-            block_timestamp_unix_secs,
-            logs_bloom: optional_hex_bytes(object, "logsBloom")?,
-            transactions_root: optional_normalized_hash(object, "transactionsRoot"),
-            receipts_root: optional_normalized_hash(object, "receiptsRoot"),
-            state_root: optional_normalized_hash(object, "stateRoot"),
+            block_hash: normalize_hash(&block.hash),
+            parent_hash: normalize_parent_hash(&block.parent_hash),
+            block_number: u256_i64(block.number, "block number")?,
+            block_timestamp_unix_secs: u256_i64(block.timestamp, "block timestamp")?,
+            logs_bloom: block.logs_bloom.map(|bytes| bytes.to_vec()),
+            transactions_root: block.transactions_root.map(|value| normalize_hash(&value)),
+            receipts_root: block.receipts_root.map(|value| normalize_hash(&value)),
+            state_root: block.state_root.map(|value| normalize_hash(&value)),
         })
     }
 }
 
 impl ProviderBlockBundle {
     pub(super) fn from_value(value: Value) -> Result<Self> {
-        let block = ProviderBlock::from_value(value.clone())?;
-        let object = rpc_object(&value, "block")?;
-        let transactions = required_array(object, "transactions", "transactions")?
-            .iter()
-            .map(ProviderTransaction::from_value)
+        let mut rpc_block = decode_rpc_value::<RpcBlock>(value, "block")?;
+        let transactions = rpc_block
+            .transactions
+            .take()
+            .context("missing transactions in JSON-RPC result")?
+            .into_iter()
+            .map(ProviderTransaction::from_rpc_transaction)
             .collect::<Result<Vec<_>>>()?;
+        let block = ProviderBlock::from_rpc_block(rpc_block)?;
 
         Ok(Self {
             block,
@@ -49,43 +51,38 @@ impl ProviderBlockBundle {
 
 impl ProviderTransaction {
     pub(super) fn from_value(value: &Value) -> Result<Self> {
-        let object = rpc_object(value, "transaction")?;
-        let transaction_hash = required_str(object, "hash", "transaction hash")?;
-        let block_hash = required_str(object, "blockHash", "transaction block hash")?;
-        let block_number = required_hex_i64(object, "blockNumber", "transaction block number")?;
-        let transaction_index = required_hex_i64(object, "transactionIndex", "transaction index")?;
-        let from = required_str(object, "from", "transaction from address")?;
+        Self::from_rpc_transaction(decode_rpc_ref(value, "transaction")?)
+    }
 
+    fn from_rpc_transaction(transaction: RpcTransaction) -> Result<Self> {
         Ok(Self {
-            transaction_hash: normalize_hash(transaction_hash),
-            block_hash: normalize_hash(block_hash),
-            block_number,
-            transaction_index,
-            from: normalize_address(from),
-            to: optional_normalized_address(object, "to"),
+            transaction_hash: hash_hex(transaction.hash),
+            block_hash: hash_hex(transaction.block_hash),
+            block_number: u256_i64(transaction.block_number, "transaction block number")?,
+            transaction_index: u256_i64(transaction.transaction_index, "transaction index")?,
+            from: address_hex(transaction.from),
+            to: transaction.to.map(address_hex),
         })
     }
 }
 
 impl ProviderReceipt {
     pub(super) fn from_value(value: &Value) -> Result<Self> {
-        let object = rpc_object(value, "receipt")?;
-        let transaction_hash = required_str(object, "transactionHash", "receipt transaction hash")?;
-        let block_hash = required_str(object, "blockHash", "receipt block hash")?;
-        let block_number = required_hex_i64(object, "blockNumber", "receipt block number")?;
-        let transaction_index =
-            required_hex_i64(object, "transactionIndex", "receipt transaction index")?;
+        let receipt = decode_rpc_ref::<RpcReceipt>(value, "receipt")?;
 
         Ok(Self {
-            transaction_hash: normalize_hash(transaction_hash),
-            block_hash: normalize_hash(block_hash),
-            block_number,
-            transaction_index,
-            contract_address: optional_normalized_address(object, "contractAddress"),
-            status: optional_hex_i64(object, "status")?,
-            cumulative_gas_used: optional_hex_i64(object, "cumulativeGasUsed")?,
-            gas_used: optional_hex_i64(object, "gasUsed")?,
-            logs_bloom: optional_hex_bytes(object, "logsBloom")?,
+            transaction_hash: hash_hex(receipt.transaction_hash),
+            block_hash: hash_hex(receipt.block_hash),
+            block_number: u256_i64(receipt.block_number, "receipt block number")?,
+            transaction_index: u256_i64(receipt.transaction_index, "receipt transaction index")?,
+            contract_address: receipt.contract_address.map(address_hex),
+            status: optional_u256_i64(receipt.status, "receipt status")?,
+            cumulative_gas_used: optional_u256_i64(
+                receipt.cumulative_gas_used,
+                "receipt cumulative gas used",
+            )?,
+            gas_used: optional_u256_i64(receipt.gas_used, "receipt gas used")?,
+            logs_bloom: receipt.logs_bloom.map(|bytes| bytes.to_vec()),
         })
     }
 }
@@ -96,31 +93,17 @@ impl ProviderLog {
         block_hash: &str,
         expected_block_number: i64,
     ) -> Result<Self> {
-        let object = rpc_object(value, "log")?;
-        let log_block_hash = required_str(object, "blockHash", "log block hash")?;
-        let block_number = required_hex_i64(object, "blockNumber", "log block number")?;
-        let transaction_hash = required_str(object, "transactionHash", "log transaction hash")?;
-        let transaction_index =
-            required_hex_i64(object, "transactionIndex", "log transaction index")?;
-        let log_index = required_hex_i64(object, "logIndex", "log index")?;
-        let address = required_str(object, "address", "log address")?;
-        let topics = required_array(object, "topics", "log topics")?
-            .iter()
-            .map(|topic| {
-                topic
-                    .as_str()
-                    .context("expected log topic string in JSON-RPC result")
-                    .map(normalize_hash)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let data = required_str(object, "data", "log data")?;
+        let log = decode_rpc_ref::<RpcLog>(value, "log")?;
+        let log_block_hash = hash_hex(log.block_hash);
+        let block_number = u256_i64(log.block_number, "log block number")?;
+        let log_index = u256_i64(log.log_index, "log index")?;
 
-        if normalize_hash(log_block_hash) != block_hash {
+        if log_block_hash != block_hash {
             bail!(
                 "provider returned log {} for block {} with mismatched block hash {}",
                 log_index,
                 block_hash,
-                normalize_hash(log_block_hash)
+                log_block_hash
             );
         }
         if block_number != expected_block_number {
@@ -133,90 +116,26 @@ impl ProviderLog {
         }
 
         Ok(Self {
-            block_hash: normalize_hash(log_block_hash),
+            block_hash: log_block_hash,
             block_number,
-            transaction_hash: normalize_hash(transaction_hash),
-            transaction_index,
+            transaction_hash: hash_hex(log.transaction_hash),
+            transaction_index: u256_i64(log.transaction_index, "log transaction index")?,
             log_index,
-            address: normalize_address(address),
-            topics,
-            data: data.to_owned(),
+            address: address_hex(log.address),
+            topics: log.topics.into_iter().map(hash_hex).collect(),
+            data: hex_string(log.data.as_ref()),
         })
     }
 
     pub(super) fn block_number_from_value(value: &Value) -> Result<i64> {
-        let object = rpc_object(value, "log")?;
-        required_hex_i64(object, "blockNumber", "log block number")
+        let log = decode_rpc_ref::<RpcLogBlockNumber>(value, "log")?;
+        u256_i64(log.block_number, "log block number")
     }
 }
 
 pub(super) fn block_hash_from_value(value: &Value) -> Result<String> {
-    let object = rpc_object(value, "block")?;
-    let block_hash = required_str(object, "hash", "block hash")?;
-
-    Ok(normalize_hash(block_hash))
-}
-
-fn rpc_object<'a>(value: &'a Value, label: &'static str) -> Result<&'a Map<String, Value>> {
-    value
-        .as_object()
-        .with_context(|| format!("expected {label} object in JSON-RPC result"))
-}
-
-fn required_str<'a>(
-    object: &'a Map<String, Value>,
-    field: &str,
-    label: &'static str,
-) -> Result<&'a str> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .with_context(|| format!("missing {label} in JSON-RPC result"))
-}
-
-fn required_array<'a>(
-    object: &'a Map<String, Value>,
-    field: &str,
-    label: &'static str,
-) -> Result<&'a Vec<Value>> {
-    object
-        .get(field)
-        .and_then(Value::as_array)
-        .with_context(|| format!("missing {label} in JSON-RPC result"))
-}
-
-fn required_hex_i64(object: &Map<String, Value>, field: &str, label: &'static str) -> Result<i64> {
-    parse_hex_i64(required_str(object, field, label)?)
-}
-
-fn optional_hex_i64(object: &Map<String, Value>, field: &str) -> Result<Option<i64>> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(parse_hex_i64)
-        .transpose()
-}
-
-fn optional_hex_bytes(object: &Map<String, Value>, field: &str) -> Result<Option<Vec<u8>>> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(parse_hex_bytes)
-        .transpose()
-}
-
-fn optional_normalized_hash(object: &Map<String, Value>, field: &str) -> Option<String> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(normalize_hash)
-}
-
-fn optional_normalized_address(object: &Map<String, Value>, field: &str) -> Option<String> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(normalize_address)
+    let block = decode_rpc_ref::<RpcBlockHash>(value, "block")?;
+    Ok(normalize_hash(&block.hash))
 }
 
 pub(super) fn parse_hex_i64(value: &str) -> Result<i64> {
@@ -245,6 +164,33 @@ pub(super) fn normalize_hash(value: &str) -> String {
     value.to_ascii_lowercase()
 }
 
+pub(super) fn normalize_address(value: &str) -> String {
+    value.to_ascii_lowercase()
+}
+
+fn decode_rpc_value<T>(value: Value, label: &'static str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_value(value)
+        .with_context(|| format!("failed to decode {label} JSON-RPC result"))
+}
+
+fn decode_rpc_ref<T>(value: &Value, label: &'static str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    decode_rpc_value(value.clone(), label)
+}
+
+fn hash_hex(value: B256) -> String {
+    hex_string(value.as_slice())
+}
+
+fn address_hex(value: Address) -> String {
+    hex_string(value.as_slice())
+}
+
 fn normalize_parent_hash(value: &str) -> Option<String> {
     let value = normalize_hash(value);
     if value == ZERO_HASH || value.is_empty() {
@@ -254,6 +200,84 @@ fn normalize_parent_hash(value: &str) -> Option<String> {
     }
 }
 
-pub(super) fn normalize_address(value: &str) -> String {
-    value.to_ascii_lowercase()
+fn optional_u256_i64(value: Option<U256>, label: &'static str) -> Result<Option<i64>> {
+    value.map(|value| u256_i64(value, label)).transpose()
+}
+
+fn u256_i64(value: U256, label: &'static str) -> Result<i64> {
+    let value = u64::try_from(value).with_context(|| format!("{label} exceeds u64"))?;
+    i64::try_from(value).with_context(|| format!("{label} exceeds i64"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcBlock {
+    hash: String,
+    parent_hash: String,
+    number: U256,
+    timestamp: U256,
+    #[serde(default)]
+    logs_bloom: Option<Bytes>,
+    #[serde(default)]
+    transactions_root: Option<String>,
+    #[serde(default)]
+    receipts_root: Option<String>,
+    #[serde(default)]
+    state_root: Option<String>,
+    #[serde(default)]
+    transactions: Option<Vec<RpcTransaction>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RpcBlockHash {
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcTransaction {
+    hash: B256,
+    block_hash: B256,
+    block_number: U256,
+    transaction_index: U256,
+    from: Address,
+    to: Option<Address>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcReceipt {
+    transaction_hash: B256,
+    block_hash: B256,
+    block_number: U256,
+    transaction_index: U256,
+    #[serde(default)]
+    contract_address: Option<Address>,
+    #[serde(default)]
+    status: Option<U256>,
+    #[serde(default)]
+    cumulative_gas_used: Option<U256>,
+    #[serde(default)]
+    gas_used: Option<U256>,
+    #[serde(default)]
+    logs_bloom: Option<Bytes>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcLog {
+    block_hash: B256,
+    block_number: U256,
+    transaction_hash: B256,
+    transaction_index: U256,
+    log_index: U256,
+    address: Address,
+    topics: Vec<B256>,
+    data: Bytes,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcLogBlockNumber {
+    block_number: U256,
 }
