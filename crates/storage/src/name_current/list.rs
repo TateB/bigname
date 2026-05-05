@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
 use super::{NameCurrentRow, decode_name_current_row};
 use crate::{
@@ -263,9 +263,7 @@ pub async fn count_name_current_list(pool: &PgPool, filter: &NameCurrentListFilt
         .fetch_one(pool)
         .await
         .with_context(|| format!("failed to count name_current compact rows for {filter:?}"))?;
-    let total_count = row
-        .try_get::<i64, _>("total_count")
-        .context("missing total_count")?;
+    let total_count = crate::sql_row::get::<i64>(&row, "total_count")?;
     u64::try_from(total_count).context("negative name_current compact total_count")
 }
 

@@ -217,18 +217,14 @@ fn timestamp_null_rank(value: Option<OffsetDateTime>, order: NameCurrentListOrde
 }
 
 fn decode_name_current_list_row(row: PgRow) -> Result<NameCurrentListRow> {
-    let labelhash = row.try_get("labelhash").context("missing labelhash")?;
-    let token_id = row.try_get("token_id").context("missing token_id")?;
-    let owner = row.try_get("owner").context("missing owner")?;
-    let registrant = row.try_get("registrant").context("missing registrant")?;
-    let created_at = row.try_get("created_at").context("missing created_at")?;
-    let registration_date = row
-        .try_get("registration_date")
-        .context("missing registration_date")?;
-    let expiry_date = row.try_get("expiry_date").context("missing expiry_date")?;
-    let resolver_address = row
-        .try_get("resolver_address")
-        .context("missing resolver_address")?;
+    let labelhash = crate::sql_row::get(&row, "labelhash")?;
+    let token_id = crate::sql_row::get(&row, "token_id")?;
+    let owner = crate::sql_row::get(&row, "owner")?;
+    let registrant = crate::sql_row::get(&row, "registrant")?;
+    let created_at = crate::sql_row::get(&row, "created_at")?;
+    let registration_date = crate::sql_row::get(&row, "registration_date")?;
+    let expiry_date = crate::sql_row::get(&row, "expiry_date")?;
+    let resolver_address = crate::sql_row::get(&row, "resolver_address")?;
     let row = decode_name_current_row(row)?;
 
     Ok(NameCurrentListRow {

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{Executor, Postgres, Row, postgres::PgRow};
+use sqlx::{Executor, Postgres, postgres::PgRow};
 use uuid::Uuid;
 
 use super::types::{ExecutionTrace, ExecutionTraceStep};
@@ -213,56 +213,30 @@ where
 
 fn decode_execution_trace_row(row: PgRow) -> Result<ExecutionTrace> {
     Ok(ExecutionTrace {
-        execution_trace_id: row
-            .try_get("execution_trace_id")
-            .context("missing execution_trace_id")?,
-        request_type: row
-            .try_get("request_type")
-            .context("missing request_type")?,
-        request_key: row.try_get("request_key").context("missing request_key")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        chain_context: row
-            .try_get("chain_context")
-            .context("missing chain_context")?,
-        manifest_context: row
-            .try_get("manifest_context")
-            .context("missing manifest_context")?,
-        contracts_called: row
-            .try_get("contracts_called")
-            .context("missing contracts_called")?,
-        gateway_digests: row
-            .try_get("gateway_digests")
-            .context("missing gateway_digests")?,
-        final_payload: row
-            .try_get("final_payload")
-            .context("missing final_payload")?,
-        failure_payload: row
-            .try_get("failure_payload")
-            .context("missing failure_payload")?,
-        request_metadata: row
-            .try_get("request_metadata")
-            .context("missing request_metadata")?,
-        finished_at: row.try_get("finished_at").context("missing finished_at")?,
+        execution_trace_id: crate::sql_row::get(&row, "execution_trace_id")?,
+        request_type: crate::sql_row::get(&row, "request_type")?,
+        request_key: crate::sql_row::get(&row, "request_key")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        chain_context: crate::sql_row::get(&row, "chain_context")?,
+        manifest_context: crate::sql_row::get(&row, "manifest_context")?,
+        contracts_called: crate::sql_row::get(&row, "contracts_called")?,
+        gateway_digests: crate::sql_row::get(&row, "gateway_digests")?,
+        final_payload: crate::sql_row::get(&row, "final_payload")?,
+        failure_payload: crate::sql_row::get(&row, "failure_payload")?,
+        request_metadata: crate::sql_row::get(&row, "request_metadata")?,
+        finished_at: crate::sql_row::get(&row, "finished_at")?,
         steps: Vec::new(),
     })
 }
 
 fn decode_execution_step(row: PgRow) -> Result<ExecutionTraceStep> {
     Ok(ExecutionTraceStep {
-        step_index: row.try_get("step_index").context("missing step_index")?,
-        step_kind: row.try_get("step_kind").context("missing step_kind")?,
-        input_digest: row
-            .try_get("input_digest")
-            .context("missing input_digest")?,
-        output_digest: row
-            .try_get("output_digest")
-            .context("missing output_digest")?,
-        latency_ms: row.try_get("latency_ms").context("missing latency_ms")?,
-        canonicality_dependency: row
-            .try_get("canonicality_dependency")
-            .context("missing canonicality_dependency")?,
-        step_payload: row
-            .try_get("step_payload")
-            .context("missing step_payload")?,
+        step_index: crate::sql_row::get(&row, "step_index")?,
+        step_kind: crate::sql_row::get(&row, "step_kind")?,
+        input_digest: crate::sql_row::get(&row, "input_digest")?,
+        output_digest: crate::sql_row::get(&row, "output_digest")?,
+        latency_ms: crate::sql_row::get(&row, "latency_ms")?,
+        canonicality_dependency: crate::sql_row::get(&row, "canonicality_dependency")?,
+        step_payload: crate::sql_row::get(&row, "step_payload")?,
     })
 }

@@ -18,41 +18,23 @@ pub(super) fn decode_address_name_current_row(row: PgRow) -> Result<AddressNameC
         .and_then(|value| SurfaceBindingKind::parse(&value))?;
 
     Ok(AddressNameCurrentRow {
-        address: row.try_get("address").context("missing address")?,
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
+        address: crate::sql_row::get(&row, "address")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
         relation,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
         binding_kind,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        coverage: crate::sql_row::get(&row, "coverage")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 
@@ -69,75 +51,43 @@ pub(super) fn decode_address_name_current_entry(row: PgRow) -> Result<AddressNam
         .collect::<Result<Vec<_>>>()?;
 
     Ok(AddressNameCurrentEntry {
-        address: row.try_get("address").context("missing address")?,
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
+        address: crate::sql_row::get(&row, "address")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
         binding_kind,
         relations,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        coverage: crate::sql_row::get(&row, "coverage")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 
 pub(super) fn decode_address_names_current_summary(
     row: PgRow,
 ) -> Result<AddressNamesCurrentSummary> {
-    let grouped_entry_count = row
-        .try_get::<i64, _>("grouped_entry_count")
-        .context("missing grouped_entry_count")?;
+    let grouped_entry_count = crate::sql_row::get::<i64>(&row, "grouped_entry_count")?;
     let grouped_entry_count =
         u64::try_from(grouped_entry_count).context("negative grouped_entry_count")?;
 
     Ok(AddressNamesCurrentSummary {
         grouped_entry_count,
         provenance: AddressNamesCurrentProvenanceSummary {
-            normalized_event_ids: row
-                .try_get("provenance_normalized_event_ids")
-                .context("missing provenance_normalized_event_ids")?,
-            raw_fact_refs: row
-                .try_get("provenance_raw_fact_refs")
-                .context("missing provenance_raw_fact_refs")?,
-            manifest_versions: row
-                .try_get("provenance_manifest_versions")
-                .context("missing provenance_manifest_versions")?,
-            derivation_kind: row
-                .try_get("provenance_derivation_kind")
-                .context("missing provenance_derivation_kind")?,
+            normalized_event_ids: crate::sql_row::get(&row, "provenance_normalized_event_ids")?,
+            raw_fact_refs: crate::sql_row::get(&row, "provenance_raw_fact_refs")?,
+            manifest_versions: crate::sql_row::get(&row, "provenance_manifest_versions")?,
+            derivation_kind: crate::sql_row::get(&row, "provenance_derivation_kind")?,
         },
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        consistency: row.try_get("consistency").context("missing consistency")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        consistency: crate::sql_row::get(&row, "consistency")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }

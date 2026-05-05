@@ -297,22 +297,16 @@ fn ensure_raw_code_hash_identity_matches(
 
 fn decode_raw_code_hash(row: PgRow) -> Result<RawCodeHash> {
     Ok(RawCodeHash {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        contract_address: row
-            .try_get("contract_address")
-            .context("missing contract_address")?,
-        code_hash: row.try_get("code_hash").context("missing code_hash")?,
-        code_byte_length: row
-            .try_get("code_byte_length")
-            .context("missing code_byte_length")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        contract_address: crate::sql_row::get(&row, "contract_address")?,
+        code_hash: crate::sql_row::get(&row, "code_hash")?,
+        code_byte_length: crate::sql_row::get(&row, "code_byte_length")?,
+        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 

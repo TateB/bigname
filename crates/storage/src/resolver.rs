@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow};
 
 use crate::projection_helpers::{
     POSTGRES_MAX_BIND_PARAMETERS, remap_input_indexed_rows, require_json_object,
@@ -394,28 +394,16 @@ fn validate_resolver_current_row(row: &ResolverCurrentRow) -> Result<()> {
 
 fn decode_resolver_current_row(row: PgRow) -> Result<ResolverCurrentRow> {
     Ok(ResolverCurrentRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        resolver_address: row
-            .try_get::<String, _>("resolver_address")
-            .context("missing resolver_address")?
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        resolver_address: crate::sql_row::get::<String>(&row, "resolver_address")?
             .to_ascii_lowercase(),
-        declared_summary: row
-            .try_get("declared_summary")
-            .context("missing declared_summary")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        declared_summary: crate::sql_row::get(&row, "declared_summary")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        coverage: crate::sql_row::get(&row, "coverage")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 

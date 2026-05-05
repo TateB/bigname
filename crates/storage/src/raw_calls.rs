@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
+use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 
 use crate::CanonicalityState;
 
@@ -305,27 +305,17 @@ fn ensure_raw_call_snapshot_identity_matches(
 
 fn decode_raw_call_snapshot(row: PgRow) -> Result<RawCallSnapshot> {
     Ok(RawCallSnapshot {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        request_hash: row
-            .try_get("request_hash")
-            .context("missing request_hash")?,
-        request_payload: row
-            .try_get("request_payload")
-            .context("missing request_payload")?,
-        response_hash: row
-            .try_get("response_hash")
-            .context("missing response_hash")?,
-        response_payload: row
-            .try_get("response_payload")
-            .context("missing response_payload")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        request_hash: crate::sql_row::get(&row, "request_hash")?,
+        request_payload: crate::sql_row::get(&row, "request_payload")?,
+        response_hash: crate::sql_row::get(&row, "response_hash")?,
+        response_payload: crate::sql_row::get(&row, "response_payload")?,
+        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 

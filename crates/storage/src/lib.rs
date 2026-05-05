@@ -23,6 +23,7 @@ mod record_inventory;
 mod resolution_support;
 mod resolver;
 mod snapshot_selection;
+mod sql_row;
 
 use anyhow::{Context, Result};
 use clap::Args;

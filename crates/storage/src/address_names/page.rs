@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
     decode::{decode_address_name_current_entry, decode_address_names_current_summary},
@@ -338,10 +338,7 @@ async fn ensure_address_names_current_cursor_exists(
         )
     })?;
 
-    if row
-        .try_get::<bool, _>("cursor_exists")
-        .context("missing cursor_exists")?
-    {
+    if crate::sql_row::get::<bool>(&row, "cursor_exists")? {
         Ok(())
     } else {
         bail!("address_names_current page cursor does not match a grouped entry")
