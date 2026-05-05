@@ -38,3 +38,18 @@ proxy_kind = "none"
 # Start block follows the sepolia-dev deployment transaction.
 # (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
 start_block = 10462909
+
+# Registrar event ABI fragments consumed by ENSv2 registrar adapters.
+# NameRegistered: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309).
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrarNameRegistered"]
+
+# NameRenewed: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309).
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed"]

@@ -41,3 +41,67 @@ admission = "reachable_from_root"
 edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
+
+# Registry event ABI fragments consumed by ENSv2 registry adapters.
+# LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309).
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["RegistrationGranted"]
+
+# LabelReserved: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309).
+[[abi.events]]
+name = "LabelReserved"
+fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["RegistrationReserved"]
+
+# LabelUnregistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L41 @ ens_v2@554c309).
+[[abi.events]]
+name = "LabelUnregistered"
+fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["RegistrationReleased"]
+
+# ExpiryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L47 @ ens_v2@554c309).
+[[abi.events]]
+name = "ExpiryUpdated"
+fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ExpiryChanged"]
+
+# SubregistryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L53 @ ens_v2@554c309).
+[[abi.events]]
+name = "SubregistryUpdated"
+fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SubregistryChanged"]
+
+# ResolverUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L63 @ ens_v2@554c309).
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ResolverChanged"]
+
+# TokenResource: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L37 @ ens_v2@554c309).
+[[abi.events]]
+name = "TokenResource"
+fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
+emitter_roles = ["registry"]
+normalized_events = ["TokenResourceLinked"]
+
+# TokenRegenerated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L73 @ ens_v2@554c309).
+[[abi.events]]
+name = "TokenRegenerated"
+fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
+emitter_roles = ["registry"]
+normalized_events = ["TokenRegenerated"]
+
+# ParentUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L79 @ ens_v2@554c309).
+[[abi.events]]
+name = "ParentUpdated"
+fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ParentChanged"]

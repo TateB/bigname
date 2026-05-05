@@ -1584,6 +1584,25 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         normalize_address(&registry_manifest.contracts[0].address),
         "0x796fff2e907449be8d5921bcc215b1b76d89d080"
     );
+    assert_eq!(
+        registry_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "LabelRegistered",
+            "LabelReserved",
+            "LabelUnregistered",
+            "ExpiryUpdated",
+            "SubregistryUpdated",
+            "ResolverUpdated",
+            "TokenResource",
+            "TokenRegenerated",
+            "ParentUpdated",
+        ]
+    );
 
     let registrar_manifest_v1 = manifests_by_source_family_version[&("ens_v2_registrar_l1", 1)];
     assert_eq!(
@@ -1612,11 +1631,40 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         registrar_manifest.capability_flags["exact_name_profile"].status,
         CapabilitySupportStatus::Supported
     );
+    assert_eq!(
+        registrar_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["NameRegistered", "NameRenewed"]
+    );
 
     let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 1)];
     assert!(resolver_manifest.roots.is_empty());
     assert!(resolver_manifest.contracts.is_empty());
     assert!(resolver_manifest.discovery_rules.is_empty());
+    assert_eq!(
+        resolver_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "AddressChanged",
+            "TextChanged",
+            "ContenthashChanged",
+            "NameChanged",
+            "VersionChanged",
+            "AliasChanged",
+            "NamedResource",
+            "NamedTextResource",
+            "NamedAddrResource",
+            "EACRolesChanged",
+        ]
+    );
 
     let admitted_addresses = sepolia_repository
         .manifests()

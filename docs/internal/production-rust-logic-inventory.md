@@ -110,6 +110,9 @@ Addressed slices:
   shape, duplicate canonical signatures, and declared contract roles. This is
   the landing zone for moving adapter event constants and execution call ABI
   declarations out of production code.
+- The ENSv2 Sepolia registry, registrar, and resolver manifests now declare the
+  event ABI fragments currently consumed by the ENSv2 adapters, with upstream
+  citations next to the manifest declarations.
 
 ## Highest leverage cleanup map
 
