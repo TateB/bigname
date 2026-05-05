@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_storage::sql_row;
 use sqlx::PgPool;
 
 use crate::ens_v2_common::{
@@ -126,11 +127,11 @@ pub(super) async fn load_name_link_by_name(
 
 fn decode_name_link(row: sqlx::postgres::PgRow) -> Result<NameLink> {
     Ok(NameLink {
-        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
-        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
-        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
-        namehash: crate::sql_row::get(&row, "namehash")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        normalized_name: sql_row::get(&row, "normalized_name")?,
+        canonical_display_name: sql_row::get(&row, "canonical_display_name")?,
+        namehash: sql_row::get(&row, "namehash")?,
     })
 }
 
@@ -213,8 +214,8 @@ pub(super) async fn load_resolver_raw_logs(
     let mut output = Vec::new();
     for row in rows {
         let emitting_address =
-            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
-        let block_number = crate::sql_row::get(&row, "block_number")?;
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
         let Some(emitter) = active_emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| active_emitter_for_block(emitters, block_number))
@@ -222,18 +223,18 @@ pub(super) async fn load_resolver_raw_logs(
             continue;
         };
         output.push(ResolverRawLogRow {
-            chain_id: crate::sql_row::get(&row, "chain_id")?,
-            block_hash: crate::sql_row::get(&row, "block_hash")?,
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
             block_number,
-            event_position_timestamp: crate::sql_row::get(&row, "event_position_timestamp")?,
-            transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-            transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-            log_index: crate::sql_row::get(&row, "log_index")?,
+            event_position_timestamp: sql_row::get(&row, "event_position_timestamp")?,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index: sql_row::get(&row, "transaction_index")?,
+            log_index: sql_row::get(&row, "log_index")?,
             emitting_address,
             emitting_contract_instance_id: emitter.contract_instance_id,
-            topics: crate::sql_row::get(&row, "topics")?,
-            data: crate::sql_row::get(&row, "data")?,
-            canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
                 &row,
                 "canonicality_state",
             )?)?,

@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
@@ -134,25 +135,16 @@ pub(super) async fn load_active_registry_edge_observations_excluding_keys(
             }
             Some((|| {
                 Ok(DiscoveryObservation {
-                    chain: crate::sql_row::get(&row, "chain_id")?,
-                    from_address: normalize_address(&crate::sql_row::get::<String>(
-                        &row,
-                        "from_address",
-                    )?),
-                    to_address: normalize_address(&crate::sql_row::get::<String>(
-                        &row,
-                        "to_address",
-                    )?),
-                    edge_kind: crate::sql_row::get(&row, "edge_kind")?,
+                    chain: sql_row::get(&row, "chain_id")?,
+                    from_address: normalize_address(&sql_row::get::<String>(&row, "from_address")?),
+                    to_address: normalize_address(&sql_row::get::<String>(&row, "to_address")?),
+                    edge_kind: sql_row::get(&row, "edge_kind")?,
                     discovery_source,
-                    active_from_block_number: crate::sql_row::get(
-                        &row,
-                        "active_from_block_number",
-                    )?,
-                    active_from_block_hash: crate::sql_row::get(&row, "active_from_block_hash")?,
-                    active_to_block_number: crate::sql_row::get(&row, "active_to_block_number")?,
-                    active_to_block_hash: crate::sql_row::get(&row, "active_to_block_hash")?,
-                    provenance: crate::sql_row::get(&row, "provenance")?,
+                    active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
+                    active_from_block_hash: sql_row::get(&row, "active_from_block_hash")?,
+                    active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
+                    active_to_block_hash: sql_row::get(&row, "active_to_block_hash")?,
+                    provenance: sql_row::get(&row, "provenance")?,
                 })
             })())
         })

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_storage::sql_row;
 use bigname_storage::{CanonicalityState, SurfaceBindingKind};
 use sqlx::Row;
 
@@ -87,35 +88,29 @@ pub(super) fn decode_current_binding_context(
 
 pub(super) fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
     Ok(RelevantEvent {
-        normalized_event_id: crate::sql_row::get(&row, "normalized_event_id")?,
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
-        event_kind: crate::sql_row::get(&row, "event_kind")?,
-        source_family: crate::sql_row::get(&row, "source_family")?,
-        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-        source_manifest_id: crate::sql_row::get(&row, "source_manifest_id")?,
-        source_manifest_version: crate::sql_row::get(&row, "source_manifest_version")?,
-        source_manifest_namespace: crate::sql_row::get(&row, "source_manifest_namespace")?,
-        source_manifest_source_family: crate::sql_row::get(&row, "source_manifest_source_family")?,
-        source_manifest_chain: crate::sql_row::get(&row, "source_manifest_chain")?,
-        source_manifest_deployment_epoch: crate::sql_row::get(
-            &row,
-            "source_manifest_deployment_epoch",
-        )?,
-        source_manifest_rollout_status: crate::sql_row::get(
-            &row,
-            "source_manifest_rollout_status",
-        )?,
-        exact_name_profile_status: crate::sql_row::get(&row, "exact_name_profile_status")?,
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_number: crate::sql_row::get(&row, "block_number")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
-        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-        raw_fact_ref: crate::sql_row::get(&row, "raw_fact_ref")?,
-        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+        normalized_event_id: sql_row::get(&row, "normalized_event_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        event_kind: sql_row::get(&row, "event_kind")?,
+        source_family: sql_row::get(&row, "source_family")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
+        source_manifest_id: sql_row::get(&row, "source_manifest_id")?,
+        source_manifest_version: sql_row::get(&row, "source_manifest_version")?,
+        source_manifest_namespace: sql_row::get(&row, "source_manifest_namespace")?,
+        source_manifest_source_family: sql_row::get(&row, "source_manifest_source_family")?,
+        source_manifest_chain: sql_row::get(&row, "source_manifest_chain")?,
+        source_manifest_deployment_epoch: sql_row::get(&row, "source_manifest_deployment_epoch")?,
+        source_manifest_rollout_status: sql_row::get(&row, "source_manifest_rollout_status")?,
+        exact_name_profile_status: sql_row::get(&row, "exact_name_profile_status")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        raw_fact_ref: sql_row::get(&row, "raw_fact_ref")?,
+        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,
-        after_state: crate::sql_row::get(&row, "after_state")?,
+        after_state: sql_row::get(&row, "after_state")?,
     })
 }
 

@@ -1,5 +1,6 @@
 use super::super::*;
 use anyhow::{Context, Result};
+use bigname_storage::sql_row;
 use sqlx::{PgPool, postgres::PgRow, types::time::OffsetDateTime};
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
@@ -32,11 +33,11 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     rows.into_iter()
         .map(|row| {
             Ok(RawBlockSnapshot {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                block_hash: crate::sql_row::get(&row, "block_hash")?,
-                block_number: crate::sql_row::get(&row, "block_number")?,
-                block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-                canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                block_timestamp: sql_row::get(&row, "block_timestamp")?,
+                canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
                     &row,
                     "canonicality_state",
                 )?)?,
@@ -190,11 +191,11 @@ fn release_boundary_timestamp_for_authority_log(
 
 fn raw_block_snapshot_from_row(row: PgRow) -> Result<RawBlockSnapshot> {
     Ok(RawBlockSnapshot {
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
-        block_number: crate::sql_row::get(&row, "block_number")?,
-        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,

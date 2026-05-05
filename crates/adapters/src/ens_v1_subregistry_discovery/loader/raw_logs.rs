@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use super::super::{
@@ -114,8 +115,8 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs(
         .with_context(|| format!("failed to stream ENSv1 registry raw logs for chain {chain}"))?
     {
         let emitting_address =
-            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
-        let block_number = crate::sql_row::get(&row, "block_number")?;
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
         let emitter = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
@@ -324,9 +325,9 @@ async fn load_registry_raw_logs_internal(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &crate::sql_row::get::<String>(&row, "emitting_address")?,
+                &sql_row::get::<String>(&row, "emitting_address")?,
             );
-            let block_number = crate::sql_row::get(&row, "block_number")?;
+            let block_number = sql_row::get(&row, "block_number")?;
             let emitter = emitters_by_address
                 .get(&emitting_address)
                 .and_then(|emitters| {
@@ -363,16 +364,16 @@ fn registry_raw_log_from_row(
     emitter: &ActiveEmitter,
 ) -> Result<RegistryRawLogRow> {
     Ok(RegistryRawLogRow {
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
         block_number,
-        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-        log_index: crate::sql_row::get(&row, "log_index")?,
+        transaction_hash: sql_row::get(&row, "transaction_hash")?,
+        transaction_index: sql_row::get(&row, "transaction_index")?,
+        log_index: sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: crate::sql_row::get(&row, "topics")?,
-        data: crate::sql_row::get(&row, "data")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+        topics: sql_row::get(&row, "topics")?,
+        data: sql_row::get(&row, "data")?,
+        canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,

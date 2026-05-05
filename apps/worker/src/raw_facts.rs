@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use bigname_storage::sql_row;
 use serde_json::json;
 use sqlx::{Executor, Postgres, Transaction};
 use tracing::info;
@@ -157,10 +158,10 @@ async fn load_normalized_replay_readiness(
     .context("failed to inspect normalized replay cursor readiness")?;
 
     Ok(NormalizedReplayReadiness {
-        cursor_count: crate::sql_row::get(&row, "cursor_count")?,
-        remaining_block_count: crate::sql_row::get(&row, "remaining_block_count")?,
-        completed_through_block: crate::sql_row::get(&row, "completed_through_block")?,
-        caught_up: crate::sql_row::get(&row, "caught_up")?,
+        cursor_count: sql_row::get(&row, "cursor_count")?,
+        remaining_block_count: sql_row::get(&row, "remaining_block_count")?,
+        completed_through_block: sql_row::get(&row, "completed_through_block")?,
+        caught_up: sql_row::get(&row, "caught_up")?,
     })
 }
 
@@ -190,9 +191,9 @@ async fn load_log_staging_table_summaries(
     rows.into_iter()
         .map(|row| {
             Ok(RawFactTableSummary {
-                table_name: crate::sql_row::get(&row, "table_name")?,
-                estimated_row_count: crate::sql_row::get(&row, "estimated_row_count")?,
-                total_bytes: crate::sql_row::get(&row, "total_bytes")?,
+                table_name: sql_row::get(&row, "table_name")?,
+                estimated_row_count: sql_row::get(&row, "estimated_row_count")?,
+                total_bytes: sql_row::get(&row, "total_bytes")?,
             })
         })
         .collect()
@@ -239,9 +240,9 @@ async fn load_uncovered_log_staging_rows(
     rows.into_iter()
         .map(|row| {
             Ok(RawFactUncoveredRows {
-                table_name: crate::sql_row::get(&row, "table_name")?,
-                row_count: crate::sql_row::get(&row, "row_count")?,
-                max_block_number: crate::sql_row::get(&row, "max_block_number")?,
+                table_name: sql_row::get(&row, "table_name")?,
+                row_count: sql_row::get(&row, "row_count")?,
+                max_block_number: sql_row::get(&row, "max_block_number")?,
             })
         })
         .collect()

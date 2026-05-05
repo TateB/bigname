@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
@@ -170,13 +171,13 @@ async fn load_active_manifest_metadata(
     rows.into_iter()
         .map(|row| {
             let manifest = ActiveManifestMetadata {
-                manifest_id: crate::sql_row::get(&row, "manifest_id")?,
-                chain: crate::sql_row::get(&row, "chain")?,
-                namespace: crate::sql_row::get(&row, "namespace")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-                normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
-                role: crate::sql_row::get(&row, "role")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
+                role: sql_row::get(&row, "role")?,
             };
             Ok((manifest.manifest_id, manifest))
         })

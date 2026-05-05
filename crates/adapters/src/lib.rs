@@ -17,7 +17,6 @@ mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
 mod registry_migration_cache;
-mod sql_row;
 
 /// Current adapter bootstrap status.
 pub const fn bootstrap_status() -> &'static str {

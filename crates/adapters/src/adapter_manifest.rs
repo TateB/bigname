@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
@@ -126,10 +127,10 @@ pub(crate) async fn load_latest_active_manifest_metadata_for_source_family(
 
 fn decode_active_manifest_metadata(row: sqlx::postgres::PgRow) -> Result<ActiveManifestMetadata> {
     Ok(ActiveManifestMetadata {
-        manifest_id: crate::sql_row::get(&row, "manifest_id")?,
-        chain: crate::sql_row::get(&row, "chain")?,
-        namespace: crate::sql_row::get(&row, "namespace")?,
-        source_family: crate::sql_row::get(&row, "source_family")?,
-        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        manifest_id: sql_row::get(&row, "manifest_id")?,
+        chain: sql_row::get(&row, "chain")?,
+        namespace: sql_row::get(&row, "namespace")?,
+        source_family: sql_row::get(&row, "source_family")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
     })
 }

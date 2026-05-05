@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use super::super::scope::{
@@ -113,8 +114,8 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     while let Some(row) = rows.try_next().await.with_context(|| {
         format!("failed to stream ENSv1 unwrapped authority raw logs for chain {chain}")
     })? {
-        let address = crate::sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
-        let block_number = crate::sql_row::get(&row, "block_number")?;
+        let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+        let block_number = sql_row::get(&row, "block_number")?;
         let emitter = emitters_by_address
             .get(&address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
@@ -336,9 +337,9 @@ async fn load_authority_raw_logs_internal(
         raw_logs.extend(
             rows.into_iter()
                 .map(|row| {
-                    let address = crate::sql_row::get::<String>(&row, "emitting_address")?
-                        .to_ascii_lowercase();
-                    let block_number = crate::sql_row::get(&row, "block_number")?;
+                    let address =
+                        sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+                    let block_number = sql_row::get(&row, "block_number")?;
                     let emitter = emitters_by_address
                 .get(&address)
                 .and_then(|emitters| {
@@ -477,9 +478,9 @@ async fn load_generic_resolver_event_raw_logs(
 
     rows.into_iter()
         .map(|row| {
-            let address = crate::sql_row::get::<String>(&row, "emitting_address")?
+            let address = sql_row::get::<String>(&row, "emitting_address")?
                 .to_ascii_lowercase();
-            let block_number = crate::sql_row::get(&row, "block_number")?;
+            let block_number = sql_row::get(&row, "block_number")?;
             let source = generic_resolver_event_source_for_block(sources, block_number)
                 .with_context(|| {
                     format!(
@@ -515,17 +516,17 @@ fn authority_raw_log_from_row(
     emitter: &ActiveEmitter,
 ) -> Result<AuthorityRawLogRow> {
     Ok(AuthorityRawLogRow {
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
         block_number,
-        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-        log_index: crate::sql_row::get(&row, "log_index")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        transaction_hash: sql_row::get(&row, "transaction_hash")?,
+        transaction_index: sql_row::get(&row, "transaction_index")?,
+        log_index: sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: crate::sql_row::get(&row, "topics")?,
-        data: crate::sql_row::get(&row, "data")?,
-        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+        topics: sql_row::get(&row, "topics")?,
+        data: sql_row::get(&row, "data")?,
+        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,
@@ -545,17 +546,17 @@ fn authority_raw_log_from_generic_resolver_source(
     source: &GenericResolverEventSource,
 ) -> Result<AuthorityRawLogRow> {
     Ok(AuthorityRawLogRow {
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
         block_number,
-        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-        log_index: crate::sql_row::get(&row, "log_index")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        transaction_hash: sql_row::get(&row, "transaction_hash")?,
+        transaction_index: sql_row::get(&row, "transaction_index")?,
+        log_index: sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: crate::sql_row::get(&row, "topics")?,
-        data: crate::sql_row::get(&row, "data")?,
-        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+        topics: sql_row::get(&row, "topics")?,
+        data: sql_row::get(&row, "data")?,
+        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,

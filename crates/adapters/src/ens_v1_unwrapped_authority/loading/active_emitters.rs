@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use super::super::scope::{
@@ -311,14 +312,14 @@ async fn load_scoped_discovery_watched_contracts(
     rows.into_iter()
         .map(|row| {
             Ok(WatchedContract {
-                chain: crate::sql_row::get(&row, "chain")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                address: crate::sql_row::get::<String>(&row, "address")?.to_ascii_lowercase(),
-                contract_instance_id: crate::sql_row::get(&row, "contract_instance_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                address: sql_row::get::<String>(&row, "address")?.to_ascii_lowercase(),
+                contract_instance_id: sql_row::get(&row, "contract_instance_id")?,
                 source: WatchedContractSource::DiscoveryEdge,
-                source_manifest_id: crate::sql_row::get(&row, "source_manifest_id")?,
-                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
-                active_to_block_number: crate::sql_row::get(&row, "active_to_block_number")?,
+                source_manifest_id: sql_row::get(&row, "source_manifest_id")?,
+                active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
+                active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
             })
         })
         .collect()
@@ -397,12 +398,12 @@ async fn load_active_manifest_metadata(
     rows.into_iter()
         .map(|row| {
             let manifest = ActiveManifestMetadata {
-                manifest_id: crate::sql_row::get(&row, "manifest_id")?,
-                chain: crate::sql_row::get(&row, "chain")?,
-                namespace: crate::sql_row::get(&row, "namespace")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-                normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
             };
             Ok((manifest.manifest_id, manifest))
         })
@@ -448,10 +449,10 @@ async fn load_manifest_contract_roles(
         .map(|row| {
             Ok((
                 (
-                    crate::sql_row::get(&row, "manifest_id")?,
-                    crate::sql_row::get(&row, "contract_instance_id")?,
+                    sql_row::get(&row, "manifest_id")?,
+                    sql_row::get(&row, "contract_instance_id")?,
                 ),
-                crate::sql_row::get(&row, "role")?,
+                sql_row::get(&row, "role")?,
             ))
         })
         .collect()
@@ -487,12 +488,12 @@ async fn load_active_manifest_metadata_for_source_family(
     rows.into_iter()
         .map(|row| {
             Ok(ActiveManifestMetadata {
-                manifest_id: crate::sql_row::get(&row, "manifest_id")?,
-                chain: crate::sql_row::get(&row, "chain")?,
-                namespace: crate::sql_row::get(&row, "namespace")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-                normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
             })
         })
         .collect()

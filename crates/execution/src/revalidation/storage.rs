@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use bigname_storage::sql_row;
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SurfaceBindingKind};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
@@ -237,26 +238,26 @@ pub(super) async fn load_name_current_for_revalidation(
 
 fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow> {
     Ok(NameCurrentRow {
-        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
-        namespace: crate::sql_row::get(&row, "namespace")?,
-        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
-        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
-        namehash: crate::sql_row::get(&row, "namehash")?,
-        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
-        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        namespace: sql_row::get(&row, "namespace")?,
+        canonical_display_name: sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: sql_row::get(&row, "normalized_name")?,
+        namehash: sql_row::get(&row, "namehash")?,
+        surface_binding_id: sql_row::get(&row, "surface_binding_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        token_lineage_id: sql_row::get(&row, "token_lineage_id")?,
         binding_kind: row
             .try_get::<Option<String>, _>("binding_kind")
             .context("missing binding_kind")?
             .map(|value| SurfaceBindingKind::parse(&value))
             .transpose()?,
-        declared_summary: crate::sql_row::get(&row, "declared_summary")?,
-        provenance: crate::sql_row::get(&row, "provenance")?,
-        coverage: crate::sql_row::get(&row, "coverage")?,
-        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
-        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
-        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
+        declared_summary: sql_row::get(&row, "declared_summary")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        coverage: sql_row::get(&row, "coverage")?,
+        chain_positions: sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 
@@ -313,19 +314,19 @@ fn decode_record_inventory_current_row_for_revalidation(
     row: PgRow,
 ) -> Result<RecordInventoryCurrentRow> {
     Ok(RecordInventoryCurrentRow {
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
-        record_version_boundary: crate::sql_row::get(&row, "record_version_boundary")?,
-        enumeration_basis: crate::sql_row::get(&row, "enumeration_basis")?,
-        selectors: crate::sql_row::get(&row, "selectors")?,
-        explicit_gaps: crate::sql_row::get(&row, "explicit_gaps")?,
-        unsupported_families: crate::sql_row::get(&row, "unsupported_families")?,
-        last_change: crate::sql_row::get(&row, "last_change")?,
-        entries: crate::sql_row::get(&row, "entries")?,
-        provenance: crate::sql_row::get(&row, "provenance")?,
-        coverage: crate::sql_row::get(&row, "coverage")?,
-        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
-        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
-        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
-        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        record_version_boundary: sql_row::get(&row, "record_version_boundary")?,
+        enumeration_basis: sql_row::get(&row, "enumeration_basis")?,
+        selectors: sql_row::get(&row, "selectors")?,
+        explicit_gaps: sql_row::get(&row, "explicit_gaps")?,
+        unsupported_families: sql_row::get(&row, "unsupported_families")?,
+        last_change: sql_row::get(&row, "last_change")?,
+        entries: sql_row::get(&row, "entries")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        coverage: sql_row::get(&row, "coverage")?,
+        chain_positions: sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: sql_row::get(&row, "last_recomputed_at")?,
     })
 }

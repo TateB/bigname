@@ -76,13 +76,9 @@ Addressed slices:
 - `crates/storage/src/sql_row.rs` now owns the common "required SQL column with
   missing-column context" helper used by storage row decoders, replacing the
   first 350 exact `PgRow::try_get(...).context("missing ...")?` call sites.
-- `apps/worker/src/sql_row.rs` mirrors that owner-local required-column helper
-  for worker projection loaders and replaced the first 70+ exact worker row
-  decoder call sites.
-- `crates/adapters/src/sql_row.rs` now owns the same required-column helper for
-  adapter loaders, replacing the first 199 exact adapter row decoder call sites.
-- `crates/execution/src/sql_row.rs` now owns the same helper for execution
-  revalidation storage reads, replacing 30 exact decoder call sites.
+- `crates/storage/src/sql_row.rs` is now the shared required-column SQL row
+  helper for storage, worker, adapter, and execution decoders; the duplicate
+  worker, adapter, and execution helper modules were removed.
 - `apps/indexer/src/provider/decode.rs` now owns local JSON-RPC object,
   required-field, optional-hex, and normalization helpers for provider payload
   decoding instead of repeating object walking at every field.
@@ -96,7 +92,7 @@ Addressed slices:
 | Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
-| SQL row decoding boilerplate | `crates/storage/src/sql_row.rs` covers the first storage-local required-column helper and 350 exact storage decoder call sites; `apps/worker/src/sql_row.rs` covers the matching worker helper for 70+ exact loader call sites; `crates/adapters/src/sql_row.rs` covers the adapter helper for 199 exact loader call sites; `crates/execution/src/sql_row.rs` covers 30 execution revalidation storage call sites; manual `PgRow::try_get(...).context(...)` decoders remain across storage edge cases, manifests, adapter custom-context loaders, worker custom-context loaders, and API/indexer support; almost no production `query_as`/`FromRow` usage | Continue replacing same-semantics row reads with owner-local helpers; use `sqlx::FromRow` for plain rows; add small helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
+| SQL row decoding boilerplate | `crates/storage/src/sql_row.rs` covers the shared required-column helper for storage, worker, adapter, and execution decoders: 350 exact storage call sites, 70+ worker call sites, 199 adapter call sites, and 30 execution revalidation call sites; manual `PgRow::try_get(...).context(...)` decoders remain across storage edge cases, manifests, adapter custom-context loaders, worker custom-context loaders, and API/indexer support; almost no production `query_as`/`FromRow` usage | Continue replacing same-semantics row reads with the shared helper where dependent crates already use storage; use `sqlx::FromRow` for plain rows; add small helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
 | Keyset pagination and cursors | `crates/storage/src/projection_helpers.rs` covers shared storage page-size checks and keyset page split/truncate/cursor selection for address names, children, and permissions; API cursor envelope helpers remain in `apps/api/src/support/cursors.rs` and now use `hex` for cursor bytes | Continue with shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)` | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
 | Adapter active-emitter and source-scope flow | `crates/adapters/src/ens_v2_common.rs`, `ens_v2_*`, `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, `ens_v1_unwrapped_authority`, `block_derived_normalized_events`, plus indexer replay/backfill source-scope builders | Adapter-local support modules for normalized source-scope targets, emitter interval overlap, active-at-block lookup, scoped ranges, and summaries. Event identity loading and by-kind counters are now in `normalized_event_support` | Removes repeated range-overlap and source-family filtering logic across adapter families |
 | Normalized-event builders and persistence summaries | `crates/adapters/src/normalized_event_support.rs` covers shared event identity loading and by-kind counters; remaining duplication lives in `crates/adapters/src/*/normalized.rs`, `events.rs`, `event_building.rs`, `persistence_summary.rs`, and manifest event identity/raw fact builders | Continue with shared `NormalizedEventBuilder`/summary helpers inside `crates/adapters`, with adapter-specific state supplied as data | Reduces repeated event identity, raw fact ref, by-kind count, and inserted count code |
@@ -239,15 +235,11 @@ Hotspots from pattern counts include:
 
 Current status:
 
-- `crates/storage/src/sql_row.rs` centralizes storage required-column reads for
-  exact `missing <column>` contexts. The first pass replaced 350 storage call
-  sites without changing custom contextual errors or dynamic-column decoders.
-- `apps/worker/src/sql_row.rs` does the same for worker-owned projection loaders
-  and command query decoders, replacing the first 70+ exact call sites.
-- `crates/adapters/src/sql_row.rs` does the same for adapter loaders and source
-  queries, replacing the first 199 exact call sites.
-- `crates/execution/src/sql_row.rs` does the same for execution revalidation
-  storage row reads, replacing 30 exact call sites.
+- `crates/storage/src/sql_row.rs` centralizes required-column reads for exact
+  `missing <column>` contexts across storage and dependent production crates.
+  The first passes replaced 350 storage call sites, 70+ worker call sites, 199
+  adapter call sites, and 30 execution call sites without changing custom
+  contextual errors or dynamic-column decoders.
 
 Preferred shape:
 

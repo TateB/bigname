@@ -1,4 +1,5 @@
 use super::*;
+use bigname_storage::sql_row;
 
 mod lineage;
 
@@ -493,20 +494,17 @@ fn surface_binding_exclusion_applies(canonicality_state: CanonicalityState) -> b
 
 fn decode_adapter_surface_binding(row: sqlx::postgres::PgRow) -> Result<SurfaceBinding> {
     Ok(SurfaceBinding {
-        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
-        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
-        binding_kind: SurfaceBindingKind::parse(&crate::sql_row::get::<String>(
-            &row,
-            "binding_kind",
-        )?)?,
-        active_from: crate::sql_row::get(&row, "active_from")?,
-        active_to: crate::sql_row::get(&row, "active_to")?,
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
-        block_number: crate::sql_row::get(&row, "block_number")?,
-        provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+        surface_binding_id: sql_row::get(&row, "surface_binding_id")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        binding_kind: SurfaceBindingKind::parse(&sql_row::get::<String>(&row, "binding_kind")?)?,
+        active_from: sql_row::get(&row, "active_from")?,
+        active_to: sql_row::get(&row, "active_to")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,

@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
@@ -162,8 +163,8 @@ pub(super) async fn load_registry_raw_logs(
     let mut output = Vec::new();
     for row in rows {
         let emitting_address =
-            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
-        let block_number = crate::sql_row::get(&row, "block_number")?;
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
         let Some(emitter) = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, source_scope))
@@ -171,17 +172,17 @@ pub(super) async fn load_registry_raw_logs(
             continue;
         };
         output.push(RegistryRawLogRow {
-            chain_id: crate::sql_row::get(&row, "chain_id")?,
-            block_hash: crate::sql_row::get(&row, "block_hash")?,
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
             block_number,
-            block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-            transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-            transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-            log_index: crate::sql_row::get(&row, "log_index")?,
+            block_timestamp: sql_row::get(&row, "block_timestamp")?,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index: sql_row::get(&row, "transaction_index")?,
+            log_index: sql_row::get(&row, "log_index")?,
             emitting_address,
-            topics: crate::sql_row::get(&row, "topics")?,
-            data: crate::sql_row::get(&row, "data")?,
-            canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
                 &row,
                 "canonicality_state",
             )?)?,

@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
@@ -100,7 +101,7 @@ pub(super) async fn load_registrar_raw_logs(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &crate::sql_row::get::<String>(&row, "emitting_address")?,
+                &sql_row::get::<String>(&row, "emitting_address")?,
             );
             let emitter = emitters_by_address
                 .get(&emitting_address)
@@ -110,17 +111,17 @@ pub(super) async fn load_registrar_raw_logs(
                     )
                 })?;
             Ok(RegistrarRawLogRow {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                block_hash: crate::sql_row::get(&row, "block_hash")?,
-                block_number: crate::sql_row::get(&row, "block_number")?,
-                transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-                transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-                log_index: crate::sql_row::get(&row, "log_index")?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                transaction_hash: sql_row::get(&row, "transaction_hash")?,
+                transaction_index: sql_row::get(&row, "transaction_index")?,
+                log_index: sql_row::get(&row, "log_index")?,
                 emitting_address,
-                topics: crate::sql_row::get(&row, "topics")?,
-                data: crate::sql_row::get(&row, "data")?,
+                topics: sql_row::get(&row, "topics")?,
+                data: sql_row::get(&row, "data")?,
                 canonicality_state: parse_canonicality_state(
-                    &crate::sql_row::get::<String>(&row, "canonicality_state")?,
+                    &sql_row::get::<String>(&row, "canonicality_state")?,
                 )?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),

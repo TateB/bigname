@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
@@ -93,23 +94,22 @@ pub(super) async fn load_reverse_raw_logs(
 
     rows.into_iter()
         .map(|row| {
-            let address =
-                crate::sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+            let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
             let emitter = emitters_by_address.get(&address).with_context(|| {
                 format!("missing active emitter metadata for chain {chain} address {address}")
             })?;
 
             Ok(ReverseRawLogRow {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                block_hash: crate::sql_row::get(&row, "block_hash")?,
-                block_number: crate::sql_row::get(&row, "block_number")?,
-                transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-                transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-                log_index: crate::sql_row::get(&row, "log_index")?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                transaction_hash: sql_row::get(&row, "transaction_hash")?,
+                transaction_index: sql_row::get(&row, "transaction_index")?,
+                log_index: sql_row::get(&row, "log_index")?,
                 emitting_address: address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
-                topics: crate::sql_row::get(&row, "topics")?,
-                canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+                topics: sql_row::get(&row, "topics")?,
+                canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
                     &row,
                     "canonicality_state",
                 )?)?,

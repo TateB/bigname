@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
@@ -173,7 +174,7 @@ pub(super) async fn load_watched_raw_logs(
 
     rows.into_iter()
         .map(|row| {
-            let emitting_address = crate::sql_row::get::<String>(&row, "emitting_address")?;
+            let emitting_address = sql_row::get::<String>(&row, "emitting_address")?;
             let normalized_emitting_address = emitting_address.to_ascii_lowercase();
             let active_emitter = emitters_by_address
                 .get(&normalized_emitting_address)
@@ -185,16 +186,16 @@ pub(super) async fn load_watched_raw_logs(
                 })?;
 
             Ok(WatchedRawLogRow {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                block_hash: crate::sql_row::get(&row, "block_hash")?,
-                block_number: crate::sql_row::get(&row, "block_number")?,
-                transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
-                transaction_index: crate::sql_row::get(&row, "transaction_index")?,
-                log_index: crate::sql_row::get(&row, "log_index")?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                transaction_hash: sql_row::get(&row, "transaction_hash")?,
+                transaction_index: sql_row::get(&row, "transaction_index")?,
+                log_index: sql_row::get(&row, "log_index")?,
                 emitting_address,
-                topics: crate::sql_row::get(&row, "topics")?,
-                data: crate::sql_row::get(&row, "data")?,
-                canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+                topics: sql_row::get(&row, "topics")?,
+                data: sql_row::get(&row, "data")?,
+                canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
                     &row,
                     "canonicality_state",
                 )?)?,

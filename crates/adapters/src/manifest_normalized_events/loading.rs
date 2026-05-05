@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
@@ -34,9 +35,9 @@ pub(super) async fn load_active_capabilities(
             .entry(manifest_id)
             .or_default()
             .push(ActiveCapabilityRow {
-                capability_name: crate::sql_row::get(&row, "capability_name")?,
-                status: crate::sql_row::get(&row, "status")?,
-                notes: crate::sql_row::get(&row, "notes")?,
+                capability_name: sql_row::get(&row, "capability_name")?,
+                status: sql_row::get(&row, "status")?,
+                notes: sql_row::get(&row, "notes")?,
             });
     }
 

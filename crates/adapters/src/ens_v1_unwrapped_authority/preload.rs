@@ -1,4 +1,5 @@
 use super::*;
+use bigname_storage::sql_row;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct PreloadedRegistrarState {
@@ -201,7 +202,7 @@ pub(super) async fn preload_restricted_name_histories(
             .or_insert_with(|| labelhash.clone());
 
         let logical_name_id = name.logical_name_id.clone();
-        let resource_provenance: Value = crate::sql_row::get(&row, "resource_provenance")?;
+        let resource_provenance: Value = sql_row::get(&row, "resource_provenance")?;
         let active_from = row
             .try_get("active_from")
             .context("missing binding active_from")?;
@@ -209,18 +210,18 @@ pub(super) async fn preload_restricted_name_histories(
             .try_get("active_to")
             .context("missing binding active_to")?;
         let binding_ref = BoundaryRef {
-            chain_id: crate::sql_row::get(&row, "binding_chain_id")?,
-            block_hash: crate::sql_row::get(&row, "binding_block_hash")?,
-            block_number: crate::sql_row::get(&row, "binding_block_number")?,
+            chain_id: sql_row::get(&row, "binding_chain_id")?,
+            block_hash: sql_row::get(&row, "binding_block_hash")?,
+            block_number: sql_row::get(&row, "binding_block_number")?,
             block_timestamp: active_from,
-            canonicality_state: decode_preload_canonicality_state(&crate::sql_row::get::<String>(
+            canonicality_state: decode_preload_canonicality_state(&sql_row::get::<String>(
                 &row,
                 "binding_canonicality_state",
             )?)?,
             namespace: name.namespace.clone(),
         };
-        let surface_binding_id = crate::sql_row::get(&row, "surface_binding_id")?;
-        let resource_id = crate::sql_row::get(&row, "resource_id")?;
+        let surface_binding_id = sql_row::get(&row, "surface_binding_id")?;
+        let resource_id = sql_row::get(&row, "resource_id")?;
 
         let history = histories
             .entry(name.namehash.clone())
@@ -336,7 +337,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
     let mut release_namespaces = Vec::new();
 
     for row in rows {
-        let resource_provenance: Value = crate::sql_row::get(&row, "resource_provenance")?;
+        let resource_provenance: Value = sql_row::get(&row, "resource_provenance")?;
         if resource_provenance
             .get("authority_kind")
             .and_then(Value::as_str)
@@ -345,7 +346,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
             continue;
         }
 
-        let logical_name_id: String = crate::sql_row::get(&row, "logical_name_id")?;
+        let logical_name_id: String = sql_row::get(&row, "logical_name_id")?;
         let expiry = if let Some(expiry) = registrar_state
             .get(&logical_name_id)
             .and_then(|state| state.expiry)
@@ -363,7 +364,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
         let release_timestamp = release_after_grace(expiry)?;
         if release_timestamp <= replay_head.block_timestamp {
             release_timestamps.push(release_timestamp);
-            release_namespaces.push(crate::sql_row::get(&row, "namespace")?);
+            release_namespaces.push(sql_row::get(&row, "namespace")?);
         }
     }
 
@@ -462,11 +463,11 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<RawBlockSnapshot>) {
 
 fn raw_block_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<RawBlockSnapshot> {
     Ok(RawBlockSnapshot {
-        chain_id: crate::sql_row::get(&row, "chain_id")?,
-        block_hash: crate::sql_row::get(&row, "block_hash")?,
-        block_number: crate::sql_row::get(&row, "block_number")?,
-        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
-        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
             &row,
             "canonicality_state",
         )?)?,
@@ -1321,15 +1322,15 @@ async fn load_latest_record_versions_before_block(
 
 fn name_metadata_from_preload_row(row: &sqlx::postgres::PgRow) -> Result<NameMetadata> {
     Ok(NameMetadata {
-        namespace: crate::sql_row::get(&row, "namespace")?,
-        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
-        input_name: crate::sql_row::get(&row, "input_name")?,
-        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
-        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
-        dns_encoded_name: crate::sql_row::get(&row, "dns_encoded_name")?,
-        namehash: crate::sql_row::get::<String>(&row, "namehash")?.to_ascii_lowercase(),
-        labelhashes: crate::sql_row::get(&row, "labelhashes")?,
-        normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
+        namespace: sql_row::get(&row, "namespace")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        input_name: sql_row::get(&row, "input_name")?,
+        canonical_display_name: sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: sql_row::get(&row, "normalized_name")?,
+        dns_encoded_name: sql_row::get(&row, "dns_encoded_name")?,
+        namehash: sql_row::get::<String>(&row, "namehash")?.to_ascii_lowercase(),
+        labelhashes: sql_row::get(&row, "labelhashes")?,
+        normalizer_version: sql_row::get(&row, "normalizer_version")?,
     })
 }
 

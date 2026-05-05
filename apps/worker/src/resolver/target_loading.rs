@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -117,10 +118,10 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
 
     let mut targets = BTreeMap::<(String, String), BTreeSet<String>>::new();
     for row in rows {
-        let chain_id = crate::sql_row::get(&row, "chain_id")?;
+        let chain_id = sql_row::get(&row, "chain_id")?;
         let resolver_address =
-            normalize_resolver_address(&crate::sql_row::get::<String>(&row, "resolver_address")?);
-        let source_family = crate::sql_row::get::<String>(&row, "source_family")?;
+            normalize_resolver_address(&sql_row::get::<String>(&row, "resolver_address")?);
+        let source_family = sql_row::get::<String>(&row, "source_family")?;
         insert_target(
             &mut targets,
             chain_id,
@@ -178,8 +179,8 @@ async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget
     rows.into_iter()
         .map(|row| {
             Ok(ResolverTarget {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                resolver_address: normalize_resolver_address(&crate::sql_row::get::<String>(
+                chain_id: sql_row::get(&row, "chain_id")?,
+                resolver_address: normalize_resolver_address(&sql_row::get::<String>(
                     &row,
                     "resolver_address",
                 )?),
