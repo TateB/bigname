@@ -1,6 +1,6 @@
 use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{
     ProviderBlock, ProviderBlockBundle, ProviderLog, ProviderReceipt, ProviderTransaction,
@@ -10,50 +10,20 @@ use super::{
 impl ProviderBlock {
     pub(super) fn from_value(value: Value) -> Result<Self> {
         let block_hash = block_hash_from_value(&value)?;
-        let object = value
-            .as_object()
-            .context("expected block object in JSON-RPC result")?;
-        let parent_hash = normalize_parent_hash(
-            object
-                .get("parentHash")
-                .and_then(Value::as_str)
-                .context("missing parent hash in JSON-RPC result")?,
-        );
-        let block_number = parse_hex_i64(
-            object
-                .get("number")
-                .and_then(Value::as_str)
-                .context("missing block number in JSON-RPC result")?,
-        )?;
-        let block_timestamp_unix_secs = parse_hex_i64(
-            object
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .context("missing block timestamp in JSON-RPC result")?,
-        )?;
+        let object = rpc_object(&value, "block")?;
+        let parent_hash = normalize_parent_hash(required_str(object, "parentHash", "parent hash")?);
+        let block_number = required_hex_i64(object, "number", "block number")?;
+        let block_timestamp_unix_secs = required_hex_i64(object, "timestamp", "block timestamp")?;
 
         Ok(Self {
             block_hash,
             parent_hash,
             block_number,
             block_timestamp_unix_secs,
-            logs_bloom: object
-                .get("logsBloom")
-                .and_then(Value::as_str)
-                .map(parse_hex_bytes)
-                .transpose()?,
-            transactions_root: object
-                .get("transactionsRoot")
-                .and_then(Value::as_str)
-                .map(normalize_hash),
-            receipts_root: object
-                .get("receiptsRoot")
-                .and_then(Value::as_str)
-                .map(normalize_hash),
-            state_root: object
-                .get("stateRoot")
-                .and_then(Value::as_str)
-                .map(normalize_hash),
+            logs_bloom: optional_hex_bytes(object, "logsBloom")?,
+            transactions_root: optional_normalized_hash(object, "transactionsRoot"),
+            receipts_root: optional_normalized_hash(object, "receiptsRoot"),
+            state_root: optional_normalized_hash(object, "stateRoot"),
         })
     }
 }
@@ -61,13 +31,8 @@ impl ProviderBlock {
 impl ProviderBlockBundle {
     pub(super) fn from_value(value: Value) -> Result<Self> {
         let block = ProviderBlock::from_value(value.clone())?;
-        let object = value
-            .as_object()
-            .context("expected block object in JSON-RPC result")?;
-        let transactions = object
-            .get("transactions")
-            .and_then(Value::as_array)
-            .context("missing transactions in JSON-RPC result")?
+        let object = rpc_object(&value, "block")?;
+        let transactions = required_array(object, "transactions", "transactions")?
             .iter()
             .map(ProviderTransaction::from_value)
             .collect::<Result<Vec<_>>>()?;
@@ -84,33 +49,12 @@ impl ProviderBlockBundle {
 
 impl ProviderTransaction {
     pub(super) fn from_value(value: &Value) -> Result<Self> {
-        let object = value
-            .as_object()
-            .context("expected transaction object in JSON-RPC result")?;
-        let transaction_hash = object
-            .get("hash")
-            .and_then(Value::as_str)
-            .context("missing transaction hash in JSON-RPC result")?;
-        let block_hash = object
-            .get("blockHash")
-            .and_then(Value::as_str)
-            .context("missing transaction block hash in JSON-RPC result")?;
-        let block_number = parse_hex_i64(
-            object
-                .get("blockNumber")
-                .and_then(Value::as_str)
-                .context("missing transaction block number in JSON-RPC result")?,
-        )?;
-        let transaction_index = parse_hex_i64(
-            object
-                .get("transactionIndex")
-                .and_then(Value::as_str)
-                .context("missing transaction index in JSON-RPC result")?,
-        )?;
-        let from = object
-            .get("from")
-            .and_then(Value::as_str)
-            .context("missing transaction from address in JSON-RPC result")?;
+        let object = rpc_object(value, "transaction")?;
+        let transaction_hash = required_str(object, "hash", "transaction hash")?;
+        let block_hash = required_str(object, "blockHash", "transaction block hash")?;
+        let block_number = required_hex_i64(object, "blockNumber", "transaction block number")?;
+        let transaction_index = required_hex_i64(object, "transactionIndex", "transaction index")?;
+        let from = required_str(object, "from", "transaction from address")?;
 
         Ok(Self {
             transaction_hash: normalize_hash(transaction_hash),
@@ -118,69 +62,30 @@ impl ProviderTransaction {
             block_number,
             transaction_index,
             from: normalize_address(from),
-            to: object
-                .get("to")
-                .and_then(Value::as_str)
-                .map(normalize_address),
+            to: optional_normalized_address(object, "to"),
         })
     }
 }
 
 impl ProviderReceipt {
     pub(super) fn from_value(value: &Value) -> Result<Self> {
-        let object = value
-            .as_object()
-            .context("expected receipt object in JSON-RPC result")?;
-        let transaction_hash = object
-            .get("transactionHash")
-            .and_then(Value::as_str)
-            .context("missing receipt transaction hash in JSON-RPC result")?;
-        let block_hash = object
-            .get("blockHash")
-            .and_then(Value::as_str)
-            .context("missing receipt block hash in JSON-RPC result")?;
-        let block_number = parse_hex_i64(
-            object
-                .get("blockNumber")
-                .and_then(Value::as_str)
-                .context("missing receipt block number in JSON-RPC result")?,
-        )?;
-        let transaction_index = parse_hex_i64(
-            object
-                .get("transactionIndex")
-                .and_then(Value::as_str)
-                .context("missing receipt transaction index in JSON-RPC result")?,
-        )?;
+        let object = rpc_object(value, "receipt")?;
+        let transaction_hash = required_str(object, "transactionHash", "receipt transaction hash")?;
+        let block_hash = required_str(object, "blockHash", "receipt block hash")?;
+        let block_number = required_hex_i64(object, "blockNumber", "receipt block number")?;
+        let transaction_index =
+            required_hex_i64(object, "transactionIndex", "receipt transaction index")?;
 
         Ok(Self {
             transaction_hash: normalize_hash(transaction_hash),
             block_hash: normalize_hash(block_hash),
             block_number,
             transaction_index,
-            contract_address: object
-                .get("contractAddress")
-                .and_then(Value::as_str)
-                .map(normalize_address),
-            status: object
-                .get("status")
-                .and_then(Value::as_str)
-                .map(parse_hex_i64)
-                .transpose()?,
-            cumulative_gas_used: object
-                .get("cumulativeGasUsed")
-                .and_then(Value::as_str)
-                .map(parse_hex_i64)
-                .transpose()?,
-            gas_used: object
-                .get("gasUsed")
-                .and_then(Value::as_str)
-                .map(parse_hex_i64)
-                .transpose()?,
-            logs_bloom: object
-                .get("logsBloom")
-                .and_then(Value::as_str)
-                .map(parse_hex_bytes)
-                .transpose()?,
+            contract_address: optional_normalized_address(object, "contractAddress"),
+            status: optional_hex_i64(object, "status")?,
+            cumulative_gas_used: optional_hex_i64(object, "cumulativeGasUsed")?,
+            gas_used: optional_hex_i64(object, "gasUsed")?,
+            logs_bloom: optional_hex_bytes(object, "logsBloom")?,
         })
     }
 }
@@ -191,43 +96,15 @@ impl ProviderLog {
         block_hash: &str,
         expected_block_number: i64,
     ) -> Result<Self> {
-        let object = value
-            .as_object()
-            .context("expected log object in JSON-RPC result")?;
-        let log_block_hash = object
-            .get("blockHash")
-            .and_then(Value::as_str)
-            .context("missing log block hash in JSON-RPC result")?;
-        let block_number = parse_hex_i64(
-            object
-                .get("blockNumber")
-                .and_then(Value::as_str)
-                .context("missing log block number in JSON-RPC result")?,
-        )?;
-        let transaction_hash = object
-            .get("transactionHash")
-            .and_then(Value::as_str)
-            .context("missing log transaction hash in JSON-RPC result")?;
-        let transaction_index = parse_hex_i64(
-            object
-                .get("transactionIndex")
-                .and_then(Value::as_str)
-                .context("missing log transaction index in JSON-RPC result")?,
-        )?;
-        let log_index = parse_hex_i64(
-            object
-                .get("logIndex")
-                .and_then(Value::as_str)
-                .context("missing log index in JSON-RPC result")?,
-        )?;
-        let address = object
-            .get("address")
-            .and_then(Value::as_str)
-            .context("missing log address in JSON-RPC result")?;
-        let topics = object
-            .get("topics")
-            .and_then(Value::as_array)
-            .context("missing log topics in JSON-RPC result")?
+        let object = rpc_object(value, "log")?;
+        let log_block_hash = required_str(object, "blockHash", "log block hash")?;
+        let block_number = required_hex_i64(object, "blockNumber", "log block number")?;
+        let transaction_hash = required_str(object, "transactionHash", "log transaction hash")?;
+        let transaction_index =
+            required_hex_i64(object, "transactionIndex", "log transaction index")?;
+        let log_index = required_hex_i64(object, "logIndex", "log index")?;
+        let address = required_str(object, "address", "log address")?;
+        let topics = required_array(object, "topics", "log topics")?
             .iter()
             .map(|topic| {
                 topic
@@ -236,10 +113,7 @@ impl ProviderLog {
                     .map(normalize_hash)
             })
             .collect::<Result<Vec<_>>>()?;
-        let data = object
-            .get("data")
-            .and_then(Value::as_str)
-            .context("missing log data in JSON-RPC result")?;
+        let data = required_str(object, "data", "log data")?;
 
         if normalize_hash(log_block_hash) != block_hash {
             bail!(
@@ -271,29 +145,78 @@ impl ProviderLog {
     }
 
     pub(super) fn block_number_from_value(value: &Value) -> Result<i64> {
-        let object = value
-            .as_object()
-            .context("expected log object in JSON-RPC result")?;
-
-        parse_hex_i64(
-            object
-                .get("blockNumber")
-                .and_then(Value::as_str)
-                .context("missing log block number in JSON-RPC result")?,
-        )
+        let object = rpc_object(value, "log")?;
+        required_hex_i64(object, "blockNumber", "log block number")
     }
 }
 
 pub(super) fn block_hash_from_value(value: &Value) -> Result<String> {
-    let object = value
-        .as_object()
-        .context("expected block object in JSON-RPC result")?;
-    let block_hash = object
-        .get("hash")
-        .and_then(Value::as_str)
-        .context("missing block hash in JSON-RPC result")?;
+    let object = rpc_object(value, "block")?;
+    let block_hash = required_str(object, "hash", "block hash")?;
 
     Ok(normalize_hash(block_hash))
+}
+
+fn rpc_object<'a>(value: &'a Value, label: &'static str) -> Result<&'a Map<String, Value>> {
+    value
+        .as_object()
+        .with_context(|| format!("expected {label} object in JSON-RPC result"))
+}
+
+fn required_str<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    label: &'static str,
+) -> Result<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .with_context(|| format!("missing {label} in JSON-RPC result"))
+}
+
+fn required_array<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    label: &'static str,
+) -> Result<&'a Vec<Value>> {
+    object
+        .get(field)
+        .and_then(Value::as_array)
+        .with_context(|| format!("missing {label} in JSON-RPC result"))
+}
+
+fn required_hex_i64(object: &Map<String, Value>, field: &str, label: &'static str) -> Result<i64> {
+    parse_hex_i64(required_str(object, field, label)?)
+}
+
+fn optional_hex_i64(object: &Map<String, Value>, field: &str) -> Result<Option<i64>> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(parse_hex_i64)
+        .transpose()
+}
+
+fn optional_hex_bytes(object: &Map<String, Value>, field: &str) -> Result<Option<Vec<u8>>> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(parse_hex_bytes)
+        .transpose()
+}
+
+fn optional_normalized_hash(object: &Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(normalize_hash)
+}
+
+fn optional_normalized_address(object: &Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(normalize_address)
 }
 
 pub(super) fn parse_hex_i64(value: &str) -> Result<i64> {
