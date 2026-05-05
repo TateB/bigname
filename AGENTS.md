@@ -4,21 +4,21 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 ## Guardrails
 
-- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v1.md` (plus `docs/api-v1-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`, `docs/adrs/0001-stack.md`, `docs/adrs/0002-surface-resource-identity.md`.
+- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v1.md` (plus `docs/api-v1-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`.
 - If a task changes public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or replacement meaning, update the relevant docs first or in the same change.
-- Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Do not build disguised legacy API parity or new planning docs unless semantics changed.
+- Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Don't build disguised legacy API parity or new planning docs unless semantics changed.
 
 ## Boundaries
 
-- Adapters write identity rows and normalized events, not projection rows.
-- API code reads projections and execution output only, except explicit audit endpoints.
+- Adapters write identity rows and normalised events. They don't write projection rows.
+- API code reads projections and execution output, except explicit audit endpoints.
 - Execution code uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.
-- Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behavior must be explicit.
+- Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behaviour stays explicit.
 
 ## Upstream anchors
 
-The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. Agents read from the pinned checkouts; they do not guess or paraphrase upstream behavior from memory.
+The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. Agents read from the pinned checkouts; they don't guess or paraphrase upstream behaviour from memory.
 
 - `.refs/ens_v1/` — canonical ENSv1 Solidity
 - `.refs/ens_v2/` — ENSv2 contracts
@@ -30,7 +30,7 @@ Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `
 
 Citation rules:
 
-- Any claim about ENSv1, ENSv2, or Basenames behavior — in docs, manifests, ADRs, code comments, task writeups, or agent output — must cite the upstream source as `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)`.
+- Any claim about ENSv1, ENSv2, or Basenames behaviour — in docs, manifests, code comments, task writeups, or agent output — must cite the upstream source as `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)`.
 - "Upstream says X" without a `.refs/` citation is unsupported and should be rejected in review.
 - When upstream disagrees with our docs or manifests, the disagreement is a doc-first task. We may intentionally narrow, widen, or reshape upstream semantics; the divergence must be stated explicitly in the doc that carries our rule and listed in `docs/upstream.md` § Known divergences.
 - Manifest address changes and new source families cite the upstream deployment metadata or Solidity file rather than relying on external URLs.
@@ -62,4 +62,4 @@ Citation rules:
 ## Core Agents
 
 - `docs_writer`, `next_slice_researcher`, `task_designer`, `verification_reviewer`: defined in `.codex/agents/`. All four read `AGENTS.md` and treat upstream anchors as part of their reading set.
-- `upstream_auditor`: read-only agent that surfaces drift between `.refs/` pins and upstream `main`. Run opportunistically or on a schedule; it reports, it does not bump pins.
+- `upstream_auditor`: read-only agent that surfaces drift between `.refs/` pins and upstream `main`. Run opportunistically or on a schedule; it reports, it doesn't bump pins.

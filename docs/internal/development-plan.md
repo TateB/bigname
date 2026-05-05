@@ -50,7 +50,7 @@ The system can serve verified resolution and primary-name answers with full prov
 
 The first-party apps can switch to the native `v1` contract without relying on the existing ENSv1/v2 indexer API shape.
 
-Implementation should use the workstream overlay in `docs/internal/workstreams.md` once the Phase 0 docs and ADRs are frozen.
+Implementation should use the workstream overlay in `docs/internal/workstreams.md` once the Phase 0 docs are frozen.
 
 ---
 
@@ -82,7 +82,7 @@ Turn the revised architecture into implementation-ready semantics for the first 
 - frozen deployment-profile rule: ship the mainnet profile first, with later Sepolia support as a separate single-profile option rather than a concurrent chain set
 - frozen consumer capability matrix in `docs/consumer-capabilities.md`
 - frozen workstream boundaries and ownership for shared crates
-- initial ADRs for stack and repo layout
+- stack and repo-layout decisions captured in `docs/operations.md` § Decisions captured here
 
 ### Exit Criteria
 
@@ -113,7 +113,7 @@ Create the implementation structure without committing to too much behavior yet.
 
 - the repo can boot an API process, an indexer process, and a worker process
 - local development can create the database schema and run tests
-- docs and ADR folders are wired into the repo structure
+- docs are wired into the repo structure
 - repo ownership matches `docs/internal/workstreams.md`
 
 ---
@@ -625,5 +625,5 @@ These docs should exist and be treated as the interface baseline before reposito
 - `docs/execution.md` for verified resolution and primary-name verification
 - `docs/consumer-capabilities.md` for the checked-in consumer capability baseline
 - `docs/internal/workstreams.md` for parallel delivery boundaries and ownership
-- `docs/adrs/0001-stack.md` for the implementation stack decision
-- `docs/adrs/0002-surface-resource-identity.md` for the surface / resource split
+- `docs/operations.md` for the implementation stack decision
+- `docs/architecture.md` § Identities and `docs/storage.md` § Identity strategy for the surface / resource split

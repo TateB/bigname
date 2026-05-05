@@ -12,7 +12,7 @@ Use this skill to decide whether a task is a frozen-interface change or an imple
 ## Read only the docs you need
 
 - API, query, coverage, or route semantics: `docs/api-v1.md`
-- Surface/resource identity or binding behavior: `docs/adrs/0002-surface-resource-identity.md`
+- Surface/resource identity or binding behavior: `docs/architecture.md` § Identities and § Surfaces, bindings, and authority; `docs/storage.md` § Identity strategy
 - Storage, canonicality, migrations, or write ownership: `docs/storage.md`
 - Manifests, discovery, or capability flags: `docs/manifests.md`
 - Projection families or collection semantics: `docs/projections.md`

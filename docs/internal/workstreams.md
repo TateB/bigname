@@ -12,8 +12,8 @@ These docs are the minimum interface freeze:
 - `storage.md`
 - `manifests.md`
 - `consumer-capabilities.md`
-- `docs/adrs/0001-stack.md`
-- `docs/adrs/0002-surface-resource-identity.md`
+- `docs/operations.md` § Decisions captured here
+- `docs/storage.md` § Identity strategy
 
 After these are accepted, parallel work can start.
 
@@ -21,9 +21,9 @@ After these are accepted, parallel work can start.
 
 | Workstream | Owns | Can start after | Main outputs |
 | --- | --- | --- | --- |
-| Platform and DevEx | workspace bootstrap, CI, local dev, config loading | ADR 0001 | Rust workspace, compose/dev env, CI gates |
-| Storage and Domain | migrations, IDs, storage traits, domain types | `storage.md`, `chain-intake.md`, ADR 0002 | schema, migration harness, shared types |
-| Manifests and Discovery | manifest loader, discovery graph, capability registry | `manifests.md`, ADR 0001 | manifest crate, discovery persistence, admission logic |
+| Platform and DevEx | workspace bootstrap, CI, local dev, config loading | `operations.md` | Rust workspace, compose/dev env, CI gates |
+| Storage and Domain | migrations, IDs, storage traits, domain types | `storage.md`, `chain-intake.md` | schema, migration harness, shared types |
+| Manifests and Discovery | manifest loader, discovery graph, capability registry | `manifests.md` | manifest crate, discovery persistence, admission logic |
 | Intake and Adapters | chain intake, ENSv1/ENSv2/Basenames adapters, normalized events | `storage.md`, `chain-intake.md`, `manifests.md` | raw fact intake, per-chain provider availability handling, adapter routing, normalized events |
 | Projections and API | current-state projections, read handlers, OpenAPI output | `api-v1.md`, `projections.md`, `storage.md` | read models, API routes, contract tests |
 | Verified Execution | resolution execution, primary verification, trace persistence | `execution.md`, `manifests.md`, `storage.md` | execution crate, invalidation, explain traces |
