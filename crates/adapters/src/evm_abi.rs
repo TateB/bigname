@@ -56,10 +56,6 @@ pub(crate) fn u256_word_hex(value: U256) -> String {
     hex_string(value.to_be_bytes::<ABI_WORD_BYTES>())
 }
 
-pub(crate) fn u256_topic_i64(value: &str, label: &str) -> Result<i64> {
-    u256_i64(U256::from_be_bytes(hex_32(value)?), label)
-}
-
 pub(crate) fn hex_32(value: &str) -> Result<[u8; ABI_WORD_BYTES]> {
     let normalized = normalize_hex_32(value)?;
     let mut output = [0u8; ABI_WORD_BYTES];

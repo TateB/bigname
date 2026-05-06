@@ -680,6 +680,13 @@ fn abi_word_address(address: &str) -> [u8; 32] {
     word
 }
 
+fn abi_word_fixed_bytes(value: &[u8]) -> [u8; 32] {
+    assert!(value.len() <= 32, "fixed bytes value must fit in one word");
+    let mut word = [0u8; 32];
+    word[..value.len()].copy_from_slice(value);
+    word
+}
+
 fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> Vec<u8> {
     encode_controller_label_event_log_data(label, &[1, expiry_unix as u64])
 }
@@ -723,11 +730,14 @@ fn encode_registry_new_resolver_log_data(resolver: &str) -> Vec<u8> {
 }
 
 fn encode_dynamic_string_log_data(value: &str) -> Vec<u8> {
-    let value_bytes = value.as_bytes();
+    encode_dynamic_bytes_log_data(value.as_bytes())
+}
+
+fn encode_dynamic_bytes_log_data(value_bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&abi_word_u64(32));
     output.extend_from_slice(&abi_word_u64(
-        u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
+        u64::try_from(value_bytes.len()).expect("test dynamic bytes length must fit in u64"),
     ));
     output.extend_from_slice(value_bytes);
     let padded_length = value_bytes.len().div_ceil(32) * 32;
@@ -2027,12 +2037,105 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
+    let contenthash_bytes = [0xe3, 0x01, 0x01];
+    let contenthash_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                keccak256_hex(CONTENTHASH_CHANGED_SIGNATURE.as_bytes()),
+                alice.namehash.clone(),
+            ],
+            encode_dynamic_bytes_log_data(&contenthash_bytes),
+            6,
+        ),
+        &event_topics,
+    )?
+    .context("ContenthashChanged observation should decode")?;
+    assert_eq!(
+        contenthash_observation,
+        AuthorityObservation::RecordChanged(RecordChangeObservation {
+            namehash: alice.namehash.clone(),
+            resolver: resolver_address.to_owned(),
+            selector: RecordSelector {
+                record_key: "contenthash".to_owned(),
+                record_family: "contenthash".to_owned(),
+                selector_key: None,
+            },
+            value: Some(json!({
+                "encoding": "hex",
+                "bytes": "0xe30101",
+            })),
+            raw_name: None,
+            reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 6).reference(),
+        })
+    );
+
+    let abi_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                keccak256_hex(ABI_CHANGED_SIGNATURE.as_bytes()),
+                alice.namehash.clone(),
+                hex_string(abi_word_u64(2)),
+            ],
+            Vec::new(),
+            7,
+        ),
+        &event_topics,
+    )?
+    .context("ABIChanged observation should decode")?;
+    assert_eq!(
+        abi_observation,
+        AuthorityObservation::RecordChanged(RecordChangeObservation {
+            namehash: alice.namehash.clone(),
+            resolver: resolver_address.to_owned(),
+            selector: RecordSelector {
+                record_key: "abi:2".to_owned(),
+                record_family: "abi".to_owned(),
+                selector_key: Some("2".to_owned()),
+            },
+            value: Some(json!(2)),
+            raw_name: None,
+            reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 7).reference(),
+        })
+    );
+
+    let interface_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                keccak256_hex(INTERFACE_CHANGED_SIGNATURE.as_bytes()),
+                alice.namehash.clone(),
+                hex_string(abi_word_fixed_bytes(&[0x01, 0xff, 0xc9, 0xa7])),
+            ],
+            abi_word_address("0x00000000000000000000000000000000000000dd").to_vec(),
+            8,
+        ),
+        &event_topics,
+    )?
+    .context("InterfaceChanged observation should decode")?;
+    assert_eq!(
+        interface_observation,
+        AuthorityObservation::RecordChanged(RecordChangeObservation {
+            namehash: alice.namehash.clone(),
+            resolver: resolver_address.to_owned(),
+            selector: RecordSelector {
+                record_key: "interface:0x01ffc9a7".to_owned(),
+                record_family: "interface".to_owned(),
+                selector_key: Some("0x01ffc9a7".to_owned()),
+            },
+            value: Some(json!("0x00000000000000000000000000000000000000dd")),
+            raw_name: None,
+            reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 8).reference(),
+        })
+    );
+
     let pubkey_observation = build_authority_observation(
         &resolver_raw_log(
             resolver_address,
             vec![pubkey_changed_topic0(), alice.namehash.clone()],
             vec![0; 64],
-            6,
+            9,
         ),
         &event_topics,
     )?;
@@ -2043,7 +2146,7 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
             resolver_address,
             vec![version_changed_topic0(), alice.namehash.clone()],
             encode_resolver_version_changed_log_data(7),
-            7,
+            10,
         ),
         &event_topics,
     )?
@@ -2054,7 +2157,7 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
             namehash: alice.namehash,
             resolver: resolver_address.to_owned(),
             record_version: 7,
-            reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 7).reference(),
+            reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 10).reference(),
         })
     );
 

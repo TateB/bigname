@@ -1,9 +1,31 @@
 use super::*;
-use alloy_sol_types::sol_data::{
-    Address as SolAddress, Bytes as SolBytes, FixedBytes as SolFixedBytes, String as SolString,
-    Uint,
-};
-use alloy_sol_types::{SolType, abi::TokenSeq};
+use alloy_sol_types::{SolEvent, sol};
+
+sol! {
+    #[derive(Debug)]
+    event ABIChanged(bytes32 indexed node, uint256 indexed contentType);
+
+    #[derive(Debug)]
+    event ContentChanged(bytes32 indexed node, bytes32 hash);
+
+    #[derive(Debug)]
+    event ContenthashChanged(bytes32 indexed node, bytes hash);
+
+    #[derive(Debug)]
+    event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record);
+
+    #[derive(Debug)]
+    event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource);
+
+    #[derive(Debug)]
+    event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash);
+
+    #[derive(Debug)]
+    event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer);
+
+    #[derive(Debug)]
+    event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData);
+}
 
 pub(super) fn build_ens_v1_generic_record_observation(
     raw_log: &AuthorityRawLogRow,
@@ -50,58 +72,57 @@ pub(super) fn build_ens_v1_generic_record_observation(
 }
 
 fn abi_changed_observation(raw_log: &AuthorityRawLogRow) -> Result<Option<AuthorityObservation>> {
-    let Some(content_type) =
-        decode_topic_u256_i64_skip(raw_log.topics.get(2), "ABIChanged content type")
+    let Some(event) = decode_event_skip::<ABIChanged>(raw_log, "ABIChanged log is malformed")
+    else {
+        return Ok(None);
+    };
+    let Ok(content_type) = crate::evm_abi::u256_i64(event.contentType, "ABIChanged content type")
     else {
         return Ok(None);
     };
     resolver_record_observation(
         raw_log,
-        "ABIChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
             record_key: format!("abi:{content_type}"),
             record_family: "abi".to_owned(),
             selector_key: Some(content_type.to_string()),
         },
         Some(json!(content_type)),
-        None,
     )
 }
 
 fn content_changed_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some((content,)) = decode_params_skip::<(SolFixedBytes<32>,)>(
-        &raw_log.data,
-        "ContentChanged data is malformed",
-    ) else {
+    let Some(event) =
+        decode_event_skip::<ContentChanged>(raw_log, "ContentChanged log is malformed")
+    else {
         return Ok(None);
     };
-    let content = normalize_hex_32(&hex_string(content.as_slice()))?;
     resolver_record_observation(
         raw_log,
-        "ContentChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
             record_key: "content".to_owned(),
             record_family: "content".to_owned(),
             selector_key: None,
         },
-        Some(json!(content)),
-        None,
+        Some(json!(hex_string(event.hash.as_slice()))),
     )
 }
 
 fn contenthash_changed_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some((contenthash,)) =
-        decode_params_skip::<(SolBytes,)>(&raw_log.data, "ContenthashChanged data is malformed")
+    let Some(event) =
+        decode_event_skip::<ContenthashChanged>(raw_log, "ContenthashChanged log is malformed")
     else {
         return Ok(None);
     };
     resolver_record_observation(
         raw_log,
-        "ContenthashChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
             record_key: "contenthash".to_owned(),
             record_family: "contenthash".to_owned(),
@@ -109,65 +130,59 @@ fn contenthash_changed_observation(
         },
         Some(json!({
             "encoding": "hex",
-            "bytes": hex_string(contenthash.as_ref()),
+            "bytes": hex_string(event.hash.as_ref()),
         })),
-        None,
     )
 }
 
 fn dns_record_changed_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some((dns_name, resource, record)) = decode_params_skip::<(SolBytes, Uint<16>, SolBytes)>(
-        &raw_log.data,
-        "DNSRecordChanged data is malformed",
-    ) else {
+    let Some(event) =
+        decode_event_skip::<DNSRecordChanged>(raw_log, "DNSRecordChanged log is malformed")
+    else {
         return Ok(None);
     };
-    let resource = i64::from(resource);
+    let resource = i64::from(event.resource);
     resolver_record_observation(
         raw_log,
-        "DNSRecordChanged",
-        dns_record_selector(resource, dns_name.as_ref()),
+        hex_string(event.node.as_slice()),
+        dns_record_selector(resource, event.name.as_ref()),
         Some(json!({
             "encoding": "hex",
-            "bytes": hex_string(record.as_ref()),
+            "bytes": hex_string(event.record.as_ref()),
         })),
-        None,
     )
 }
 
 fn dns_record_deleted_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some((dns_name, resource)) = decode_params_skip::<(SolBytes, Uint<16>)>(
-        &raw_log.data,
-        "DNSRecordDeleted data is malformed",
-    ) else {
+    let Some(event) =
+        decode_event_skip::<DNSRecordDeleted>(raw_log, "DNSRecordDeleted log is malformed")
+    else {
         return Ok(None);
     };
-    let resource = i64::from(resource);
+    let resource = i64::from(event.resource);
     resolver_record_observation(
         raw_log,
-        "DNSRecordDeleted",
-        dns_record_selector(resource, dns_name.as_ref()),
+        hex_string(event.node.as_slice()),
+        dns_record_selector(resource, event.name.as_ref()),
         Some(json!({ "deleted": true })),
-        None,
     )
 }
 
 fn dns_zonehash_changed_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some((last_zonehash, zonehash)) = decode_params_skip::<(SolBytes, SolBytes)>(
-        &raw_log.data,
-        "DNSZonehashChanged data is malformed",
-    ) else {
+    let Some(event) =
+        decode_event_skip::<DNSZonehashChanged>(raw_log, "DNSZonehashChanged log is malformed")
+    else {
         return Ok(None);
     };
     resolver_record_observation(
         raw_log,
-        "DNSZonehashChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
             record_key: "dns:zonehash".to_owned(),
             record_family: "dns".to_owned(),
@@ -176,88 +191,72 @@ fn dns_zonehash_changed_observation(
         Some(json!({
             "previous": {
                 "encoding": "hex",
-                "bytes": hex_string(last_zonehash.as_ref()),
+                "bytes": hex_string(event.lastzonehash.as_ref()),
             },
             "current": {
                 "encoding": "hex",
-                "bytes": hex_string(zonehash.as_ref()),
+                "bytes": hex_string(event.zonehash.as_ref()),
             },
         })),
-        None,
     )
 }
 
 fn interface_changed_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some(interface_id) = decode_topic_skip::<SolFixedBytes<4>>(raw_log.topics.get(2)) else {
-        return Ok(None);
-    };
-    let Some((implementer,)) =
-        decode_params_skip::<(SolAddress,)>(&raw_log.data, "InterfaceChanged data is malformed")
+    let Some(event) =
+        decode_event_skip::<InterfaceChanged>(raw_log, "InterfaceChanged log is malformed")
     else {
         return Ok(None);
     };
-    let interface_id = hex_string(interface_id.as_slice());
-    let implementer = crate::evm_abi::address_hex(implementer);
+    let interface_id = hex_string(event.interfaceID.as_slice());
+    let implementer = crate::evm_abi::address_hex(event.implementer);
     resolver_record_observation(
         raw_log,
-        "InterfaceChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
             record_key: format!("interface:{interface_id}"),
             record_family: "interface".to_owned(),
             selector_key: Some(interface_id),
         },
         Some(json!(implementer)),
-        None,
     )
 }
 
 fn data_changed_observation(raw_log: &AuthorityRawLogRow) -> Result<Option<AuthorityObservation>> {
-    let Some((key,)) =
-        decode_params_skip::<(SolString,)>(&raw_log.data, "DataChanged data is malformed")
+    let Some(event) = decode_event_skip::<DataChanged>(raw_log, "DataChanged log is malformed")
     else {
         return Ok(None);
     };
-    let Some(indexed_key_hash) = normalize_resolver_topic(raw_log.topics.get(2)) else {
-        return Ok(None);
-    };
-    if indexed_key_hash != keccak256_hex(key.as_bytes()) {
+    if hex_string(event.indexedKey.as_slice()) != keccak256_hex(event.key.as_bytes()) {
         return Ok(None);
     }
-    let Some(indexed_data_hash) = normalize_resolver_topic(raw_log.topics.get(3)) else {
-        return Ok(None);
-    };
+    let indexed_data_hash = hex_string(event.indexedData.as_slice());
     resolver_record_observation(
         raw_log,
-        "DataChanged",
+        hex_string(event.node.as_slice()),
         RecordSelector {
-            record_key: format!("data:{key}"),
+            record_key: format!("data:{}", event.key),
             record_family: "data".to_owned(),
-            selector_key: Some(key),
+            selector_key: Some(event.key),
         },
         Some(json!({ "indexed_data_hash": indexed_data_hash })),
-        None,
     )
 }
 
 fn resolver_record_observation(
     raw_log: &AuthorityRawLogRow,
-    _event_name: &str,
+    namehash: String,
     selector: RecordSelector,
     value: Option<Value>,
-    raw_name: Option<String>,
 ) -> Result<Option<AuthorityObservation>> {
-    let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
-        return Ok(None);
-    };
     Ok(Some(AuthorityObservation::RecordChanged(
         RecordChangeObservation {
             namehash,
             resolver: raw_log.emitting_address.clone(),
             selector,
             value,
-            raw_name,
+            raw_name: None,
             reference: raw_log.reference(),
         },
     )))
@@ -272,22 +271,9 @@ fn dns_record_selector(resource: i64, dns_name: &[u8]) -> RecordSelector {
     }
 }
 
-fn decode_params_skip<'de, T>(data: &'de [u8], context: &'static str) -> Option<T::RustType>
+fn decode_event_skip<E>(raw_log: &AuthorityRawLogRow, context: &'static str) -> Option<E>
 where
-    T: SolType,
-    T::Token<'de>: TokenSeq<'de>,
+    E: SolEvent,
 {
-    crate::evm_abi::abi_decode_params::<T>(data, context).ok()
-}
-
-fn decode_topic_u256_i64_skip(topic: Option<&String>, label: &str) -> Option<i64> {
-    crate::evm_abi::u256_topic_i64(topic?, label).ok()
-}
-
-fn decode_topic_skip<T>(topic: Option<&String>) -> Option<T::RustType>
-where
-    T: SolType,
-{
-    let word = crate::evm_abi::hex_32(topic?).ok()?;
-    T::abi_decode_validate(&word).ok()
+    crate::evm_abi::decode_event_log::<E>(&raw_log.topics, &raw_log.data, context).ok()
 }
