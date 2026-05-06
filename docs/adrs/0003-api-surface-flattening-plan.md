@@ -91,6 +91,12 @@ The review question for every slice is: "Can a maintainer understand this capabi
 with fewer concepts and fewer files open than before?" If the answer is no, the slice is
 not de-slopping even if the code looks more organized.
 
+ADR 0004 adds a retroactive completion gate for this plan. A slice does not count as
+completed ADR 0003 work merely because it introduces a shared helper, central table, or
+compatibility scaffold. It must delete or collapse the duplicated subsystem concept
+that made the capability hard to understand, or explicitly name the remaining
+scaffolding as debt with a paired deletion target.
+
 ### Public route families
 
 All public `v1` routes should fit one of these route families.
@@ -1022,3 +1028,4 @@ touch.
 - `docs/internal/workstreams.md`
 - `docs/adrs/0001-stack.md`
 - `docs/adrs/0002-surface-resource-identity.md`
+- `docs/adrs/0004-conceptual-deduplication-gate.md`
