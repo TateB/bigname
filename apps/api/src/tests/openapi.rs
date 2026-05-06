@@ -175,6 +175,23 @@ fn assert_schema_omits(schema: &Value, denied_fields: &[&str]) {
     }
 }
 
+const COMPACT_SCHEMA_DENYLIST: &[&str] = &[
+    "logical_name_id",
+    "surface_binding_id",
+    "projection_version_id",
+    "raw_fact_refs",
+    "normalized_event_ids",
+    "execution_trace_id",
+    "chain_positions",
+    "coverage",
+];
+
+fn assert_compact_schema_omits(document: &Value, schema_name: &str, extra_denied_fields: &[&str]) {
+    let schema = openapi_schema(document, schema_name);
+    assert_schema_omits(schema, COMPACT_SCHEMA_DENYLIST);
+    assert_schema_omits(schema, extra_denied_fields);
+}
+
 #[test]
 fn openapi_document_publishes_only_shipped_routes() {
     let document = openapi_document();
@@ -708,54 +725,25 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         Some(&json!({ "$ref": "#/components/schemas/ResourceLookupData" }))
     );
 
-    let compact_denylisted_fields = [
-        "logical_name_id",
-        "surface_binding_id",
-        "projection_version_id",
-        "raw_fact_refs",
-        "normalized_event_ids",
-        "execution_trace_id",
-        "chain_positions",
-        "coverage",
-    ];
-    assert_schema_omits(
-        openapi_schema(&document, "CompactDomainSummary"),
+    assert_compact_schema_omits(&document, "CompactDomainSummary", &["resource_id", "provenance"]);
+    assert_compact_schema_omits(
+        &document,
+        "CompactRecordSummary",
         &[
-            &compact_denylisted_fields[..],
-            &["resource_id", "provenance"],
-        ]
-        .concat(),
+            "resource_id",
+            "record_version_boundary",
+            "explicit_gaps",
+            "unsupported_families",
+            "provenance",
+        ],
     );
-    assert_schema_omits(
-        openapi_schema(&document, "CompactRecordSummary"),
-        &[
-            &compact_denylisted_fields[..],
-            &[
-                "resource_id",
-                "record_version_boundary",
-                "explicit_gaps",
-                "unsupported_families",
-                "provenance",
-            ],
-        ]
-        .concat(),
+    assert_compact_schema_omits(
+        &document,
+        "CompactHistoryEvent",
+        &["normalized_event_id", "provenance"],
     );
-    assert_schema_omits(
-        openapi_schema(&document, "CompactHistoryEvent"),
-        &[
-            &compact_denylisted_fields[..],
-            &["normalized_event_id", "provenance"],
-        ]
-        .concat(),
-    );
-    assert_schema_omits(
-        openapi_schema(&document, "ResourceLookupData"),
-        &["logical_name_id", "surface_binding_id", "namehash"],
-    );
-    assert_schema_omits(
-        openapi_schema(&document, "RoleRow"),
-        &["provenance", "raw_fact_refs", "normalized_event_ids", "execution_trace_id"],
-    );
+    assert_compact_schema_omits(&document, "ResourceLookupData", &["namehash"]);
+    assert_compact_schema_omits(&document, "RoleRow", &["provenance"]);
 
     let resolution = openapi_schema(&document, "ResolutionResponse");
     assert_eq!(
