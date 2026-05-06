@@ -102,23 +102,16 @@ fn build_compact_children_meta(
     counts_supported: bool,
     meta: MetaMode,
 ) -> JsonValue {
-    let mut value = empty_object();
-    insert_string_field(&mut value, "support_status", "supported".to_owned());
-    insert_value_field(&mut value, "unsupported_filters", JsonValue::Array(Vec::new()));
     let unsupported_fields = if include_counts && !counts_supported {
-        vec![JsonValue::String("subname_count".to_owned())]
+        vec!["subname_count".to_owned()]
     } else {
         Vec::new()
     };
-    insert_value_field(
-        &mut value,
-        "unsupported_fields",
-        JsonValue::Array(unsupported_fields),
-    );
-    insert_value_field(
-        &mut value,
-        "total_count",
-        JsonValue::Number(u64::try_from(summary.child_count).unwrap_or_default().into()),
+    let mut value = compact_meta_object(
+        "supported",
+        Some(u64::try_from(summary.child_count).unwrap_or_default()),
+        unsupported_fields,
+        std::iter::empty(),
     );
 
     if meta == MetaMode::Full {
