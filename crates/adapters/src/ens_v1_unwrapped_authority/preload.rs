@@ -229,10 +229,7 @@ pub(super) async fn preload_restricted_name_histories(
             block_hash: sql_row::get(&row, "binding_block_hash")?,
             block_number: sql_row::get(&row, "binding_block_number")?,
             block_timestamp: active_from,
-            canonicality_state: decode_preload_canonicality_state(&sql_row::get::<String>(
-                &row,
-                "binding_canonicality_state",
-            )?)?,
+            canonicality_state: sql_row::get(&row, "binding_canonicality_state")?,
             namespace: name.namespace.clone(),
         };
         let surface_binding_id = sql_row::get(&row, "surface_binding_id")?;
@@ -482,10 +479,7 @@ fn raw_block_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<RawBlockSna
         block_hash: sql_row::get(&row, "block_hash")?,
         block_number: sql_row::get(&row, "block_number")?,
         block_timestamp: sql_row::get(&row, "block_timestamp")?,
-        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -787,7 +781,7 @@ async fn load_selected_registrar_state_before_replay(
                 transaction_hash: row.try_get("reference_transaction_hash")?,
                 transaction_index: None,
                 log_index: row.try_get("reference_log_index")?,
-                canonicality_state: decode_preload_canonicality_state(
+                canonicality_state: CanonicalityState::parse(
                     &row.try_get::<Option<String>, _>("reference_canonicality_state")?
                         .context("selected registrar replay state is missing canonicality")?,
                 )?,
@@ -1743,15 +1737,4 @@ fn manifest_id_from_authority_key(authority_key: &str) -> Option<i64> {
 
 fn log_index_from_authority_key(authority_key: &str) -> Option<i64> {
     authority_key.rsplit(':').next()?.parse().ok()
-}
-
-fn decode_preload_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use sqlx::PgPool;
 
-use crate::ens_v2_common::{normalize_address, parse_canonicality_state, source_scope_bindings};
+use crate::ens_v2_common::{normalize_address, source_scope_bindings};
 
 use super::{SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, active_emitters::ActiveEmitter};
 
@@ -120,9 +120,7 @@ pub(super) async fn load_registrar_raw_logs(
                 emitting_address,
                 topics: sql_row::get(&row, "topics")?,
                 data: sql_row::get(&row, "data")?,
-                canonicality_state: parse_canonicality_state(
-                    &sql_row::get::<String>(&row, "canonicality_state")?,
-                )?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),
                 source_family: emitter.source_family.clone(),

@@ -3,7 +3,6 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::load_watched_contracts;
-use bigname_storage::CanonicalityState;
 use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::adapter_manifest::{
@@ -206,10 +205,6 @@ async fn load_active_source_family_manifest_metadata(
 
 pub(crate) fn normalize_address(value: &str) -> String {
     value.to_ascii_lowercase()
-}
-
-pub(crate) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    CanonicalityState::parse(value)
 }
 
 pub(crate) fn dns_decode_optional(bytes: &[u8]) -> Result<Option<String>> {

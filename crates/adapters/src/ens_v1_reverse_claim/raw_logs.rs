@@ -109,10 +109,7 @@ pub(super) async fn load_reverse_raw_logs(
                 emitting_address: address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
                 topics: sql_row::get(&row, "topics")?,
-                canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
-                    &row,
-                    "canonicality_state",
-                )?)?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),
                 source_family: emitter.source_family.clone(),

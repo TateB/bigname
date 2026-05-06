@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use super::{
     emitters::{emitter_for_block_and_scope, scoped_ranges_for_active_emitters},
     types::{ActiveEmitter, RegistryRawLogRow, RegistryRawLogSourceScopeTarget},
-    util::{normalize_address, parse_canonicality_state},
+    util::normalize_address,
 };
 
 pub(super) async fn load_registry_raw_logs(
@@ -182,10 +182,7 @@ pub(super) async fn load_registry_raw_logs(
             emitting_address,
             topics: sql_row::get(&row, "topics")?,
             data: sql_row::get(&row, "data")?,
-            canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-                &row,
-                "canonicality_state",
-            )?)?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
             emitting_contract_instance_id: emitter.contract_instance_id,
             source_manifest_id: emitter.source_manifest_id,
             namespace: emitter.namespace.clone(),

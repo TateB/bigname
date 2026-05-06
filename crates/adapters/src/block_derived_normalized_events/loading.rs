@@ -2,7 +2,6 @@ use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use bigname_storage::CanonicalityState;
 use sqlx::PgPool;
 
 use super::event_topics::PreimageObservedEventTopics;
@@ -209,10 +208,7 @@ pub(super) async fn load_watched_raw_logs(
                 emitting_address,
                 topics: sql_row::get(&row, "topics")?,
                 data: sql_row::get(&row, "data")?,
-                canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
-                    &row,
-                    "canonicality_state",
-                )?)?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: active_emitter.source_manifest_id,
                 namespace: active_emitter.namespace.clone(),
                 source_family: active_emitter.source_family.clone(),

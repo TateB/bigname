@@ -4,7 +4,7 @@ use sqlx::PgPool;
 
 use crate::ens_v2_common::{
     ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
-    parse_canonicality_state, source_scope_bindings,
+    source_scope_bindings,
 };
 
 use super::{
@@ -234,10 +234,7 @@ pub(super) async fn load_resolver_raw_logs(
             emitting_contract_instance_id: emitter.contract_instance_id,
             topics: sql_row::get(&row, "topics")?,
             data: sql_row::get(&row, "data")?,
-            canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-                &row,
-                "canonicality_state",
-            )?)?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
             source_manifest_id: emitter.source_manifest_id,
             namespace: emitter.namespace.clone(),
             source_family: emitter.source_family.clone(),

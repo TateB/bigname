@@ -531,10 +531,7 @@ fn authority_raw_log_from_row(
         emitting_address,
         topics: sql_row::get(&row, "topics")?,
         data: sql_row::get(&row, "data")?,
-        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
         source_manifest_id: emitter.source_manifest_id,
         namespace: emitter.namespace.clone(),
         source_family: emitter.source_family.clone(),
@@ -561,10 +558,7 @@ fn authority_raw_log_from_generic_resolver_source(
         emitting_address,
         topics: sql_row::get(&row, "topics")?,
         data: sql_row::get(&row, "data")?,
-        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
         source_manifest_id: source.source_manifest_id,
         namespace: source.namespace.clone(),
         source_family: source.source_family.clone(),

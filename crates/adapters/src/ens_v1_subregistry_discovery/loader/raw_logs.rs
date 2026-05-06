@@ -10,7 +10,6 @@ use super::super::{
 };
 use super::{ActiveEmitter, RegistryRawLogRow};
 use anyhow::{Context, Result};
-use bigname_storage::CanonicalityState;
 use futures_util::TryStreamExt;
 use sqlx::PgPool;
 
@@ -373,10 +372,7 @@ fn registry_raw_log_from_row(
         emitting_address,
         topics: sql_row::get(&row, "topics")?,
         data: sql_row::get(&row, "data")?,
-        canonicality_state: CanonicalityState::parse(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
         emitting_contract_instance_id: emitter.contract_instance_id,
         source_manifest_id: emitter.source_manifest_id,
         namespace: emitter.namespace.clone(),

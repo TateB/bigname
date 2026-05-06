@@ -29,14 +29,14 @@ Production Rust snapshot from the working tree:
 | Area | Production files | LOC |
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 25,985 |
-| `crates/adapters` | 101 | 21,522 |
+| `crates/adapters` | 101 | 21,450 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,343 |
+| Total | 513 | 105,271 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -192,6 +192,10 @@ Addressed slices:
 - Storage row decoders now read `CanonicalityState` and `SurfaceBindingKind`
   through the shared SQLx decoders instead of repeatedly loading strings and
   reparsing them at each raw/identity/history/projection decode site.
+- Adapter raw-log and preload row loaders now share the same SQLx enum decode
+  path for canonicality and binding-kind fields. The ENSv2 common
+  canonicality parse shim and the unused ENSv1 authority ABI parse helper were
+  removed.
 
 ## Highest leverage cleanup map
 

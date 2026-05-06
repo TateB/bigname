@@ -37,10 +37,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
                 block_hash: sql_row::get(&row, "block_hash")?,
                 block_number: sql_row::get(&row, "block_number")?,
                 block_timestamp: sql_row::get(&row, "block_timestamp")?,
-                canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-                    &row,
-                    "canonicality_state",
-                )?)?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
             })
         })
         .collect()
@@ -204,9 +201,6 @@ fn raw_block_snapshot_from_row(row: PgRow) -> Result<RawBlockSnapshot> {
         block_hash: sql_row::get(&row, "block_hash")?,
         block_number: sql_row::get(&row, "block_number")?,
         block_timestamp: sql_row::get(&row, "block_timestamp")?,
-        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
     })
 }

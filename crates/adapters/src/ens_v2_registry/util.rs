@@ -4,9 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
-pub(super) use crate::ens_v2_common::{
-    hex_string, keccak256_bytes, normalize_address, parse_canonicality_state,
-};
+pub(super) use crate::ens_v2_common::{hex_string, keccak256_bytes, normalize_address};
 pub(super) use crate::evm_abi::namehash_bytes;
 
 use super::{constants::ZERO_ADDRESS, types::ObservationRef};
