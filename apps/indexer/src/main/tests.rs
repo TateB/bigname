@@ -6,6 +6,8 @@ include!("tests/reconcile.rs");
 
 include!("tests/runtime_refresh.rs");
 
+include!("tests/run_mode.rs");
+
 include!("tests/adapter_sync.rs");
 
 include!("tests/replay.rs");

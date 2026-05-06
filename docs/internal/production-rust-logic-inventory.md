@@ -30,13 +30,13 @@ Production Rust snapshot from the working tree:
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 25,985 |
 | `crates/adapters` | 101 | 21,384 |
-| `apps/indexer` | 65 | 17,060 |
+| `apps/indexer` | 65 | 17,035 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,205 |
+| Total | 513 | 105,180 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -45,14 +45,14 @@ first places to revisit after logic dedupe:
 - `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
 - `apps/indexer/src/main/repair.rs` at 615 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 622 LOC.
-- `apps/indexer/src/main.rs` at 518 LOC.
 - `crates/manifests/src/lib/model.rs` at 632 LOC.
 - `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` at 602 LOC.
 
 Additional advisory-only warnings remain above 500 LOC, including
 `crates/adapters/src/block_derived_normalized_events/event_builders.rs` at 593
 LOC, `crates/adapters/src/ens_v1_unwrapped_authority.rs` at 572 LOC, and
-`crates/storage/src/raw_code.rs` at 562 LOC.
+`crates/storage/src/raw_code.rs` at 562 LOC. `apps/indexer/src/main.rs` is no
+longer a hard failure, but remains a wiring-file advisory at 493 LOC.
 
 Addressed slices:
 
@@ -200,6 +200,8 @@ Addressed slices:
   its canonical/safe/finalized SQL filter and collapses selected registrar
   replay reference aggregation to one JSON payload, removing repeated reference
   column aggregates and hand-decoded optional reference columns.
+- `apps/indexer/src/main.rs` dropped below the hard wiring-file threshold by
+  moving the run-mode unit test into the existing `main/tests` include tree.
 
 ## Highest leverage cleanup map
 

@@ -308,31 +308,6 @@ fn live_poll_adapter_sync_enabled_for_run_mode(
             && normalized_replay_catchup_enabled)
 }
 
-#[cfg(test)]
-mod run_mode_tests {
-    use super::*;
-
-    #[test]
-    fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
-        assert!(!live_poll_adapter_sync_enabled_for_run_mode(
-            BackfillAdapterSyncMode::Auto,
-            true
-        ));
-        assert!(live_poll_adapter_sync_enabled_for_run_mode(
-            BackfillAdapterSyncMode::Auto,
-            false
-        ));
-        assert!(live_poll_adapter_sync_enabled_for_run_mode(
-            BackfillAdapterSyncMode::Inline,
-            true
-        ));
-        assert!(!live_poll_adapter_sync_enabled_for_run_mode(
-            BackfillAdapterSyncMode::RawOnly,
-            false
-        ));
-    }
-}
-
 async fn run_backfill(args: BackfillArgs) -> Result<()> {
     let range = BackfillBlockRange::new(args.from_block, args.to_block)?;
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;

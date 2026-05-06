@@ -1,0 +1,19 @@
+#[test]
+fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
+    assert!(!live_poll_adapter_sync_enabled_for_run_mode(
+        BackfillAdapterSyncMode::Auto,
+        true
+    ));
+    assert!(live_poll_adapter_sync_enabled_for_run_mode(
+        BackfillAdapterSyncMode::Auto,
+        false
+    ));
+    assert!(live_poll_adapter_sync_enabled_for_run_mode(
+        BackfillAdapterSyncMode::Inline,
+        true
+    ));
+    assert!(!live_poll_adapter_sync_enabled_for_run_mode(
+        BackfillAdapterSyncMode::RawOnly,
+        false
+    ));
+}
