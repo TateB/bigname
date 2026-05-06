@@ -31,18 +31,17 @@ Production Rust snapshot from the working tree:
 | `crates/storage` | 144 | 25,984 |
 | `crates/adapters` | 101 | 21,350 |
 | `apps/indexer` | 65 | 17,003 |
-| `apps/api` | 64 | 14,218 |
+| `apps/api` | 65 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,602 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,040 |
+| Total | 514 | 105,040 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
 
 - `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,674 LOC.
-- `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
 
 Additional advisory-only warnings remain above 500 LOC, including
 `crates/adapters/src/block_derived_normalized_events/event_builders.rs` at 593
@@ -54,6 +53,8 @@ only at 577 LOC. `apps/indexer/src/main/repair.rs` is now advisory only at 583
 LOC. `crates/manifests/src/lib/model.rs` is now advisory only at 578 LOC.
 `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` is now
 advisory only at 584 LOC.
+`apps/api/src/responses/app_facing/records_declared_values.rs` is now advisory
+only at 595 LOC.
 
 Addressed slices:
 
@@ -217,6 +218,10 @@ Addressed slices:
   below the hard oversized-file threshold by removing the one-use
   `apply_authority_raw_logs` wrapper and letting the restricted replay caller
   own the matched-log counting loop directly.
+- `apps/api/src/responses/app_facing/records_declared_values.rs` dropped below
+  the hard oversized-file threshold by moving compact record inventory lookup,
+  inventory-derived payload, and inventory-source helpers into
+  `records_declared_inventory.rs`.
 
 ## Highest leverage cleanup map
 

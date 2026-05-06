@@ -371,4 +371,5 @@ fn parse_compact_records_coin_types(value: Option<&str>) -> ApiResult<Vec<String
     }
 }
 
+include!("records_declared_inventory.rs");
 include!("records_declared_values.rs");
