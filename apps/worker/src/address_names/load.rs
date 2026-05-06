@@ -1,17 +1,15 @@
 use anyhow::{Context, Result};
-use bigname_storage::sql_row;
 use futures_util::{Stream, StreamExt};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use super::{
     constants::{CANONICAL_STATE_FILTER, RELEVANT_EVENT_KINDS},
     model::{CurrentBindingSeed, RelevantEvent},
     source_policy::{authority_derivation_kinds, authority_source_families},
-    util::{parse_canonicality_state, parse_surface_binding_kind},
 };
 
 pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBindingSeed>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query_as::<_, CurrentBindingSeed>(&format!(
         r#"
         SELECT
             ns.logical_name_id,
@@ -60,13 +58,13 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
     .await
     .context("failed to load current bindings for address_names_current rebuild")?;
 
-    rows.into_iter().map(decode_current_binding_seed).collect()
+    Ok(rows)
 }
 
 pub(super) fn stream_current_bindings<'a>(
     pool: &'a PgPool,
 ) -> impl Stream<Item = Result<CurrentBindingSeed>> + 'a {
-    sqlx::query(
+    sqlx::query_as::<_, CurrentBindingSeed>(
         r#"
         SELECT
             ns.logical_name_id,
@@ -128,10 +126,7 @@ pub(super) fn stream_current_bindings<'a>(
         "#,
     )
     .fetch(pool)
-    .map(|row| {
-        row.context("failed to stream current bindings for address_names_current rebuild")
-            .and_then(decode_current_binding_seed)
-    })
+    .map(|row| row.context("failed to stream current bindings for address_names_current rebuild"))
 }
 
 pub(super) async fn load_relevant_events(
@@ -150,7 +145,7 @@ pub(super) async fn load_relevant_events(
         .collect::<Vec<_>>();
     let source_families = authority_source_families(namespace);
 
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query_as::<_, RelevantEvent>(&format!(
         r#"
         SELECT
             ne.normalized_event_id,
@@ -194,55 +189,5 @@ pub(super) async fn load_relevant_events(
         format!("failed to load address-name normalized events for {logical_name_id}")
     })?;
 
-    rows.into_iter().map(decode_relevant_event).collect()
-}
-
-fn decode_current_binding_seed(row: sqlx::postgres::PgRow) -> Result<CurrentBindingSeed> {
-    Ok(CurrentBindingSeed {
-        logical_name_id: sql_row::get(&row, "logical_name_id")?,
-        namespace: sql_row::get(&row, "namespace")?,
-        canonical_display_name: sql_row::get(&row, "canonical_display_name")?,
-        normalized_name: sql_row::get(&row, "normalized_name")?,
-        namehash: sql_row::get(&row, "namehash")?,
-        surface_chain_id: sql_row::get(&row, "surface_chain_id")?,
-        surface_block_hash: sql_row::get(&row, "surface_block_hash")?,
-        surface_block_number: sql_row::get(&row, "surface_block_number")?,
-        surface_block_timestamp: sql_row::get(&row, "surface_block_timestamp")?,
-        surface_state: parse_canonicality_state(&sql_row::get::<String>(&row, "surface_state")?)?,
-        surface_binding_id: sql_row::get(&row, "surface_binding_id")?,
-        resource_id: sql_row::get(&row, "resource_id")?,
-        token_lineage_id: sql_row::get(&row, "token_lineage_id")?,
-        binding_kind: parse_surface_binding_kind(&sql_row::get::<String>(&row, "binding_kind")?)?,
-        binding_chain_id: sql_row::get(&row, "binding_chain_id")?,
-        binding_block_hash: sql_row::get(&row, "binding_block_hash")?,
-        binding_block_number: sql_row::get(&row, "binding_block_number")?,
-        binding_block_timestamp: sql_row::get(&row, "binding_block_timestamp")?,
-        binding_state: parse_canonicality_state(&sql_row::get::<String>(&row, "binding_state")?)?,
-        resource_state: parse_canonicality_state(&sql_row::get::<String>(&row, "resource_state")?)?,
-        token_lineage_state: row
-            .try_get::<Option<String>, _>("token_lineage_state")
-            .context("missing token_lineage_state")?
-            .map(|value| parse_canonicality_state(&value))
-            .transpose()?,
-    })
-}
-
-fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
-    Ok(RelevantEvent {
-        normalized_event_id: sql_row::get(&row, "normalized_event_id")?,
-        event_kind: sql_row::get(&row, "event_kind")?,
-        source_family: sql_row::get(&row, "source_family")?,
-        manifest_version: sql_row::get(&row, "manifest_version")?,
-        source_manifest_id: sql_row::get(&row, "source_manifest_id")?,
-        chain_id: sql_row::get(&row, "chain_id")?,
-        block_number: sql_row::get(&row, "block_number")?,
-        block_hash: sql_row::get(&row, "block_hash")?,
-        block_timestamp: sql_row::get(&row, "block_timestamp")?,
-        raw_fact_ref: sql_row::get(&row, "raw_fact_ref")?,
-        canonicality_state: parse_canonicality_state(&sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
-        after_state: sql_row::get(&row, "after_state")?,
-    })
+    Ok(rows)
 }

@@ -3,7 +3,6 @@ use bigname_storage::SurfaceBindingKind;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::decode::decode_relevant_event;
 use super::json::{json_str, normalize_resolver_address};
 use super::resolution::relevant_event_chain_position;
 use super::types::{CurrentBindingContext, NameSurfaceSeed, RelevantEvent, WildcardSourceContext};
@@ -113,7 +112,7 @@ async fn load_wildcard_source_events(
         EVENT_KIND_RESOLVER_CHANGED.to_owned(),
         EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
     ];
-    let rows = sqlx::query(&format!(
+    let events = sqlx::query_as::<_, RelevantEvent>(&format!(
         r#"
         SELECT
             ne.normalized_event_id,
@@ -166,11 +165,6 @@ async fn load_wildcard_source_events(
     .with_context(|| {
         format!("failed to load wildcard source events for logical_name_id {logical_name_id}")
     })?;
-    let events = rows
-        .into_iter()
-        .map(decode_relevant_event)
-        .collect::<Result<Vec<_>>>()?;
-
     let resolver_event = events
         .iter()
         .find(|event| {

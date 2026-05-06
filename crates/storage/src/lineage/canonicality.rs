@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, bail};
-use sqlx::Postgres;
+use sqlx::{
+    Decode, Postgres, Type,
+    error::BoxDynError,
+    postgres::{PgTypeInfo, PgValueRef},
+};
 
 use super::reads::{load_chain_lineage_path, load_lineage_snapshots_for_hashes};
 use super::types::{CanonicalityState, ChainLineageBlock};
@@ -82,6 +86,23 @@ impl CanonicalityState {
             "orphaned" => Ok(Self::Orphaned),
             _ => bail!("unknown canonicality_state value {value}"),
         }
+    }
+}
+
+impl Type<Postgres> for CanonicalityState {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <String as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> Decode<'r, Postgres> for CanonicalityState {
+    fn decode(value: PgValueRef<'r>) -> std::result::Result<Self, BoxDynError> {
+        let value = <String as Decode<Postgres>>::decode(value)?;
+        Self::parse(&value).map_err(Into::into)
     }
 }
 

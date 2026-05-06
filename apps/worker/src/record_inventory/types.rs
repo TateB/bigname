@@ -21,7 +21,7 @@ pub struct RecordInventoryTextHydrationSummary {
     pub updated_row_count: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct RelevantEvent {
     pub(super) normalized_event_id: i64,
     pub(super) logical_name_id: String,

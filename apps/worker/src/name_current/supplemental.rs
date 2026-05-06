@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use bigname_storage::SurfaceBindingKind;
+use bigname_storage::{CanonicalityState, SurfaceBindingKind};
 use sqlx::{PgPool, Row};
 
-use super::decode::parse_canonicality_state;
 use super::project::{chain_slot, latest_chain_position_for_chain};
 use super::types::{
     BasenamesExecutionManifestVersion, ChainPositionCandidate, CurrentBindingContext, HistoryHeads,
@@ -203,7 +202,7 @@ async fn load_basenames_execution_target_lineage_observation(
                     .try_get("block_timestamp")
                     .context("missing Basenames transport block_timestamp")?,
             },
-            canonicality_state: parse_canonicality_state(
+            canonicality_state: CanonicalityState::parse(
                 &row.try_get::<String, _>("canonicality_state")
                     .context("missing Basenames transport canonicality_state")?,
             )?,

@@ -2,7 +2,7 @@ use bigname_storage::CanonicalityState;
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct RelevantEvent {
     pub(super) normalized_event_id: i64,
     pub(super) source_family: String,

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 
@@ -93,8 +92,4 @@ fn canonicality_rank(state: CanonicalityState) -> u8 {
         CanonicalityState::Observed => 3,
         CanonicalityState::Orphaned => 4,
     }
-}
-
-pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    CanonicalityState::parse(value)
 }

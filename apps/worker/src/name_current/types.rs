@@ -3,7 +3,7 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct NameSurfaceSeed {
     pub(super) logical_name_id: String,
     pub(super) namespace: String,
@@ -17,7 +17,7 @@ pub(super) struct NameSurfaceSeed {
     pub(super) canonicality_state: CanonicalityState,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct CurrentBindingContext {
     pub(super) surface_binding_id: Uuid,
     pub(super) resource_id: Uuid,
@@ -32,7 +32,7 @@ pub(super) struct CurrentBindingContext {
     pub(super) token_lineage_state: Option<CanonicalityState>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct RelevantEvent {
     pub(super) normalized_event_id: i64,
     pub(super) resource_id: Option<Uuid>,

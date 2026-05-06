@@ -3,7 +3,7 @@ use futures_util::{Stream, StreamExt};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{constants::*, json::parse_canonicality_state, types::RelevantEvent};
+use super::{constants::*, types::RelevantEvent};
 
 pub(super) fn stream_target_resource_ids<'a>(
     pool: &'a PgPool,
@@ -48,7 +48,7 @@ pub(super) async fn load_relevant_events(
 ) -> Result<Vec<RelevantEvent>> {
     let derivation_kinds = record_inventory_derivation_kinds();
     let resolver_event_namespaces = resolver_event_namespaces();
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query_as::<_, RelevantEvent>(&format!(
         r#"
         SELECT
             ne.normalized_event_id,
@@ -102,7 +102,7 @@ pub(super) async fn load_relevant_events(
         format!("failed to load record_inventory_current events for resource_id {resource_id}")
     })?;
 
-    rows.into_iter().map(decode_relevant_event).collect()
+    Ok(rows)
 }
 
 fn record_inventory_derivation_kinds() -> Vec<String> {
@@ -114,36 +114,4 @@ fn record_inventory_derivation_kinds() -> Vec<String> {
 
 fn resolver_event_namespaces() -> Vec<String> {
     vec![ENS_NAMESPACE.to_owned(), BASENAMES_NAMESPACE.to_owned()]
-}
-
-fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
-    Ok(RelevantEvent {
-        normalized_event_id: row.try_get("normalized_event_id")?,
-        logical_name_id: row
-            .try_get::<Option<String>, _>("logical_name_id")?
-            .context("record event must include logical_name_id")?,
-        resource_id: row
-            .try_get::<Option<Uuid>, _>("resource_id")?
-            .context("record event must include resource_id")?,
-        event_kind: row.try_get("event_kind")?,
-        source_family: row.try_get("source_family")?,
-        manifest_version: row.try_get("manifest_version")?,
-        source_manifest_id: row.try_get("source_manifest_id")?,
-        chain_id: row
-            .try_get::<Option<String>, _>("chain_id")?
-            .context("record event must include chain_id")?,
-        block_number: row
-            .try_get::<Option<i64>, _>("block_number")?
-            .context("record event must include block_number")?,
-        block_hash: row
-            .try_get::<Option<String>, _>("block_hash")?
-            .context("record event must include block_hash")?,
-        block_timestamp: row.try_get("block_timestamp")?,
-        raw_fact_ref: row.try_get("raw_fact_ref")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")?,
-        )?,
-        after_state: row.try_get("after_state")?,
-        emitting_address: row.try_get("emitting_address")?,
-    })
 }

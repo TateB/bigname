@@ -302,10 +302,6 @@ fn canonicality_rank(state: CanonicalityState) -> u8 {
     }
 }
 
-pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    CanonicalityState::parse(value)
-}
-
 fn supported_native_addr_record_key() -> String {
     format!("{SUPPORTED_ADDR_RECORD_FAMILY}:{SUPPORTED_NATIVE_ADDR_SELECTOR_KEY}")
 }

@@ -28,15 +28,15 @@ Production Rust snapshot from the working tree:
 
 | Area | Production files | LOC |
 | --- | ---: | ---: |
-| `crates/storage` | 144 | 26,021 |
+| `crates/storage` | 144 | 26,064 |
 | `crates/adapters` | 101 | 21,522 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
-| `apps/worker` | 70 | 12,755 |
+| `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 514 | 105,643 |
+| Total | 513 | 105,422 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -185,6 +185,10 @@ Addressed slices:
 - `apps/worker/src/replay/rebuild.rs` now centralizes all-current projection
   replay skip/mark/summary wiring behind one helper, leaving the ordered
   projection list as data-shaped calls instead of seven duplicated branches.
+- `bigname_storage::{CanonicalityState, SurfaceBindingKind}` now decode
+  directly from SQL text through SQLx, allowing worker projection loaders to
+  use `query_as`/`FromRow`. The name-current decoder module and address-name,
+  permission, and record-inventory event decode functions were removed.
 
 ## Highest leverage cleanup map
 
