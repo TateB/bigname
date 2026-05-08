@@ -51,7 +51,7 @@ pub(super) async fn build_resolver_current_row(
     let skip_binding_enumeration = skip_known_binding_enumeration
         || skip_pending_binding_enumeration
         || skip_full_rebuild_binding_enumeration;
-    let skip_permission_enumeration = skip_full_rebuild_binding_enumeration;
+    let skip_permission_enumeration = skip_binding_enumeration;
     let bindings = if skip_binding_enumeration {
         Vec::new()
     } else {

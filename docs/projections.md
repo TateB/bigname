@@ -123,9 +123,9 @@ Keyed by `(chain_id, resolver_address)`. Sections: bindings, aliases, permission
 
 `aliases` reuses the `{status, count, items}` envelope of `bindings`. Items come from current resolver-linked bindings whose `binding_kind=resolver_alias_path`. Resolver-overview alias support stays inside `resolver_current`.
 
-For ENSv1 PublicResolver-generation targets, `bindings`, `aliases`, and event fan-in summaries do not enumerate the current names pointing at a shared resolver address. Those sections return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected` because shared PublicResolver fan-in is unbounded. Exact-name resolver state stays available through `name_current` and resolution projections.
+For ENSv1 PublicResolver-generation targets, `bindings`, `aliases`, permissions, role-holder, and event fan-in summaries do not enumerate the current names or resolver-scoped permission rows pointing at a shared resolver address. Those sections return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected` because shared PublicResolver fan-in is unbounded. Exact-name resolver state stays available through `name_current`, `permissions_current`, and resolution projections.
 
-For full `resolver_current` rebuilds, binding, alias, permission, role-holder, and event fan-in may be treated as non-enumerable for bootstrap safety. The worker may publish explicit unsupported sections rather than materialize unbounded fan-in. Point rebuilds may still inspect the current binding and permission set.
+For full `resolver_current` rebuilds, binding, alias, permission, role-holder, and event fan-in may be treated as non-enumerable for bootstrap safety. The worker may publish explicit unsupported sections rather than materialize unbounded fan-in. Point rebuilds may still inspect bounded current binding and permission sets.
 
 For ENSv2, alias mappings come from `AliasChanged` emitted by admitted `PermissionedResolver` instances. The resolver rewrites by longest matching suffix, so `aliases.items` preserves both source and final target DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l56][^v2-pres-l230][^v2-pres-l650]
 
