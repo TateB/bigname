@@ -32,6 +32,12 @@ struct PreloadedWrapperState {
     expiry: Option<OffsetDateTime>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PreloadedRegistryOwnerState {
+    owner: Option<String>,
+    reference: Option<ObservationRef>,
+}
+
 #[derive(Clone, Debug)]
 struct RegistrarStateScope {
     logical_name_id: String,
@@ -172,6 +178,8 @@ pub(super) async fn preload_restricted_name_histories(
     }
     let selected_wrapper_state =
         load_selected_wrapper_state_before_replay(pool, &logical_name_ids, raw_logs).await?;
+    let registry_owner_state =
+        load_latest_registry_owner_before_block(pool, &logical_name_ids, boundary_block).await?;
     let resolver_scopes = resolver_state_scopes_for_selected_names(
         raw_logs,
         known_names_by_namehash,
@@ -291,6 +299,7 @@ pub(super) async fn preload_restricted_name_histories(
                     &binding_ref,
                     surface_binding_id,
                     resource_id,
+                    registry_owner_state.get(&logical_name_id),
                 );
                 preload_selected_registrar_lease(
                     history,
