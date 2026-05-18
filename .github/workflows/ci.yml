@@ -9,13 +9,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
   RUST_VERSION: 1.93.1
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   static:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +32,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -54,8 +64,28 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 
-  test:
+  test_shard:
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            packages: "-p bigname-api"
+          - name: indexer
+            packages: "-p bigname-indexer"
+          - name: worker
+            packages: "-p bigname-worker"
+          - name: core
+            packages: >-
+              -p bigname-domain
+              -p bigname-storage
+              -p bigname-manifests
+              -p bigname-adapters
+              -p bigname-execution
+              -p bigname-test-support
     services:
       postgres:
         image: postgres:16-alpine
@@ -86,14 +116,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test ${{ matrix.packages }} --all-features
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: test_shard
+    if: always()
+    steps:
+      - name: Check test shards
+        run: |
+          if [ "${{ needs.test_shard.result }}" != "success" ]; then
+            echo "test shards finished with result: ${{ needs.test_shard.result }}"
+            exit 1
+          fi
 
   artifacts-and-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -118,6 +166,9 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
