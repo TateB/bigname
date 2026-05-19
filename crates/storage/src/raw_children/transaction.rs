@@ -5,9 +5,7 @@ use super::{
     decode::decode_raw_transaction,
     load::load_raw_transaction_internal,
     types::RawTransaction,
-    validation::{
-        ensure_raw_transaction_identity_matches, merge_canonicality, validate_raw_transaction,
-    },
+    validation::{ensure_raw_transaction_identity_matches, validate_raw_transaction},
 };
 
 /// Insert missing raw transaction rows or refresh canonicality for already
@@ -341,8 +339,9 @@ async fn upsert_raw_transaction(
     })?;
 
     ensure_raw_transaction_identity_matches(&existing, transaction)?;
-    let next_state =
-        merge_canonicality(existing.canonicality_state, transaction.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(transaction.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"

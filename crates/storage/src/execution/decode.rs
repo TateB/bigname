@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::evm_primitives::normalize_evm_b256;
+
 pub(super) fn decode_requested_chain_positions(
     value: &Value,
     request_key: &str,
@@ -243,7 +245,12 @@ fn decode_chain_position(
                 "execution outcome cache key for request_key {request_key} {context} must include non-negative integer block_number"
             )
         })?;
-    let block_hash = required_string_field(object, "block_hash", context, request_key)?.to_owned();
+    let block_hash = normalize_evm_b256(required_string_field(
+        object,
+        "block_hash",
+        context,
+        request_key,
+    )?);
     let timestamp = required_string_field(object, "timestamp", context, request_key)?.to_owned();
 
     Ok(ChainPositionParts {
@@ -274,8 +281,12 @@ impl RequestedChainPositionParts {
                     "execution outcome cache key for request_key {request_key} {context} must include non-negative integer block_number"
                 )
             })?;
-        let block_hash =
-            required_string_field(object, "block_hash", &context, request_key)?.to_owned();
+        let block_hash = normalize_evm_b256(required_string_field(
+            object,
+            "block_hash",
+            &context,
+            request_key,
+        )?);
 
         Ok(Self {
             chain_id,
@@ -374,10 +385,33 @@ pub(super) struct VersionBoundaryParts {
     pub(super) chain_position: ChainPositionParts,
 }
 
+impl VersionBoundaryParts {
+    pub(super) fn to_value(&self) -> Value {
+        serde_json::json!({
+            "logical_name_id": self.logical_name_id.clone(),
+            "resource_id": self.resource_id.to_string(),
+            "normalized_event_id": self.normalized_event_id,
+            "event_kind": self.event_kind.clone(),
+            "chain_position": self.chain_position.to_value(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ChainPositionParts {
     pub(super) chain_id: String,
     pub(super) block_number: i64,
     pub(super) block_hash: String,
     pub(super) timestamp: String,
+}
+
+impl ChainPositionParts {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "chain_id": self.chain_id.clone(),
+            "block_number": self.block_number,
+            "block_hash": self.block_hash.clone(),
+            "timestamp": self.timestamp.clone(),
+        })
+    }
 }

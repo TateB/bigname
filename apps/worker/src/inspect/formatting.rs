@@ -1,18 +1,6 @@
 use bigname_storage::CanonicalityState;
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
-pub(in crate::inspect) fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
-}
+pub(in crate::inspect) use crate::projection_json::format_timestamp;
 
 pub(in crate::inspect) fn format_bytes_hex(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(2 + bytes.len() * 2);

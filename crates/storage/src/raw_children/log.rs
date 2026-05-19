@@ -5,7 +5,7 @@ use super::{
     decode::decode_raw_log,
     load::load_raw_log_internal,
     types::RawLog,
-    validation::{ensure_raw_log_identity_matches, merge_canonicality, validate_raw_log},
+    validation::{ensure_raw_log_identity_matches, validate_raw_log},
 };
 
 /// Insert missing raw log rows or refresh canonicality for already observed
@@ -362,7 +362,9 @@ async fn upsert_raw_log(
     })?;
 
     ensure_raw_log_identity_matches(&existing, log)?;
-    let next_state = merge_canonicality(existing.canonicality_state, log.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(log.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"

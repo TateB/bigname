@@ -10,9 +10,10 @@ default = []
 reth-db = ["dep:reth-ethereum"]
 
 [dependencies]
-alloy-consensus = "2.0.0"
-alloy-primitives = "1.4.1"
-alloy-rpc-types-eth = "2.0.1"
+alloy-consensus.workspace = true
+alloy-json-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
 anyhow.workspace = true
 bytes = "1.10.1"
 clap.workspace = true
@@ -21,7 +22,6 @@ hyper = { version = "1.9.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
 serde.workspace = true
 serde_json = "1.0.149"
-sha3 = "0.10.8"
 sqlx.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true

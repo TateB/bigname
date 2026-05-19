@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
@@ -172,7 +172,6 @@ async fn run_ops_finalized_catchup_chunk(
     .await?;
     let idempotency_key = ops_catchup_idempotency_key(
         &config.deployment_profile,
-        &config.manifests_root,
         chain,
         &source_plan.source_identity_hash(),
         chunk.range,
@@ -270,15 +269,12 @@ async fn run_ops_finalized_catchup_chunk(
 
 pub(crate) fn ops_catchup_idempotency_key(
     deployment_profile: &str,
-    manifests_root: &Path,
     chain: &str,
     source_identity_hash: &str,
     range: BackfillBlockRange,
 ) -> String {
     format!(
-        "indexer-ops-finalized-catchup:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
-        manifests_root.display(),
-        range.from_block,
-        range.to_block
+        "indexer-ops-finalized-catchup:v2:deployment_profile={deployment_profile}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
+        range.from_block, range.to_block
     )
 }

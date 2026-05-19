@@ -1,8 +1,4 @@
 mod openapi {
-    mod parameters {
-        include!("openapi/parameters.rs");
-    }
-
     mod responses {
         include!("openapi/responses.rs");
     }

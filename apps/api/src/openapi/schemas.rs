@@ -3,9 +3,16 @@ use sqlx::types::JsonValue;
 
 use crate::PUBLIC_NAMESPACES;
 
+#[path = "schemas/primary_name.rs"]
+mod primary_name;
+
 use super::responses::{
     declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
     primary_name_response_schema,
+};
+use primary_name::{
+    primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
+    primary_name_verified_result_schema,
 };
 
 pub(super) fn openapi_components() -> JsonValue {
@@ -337,123 +344,6 @@ pub(super) fn openapi_components() -> JsonValue {
         },
     })
 }
-fn primary_name_claimed_result_schema() -> JsonValue {
-    json!({
-        "oneOf": [
-            json!({
-                "type": "object",
-                "required": ["status", "provenance"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "success",
-                    },
-                    "name": {
-                        "type": "string",
-                    },
-                    "provenance": schema_ref("JsonObject"),
-                },
-                "additionalProperties": false,
-            }),
-            json!({
-                "type": "object",
-                "required": ["status"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "not_found",
-                    },
-                },
-                "additionalProperties": false,
-            }),
-            json!({
-                "type": "object",
-                "required": ["status", "provenance"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "not_found",
-                    },
-                    "provenance": schema_ref("JsonObject"),
-                },
-                "additionalProperties": false,
-            }),
-            json!({
-                "type": "object",
-                "required": ["status"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "unsupported",
-                    },
-                    "unsupported_reason": {
-                        "type": "string",
-                    },
-                },
-                "additionalProperties": false,
-            }),
-            json!({
-                "type": "object",
-                "required": ["status", "provenance"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "unsupported",
-                    },
-                    "provenance": schema_ref("JsonObject"),
-                },
-                "additionalProperties": false,
-            }),
-            json!({
-                "type": "object",
-                "required": ["status", "raw_claim_name", "provenance"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "const": "invalid_name",
-                    },
-                    "raw_claim_name": {
-                        "type": "string",
-                    },
-                    "provenance": schema_ref("JsonObject"),
-                },
-                "additionalProperties": false,
-            }),
-        ],
-    })
-}
-
-fn primary_name_verified_result_schema() -> JsonValue {
-    json!({
-        "type": "object",
-        "required": ["status"],
-        "properties": {
-            "status": {
-                "type": "string",
-            },
-            "provenance": schema_ref("PrimaryNameVerifiedResultProvenance"),
-        },
-        "additionalProperties": true,
-    })
-}
-
-fn primary_name_verified_result_provenance_schema() -> JsonValue {
-    json!({
-        "type": "object",
-        "required": ["manifest_versions", "execution_trace_id"],
-        "properties": {
-            "manifest_versions": {
-                "type": "array",
-                "items": {},
-            },
-            "execution_trace_id": {
-                "type": "string",
-            },
-        },
-        "additionalProperties": false,
-    })
-}
-
 #[rustfmt::skip]
 fn compact_collection_response_schema(item_schema: JsonValue) -> JsonValue {
     json!({ "type": "object", "required": ["data", "page"], "properties": { "data": { "type": "array", "items": item_schema }, "page": schema_ref("HistoryPageResponse"), "meta": schema_ref("CompactMeta") } })
@@ -487,7 +377,7 @@ fn compact_history_event_schema() -> JsonValue {
 
 #[rustfmt::skip]
 fn role_row_schema() -> JsonValue {
-    compact_object_schema(&["account", "resource_id", "effective_powers"], &["account", "resource_hex", "resource_id", "name", "role_bitmap", "effective_powers", "provenance"])
+    compact_object_schema(&["account", "resource_id", "effective_powers"], &["account", "resource_hex", "resource_id", "name", "role_bitmap", "effective_powers"])
 }
 
 #[rustfmt::skip]

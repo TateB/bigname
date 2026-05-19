@@ -102,6 +102,21 @@ pub(crate) fn checked_page_limit_i64_from_usize(
     i64::try_from(limit).context(sql_overflow_error)
 }
 
+pub(crate) fn split_keyset_page<T, C>(
+    mut rows: Vec<T>,
+    page_size: usize,
+    cursor_from_row: impl FnOnce(&T) -> C,
+) -> (Vec<T>, Option<C>) {
+    let has_next_page = rows.len() > page_size;
+    if has_next_page {
+        rows.truncate(page_size);
+    }
+    let next_cursor = has_next_page
+        .then(|| rows.last().map(cursor_from_row))
+        .flatten();
+    (rows, next_cursor)
+}
+
 pub(crate) fn remap_input_indexed_rows<T>(
     rows: Vec<PgRow>,
     expected_len: usize,

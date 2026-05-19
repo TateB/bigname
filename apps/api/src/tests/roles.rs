@@ -96,6 +96,7 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
         ],
     )
     .await?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let account_response = app_router(database.app_state())
         .oneshot(
@@ -123,11 +124,7 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
         account_payload["data"][0]["effective_powers"],
         json!(["set_resolver", "create_subnames"])
     );
-    assert_eq!(account_payload["data"][0]["provenance"]["block_number"], json!(41));
-    assert_eq!(
-        account_payload["data"][0]["provenance"]["timestamp"],
-        json!("2026-04-17T00:00:41Z")
-    );
+    assert!(account_payload["data"][0].get("provenance").is_none());
 
     let resource_response = app_router(database.app_state())
         .oneshot(
@@ -205,6 +202,7 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
         ],
     )
     .await?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let first_page_response = app_router(database.app_state())
         .oneshot(
@@ -242,6 +240,35 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     assert_eq!(second_page_payload["data"][0]["account"], json!(second_account));
     assert_eq!(second_page_payload["page"]["next_cursor"], JsonValue::Null);
     assert_eq!(second_page_payload["meta"]["total_count"], json!(2));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn roles_return_stale_until_permissions_projection_is_available() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let account = "0x0000000000000000000000000000000000000aaa";
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?account={account}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles request before permissions projection failed")?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
+    assert!(
+        payload
+            .error
+            .message
+            .contains("permissions_current projection is not yet available")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -290,5 +317,33 @@ async fn roles_reject_unsupported_bitmap_filter_and_missing_primary_filter() -> 
     );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ('permissions_current', 1, 0, 0, 0, 0)
+        ON CONFLICT (projection) DO UPDATE SET
+            replay_version = EXCLUDED.replay_version,
+            completed_normalized_target_block = EXCLUDED.completed_normalized_target_block,
+            requested_key_count = EXCLUDED.requested_key_count,
+            upserted_row_count = EXCLUDED.upserted_row_count,
+            deleted_row_count = EXCLUDED.deleted_row_count,
+            completed_at = now()
+        "#,
+    )
+    .execute(&database.pool)
+    .await
+    .context("failed to mark permissions_current projection ready")?;
+
     Ok(())
 }

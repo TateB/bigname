@@ -1,0 +1,7 @@
+interface:
+  display_name: "Manifest Authority"
+  short_description: "Review manifests, admission, and authority"
+  default_prompt: "Use $manifest-authority to review this manifest/discovery change for source authority, capability flags, watch-plan effects, and citations."
+
+policy:
+  allow_implicit_invocation: true

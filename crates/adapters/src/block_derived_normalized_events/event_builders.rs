@@ -1,83 +1,113 @@
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, bail};
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
 
+mod label_preimages;
+
 use super::constants::{
-    DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION, ENS_V2_ALIAS_CHANGED_SIGNATURE,
-    ENS_V2_LABEL_REGISTERED_SIGNATURE, ENS_V2_LABEL_RESERVED_SIGNATURE,
-    ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE, ENS_V2_NAMED_RESOURCE_SIGNATURE,
-    ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE, ENS_V2_PARENT_UPDATED_SIGNATURE,
-    ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE, ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE,
-    EVENT_KIND_PREIMAGE_OBSERVED, SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED,
-    SOURCE_EVENT_LABEL_RESERVED, SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED,
+    ALIAS_CHANGED_SIGNATURE, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
+    EVENT_KIND_PREIMAGE_OBSERVED, NAME_WRAPPED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE,
+    NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED,
     SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
-    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_EVENT_PARENT_UPDATED,
-    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+    SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
     SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
     SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
-use super::decoding::{
-    decode_dynamic_bytes, decode_dynamic_string, hex_string_without_prefix, keccak_signature_hex,
-    keccak256_hex, name_wrapped_topic0, registrar_name_registered_topic0,
-    registrar_name_renewed_topic0,
-};
-use super::preimage_observation::{
-    can_observe_dns_label, observe_dns_encoded_name, observe_registrar_eth_name,
-    observe_single_label,
-};
+use super::decoding::{hex_string, hex_string_without_prefix, keccak256_hex};
+use super::event_topics::PreimageObservedEventTopics;
+use super::preimage_observation::observe_dns_encoded_name;
 use super::types::{PreimageObservation, WatchedRawLogRow};
+use label_preimages::{
+    build_registrar_preimage_observed_events,
+    try_build_ens_v2_registrar_label_preimage_observed_events,
+    try_build_ens_v2_registry_label_preimage_observed_events,
+};
 
-pub(super) fn preimage_observed_topic0s() -> Vec<String> {
-    [
-        name_wrapped_topic0(),
-        registrar_name_registered_topic0(),
-        registrar_name_renewed_topic0(),
-        keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_LABEL_RESERVED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE),
-        keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE),
-        keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE),
-        keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE),
-    ]
-    .into_iter()
-    .collect()
+sol! {
+    #[derive(Debug)]
+    event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
+
+    #[derive(Debug)]
+    event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
+
+    #[derive(Debug)]
+    event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry);
+
+    #[derive(Debug)]
+    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
+
+    #[derive(Debug)]
+    event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
+
+    #[derive(Debug)]
+    event ParentUpdated(address indexed parent, string label, address indexed sender);
+
+    #[derive(Debug)]
+    event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium);
+
+    #[derive(Debug)]
+    event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base);
+
+    #[derive(Debug)]
+    event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
+
+    #[derive(Debug)]
+    event NamedResource(uint256 indexed resource, bytes name);
+
+    #[derive(Debug)]
+    event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
+
+    #[derive(Debug)]
+    event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
 }
 
 pub(super) fn build_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
+    event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
-    let events = build_registrar_preimage_observed_events(raw_log)?;
-    if !events.is_empty() {
-        return Ok(events);
+    match raw_log.source_family.as_str() {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => {
+            build_registrar_preimage_observed_events(raw_log, event_topics)
+        }
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => {
+            build_name_wrapped_preimage_observed_events(raw_log, event_topics)
+        }
+        SOURCE_FAMILY_ENS_V2_ROOT_L1
+        | SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+        | SOURCE_FAMILY_ENS_V2_REGISTRAR_L1
+        | SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => {
+            build_ens_v2_preimage_observed_events(raw_log, event_topics)
+        }
+        _ => Ok(Vec::new()),
     }
-
-    let events = build_ens_v2_preimage_observed_events(raw_log)?;
-    if !events.is_empty() {
-        return Ok(events);
-    }
-
-    build_name_wrapped_preimage_observed_events(raw_log)
 }
 
 fn build_name_wrapped_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
+    event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
-    let Some(topic0) = raw_log.topics.first() else {
-        return Ok(Vec::new());
-    };
-    if !topic0.eq_ignore_ascii_case(&name_wrapped_topic0()) {
+    if raw_log.source_family != SOURCE_FAMILY_ENS_V1_WRAPPER_L1 {
         return Ok(Vec::new());
     }
 
-    let dns_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
-        format!(
-            "failed to decode NameWrapped bytes payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(Vec::new());
+    };
+    if !event_topics.matches(raw_log, NAME_WRAPPED_SIGNATURE, topic0)? {
+        return Ok(Vec::new());
+    }
+
+    let event = decode_event_log::<NameWrapped>(raw_log, "NameWrapped log is malformed")
+        .with_context(|| {
+            format!(
+                "failed to decode NameWrapped bytes payload for chain {} block {} log {}",
+                raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+            )
+        })?;
+    let indexed_namehash = hex_string(event.node.as_slice());
+    let dns_name = event.name.to_vec();
     let observation = observe_dns_encoded_name(&dns_name).with_context(|| {
         format!(
             "failed to interpret dns-encoded name for chain {} block {} log {}",
@@ -85,9 +115,7 @@ fn build_name_wrapped_preimage_observed_events(
         )
     })?;
 
-    if let Some(indexed_namehash) = raw_log.topics.get(1)
-        && !indexed_namehash.eq_ignore_ascii_case(&observation.namehash)
-    {
+    if !indexed_namehash.eq_ignore_ascii_case(&observation.namehash) {
         bail!(
             "NameWrapped indexed namehash {} does not match decoded namehash {} for chain {} block {} log {}",
             indexed_namehash,
@@ -106,246 +134,97 @@ fn build_name_wrapped_preimage_observed_events(
     )])
 }
 
-fn build_registrar_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-) -> Result<Vec<NormalizedEvent>> {
-    if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
-        return Ok(Vec::new());
-    }
-
-    let Some(topic0) = raw_log.topics.first() else {
-        return Ok(Vec::new());
-    };
-    let source_event = if topic0.eq_ignore_ascii_case(&registrar_name_registered_topic0()) {
-        SOURCE_EVENT_NAME_REGISTERED
-    } else if topic0.eq_ignore_ascii_case(&registrar_name_renewed_topic0()) {
-        SOURCE_EVENT_NAME_RENEWED
-    } else {
-        return Ok(Vec::new());
-    };
-
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_registrar_eth_name(&label).with_context(|| {
-        format!(
-            "failed to derive registrar .eth preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let observed_labelhash = observation
-        .labelhashes
-        .first()
-        .context("registrar observation is missing the explicit labelhash")?;
-
-    if let Some(indexed_labelhash) = raw_log.topics.get(1)
-        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
-    {
-        bail!(
-            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
-            indexed_labelhash,
-            observed_labelhash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
-    }
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
 fn build_ens_v2_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
+    event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(Vec::new());
     };
 
-    if is_ens_v2_registry_source(&raw_log.source_family) {
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE)) {
-            return build_ens_v2_registry_label_preimage_observed_events(
+    match raw_log.source_family.as_str() {
+        SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => {
+            if let Some(events) = try_build_ens_v2_registry_label_preimage_observed_events(
                 raw_log,
-                SOURCE_EVENT_LABEL_REGISTERED,
-            );
+                event_topics,
+                topic0,
+            )? {
+                return Ok(events);
+            }
+            return Ok(Vec::new());
         }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_LABEL_RESERVED_SIGNATURE)) {
-            return build_ens_v2_registry_label_preimage_observed_events(
+        SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => {
+            if let Some(events) = try_build_ens_v2_registrar_label_preimage_observed_events(
                 raw_log,
-                SOURCE_EVENT_LABEL_RESERVED,
-            );
+                event_topics,
+                topic0,
+            )? {
+                return Ok(events);
+            }
+            return Ok(Vec::new());
         }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE)) {
-            let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
-                return Ok(Vec::new());
-            };
-            let observation = observe_single_label(&label).with_context(|| {
-                format!(
-                    "failed to derive ENSv2 registry parent label preimage for chain {} block {} log {}",
-                    raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-                )
-            })?;
-            return Ok(vec![build_preimage_observed_normalized_event(
-                raw_log,
-                SOURCE_EVENT_PARENT_UPDATED,
-                observation,
-                None,
-            )]);
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => {
+            if event_topics.matches(raw_log, ALIAS_CHANGED_SIGNATURE, topic0)? {
+                return build_ens_v2_alias_preimage_observed_events(raw_log);
+            }
+            if event_topics.matches(raw_log, NAMED_RESOURCE_SIGNATURE, topic0)? {
+                return build_ens_v2_named_dns_preimage_observed_events(
+                    raw_log,
+                    SOURCE_EVENT_NAMED_RESOURCE,
+                );
+            }
+            if event_topics.matches(raw_log, NAMED_TEXT_RESOURCE_SIGNATURE, topic0)? {
+                return build_ens_v2_named_dns_preimage_observed_events(
+                    raw_log,
+                    SOURCE_EVENT_NAMED_TEXT_RESOURCE,
+                );
+            }
+            if event_topics.matches(raw_log, NAMED_ADDR_RESOURCE_SIGNATURE, topic0)? {
+                return build_ens_v2_named_dns_preimage_observed_events(
+                    raw_log,
+                    SOURCE_EVENT_NAMED_ADDR_RESOURCE,
+                );
+            }
         }
-        return Ok(Vec::new());
-    }
-
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 {
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(
-            ENS_V2_REGISTRAR_NAME_REGISTERED_SIGNATURE,
-        )) {
-            return build_ens_v2_registrar_label_preimage_observed_events(
-                raw_log,
-                SOURCE_EVENT_NAME_REGISTERED,
-            );
-        }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(
-            ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE,
-        )) {
-            return build_ens_v2_registrar_label_preimage_observed_events(
-                raw_log,
-                SOURCE_EVENT_NAME_RENEWED,
-            );
-        }
-        return Ok(Vec::new());
-    }
-
-    if raw_log.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1 {
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE)) {
-            return build_ens_v2_alias_preimage_observed_events(raw_log);
-        }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE)) {
-            return build_ens_v2_named_dns_preimage_observed_events(
-                raw_log,
-                SOURCE_EVENT_NAMED_RESOURCE,
-                0,
-                None,
-            );
-        }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE))
-        {
-            return build_ens_v2_named_dns_preimage_observed_events(
-                raw_log,
-                SOURCE_EVENT_NAMED_TEXT_RESOURCE,
-                0,
-                None,
-            );
-        }
-        if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE))
-        {
-            return build_ens_v2_named_dns_preimage_observed_events(
-                raw_log,
-                SOURCE_EVENT_NAMED_ADDR_RESOURCE,
-                0,
-                None,
-            );
-        }
+        _ => {}
     }
 
     Ok(Vec::new())
 }
 
-fn build_ens_v2_registry_label_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-    source_event: &str,
-) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_single_label(&label).with_context(|| {
-        format!(
-            "failed to derive ENSv2 registry label preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let observed_labelhash = observation
-        .labelhashes
-        .first()
-        .context("ENSv2 registry observation is missing the explicit labelhash")?;
-    if let Some(indexed_labelhash) = raw_log.topics.get(2)
-        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
-    {
-        bail!(
-            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
-            indexed_labelhash,
-            observed_labelhash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
-    }
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
-fn build_ens_v2_registrar_label_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-    source_event: &str,
-) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_registrar_eth_name(&label).with_context(|| {
-        format!(
-            "failed to derive ENSv2 registrar .eth preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
-fn decode_observable_dynamic_label(
-    raw_log: &WatchedRawLogRow,
-    offset_word_index: usize,
-) -> Result<Option<String>> {
-    let label = match decode_dynamic_string(&raw_log.data, offset_word_index) {
-        Ok(label) => label,
-        Err(_) => return Ok(None),
-    };
-    if can_observe_dns_label(&label) {
-        Ok(Some(label))
-    } else {
-        Ok(None)
-    }
+fn log_context(raw_log: &WatchedRawLogRow, message: &str) -> String {
+    format!(
+        "{message} for chain {} block {} log {}",
+        raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+    )
 }
 
 fn build_ens_v2_alias_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {
-    let from_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
-        format!(
-            "failed to decode AliasChanged fromName payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let to_name = decode_dynamic_bytes(&raw_log.data, 1).with_context(|| {
-        format!(
-            "failed to decode AliasChanged toName payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    validate_indexed_bytes_hash(raw_log, 1, &from_name, "AliasChanged indexedFromName")?;
-    validate_indexed_bytes_hash(raw_log, 2, &to_name, "AliasChanged indexedToName")?;
+    let event = decode_event_log::<AliasChanged>(raw_log, "AliasChanged log is malformed")
+        .with_context(|| {
+            format!(
+                "failed to decode AliasChanged name payload for chain {} block {} log {}",
+                raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+            )
+        })?;
+    let indexed_from_name = hex_string(event.indexedFromName.as_slice());
+    let from_name = event.fromName.to_vec();
+    let indexed_to_name = hex_string(event.indexedToName.as_slice());
+    let to_name = event.toName.to_vec();
+    validate_indexed_bytes_hash(
+        raw_log,
+        &indexed_from_name,
+        &from_name,
+        "AliasChanged indexedFromName",
+    )?;
+    validate_indexed_bytes_hash(
+        raw_log,
+        &indexed_to_name,
+        &to_name,
+        "AliasChanged indexedToName",
+    )?;
 
     let mut events = Vec::new();
     if !from_name.is_empty() {
@@ -370,10 +249,8 @@ fn build_ens_v2_alias_preimage_observed_events(
 fn build_ens_v2_named_dns_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
-    offset_word_index: usize,
-    observation_slot: Option<&str>,
 ) -> Result<Vec<NormalizedEvent>> {
-    let dns_name = decode_dynamic_bytes(&raw_log.data, offset_word_index).with_context(|| {
+    let dns_name = decode_named_resource_name(raw_log, source_event).with_context(|| {
         format!(
             "failed to decode {source_event} DNS name payload for chain {} block {} log {}",
             raw_log.chain_id, raw_log.block_hash, raw_log.log_index
@@ -393,8 +270,33 @@ fn build_ens_v2_named_dns_preimage_observed_events(
         raw_log,
         source_event,
         observation,
-        observation_slot,
+        None,
     )])
+}
+
+fn decode_named_resource_name(raw_log: &WatchedRawLogRow, source_event: &str) -> Result<Vec<u8>> {
+    match source_event {
+        SOURCE_EVENT_NAMED_RESOURCE => {
+            let event =
+                decode_event_log::<NamedResource>(raw_log, "NamedResource log is malformed")?;
+            Ok(event.name.to_vec())
+        }
+        SOURCE_EVENT_NAMED_TEXT_RESOURCE => {
+            let event = decode_event_log::<NamedTextResource>(
+                raw_log,
+                "NamedTextResource log is malformed",
+            )?;
+            Ok(event.name.to_vec())
+        }
+        SOURCE_EVENT_NAMED_ADDR_RESOURCE => {
+            let event = decode_event_log::<NamedAddrResource>(
+                raw_log,
+                "NamedAddrResource log is malformed",
+            )?;
+            Ok(event.name.to_vec())
+        }
+        _ => bail!("unsupported named resolver preimage event {source_event}"),
+    }
 }
 
 fn build_preimage_observed_normalized_event(
@@ -466,13 +368,10 @@ fn build_preimage_observed_normalized_event(
 
 fn validate_indexed_bytes_hash(
     raw_log: &WatchedRawLogRow,
-    topic_index: usize,
+    indexed_hash: &str,
     bytes: &[u8],
     context: &str,
 ) -> Result<()> {
-    let Some(indexed_hash) = raw_log.topics.get(topic_index) else {
-        return Ok(());
-    };
     let observed_hash = keccak256_hex(bytes);
     if !indexed_hash.eq_ignore_ascii_case(&observed_hash) {
         bail!(
@@ -487,7 +386,9 @@ fn validate_indexed_bytes_hash(
     Ok(())
 }
 
-fn is_ens_v2_registry_source(source_family: &str) -> bool {
-    source_family == SOURCE_FAMILY_ENS_V2_ROOT_L1
-        || source_family == SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+fn decode_event_log<E>(raw_log: &WatchedRawLogRow, context: &'static str) -> Result<E>
+where
+    E: SolEvent,
+{
+    crate::evm_abi::decode_event_log::<E>(&raw_log.topics, &raw_log.data, context)
 }

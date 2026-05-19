@@ -11,6 +11,54 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"
+loc = 708
+justification = "Reconciliation adapter sync owns source-scoped diff loading, durable repair actions, and timing summaries in one stabilization path; split per sync phase after repair convergence settles."
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/replay/classification.rs"
+loc = 608
+justification = "Replay classification keeps row-family intake state, repair decisions, and diagnostics together for current reconciliation review; split classifier helpers after failure modes stabilize."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
+loc = 617
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery/checkpoint.rs"
+loc = 972
+justification = "ENSv1 subregistry-discovery checkpointing owns resumable replay progress, state hydration, and replay summaries; split state serialization from checkpoint lifecycle after replay stabilization."
+review_justification = "Explicit review accepted this file above 900 LOC while resumable subregistry discovery replay is stabilizing; future changes should split state persistence before adding behavior."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/checkpoint.rs"
+loc = 1109
+justification = "ENSv1 unwrapped-authority checkpointing owns resumable replay progress, auxiliary state hydration, and flushed-event accounting; split state persistence from checkpoint lifecycle after replay stabilization."
+review_justification = "Explicit review accepted this file above 900 LOC while unwrapped-authority replay checkpoint recovery is stabilizing; future changes should split state persistence before adding behavior."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"
+loc = 898
+justification = "ENSv1 unwrapped-authority active-emitter loading keeps exact-block replay probes and full-range replay admission in one stabilization path; split scoped discovery SQL after sync hot-path cleanup."
+
+[[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs"
-loc = 630
-justification = "Phase 10 authority pipeline remains oversized after scoped replay/intake wiring; future changes should split the sync orchestration into smaller modules."
+loc = 629
+justification = "ENSv1 unwrapped-authority full-closure replay orchestration owns checkpointed streaming and target-bounded replay wiring; future changes should split replay orchestration further."
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/reconciliation.rs"
+loc = 627
+justification = "Discovery reconciliation owns manifest/source-family diff classification and emitted reconciliation actions together; split diff collection from action rendering after manifest drift flows settle."
+
+[[files]]
+path = "crates/manifests/src/lib/views/resolver_profiles.rs"
+loc = 798
+justification = "Resolver-profile manifest views keep resolver metadata admission, capability flags, and projection shaping together for review; split family-specific shaping after resolver profiles settle."
+
+[[files]]
+path = "crates/storage/src/identity/write_fast.rs"
+loc = 906
+justification = "No-snapshot identity bulk replay writes carry large SQL statements for token lineages, resources, and surface bindings. Split remaining row families after sync stabilization so each replay write path can shrink below the oversized-file threshold."
+review_justification = "Explicit review accepted this file above 900 LOC during replay stabilization because splitting all bulk SQL by row family would be higher risk while sync is active; follow-up should split it before adding more replay write behavior."

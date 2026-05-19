@@ -3,9 +3,13 @@ use sqlx::PgPool;
 
 use super::CurrentProjectionReplayStepSummary;
 
-pub(super) const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 1;
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 1;
 
-pub(super) async fn projection_replay_completed(pool: &PgPool, projection: &str) -> Result<bool> {
+pub(super) async fn projection_replay_completed(
+    pool: &PgPool,
+    projection: &str,
+    normalized_target_block: Option<i64>,
+) -> Result<bool> {
     sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
@@ -13,11 +17,16 @@ pub(super) async fn projection_replay_completed(pool: &PgPool, projection: &str)
             FROM current_projection_replay_status
             WHERE projection = $1
               AND replay_version = $2
+              AND (
+                  $3::BIGINT IS NULL
+                  OR completed_normalized_target_block >= $3
+              )
         )
         "#,
     )
     .bind(projection)
     .bind(CURRENT_PROJECTION_REPLAY_VERSION)
+    .bind(normalized_target_block)
     .fetch_one(pool)
     .await
     .with_context(|| format!("failed to inspect replay status for {projection}"))

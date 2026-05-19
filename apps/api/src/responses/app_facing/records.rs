@@ -20,6 +20,10 @@ impl CompactNameRecordsMode {
         matches!(self, Self::Auto | Self::Declared | Self::Both)
     }
 
+    pub(crate) fn includes_verified(self) -> bool {
+        matches!(self, Self::Auto | Self::Verified | Self::Both)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -136,6 +140,7 @@ pub(crate) fn compact_name_records_requested_records(
 pub(crate) fn compact_name_records_value_source(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
     request: &CompactNameRecordsRequest,
 ) -> CompactNameRecordsValueSource {
     match request.mode {
@@ -143,7 +148,11 @@ pub(crate) fn compact_name_records_value_source(
         CompactNameRecordsMode::Verified => CompactNameRecordsValueSource::Verified,
         CompactNameRecordsMode::Both => CompactNameRecordsValueSource::Verified,
         CompactNameRecordsMode::Auto => {
-            if compact_declared_records_are_authoritative(row, record_inventory_row) {
+            if compact_declared_records_satisfy_request(
+                row,
+                record_inventory_row,
+                requested_records,
+            ) {
                 CompactNameRecordsValueSource::Declared
             } else {
                 CompactNameRecordsValueSource::Verified
@@ -155,18 +164,18 @@ pub(crate) fn compact_name_records_value_source(
 pub(crate) fn build_compact_name_records_response(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
     request: &CompactNameRecordsRequest,
     value_source: CompactNameRecordsValueSource,
     verified_outcome: Option<&ExecutionOutcome>,
 ) -> CompactNameRecordsResponse {
-    let requested_records = compact_requested_records(record_inventory_row, request);
     let inventory_lookup = compact_record_inventory_lookup(record_inventory_row);
     let value_entries = match value_source {
         CompactNameRecordsValueSource::Declared => {
-            compact_declared_record_cache_entries(row, record_inventory_row, &requested_records)
+            compact_declared_record_cache_entries(row, record_inventory_row, requested_records)
         }
         CompactNameRecordsValueSource::Verified => {
-            compact_verified_record_cache_entries(&requested_records, verified_outcome)
+            compact_verified_record_cache_entries(requested_records, verified_outcome)
         }
     };
 
@@ -229,7 +238,7 @@ pub(crate) fn build_compact_name_records_response(
         insert_value_field(
             &mut data,
             "verified_records",
-            compact_verified_records_summary(&requested_records, verified_outcome),
+            compact_verified_records_summary(requested_records, verified_outcome),
         );
     }
 
@@ -371,4 +380,6 @@ fn parse_compact_records_coin_types(value: Option<&str>) -> ApiResult<Vec<String
     }
 }
 
+include!("records_declared_inventory.rs");
 include!("records_declared_values.rs");
+include!("records_value_meta.rs");

@@ -1,6 +1,6 @@
 # bigname
 
-bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The checked-in docs are the source of truth for semantics; the implementation pipeline reference lives under `docs/internal/`.
+bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The checked-in docs are the source of truth for semantics; agent process stays in this file and the repo-local skills.
 
 ## Guardrails
 
@@ -25,12 +25,14 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 - `.refs/basenames/` — canonical Basenames Solidity
 - `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
 - `.refs/ens_app_v3/` — ENS app known-resolver metadata for first-party app admission rows only
+- `.refs/ponder/`, `.refs/graph_node/` — reference indexers for chain-intake cross-check only
+- `.refs/reth/` — reference Ethereum execution client for node-level chain-intake cross-check only
 
 Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `scripts/sync-refs --check`. Rotation policy and known divergences live in `docs/upstream.md`.
 
 Citation rules:
 
-- Any claim about ENSv1, ENSv2, or Basenames behavior — in docs, manifests, ADRs, code comments, task writeups, or agent output — must cite the upstream source as `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)`.
+- Any claim about ENSv1, ENSv2, Basenames, admitted upstream app metadata, reference-indexer comparison, or reference execution-client comparison behavior — in docs, manifests, ADRs, code comments, task writeups, or agent output — must cite the upstream source as `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)`.
 - "Upstream says X" without a `.refs/` citation is unsupported and should be rejected in review.
 - When upstream disagrees with our docs or manifests, the disagreement is a doc-first task. We may intentionally narrow, widen, or reshape upstream semantics; the divergence must be stated explicitly in the doc that carries our rule and listed in `docs/upstream.md` § Known divergences.
 - Manifest address changes and new source families cite the upstream deployment metadata or Solidity file rather than relying on external URLs.
@@ -40,6 +42,7 @@ Citation rules:
 - Keep `crates/domain` narrow.
 - Coordinate migrations carefully.
 - Treat fixture updates as cross-workstream review points.
+- Inspect dirty state before staging. Stage explicit paths only, and never stage unrelated user or agent work.
 
 ## Rust File Size
 
@@ -55,11 +58,13 @@ Citation rules:
 
 ## Core Skills
 
-- `$change-gate`: classify doc-first vs implementation-only work.
-- `$orchestrate`: make the current session orchestrate broad execution work, using subagents instead of doing most implementation directly. Covers fan-out and continuation as modes.
-- `$phased-continuation`: run `$orchestrate` in continuation mode, cycling `next_slice_researcher` → execute → research until blocked or redirected.
+- `$contract-impact`: classify implementation-only vs doc-first/shared-interface work before coding.
+- `$upstream-evidence`: gather pinned `.refs/` citations and divergence notes for upstream behavior claims.
+- `$consumer-slice`: scope one end-to-end consumer capability with docs, behavior, tests, and explicit deferrals.
+- `$manifest-authority`: plan or review manifests, discovery, admission, capability flags, and watch-plan authority.
+- `$replay-safety`: review raw facts, normalized events, canonicality, projection rebuilds, invalidation, execution artifacts, and migrations.
 
 ## Core Agents
 
-- `docs_writer`, `next_slice_researcher`, `task_designer`, `verification_reviewer`: defined in `.codex/agents/`. All four read `AGENTS.md` and treat upstream anchors as part of their reading set.
-- `upstream_auditor`: read-only agent that surfaces drift between `.refs/` pins and upstream `main`. Run opportunistically or on a schedule; it reports, it does not bump pins.
+- `evidence_reader`, `contract_editor`, `slice_builder`, and `verification_reviewer` are defined in `.codex/agents/`.
+- Use subagents only for bounded work with a clear output contract. Do not run autonomous "keep shipping" loops without a named capability target and review gate.

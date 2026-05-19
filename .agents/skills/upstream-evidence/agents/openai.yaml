@@ -1,0 +1,7 @@
+interface:
+  display_name: "Upstream Evidence"
+  short_description: "Gather pinned upstream citations"
+  default_prompt: "Use $upstream-evidence to produce a claim-to-citation ledger from pinned `.refs/` sources and note any bigname divergences."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,19 +1,30 @@
-use std::collections::HashMap;
-
 use super::super::scope::{
     AuthorityRawLogSourceScopeTarget, emitter_for_block_and_scope,
     scoped_ranges_for_active_emitters,
 };
 use super::super::*;
 use anyhow::{Context, Result};
+use bigname_storage::sql_row;
 use futures_util::TryStreamExt;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool};
+use std::collections::HashMap;
+
+mod generic_resolver;
+mod row_helpers;
+mod stream_page_bound;
+mod stream_router;
+
+use generic_resolver::load_generic_resolver_event_raw_logs;
+use row_helpers::{authority_raw_log_from_row, authority_source_scope_block_range};
+pub(in crate::ens_v1_unwrapped_authority) use stream_page_bound::select_authority_raw_log_stream_to_block;
+pub(in crate::ens_v1_unwrapped_authority) use stream_router::AuthorityRawLogStreamSourceRouter;
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
     pool: &PgPool,
     chain: &str,
     active_emitters: &[ActiveEmitter],
     generic_resolver_event_sources: &[GenericResolverEventSource],
+    event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
@@ -24,6 +35,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
         chain,
         active_emitters,
         generic_resolver_event_sources,
+        event_topics,
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
@@ -33,35 +45,17 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
 }
 
 pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain: &str,
-    active_emitters: &[ActiveEmitter],
+    source_router: &AuthorityRawLogStreamSourceRouter<'_>,
+    _event_topics: &AuthorityEventTopics,
+    from_block: i64,
+    to_block: i64,
     mut handle_raw_log: impl FnMut(AuthorityRawLogRow) -> Result<()>,
 ) -> Result<usize> {
-    if active_emitters.is_empty() {
+    if from_block > to_block {
         return Ok(0);
     }
-
-    let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
-    for emitter in active_emitters.iter().cloned() {
-        emitters_by_address
-            .entry(emitter.address.clone())
-            .or_default()
-            .push(emitter);
-    }
-    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
-    let watched_range_addresses = active_emitters
-        .iter()
-        .map(|emitter| emitter.address.clone())
-        .collect::<Vec<_>>();
-    let watched_effective_from_blocks = active_emitters
-        .iter()
-        .map(|emitter| emitter.active_from_block_number.unwrap_or(0))
-        .collect::<Vec<_>>();
-    let watched_effective_to_blocks = active_emitters
-        .iter()
-        .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
-        .collect::<Vec<_>>();
 
     let mut rows = sqlx::query(
         r#"
@@ -73,7 +67,8 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
             rl.transaction_hash AS transaction_hash,
             rl.transaction_index AS transaction_index,
             rl.log_index AS log_index,
-            rl.emitting_address AS emitting_address,
+            LOWER(rl.emitting_address) AS emitting_address,
+            LOWER(rl.topics[1]) AS topic0,
             rl.topics AS topics,
             rl.data AS data,
             rl.canonicality_state::TEXT AS canonicality_state
@@ -82,53 +77,68 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
           ON rb.chain_id = rl.chain_id
          AND rb.block_hash = rl.block_hash
         WHERE rl.chain_id = $1
-          AND lower(rl.emitting_address) = ANY($2::TEXT[])
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($3::TEXT[], $4::BIGINT[], $5::BIGINT[]) AS watched(
-                  address,
-                  effective_from_block,
-                  effective_to_block
-              )
-              WHERE watched.address = lower(rl.emitting_address)
-                AND rl.block_number BETWEEN watched.effective_from_block
-                    AND watched.effective_to_block
-          )
+          AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
+          AND rl.topics[1] IS NOT NULL
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        ORDER BY rl.block_number, rl.transaction_index, rl.log_index
+        ORDER BY
+            rl.chain_id,
+            rl.block_number,
+            rl.block_hash,
+            rl.transaction_index,
+            rl.log_index,
+            rl.emitting_address
         "#,
     )
     .bind(chain)
-    .bind(&watched_addresses)
-    .bind(&watched_range_addresses)
-    .bind(&watched_effective_from_blocks)
-    .bind(&watched_effective_to_blocks)
-    .fetch(pool);
+    .bind(from_block)
+    .bind(to_block)
+    .fetch(&mut *conn);
 
     let mut scanned_log_count = 0usize;
     while let Some(row) = rows.try_next().await.with_context(|| {
-        format!("failed to stream ENSv1 unwrapped authority raw logs for chain {chain}")
+        format!(
+            "failed to stream ENSv1 unwrapped authority raw logs for chain {chain} blocks {from_block}..={to_block}"
+        )
     })? {
-        let address = row
-            .try_get::<String, _>("emitting_address")
-            .context("missing emitting_address")?
-            .to_ascii_lowercase();
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
-        let emitter = emitters_by_address
-            .get(&address)
-            .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
-            .with_context(|| {
-                format!("missing active emitter metadata for chain {chain} address {address}")
-            })?;
-        let raw_log = authority_raw_log_from_row(row, address, block_number, emitter)?;
-        handle_raw_log(raw_log)?;
-        scanned_log_count += 1;
+        let chain_id: String = sql_row::get(&row, "chain_id")?;
+        let block_hash: String = sql_row::get(&row, "block_hash")?;
+        let block_number: i64 = sql_row::get(&row, "block_number")?;
+        let block_timestamp: OffsetDateTime = sql_row::get(&row, "block_timestamp")?;
+        let transaction_hash: String = sql_row::get(&row, "transaction_hash")?;
+        let transaction_index: i64 = sql_row::get(&row, "transaction_index")?;
+        let log_index: i64 = sql_row::get(&row, "log_index")?;
+        let emitting_address: String = sql_row::get(&row, "emitting_address")?;
+        let topic0: String = sql_row::get(&row, "topic0")?;
+        let topics: Vec<String> = sql_row::get(&row, "topics")?;
+        let data: Vec<u8> = sql_row::get(&row, "data")?;
+        let canonicality_state: CanonicalityState = sql_row::get(&row, "canonicality_state")?;
+        for source in source_router.source_candidates(&emitting_address, &topic0, block_number) {
+            let raw_log = AuthorityRawLogRow {
+                chain_id: chain_id.clone(),
+                block_hash: block_hash.clone(),
+                block_number,
+                block_timestamp,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index,
+                log_index,
+                emitting_address: emitting_address.clone(),
+                topics: topics.clone(),
+                data: data.clone(),
+                canonicality_state,
+                source_manifest_id: source.source_manifest_id(),
+                namespace: source.namespace().to_owned(),
+                source_family: source.source_family().to_owned(),
+                manifest_version: source.manifest_version(),
+                normalizer_version: source.normalizer_version().to_owned(),
+                contract_role: source.contract_role().map(str::to_owned),
+            };
+            handle_raw_log(raw_log)?;
+            scanned_log_count += 1;
+        }
     }
     Ok(scanned_log_count)
 }
@@ -138,6 +148,7 @@ async fn load_authority_raw_logs_internal(
     chain: &str,
     active_emitters: &[ActiveEmitter],
     generic_resolver_event_sources: &[GenericResolverEventSource],
+    event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
@@ -341,13 +352,9 @@ async fn load_authority_raw_logs_internal(
         raw_logs.extend(
             rows.into_iter()
                 .map(|row| {
-                    let address = row
-                        .try_get::<String, _>("emitting_address")
-                        .context("missing emitting_address")?
-                        .to_ascii_lowercase();
-                    let block_number = row
-                        .try_get("block_number")
-                        .context("missing block_number")?;
+                    let address =
+                        sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+                    let block_number = sql_row::get(&row, "block_number")?;
                     let emitter = emitters_by_address
                 .get(&address)
                 .and_then(|emitters| {
@@ -367,6 +374,7 @@ async fn load_authority_raw_logs_internal(
             pool,
             chain,
             generic_resolver_event_sources,
+            event_topics,
             restrict_to_block_hashes,
             block_hashes,
             block_range,
@@ -389,206 +397,4 @@ async fn load_authority_raw_logs_internal(
             && left.source_family == right.source_family
     });
     Ok(raw_logs)
-}
-
-fn authority_source_scope_block_range(
-    source_scope: &[AuthorityRawLogSourceScopeTarget],
-) -> Option<(i64, i64)> {
-    let from_block = source_scope
-        .iter()
-        .map(|target| target.effective_from_block)
-        .min()?;
-    let to_block = source_scope
-        .iter()
-        .map(|target| target.effective_to_block)
-        .max()?;
-    Some((from_block, to_block))
-}
-
-async fn load_generic_resolver_event_raw_logs(
-    pool: &PgPool,
-    chain: &str,
-    sources: &[GenericResolverEventSource],
-    restrict_to_block_hashes: bool,
-    block_hashes: &[String],
-    block_range: Option<(i64, i64)>,
-) -> Result<Vec<AuthorityRawLogRow>> {
-    if sources.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let source_from_blocks = sources
-        .iter()
-        .map(|source| source.effective_from_block.unwrap_or(0))
-        .collect::<Vec<_>>();
-    let source_to_blocks = sources
-        .iter()
-        .map(|source| source.effective_to_block.unwrap_or(i64::MAX))
-        .collect::<Vec<_>>();
-    let topic0s = ens_v1_resolver_event_topic0s();
-    let (has_block_range, from_block, to_block) = block_range
-        .map(|(from_block, to_block)| (true, from_block, to_block))
-        .unwrap_or((false, 0, 0));
-
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            rl.chain_id AS chain_id,
-            rl.block_hash AS block_hash,
-            rl.block_number AS block_number,
-            rb.block_timestamp AS block_timestamp,
-            rl.transaction_hash AS transaction_hash,
-            rl.transaction_index AS transaction_index,
-            rl.log_index AS log_index,
-            rl.emitting_address AS emitting_address,
-            rl.topics AS topics,
-            rl.data AS data,
-            rl.canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs rl
-        JOIN chain_lineage rb
-          ON rb.chain_id = rl.chain_id
-         AND rb.block_hash = rl.block_hash
-        WHERE rl.chain_id = $1
-          AND ($2::BOOLEAN = FALSE OR rl.block_hash = ANY($3::TEXT[]))
-          AND ($4::BOOLEAN = FALSE OR rl.block_number BETWEEN $5::BIGINT AND $6::BIGINT)
-          AND lower(rl.topics[1]) = ANY($7::TEXT[])
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($8::BIGINT[], $9::BIGINT[]) AS source_range(
-                  effective_from_block,
-                  effective_to_block
-              )
-              WHERE rl.block_number BETWEEN source_range.effective_from_block
-                  AND source_range.effective_to_block
-          )
-          AND rl.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY rl.block_number, rl.transaction_index, rl.log_index
-        "#,
-    )
-    .bind(chain)
-    .bind(restrict_to_block_hashes)
-    .bind(block_hashes)
-    .bind(has_block_range)
-    .bind(from_block)
-    .bind(to_block)
-    .bind(&topic0s)
-    .bind(&source_from_blocks)
-    .bind(&source_to_blocks)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load generic ENSv1 resolver-event raw logs for chain {chain}")
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            let address = row
-                .try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?
-                .to_ascii_lowercase();
-            let block_number = row
-                .try_get("block_number")
-                .context("missing block_number")?;
-            let source = generic_resolver_event_source_for_block(sources, block_number)
-                .with_context(|| {
-                    format!(
-                        "missing generic ENSv1 resolver-event source metadata for chain {chain} block {block_number}"
-                    )
-                })?;
-            authority_raw_log_from_generic_resolver_source(row, address, block_number, source)
-        })
-        .collect()
-}
-
-fn generic_resolver_event_source_for_block(
-    sources: &[GenericResolverEventSource],
-    block_number: i64,
-) -> Option<&GenericResolverEventSource> {
-    sources
-        .iter()
-        .filter(|source| {
-            source
-                .effective_from_block
-                .is_none_or(|from_block| block_number >= from_block)
-                && source
-                    .effective_to_block
-                    .is_none_or(|to_block| block_number <= to_block)
-        })
-        .min_by(|left, right| left.source_manifest_id.cmp(&right.source_manifest_id))
-}
-
-fn authority_raw_log_from_row(
-    row: sqlx::postgres::PgRow,
-    emitting_address: String,
-    block_number: i64,
-    emitter: &ActiveEmitter,
-) -> Result<AuthorityRawLogRow> {
-    Ok(AuthorityRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
-        emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
-        source_manifest_id: emitter.source_manifest_id,
-        namespace: emitter.namespace.clone(),
-        source_family: emitter.source_family.clone(),
-        manifest_version: emitter.manifest_version,
-        normalizer_version: emitter.normalizer_version.clone(),
-        contract_role: emitter.contract_role.clone(),
-    })
-}
-
-fn authority_raw_log_from_generic_resolver_source(
-    row: sqlx::postgres::PgRow,
-    emitting_address: String,
-    block_number: i64,
-    source: &GenericResolverEventSource,
-) -> Result<AuthorityRawLogRow> {
-    Ok(AuthorityRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
-        emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
-        source_manifest_id: source.source_manifest_id,
-        namespace: source.namespace.clone(),
-        source_family: source.source_family.clone(),
-        manifest_version: source.manifest_version,
-        normalizer_version: source.normalizer_version.clone(),
-        contract_role: None,
-    })
 }

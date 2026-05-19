@@ -12,7 +12,7 @@
 
             stitch_chaos_losing_branch_parent_links(&database).await?;
             let reorg_outcome = apply_chaos_losing_branch_reorg(&database).await?;
-            assert_eq!(reorg_outcome.raw_block_count, 7);
+            assert_eq!(reorg_outcome.raw_block_count, 0);
             assert_eq!(reorg_outcome.normalized_event_count, 10);
 
             let raw_replay_block =

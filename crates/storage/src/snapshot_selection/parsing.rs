@@ -5,6 +5,7 @@ use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
 use super::chain_position::{ChainPosition, ChainPositions, SnapshotSelectionScope};
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
+use crate::evm_primitives::normalize_evm_b256;
 
 pub(super) fn parse_explicit_chain_positions_json(
     raw: &str,
@@ -52,7 +53,12 @@ fn decode_chain_position_value(
         SnapshotSelectionError::invalid_input(format!("{field_name}.{slot} must be an object"))
     })?;
     let chain_id = required_string_field(object, "chain_id", field_name, slot)?;
-    let block_hash = required_string_field(object, "block_hash", field_name, slot)?;
+    let block_hash = normalize_evm_b256(&required_string_field(
+        object,
+        "block_hash",
+        field_name,
+        slot,
+    )?);
     let block_number = object
         .get("block_number")
         .and_then(Value::as_i64)

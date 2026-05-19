@@ -12,7 +12,7 @@ pub(super) fn build_registry_changed_event(
     assignment: &ObservedRegistryAssignment,
     active_edge: Option<&ActiveRegistryEdge>,
 ) -> Result<Option<NormalizedEvent>> {
-    if assignment.observation.to_address != ZERO_ADDRESS && active_edge.is_none() {
+    if assignment.to_address != ZERO_ADDRESS && active_edge.is_none() {
         return Ok(None);
     }
 
@@ -70,34 +70,20 @@ fn build_subregistry_after_state(
     active_edge: Option<&ActiveRegistryEdge>,
 ) -> Result<serde_json::Value> {
     let parent_node = assignment
-        .observation
-        .provenance
-        .get("parent_node")
-        .and_then(|value| value.as_str())
+        .parent_node
+        .as_deref()
         .context("ENSv1 subregistry observation is missing provenance.parent_node")?;
     let labelhash = assignment
-        .observation
-        .provenance
-        .get("labelhash")
-        .and_then(|value| value.as_str())
+        .labelhash
+        .as_deref()
         .context("ENSv1 subregistry observation is missing provenance.labelhash")?;
-    let child_node = assignment
-        .observation
-        .provenance
-        .get("observation_key")
-        .and_then(|value| value.as_str())
-        .context("ENSv1 subregistry observation is missing provenance.observation_key")?;
-    let owner = assignment
-        .observation
-        .provenance
-        .get("owner")
-        .and_then(|value| value.as_str())
-        .context("ENSv1 subregistry observation is missing provenance.owner")?;
-    let tombstone = assignment.observation.to_address == ZERO_ADDRESS;
+    let child_node = assignment.observation_key.as_str();
+    let owner = assignment.to_address.as_str();
+    let tombstone = assignment.to_address == ZERO_ADDRESS;
 
     Ok(json!({
         "source_event": assignment.discovery_kind.source_event(),
-        "discovery_source": assignment.observation.discovery_source,
+        "discovery_source": assignment.discovery_source,
         "edge_kind": assignment.discovery_kind.edge_kind(),
         "observation_key": assignment.observation_key,
         "parent_node": parent_node,
@@ -119,22 +105,15 @@ fn build_resolver_after_state(
     active_edge: Option<&ActiveRegistryEdge>,
 ) -> Result<serde_json::Value> {
     let node = assignment
-        .observation
-        .provenance
-        .get("node")
-        .and_then(|value| value.as_str())
+        .node
+        .as_deref()
         .context("ENSv1 resolver observation is missing provenance.node")?;
-    let resolver = assignment
-        .observation
-        .provenance
-        .get("resolver")
-        .and_then(|value| value.as_str())
-        .context("ENSv1 resolver observation is missing provenance.resolver")?;
-    let tombstone = assignment.observation.to_address == ZERO_ADDRESS;
+    let resolver = assignment.to_address.as_str();
+    let tombstone = assignment.to_address == ZERO_ADDRESS;
 
     Ok(json!({
         "source_event": assignment.discovery_kind.source_event(),
-        "discovery_source": assignment.observation.discovery_source,
+        "discovery_source": assignment.discovery_source,
         "edge_kind": assignment.discovery_kind.edge_kind(),
         "observation_key": assignment.observation_key,
         "node": node,

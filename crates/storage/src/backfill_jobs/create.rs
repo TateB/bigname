@@ -122,7 +122,7 @@ async fn insert_backfill_range(
             range_end_block_number,
             checkpoint_block_number
         )
-        VALUES ($1, $2, $3, $2)
+        VALUES ($1, $2, $3, $2 - 1)
         "#,
     );
     let row = sqlx::query(&insert_sql)

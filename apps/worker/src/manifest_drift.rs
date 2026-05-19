@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, ManifestDriftAlertInspection, ManifestDriftAlertKind,
-    ManifestDriftAlertObservation,
+    ManifestDriftAlertObservation, normalize_evm_address, normalize_evm_b256,
 };
 use serde_json::{Value, json};
 use sqlx::types::time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
@@ -134,7 +134,10 @@ fn manifest_code_hash_drift_candidate_observation(
     let source_family = required_string(candidate, "source_family")?;
     let source_manifest_id = required_i64(candidate, "source_manifest_id")?;
     let block_number = required_i64(observed_block, "number")?;
-    let block_hash = required_string(observed_block, "hash")?;
+    let block_hash = normalize_evm_b256(required_string(observed_block, "hash")?);
+    let contract_address = normalize_evm_address(required_string(contract, "address")?);
+    let expected_code_hash = normalize_evm_b256(required_string(code_hash, "expected")?);
+    let observed_code_hash = normalize_evm_b256(required_string(code_hash, "observed")?);
     let canonicality_state =
         parse_manifest_drift_canonicality(required_string(observed_block, "canonicality_state")?)?;
     let raw_fact_ref = required_value(watched_target, "raw_fact_ref")?.clone();
@@ -150,7 +153,7 @@ fn manifest_code_hash_drift_candidate_observation(
         source_manifest_id: Some(source_manifest_id),
         chain_id: Some(chain.to_owned()),
         block_number: Some(block_number),
-        block_hash: Some(block_hash.to_owned()),
+        block_hash: Some(block_hash.clone()),
         raw_fact_ref,
         canonicality_state,
         alert_state: json!({
@@ -158,9 +161,9 @@ fn manifest_code_hash_drift_candidate_observation(
             "declaration_kind": required_string(declaration, "kind")?,
             "declaration_name": required_string(declaration, "name")?,
             "contract_instance_id": required_string(contract, "contract_instance_id")?,
-            "address": required_string(contract, "address")?,
-            "expected_code_hash": required_string(code_hash, "expected")?,
-            "observed_code_hash": required_string(code_hash, "observed")?,
+            "address": contract_address,
+            "expected_code_hash": expected_code_hash,
+            "observed_code_hash": observed_code_hash,
             "observed_code_byte_length": required_i64(code_hash, "observed_byte_length")?,
             "observed_block_number": block_number,
             "observed_block_hash": block_hash,
@@ -187,7 +190,11 @@ pub(crate) fn manifest_proxy_implementation_candidate_observation(
     let discovery_edge_id = optional_i64(implementation_edge, "discovery_edge_id")?;
     let observed_implementation_contract_instance_id =
         optional_string(observed, "contract_instance_id")?;
-    let observed_implementation_address = optional_string(observed, "address")?;
+    let proxy_address = normalize_evm_address(required_string(proxy, "address")?);
+    let expected_implementation_address =
+        optional_string(expected, "address")?.map(normalize_evm_address);
+    let observed_implementation_address =
+        optional_string(observed, "address")?.map(normalize_evm_address);
 
     Ok(ManifestDriftAlertObservation {
         normalized_event_id: 0,
@@ -215,9 +222,9 @@ pub(crate) fn manifest_proxy_implementation_candidate_observation(
             "role": optional_string(declaration, "role")?,
             "proxy_kind": optional_string(declaration, "proxy_kind")?,
             "proxy_contract_instance_id": required_string(proxy, "contract_instance_id")?,
-            "proxy_address": required_string(proxy, "address")?,
+            "proxy_address": proxy_address,
             "expected_implementation_contract_instance_id": required_string(expected, "contract_instance_id")?,
-            "expected_implementation_address": optional_string(expected, "address")?,
+            "expected_implementation_address": expected_implementation_address,
             "observed_implementation_contract_instance_id": observed_implementation_contract_instance_id,
             "implementation_contract_instance_id": observed_implementation_contract_instance_id,
             "implementation_address": observed_implementation_address,

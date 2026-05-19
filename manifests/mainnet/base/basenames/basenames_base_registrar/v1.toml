@@ -1,0 +1,41 @@
+# Bootstrap seed for the canonical Basenames registrar on Base mainnet.
+# Address confirmed from the upstream base/basenames deployment metadata.
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_base_registrar"
+chain = "base-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "registrar"
+address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a"
+proxy_kind = "none"
+
+# Basenames label-bearing registrar-controller events consumed by
+# manifest-derived authority topic lookup:
+# (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L191 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L198 @ basenames@1809bbc).
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)"
+normalized_events = ["RegistrationGranted"]
+
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 expires)"
+normalized_events = ["RegistrationRenewed"]
+
+# BaseRegistrar is an ERC721 token contract for registered labels:
+# (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L5 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L24 @ basenames@1809bbc).
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = ["TokenControlTransferred"]

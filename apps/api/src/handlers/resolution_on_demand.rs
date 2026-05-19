@@ -1,6 +1,42 @@
 use super::*;
 
-pub(super) async fn execute_ens_verified_resolution_cache_miss(
+pub(super) async fn load_or_execute_resolution_verified_outcome(
+    state: &AppState,
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
+    use_latest_block_tag: bool,
+    persist_execution: bool,
+) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
+    match lookup_resolution_verified_outcome(
+        &state.pool,
+        row,
+        records,
+        record_inventory_row,
+        selected_snapshot,
+    )
+    .await?
+    {
+        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(outcome)),
+        ResolutionVerifiedOutcomeLookup::NotSupported => Ok(None),
+        ResolutionVerifiedOutcomeLookup::CacheMiss => Ok(Some(
+            execute_ens_verified_resolution_cache_miss(
+                &state.pool,
+                &state.chain_rpc_urls,
+                row,
+                records,
+                record_inventory_row,
+                selected_snapshot,
+                use_latest_block_tag,
+                persist_execution,
+            )
+            .await?,
+        )),
+    }
+}
+
+async fn execute_ens_verified_resolution_cache_miss(
     pool: &PgPool,
     chain_rpc_urls: &bigname_execution::ChainRpcUrls,
     row: &NameCurrentRow,

@@ -187,6 +187,12 @@
                 ),
             },
             OpenApiConformanceCoverage {
+                path: "/v1/resolve/{name}/records",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::records resolve records; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
                 path: "/v1/resolvers/{chain_id}/{resolver_address}",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "resolution_and_permissions.rs::resolver_overview_contract_*",

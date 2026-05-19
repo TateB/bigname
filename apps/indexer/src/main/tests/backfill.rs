@@ -449,7 +449,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 15);
+    assert_eq!(requests.len(), 21);
     let tagged_head_requests = requests
         .iter()
         .filter(|request| {
@@ -466,8 +466,32 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .iter()
             .map(|request| request.params.first().and_then(Value::as_str))
             .collect::<Vec<_>>(),
-        vec![Some("latest"), Some("safe"), Some("finalized")]
+        vec![
+            Some("latest"),
+            Some("safe"),
+            Some("finalized"),
+            Some("latest"),
+            Some("safe"),
+            Some("finalized")
+        ]
     );
+    for batch in tagged_head_requests.chunks(3) {
+        assert_eq!(
+            batch
+                .iter()
+                .map(|request| request.params.first().and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![Some("latest"), Some("safe"), Some("finalized")]
+        );
+    }
+    let head_hash_requests = requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getBlockByHash"
+                && request.params.get(1) == Some(&Value::Bool(false))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(head_hash_requests.len(), 2);
     let block_number_requests = requests
         .iter()
         .filter(|request| {
@@ -479,13 +503,20 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
                     .is_some_and(|value| value.starts_with("0x"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(block_number_requests.len(), 4);
+    assert_eq!(block_number_requests.len(), 6);
     assert_eq!(
         block_number_requests
             .iter()
             .map(|request| request.params.first().and_then(Value::as_str))
             .collect::<Vec<_>>(),
-        vec![Some("0x2a"), Some("0x2b"), Some("0x2a"), Some("0x2b")]
+        vec![
+            Some("0x2a"),
+            Some("0x2b"),
+            Some("0x2a"),
+            Some("0x2b"),
+            Some("0x2a"),
+            Some("0x2b")
+        ]
     );
     for batch in block_number_requests.chunks(2) {
         assert_eq!(batch.len(), 2);
@@ -501,6 +532,10 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_ne!(
         block_number_requests[0].http_request_id, block_number_requests[2].http_request_id,
         "post-log hash validation must re-fetch block numbers after the range log request"
+    );
+    assert_ne!(
+        block_number_requests[2].http_request_id, block_number_requests[4].http_request_id,
+        "canonicality assignment must revalidate block hashes after the hash-pinned bundle fetch"
     );
     assert_eq!(requests[4].method, "eth_getBlockByNumber");
     assert_eq!(
@@ -564,6 +599,29 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .params
             .first()
             .and_then(Value::as_str),
+        Some(block_43.block_hash.as_str())
+    );
+    let receipt_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getBlockReceipts")
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_requests.len(), 2);
+    assert_eq!(receipt_requests[0].batch_size, 2);
+    assert!(
+        receipt_requests
+            .iter()
+            .all(
+                |request| request.http_request_id == receipt_requests[0].http_request_id
+                    && request.batch_size == 2
+            ),
+        "hash-pinned receipt hydration must share one JSON-RPC batch HTTP request"
+    );
+    assert_eq!(
+        receipt_requests[0].params.first().and_then(Value::as_str),
+        Some(block_42.block_hash.as_str())
+    );
+    assert_eq!(
+        receipt_requests[1].params.first().and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
     let code_requests = requests
@@ -1881,13 +1939,24 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
                 Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
                 fixture.block_number,
             );
-            ProviderBlockFixture {
-                block: block.clone(),
-                logs: vec![rpc_log_payload_at_address(
+            let logs = if fixture.source_family == "ens_v1_resolver_l1" {
+                vec![rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block,
+                    fixture.address,
+                    &namehash_for_dns_name(&dns_encoded_eth_name("focused")),
+                    "focused.eth",
+                    index as u64,
+                )]
+            } else {
+                vec![rpc_log_payload_at_address(
                     &block,
                     fixture.address,
                     index as i64,
-                )],
+                )]
+            };
+            ProviderBlockFixture {
+                block: block.clone(),
+                logs,
             }
         })
         .collect::<Vec<_>>();
@@ -1931,23 +2000,39 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
         let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
             .await?
             .expect("focused source-family backfill job must exist");
-        let expected_source_identity_hash = source_plan.source_identity_hash();
-        assert_eq!(job.source_identity, source_plan.source_identity_payload());
+        let expected_source_identity =
+            backfill::backfill_job_source_identity_payload(&source_plan)?;
+        let expected_source_identity_hash = expected_source_identity
+            .get("source_identity_hash")
+            .and_then(Value::as_str)
+            .expect("expected source identity must include hash")
+            .to_owned();
+        assert_eq!(job.source_identity, expected_source_identity);
         assert_eq!(
             job.source_identity
                 .get("source_identity_hash")
                 .and_then(Value::as_str),
             Some(expected_source_identity_hash.as_str())
         );
-        assert_eq!(
-            job.source_identity
-                .get("selected_targets")
-                .and_then(Value::as_array)
-                .and_then(|targets| targets.first())
-                .and_then(|target| target.get("source_family"))
-                .and_then(Value::as_str),
-            Some(fixture.source_family)
-        );
+        if fixture.source_family == "ens_v1_resolver_l1" {
+            assert_eq!(
+                job.source_identity
+                    .get("source_identity_payload_format")
+                    .and_then(Value::as_str),
+                Some("generic_resolver_event_topics_v1")
+            );
+            assert!(job.source_identity.get("selected_targets").is_none());
+        } else {
+            assert_eq!(
+                job.source_identity
+                    .get("selected_targets")
+                    .and_then(Value::as_array)
+                    .and_then(|targets| targets.first())
+                    .and_then(|target| target.get("source_family"))
+                    .and_then(Value::as_str),
+                Some(fixture.source_family)
+            );
+        }
 
         let repeat_lease = format!("lease-{}-repeat", fixture.source_family);
         let rerun = run_resumable_hash_pinned_backfill_job(
@@ -2588,7 +2673,13 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
     let (provider, server) = number_resolving_provider_with_fixtures(
         vec![ProviderBlockFixture {
             block: block_42.clone(),
-            logs: vec![rpc_log_payload_at_address(&block_42, selected_address, 0)],
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_42,
+                selected_address,
+                "selected",
+                1,
+                0,
+            )],
         }],
         Arc::clone(&requests),
     )
@@ -2610,7 +2701,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
         .bind(selected_address)
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2625,7 +2716,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        2
     );
 
     server.abort();
@@ -2950,7 +3041,7 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
     );
     assert_eq!(ranges[0].range_start_block_number, 42);
     assert_eq!(ranges[0].range_end_block_number, 42);
-    assert_eq!(ranges[0].checkpoint_block_number, 42);
+    assert_eq!(ranges[0].checkpoint_block_number, 41);
     assert_eq!(ranges[0].attempt_count, 1);
     assert_eq!(
         ranges[0]
@@ -4468,7 +4559,7 @@ async fn insert_active_backfill_manifest_version(
                 'active',
                 'uts46-v1',
                 ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -4605,7 +4696,7 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
-            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number - 1 AND checkpoint_block_number <= range_end_block_number),
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             lease_token TEXT,
             lease_owner TEXT,

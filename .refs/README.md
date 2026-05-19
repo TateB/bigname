@@ -1,6 +1,6 @@
 # Upstream references
 
-Pinned checkouts of the canonical ENSv1, ENSv2, and Basenames codebases, reference indexers, and app metadata used by checked-in admissions. Anchors bigname docs, manifests, agent reviews, and task design to real upstream behavior instead of vendored memory.
+Pinned checkouts of the canonical ENSv1, ENSv2, and Basenames codebases, reference indexers, reference execution clients, and app metadata used by checked-in admissions or comparison rules. Anchors bigname docs, manifests, agent reviews, and task design to real upstream behavior instead of vendored memory.
 
 ## Layout
 
@@ -35,4 +35,4 @@ See `AGENTS.md` § Upstream anchors for the governing rules and `docs/upstream.m
 
 ## When pins drift
 
-`scripts/sync-refs --check` and the `upstream_auditor` codex agent both surface drift. Neither bumps pins automatically — bumping is a deliberate, documented change. See `docs/upstream.md` § Rotation policy.
+`scripts/sync-refs --check` verifies local checkouts match pinned commits. Use `$upstream-evidence` or `evidence_reader` for claim-to-citation checks, and run deliberate pin-drift checks when load-bearing citations or manifests change. Nothing bumps pins automatically — bumping is a deliberate, documented change. See `docs/upstream.md` § Rotation policy.

@@ -1,8 +1,11 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedContractSource, load_watched_contracts};
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
+
+use crate::adapter_manifest::watched_contract_manifest_ids;
 
 use super::{
     constants::*,
@@ -26,19 +29,7 @@ pub(super) async fn load_active_emitters(
         return Ok(Vec::new());
     }
 
-    let manifest_ids = watched_contracts
-        .iter()
-        .map(|contract| {
-            contract.source_manifest_id.with_context(|| {
-                format!(
-                    "watched contract {} on {} is missing source_manifest_id",
-                    contract.address, contract.chain
-                )
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
 
     let mut emitter_candidates = Vec::new();
@@ -180,19 +171,13 @@ async fn load_active_manifest_metadata(
     rows.into_iter()
         .map(|row| {
             let manifest = ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-                normalizer_version: row
-                    .try_get("normalizer_version")
-                    .context("missing normalizer_version")?,
-                role: row.try_get("role").context("missing role")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
+                role: sql_row::get(&row, "role")?,
             };
             Ok((manifest.manifest_id, manifest))
         })
@@ -274,11 +259,7 @@ pub(super) fn emitter_active_at_block(emitter: &ActiveEmitter, block_number: i64
 }
 
 pub(super) fn source_rank(source: WatchedContractSource) -> i32 {
-    match source {
-        WatchedContractSource::ManifestRoot => 0,
-        WatchedContractSource::ManifestContract => 1,
-        WatchedContractSource::DiscoveryEdge => 2,
-    }
+    crate::adapter_manifest::source_rank(source)
 }
 
 pub(super) fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {

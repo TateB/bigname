@@ -72,6 +72,37 @@ fn trim_incoming_bindings_at_existing_starts_closes_historical_open_interval() {
 }
 
 #[test]
+fn existing_binding_closure_uses_next_later_incoming_segment() {
+    let existing = test_binding(
+        Uuid::from_u128(0x200),
+        "ens:bancambios.eth",
+        1_582_156_785,
+        None,
+    );
+    let earlier_incoming = test_binding(
+        Uuid::from_u128(0x100),
+        "ens:bancambios.eth",
+        1_581_795_431,
+        Some(existing.active_from),
+    );
+    let later_incoming = test_binding(
+        Uuid::from_u128(0x300),
+        "ens:bancambios.eth",
+        1_582_530_648,
+        None,
+    );
+
+    let closures = existing_binding_closures_for_incoming(
+        std::slice::from_ref(&existing),
+        &[earlier_incoming, later_incoming.clone()],
+    );
+
+    assert_eq!(closures.len(), 1);
+    assert_eq!(closures[0].surface_binding_id, existing.surface_binding_id);
+    assert_eq!(closures[0].active_to, Some(later_incoming.active_from));
+}
+
+#[test]
 fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_id() {
     let incoming = vec![test_binding(
         Uuid::from_u128(0x100),
@@ -80,7 +111,10 @@ fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_i
         None,
     )];
     let mut stale = test_binding(Uuid::from_u128(0x200), "ens:retry.eth", 1_695_230_399, None);
-    stale.provenance = json!({"adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY});
+    stale.provenance = json!({
+        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        "authority_key": "registrar:ethereum-mainnet:0xabc:1"
+    });
     let mut same_id = stale.clone();
     same_id.surface_binding_id = incoming[0].surface_binding_id;
     let unrelated_adapter =
@@ -93,8 +127,22 @@ fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_i
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates.get(&stale.surface_binding_id),
-        Some(&stale.resource_id)
+        candidates
+            .get(&stale.surface_binding_id)
+            .map(|candidate| candidate.resource_id),
+        Some(stale.resource_id)
+    );
+    assert_eq!(
+        candidates
+            .get(&stale.surface_binding_id)
+            .and_then(|candidate| candidate.authority_key.as_deref()),
+        Some("registrar:ethereum-mainnet:0xabc:1")
+    );
+    assert_eq!(
+        candidates
+            .get(&stale.surface_binding_id)
+            .map(|candidate| candidate.active_from_epoch),
+        Some(stale.active_from.unix_timestamp())
     );
 }
 

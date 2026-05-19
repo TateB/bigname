@@ -1,5 +1,64 @@
 use super::*;
 
+pub(super) struct ExactNameRead {
+    pub(super) row: NameCurrentRow,
+    pub(super) selected_snapshot: SelectedSnapshot,
+}
+
+pub(super) struct ExactNameInventoryRead {
+    pub(super) row: NameCurrentRow,
+    pub(super) record_inventory_current: Option<RecordInventoryCurrentRow>,
+    pub(super) selected_snapshot: SelectedSnapshot,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ExactNameReadRequest<'a> {
+    namespace: &'a str,
+    name: &'a str,
+    selector: ExactNameSnapshotSelector<'a>,
+    include_resolution_auxiliary: bool,
+    projection_kind: Option<&'a str>,
+}
+
+impl<'a> ExactNameReadRequest<'a> {
+    pub(super) fn new(
+        namespace: &'a str,
+        name: &'a str,
+        selector: ExactNameSnapshotSelector<'a>,
+    ) -> Self {
+        Self {
+            namespace,
+            name,
+            selector,
+            include_resolution_auxiliary: false,
+            projection_kind: None,
+        }
+    }
+
+    pub(super) fn include_resolution_auxiliary(mut self, include: bool) -> Self {
+        self.include_resolution_auxiliary = include;
+        self
+    }
+
+    fn with_projection_kind(mut self, projection_kind: &'a str) -> Self {
+        self.projection_kind = Some(projection_kind);
+        self
+    }
+
+    fn map_internal_error(self, error: ApiError) -> ApiError {
+        let Some(projection_kind) = self.projection_kind else {
+            return error;
+        };
+        map_internal_api_error(
+            error,
+            format!(
+                "failed to load {projection_kind} projection for name {}/{}",
+                self.namespace, self.name
+            ),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ExactNameSnapshotSelector<'a> {
     at: Option<&'a str>,
@@ -55,6 +114,69 @@ pub(super) async fn load_name_current_for_selected_snapshot(
         SnapshotProjectionRead::Found(row) => Ok(row),
         SnapshotProjectionRead::NotFound => Err(name_not_found_error(namespace, name)),
     }
+}
+
+pub(super) async fn load_exact_name_read(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+    selector: ExactNameSnapshotSelector<'_>,
+    projection_kind: &str,
+) -> ApiResult<ExactNameRead> {
+    load_exact_name_read_for_route(
+        pool,
+        ExactNameReadRequest::new(namespace, name, selector).with_projection_kind(projection_kind),
+    )
+    .await
+}
+
+pub(super) async fn load_exact_name_read_for_route(
+    pool: &PgPool,
+    request: ExactNameReadRequest<'_>,
+) -> ApiResult<ExactNameRead> {
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        pool,
+        request.namespace,
+        request.selector,
+        request.include_resolution_auxiliary,
+    )
+    .await
+    .map_err(|error| request.map_internal_error(error))?;
+    let row = load_name_current_for_selected_snapshot(
+        pool,
+        request.namespace,
+        request.name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| request.map_internal_error(error))?;
+
+    Ok(ExactNameRead {
+        row,
+        selected_snapshot,
+    })
+}
+
+pub(super) async fn load_exact_name_inventory_read(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+    selector: ExactNameSnapshotSelector<'_>,
+) -> ApiResult<ExactNameInventoryRead> {
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read(pool, namespace, name, selector, "current").await?;
+    let record_inventory_current =
+        load_supported_record_inventory_current_for_snapshot(pool, &row, &selected_snapshot)
+            .await
+            .map_err(snapshot_selection_api_error)?;
+
+    Ok(ExactNameInventoryRead {
+        row,
+        record_inventory_current,
+        selected_snapshot,
+    })
 }
 
 pub(super) fn map_internal_api_error(error: ApiError, message: impl Into<String>) -> ApiError {

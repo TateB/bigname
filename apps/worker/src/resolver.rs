@@ -157,13 +157,13 @@ async fn rebuild_one_resolver(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<ResolverCurrentRebuildSummary> {
-    let profile_gate = ResolverProfileGate::load(pool).await?;
     let target = ResolverTarget {
         chain_id: chain_id.to_owned(),
         resolver_address: normalize_resolver_address(resolver_address),
         profile_source_family: None,
         enumerate_bindings: true,
     };
+    let profile_gate = ResolverProfileGate::load_for_target(pool, &target).await?;
     let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
         let deleted_row_count =
             delete_resolver_current(pool, &target.chain_id, &target.resolver_address).await?;

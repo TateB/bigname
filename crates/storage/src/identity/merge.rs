@@ -79,26 +79,3 @@ pub(super) fn merge_binding_active_to(
         (None, incoming) => Ok(incoming),
     }
 }
-
-pub(super) fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
-}

@@ -44,7 +44,7 @@ impl TestDatabase {
             .as_nanos();
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let database_name = format!(
-            "bigname_adapters_ens_v1_reverse_test_{}_{}_{}",
+            "bn_ad_ensv1_rev_{}_{}_{}",
             std::process::id(),
             unique,
             sequence

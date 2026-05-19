@@ -4,10 +4,11 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockLogRequest, ProviderBlockSelection,
-    ProviderLog, ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderResolvedBlock,
-    decode::{normalize_address, normalize_hash},
+    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockLogRequest, ProviderLog,
+    ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderResolvedBlock,
+    decode::{address_hex_from_str, hash_hex_from_str, normalize_hash},
     request::JsonRpcBatchCall,
+    types::ProviderLogFilter,
 };
 
 mod exact;
@@ -43,16 +44,21 @@ impl JsonRpcProvider {
         let mut logs_by_block_number = BTreeMap::<i64, Vec<ProviderLog>>::new();
         let requests = requests
             .iter()
-            .map(|request| ProviderBlockLogRequest {
-                block_number: request.block_number,
-                block_hash: normalize_hash(&request.block_hash),
-                addresses: request
-                    .addresses
-                    .iter()
-                    .map(|address| normalize_address(address))
-                    .collect(),
+            .map(|request| {
+                Ok(ProviderBlockLogRequest {
+                    block_number: request.block_number,
+                    block_hash: hash_hex_from_str(
+                        &request.block_hash,
+                        "provider log request block hash",
+                    )?,
+                    addresses: request
+                        .addresses
+                        .iter()
+                        .map(|address| address_hex_from_str(address))
+                        .collect::<Result<Vec<_>>>()?,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         for request in &requests {
             if logs_by_block_number
@@ -75,28 +81,16 @@ impl JsonRpcProvider {
             let calls = chunk
                 .iter()
                 .map(|request| {
-                    let mut filter = serde_json::Map::new();
-                    filter.insert(
-                        "blockHash".to_owned(),
-                        Value::String(request.block_hash.clone()),
-                    );
-                    filter.insert(
-                        "address".to_owned(),
-                        Value::Array(
-                            request
-                                .addresses
-                                .iter()
-                                .map(|address| Value::String(address.clone()))
-                                .collect(),
-                        ),
-                    );
+                    let filter = ProviderLogFilter::block_hash(&request.block_hash)?
+                        .with_addresses(&request.addresses)?
+                        .json_rpc_parameter()?;
 
-                    JsonRpcBatchCall {
+                    Ok(JsonRpcBatchCall {
                         method: "eth_getLogs",
-                        params: vec![Value::Object(filter)],
-                    }
+                        params: vec![filter],
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>>>()?;
             let results = self.fetch_json_rpc_batch_results(calls).await?;
 
             for (request, result) in chunk.iter().zip(results) {
@@ -146,6 +140,7 @@ impl JsonRpcProvider {
                     resolved_block.block_number
                 );
             }
+            let block_hash = hash_hex_from_str(&block_hash, "provider log range block hash")?;
 
             if block_hash_by_number
                 .insert(resolved_block.block_number, block_hash)
@@ -182,10 +177,6 @@ impl JsonRpcProvider {
             return Ok(logs_by_block_number);
         }
 
-        let addresses = addresses
-            .iter()
-            .map(|address| normalize_address(address))
-            .collect::<Vec<_>>();
         if addresses.is_empty() {
             return Ok(logs_by_block_number);
         }
@@ -229,14 +220,6 @@ impl JsonRpcProvider {
             return Ok(logs_by_block_number);
         }
 
-        let topic0s = topic0s
-            .iter()
-            .map(|topic| normalize_hash(topic))
-            .collect::<Vec<_>>();
-        let addresses = addresses
-            .iter()
-            .map(|address| normalize_address(address))
-            .collect::<Vec<_>>();
         if topic0s.is_empty() {
             return Ok(logs_by_block_number);
         }
@@ -284,7 +267,7 @@ impl JsonRpcProvider {
                 .block_number;
             let filter = range_log_filter(from_block, to_block, addresses)?;
             let result = self
-                .fetch_json_rpc_result("eth_getLogs", vec![Value::Object(filter)])
+                .fetch_json_rpc_result("eth_getLogs", vec![filter])
                 .await;
             let segment_logs = match result {
                 Ok(Some(logs)) => logs,
@@ -340,7 +323,7 @@ impl JsonRpcProvider {
                 .block_number;
             let filter = range_topic0_log_filter(from_block, to_block, topic0s, addresses)?;
             let result = self
-                .fetch_json_rpc_result("eth_getLogs", vec![Value::Object(filter)])
+                .fetch_json_rpc_result("eth_getLogs", vec![filter])
                 .await;
             let segment_logs = match result {
                 Ok(Some(logs)) => logs,
@@ -397,7 +380,8 @@ impl JsonRpcProvider {
         }
 
         for (expected, actual) in resolved_blocks.iter().zip(revalidated_blocks) {
-            let expected_hash = normalize_hash(&expected.block_hash);
+            let expected_hash =
+                hash_hex_from_str(&expected.block_hash, "provider revalidation block hash")?;
             if actual.block_number != expected.block_number {
                 bail!(
                     "provider revalidated block number {} after range log lookup, but received block number {}",
@@ -419,26 +403,10 @@ impl JsonRpcProvider {
     }
 }
 
-fn range_log_filter(
-    from_block: i64,
-    to_block: i64,
-    addresses: &[String],
-) -> Result<serde_json::Map<String, Value>> {
-    let mut filter = serde_json::Map::new();
-    filter.insert(
-        "fromBlock".to_owned(),
-        ProviderBlockSelection::Number(from_block).json_rpc_parameter()?,
-    );
-    filter.insert(
-        "toBlock".to_owned(),
-        ProviderBlockSelection::Number(to_block).json_rpc_parameter()?,
-    );
-    filter.insert(
-        "address".to_owned(),
-        Value::Array(addresses.iter().cloned().map(Value::String).collect()),
-    );
-
-    Ok(filter)
+fn range_log_filter(from_block: i64, to_block: i64, addresses: &[String]) -> Result<Value> {
+    ProviderLogFilter::block_range(from_block, to_block)
+        .with_addresses(addresses)?
+        .json_rpc_parameter()
 }
 
 fn range_topic0_log_filter(
@@ -446,36 +414,11 @@ fn range_topic0_log_filter(
     to_block: i64,
     topic0s: &[String],
     addresses: &[String],
-) -> Result<serde_json::Map<String, Value>> {
-    let mut filter = base_range_log_filter(from_block, to_block)?;
-    filter.insert(
-        "topics".to_owned(),
-        Value::Array(vec![Value::Array(
-            topic0s.iter().cloned().map(Value::String).collect(),
-        )]),
-    );
-    if !addresses.is_empty() {
-        filter.insert(
-            "address".to_owned(),
-            Value::Array(addresses.iter().cloned().map(Value::String).collect()),
-        );
-    }
-
-    Ok(filter)
-}
-
-fn base_range_log_filter(from_block: i64, to_block: i64) -> Result<serde_json::Map<String, Value>> {
-    let mut filter = serde_json::Map::new();
-    filter.insert(
-        "fromBlock".to_owned(),
-        ProviderBlockSelection::Number(from_block).json_rpc_parameter()?,
-    );
-    filter.insert(
-        "toBlock".to_owned(),
-        ProviderBlockSelection::Number(to_block).json_rpc_parameter()?,
-    );
-
-    Ok(filter)
+) -> Result<Value> {
+    ProviderLogFilter::block_range(from_block, to_block)
+        .with_topic0s(topic0s)?
+        .with_addresses(addresses)?
+        .json_rpc_parameter()
 }
 
 fn validate_contiguous_log_range(
@@ -499,6 +442,7 @@ fn validate_contiguous_log_range(
                 resolved_block.block_number
             );
         }
+        let block_hash = hash_hex_from_str(&block_hash, "provider log range block hash")?;
 
         if block_hash_by_number
             .insert(resolved_block.block_number, block_hash)

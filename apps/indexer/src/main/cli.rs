@@ -37,6 +37,7 @@ pub(crate) enum Command {
     Backfill(BackfillArgs),
     OpsCatchup(OpsCatchupArgs),
     Replay(ReplayArgs),
+    Rewind(RewindArgs),
     Repair(RepairArgs),
 }
 
@@ -47,7 +48,7 @@ pub(crate) struct RunArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(
@@ -137,7 +138,7 @@ pub(crate) struct BackfillArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(
@@ -203,7 +204,7 @@ pub(crate) struct OpsCatchupArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(
@@ -288,6 +289,22 @@ pub(crate) struct ReplayArgs {
 pub(crate) struct RepairArgs {
     #[command(subcommand)]
     pub(crate) command: RepairCommand,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RewindArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
+    pub(crate) deployment_profile: String,
+    #[arg(long)]
+    pub(crate) chain: String,
+    #[arg(long)]
+    pub(crate) ancestor_block_number: i64,
+    #[arg(long)]
+    pub(crate) ancestor_block_hash: String,
+    #[arg(long)]
+    pub(crate) from_block_hash: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

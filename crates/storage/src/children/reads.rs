@@ -2,7 +2,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
-use crate::projection_helpers::{checked_page_limit_i64, checked_page_size_usize, take_json_array};
+use crate::projection_helpers::{
+    checked_page_limit_i64, checked_page_size_usize, split_keyset_page, take_json_array,
+};
 
 use super::{
     DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
@@ -99,7 +101,7 @@ pub async fn load_children_current_page(
     );
     builder.push_bind(limit);
 
-    let mut rows = builder
+    let rows = builder
         .build()
         .fetch_all(pool)
         .await
@@ -112,13 +114,9 @@ pub async fn load_children_current_page(
         .map(decode_children_current_row)
         .collect::<Result<Vec<_>>>()?;
 
-    let has_next_page = rows.len() > page_size;
-    if has_next_page {
-        rows.truncate(page_size);
-    }
-    let next_cursor = has_next_page
-        .then(|| rows.last().map(ChildrenCurrentKeysetCursor::from))
-        .flatten();
+    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
+        ChildrenCurrentKeysetCursor::from(row)
+    });
 
     let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
 
@@ -276,57 +274,35 @@ async fn load_children_current_summary(
 }
 
 pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
-    let surface_class = row
-        .try_get::<String, _>("surface_class")
-        .context("missing surface_class")?;
+    let surface_class = crate::sql_row::get::<String>(&row, "surface_class")?;
     if surface_class != DECLARED_SURFACE_CLASS {
         bail!("unknown children_current surface_class {surface_class}");
     }
 
     Ok(ChildrenCurrentRow {
-        parent_logical_name_id: row
-            .try_get("parent_logical_name_id")
-            .context("missing parent_logical_name_id")?,
-        child_logical_name_id: row
-            .try_get("child_logical_name_id")
-            .context("missing child_logical_name_id")?,
+        parent_logical_name_id: crate::sql_row::get(&row, "parent_logical_name_id")?,
+        child_logical_name_id: crate::sql_row::get(&row, "child_logical_name_id")?,
         surface_class,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 
 fn decode_children_current_summary(row: PgRow) -> Result<ChildrenCurrentSummary> {
     Ok(ChildrenCurrentSummary {
-        parent_logical_name_id: row
-            .try_get("parent_logical_name_id")
-            .context("missing parent_logical_name_id")?,
-        child_count: row.try_get("child_count").context("missing child_count")?,
+        parent_logical_name_id: crate::sql_row::get(&row, "parent_logical_name_id")?,
+        child_count: crate::sql_row::get(&row, "child_count")?,
         provenance_inputs: json_array_field(&row, "provenance_inputs")?,
         chain_positions: json_array_field(&row, "chain_positions")?,
         canonicality_summaries: json_array_field(&row, "canonicality_summaries")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 

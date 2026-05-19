@@ -1,13 +1,26 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use super::{
     emitters::{emitter_for_block_and_scope, scoped_ranges_for_active_emitters},
     types::{ActiveEmitter, RegistryRawLogRow, RegistryRawLogSourceScopeTarget},
-    util::{normalize_address, parse_canonicality_state},
+    util::normalize_address,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RawLogCanonicalityFilter {
+    IncludeObserved,
+    CanonicalOnly,
+}
+
+impl RawLogCanonicalityFilter {
+    const fn canonical_only(self) -> bool {
+        matches!(self, Self::CanonicalOnly)
+    }
+}
 
 pub(super) async fn load_registry_raw_logs(
     pool: &PgPool,
@@ -16,6 +29,8 @@ pub(super) async fn load_registry_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
+    canonicality_filter: RawLogCanonicalityFilter,
+    max_block_number: Option<i64>,
 ) -> Result<Vec<RegistryRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -45,6 +60,8 @@ pub(super) async fn load_registry_raw_logs(
     let scoped_ranges = source_scope
         .map(|source_scope| scoped_ranges_for_active_emitters(source_scope, emitters))
         .transpose()?;
+    let has_max_block_number = max_block_number.is_some();
+    let max_block_number = max_block_number.unwrap_or(i64::MAX);
     let rows = if let Some(scoped_ranges) = scoped_ranges.as_ref() {
         if scoped_ranges.is_empty() {
             return Ok(Vec::new());
@@ -83,6 +100,7 @@ pub(super) async fn load_registry_raw_logs(
             WHERE rl.chain_id = $1
               AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND ($12::BOOLEAN = FALSE OR rl.block_number <= $13::BIGINT)
               AND EXISTS (
                   SELECT 1
                   FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
@@ -105,7 +123,20 @@ pub(super) async fn load_registry_raw_logs(
                     AND rl.block_number BETWEEN scoped.effective_from_block
                         AND scoped.effective_to_block
               )
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND (
+                  (
+                      $11::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $11::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
@@ -119,6 +150,9 @@ pub(super) async fn load_registry_raw_logs(
         .bind(&scoped_addresses)
         .bind(&scoped_from_blocks)
         .bind(&scoped_to_blocks)
+        .bind(canonicality_filter.canonical_only())
+        .bind(has_max_block_number)
+        .bind(max_block_number)
         .fetch_all(pool)
         .await
         .with_context(|| {
@@ -146,7 +180,21 @@ pub(super) async fn load_registry_raw_logs(
             WHERE rl.chain_id = $1
               AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND ($6::BOOLEAN = FALSE OR rl.block_number <= $7::BIGINT)
+              AND (
+                  (
+                      $5::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $5::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
@@ -154,6 +202,9 @@ pub(super) async fn load_registry_raw_logs(
         .bind(&watched_addresses)
         .bind(restrict_to_block_hashes)
         .bind(block_hashes)
+        .bind(canonicality_filter.canonical_only())
+        .bind(has_max_block_number)
+        .bind(max_block_number)
         .fetch_all(pool)
         .await
         .with_context(|| format!("failed to load ENSv2 registry raw logs for chain {chain}"))?
@@ -161,13 +212,9 @@ pub(super) async fn load_registry_raw_logs(
 
     let mut output = Vec::new();
     for row in rows {
-        let emitting_address = normalize_address(
-            &row.try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?,
-        );
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
+        let emitting_address =
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
         let Some(emitter) = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, source_scope))
@@ -175,26 +222,17 @@ pub(super) async fn load_registry_raw_logs(
             continue;
         };
         output.push(RegistryRawLogRow {
-            chain_id: row.try_get("chain_id").context("missing chain_id")?,
-            block_hash: row.try_get("block_hash").context("missing block_hash")?,
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
             block_number,
-            block_timestamp: row
-                .try_get("block_timestamp")
-                .context("missing block_timestamp")?,
-            transaction_hash: row
-                .try_get("transaction_hash")
-                .context("missing transaction_hash")?,
-            transaction_index: row
-                .try_get("transaction_index")
-                .context("missing transaction_index")?,
-            log_index: row.try_get("log_index").context("missing log_index")?,
+            block_timestamp: sql_row::get(&row, "block_timestamp")?,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index: sql_row::get(&row, "transaction_index")?,
+            log_index: sql_row::get(&row, "log_index")?,
             emitting_address,
-            topics: row.try_get("topics").context("missing topics")?,
-            data: row.try_get("data").context("missing data")?,
-            canonicality_state: parse_canonicality_state(
-                &row.try_get::<String, _>("canonicality_state")
-                    .context("missing canonicality_state")?,
-            )?,
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
             emitting_contract_instance_id: emitter.contract_instance_id,
             source_manifest_id: emitter.source_manifest_id,
             namespace: emitter.namespace.clone(),

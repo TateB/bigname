@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool, Row,
-    types::time::{OffsetDateTime, UtcOffset},
-};
+use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+
+pub(super) use crate::projection_json::format_timestamp;
 
 use super::{
     constants::*,
@@ -216,17 +215,4 @@ fn chain_slot(chain_id: &str) -> String {
         BASE_MAINNET_CHAIN_ID => "base".to_owned(),
         _ => chain_id.to_owned(),
     }
-}
-
-pub(super) fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

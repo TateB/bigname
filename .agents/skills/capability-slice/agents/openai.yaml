@@ -1,7 +1,0 @@
-interface:
-  display_name: "Capability Slice"
-  short_description: "Plan a consumer replacement slice"
-  default_prompt: "Use $capability-slice to map this consumer capability to routes, projections, tests, and rollout criteria."
-
-policy:
-  allow_implicit_invocation: true

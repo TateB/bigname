@@ -1145,6 +1145,189 @@ async fn rebuild_projects_current_resolver_summary() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_prefers_explicit_registry_resolver_over_authority_epoch_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:wrapped-resolver.eth",
+        "wrapped-resolver.eth",
+        0x3110,
+        0x3210,
+        0x3310,
+    );
+    let stale_boundary_resolver = "0x0000000000000000000000000000000000000abc";
+    let registry_resolver = "0x0000000000000000000000000000000000000def";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xgrant", 212, 1_717_171_712),
+            raw_block("ethereum-mainnet", "0xresolver", 213, 1_717_171_713),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xgrant", 212, 1_717_171_712).await?;
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "grant-wrapped-resolver",
+                "RegistrationGranted",
+                "0xgrant",
+                212,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "wrapper",
+                    "authority_key": "wrapper:ethereum-mainnet:16:wrapped-resolver",
+                    "registrant": "0x0000000000000000000000000000000000000aaa",
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            with_source_family(
+                resolver_event(
+                    &binding,
+                    "explicit-registry-resolver",
+                    registry_resolver,
+                    "0xresolver",
+                    213,
+                    188,
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "authority-boundary-resolver",
+                    EVENT_KIND_RESOLVER_CHANGED,
+                    "0xresolver",
+                    213,
+                    None,
+                    json!({
+                        "resolver": Value::Null,
+                    }),
+                    json!({
+                        "namehash": format!("namehash:{}", binding.display_name),
+                        "resolver": stale_boundary_resolver,
+                        "source_event": "AuthorityEpochChanged",
+                    }),
+                ),
+                "ens_v1_wrapper_l1",
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt row must exist")?;
+    assert_eq!(
+        row.declared_summary["resolver"],
+        json!({
+            "chain_id": "ethereum-mainnet",
+            "address": registry_resolver,
+            "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_accepts_later_authority_epoch_resolver_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:later-boundary.eth",
+        "later-boundary.eth",
+        0x3120,
+        0x3220,
+        0x3320,
+    );
+    let registry_resolver = "0x0000000000000000000000000000000000000def";
+    let later_boundary_resolver = "0x0000000000000000000000000000000000001234";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xgrant", 212, 1_717_171_712),
+            raw_block("ethereum-mainnet", "0xresolver", 213, 1_717_171_713),
+            raw_block("ethereum-mainnet", "0xboundary", 214, 1_717_171_714),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xgrant", 212, 1_717_171_712).await?;
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "grant-later-boundary",
+                "RegistrationGranted",
+                "0xgrant",
+                212,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "wrapper",
+                    "authority_key": "wrapper:ethereum-mainnet:16:later-boundary",
+                    "registrant": "0x0000000000000000000000000000000000000aaa",
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            with_source_family(
+                resolver_event(
+                    &binding,
+                    "explicit-registry-resolver",
+                    registry_resolver,
+                    "0xresolver",
+                    213,
+                    188,
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "later-authority-boundary-resolver",
+                    EVENT_KIND_RESOLVER_CHANGED,
+                    "0xboundary",
+                    214,
+                    None,
+                    json!({
+                        "resolver": registry_resolver,
+                    }),
+                    json!({
+                        "namehash": format!("namehash:{}", binding.display_name),
+                        "resolver": later_boundary_resolver,
+                        "source_event": "AuthorityEpochChanged",
+                    }),
+                ),
+                "ens_v1_wrapper_l1",
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt row must exist")?;
+    assert_eq!(
+        row.declared_summary["resolver"],
+        json!({
+            "chain_id": "ethereum-mainnet",
+            "address": later_boundary_resolver,
+            "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_projects_null_resolver_summary_for_zero_address() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new(
@@ -1656,20 +1839,12 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
     .await?;
     upsert_chain_lineage_blocks(
         database.pool(),
-        &[
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1-compatible",
-                21_000_099,
-                1_717_172_513,
-            ),
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1-future",
-                21_000_100,
-                1_776_387_700,
-            ),
-        ],
+        &[chain_lineage_block(
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xbasenamesl1-compatible",
+            21_000_099,
+            1_717_172_513,
+        )],
     )
     .await?;
     upsert_token_lineages(

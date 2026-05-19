@@ -444,7 +444,7 @@ fn provider_blocks(from: i64, to: i64) -> Vec<ProviderBlock> {
 fn ops_config(chunk_blocks: i64) -> OpsCatchupConfig {
     OpsCatchupConfig {
         deployment_profile: "mainnet".to_owned(),
-        manifests_root: PathBuf::from("manifests"),
+        manifests_root: PathBuf::from("manifests/mainnet"),
         chunk_blocks,
         follow: false,
         follow_iterations: None,
@@ -490,16 +490,15 @@ async fn insert_ops_watched_manifest_contract(
     address: &str,
     start_block: Option<i64>,
 ) -> Result<()> {
-    let manifest_payload = match start_block {
-        Some(start_block) => json!({
-            "contracts": [{"role": "WatchedContract", "start_block": start_block}],
-            "roots": []
-        }),
-        None => json!({
-            "contracts": [{"role": "WatchedContract"}],
-            "roots": []
-        }),
+    let contracts = match start_block {
+        Some(start_block) => json!([{"role": "WatchedContract", "start_block": start_block}]),
+        None => json!([{"role": "WatchedContract"}]),
     };
+    let manifest_payload = json!({
+        "contracts": contracts,
+        "roots": [],
+        "abi": {"events": test_manifest_abi_events()},
+    });
     sqlx::query(
         r#"
             INSERT INTO manifest_versions (

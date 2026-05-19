@@ -101,6 +101,28 @@ fn assert_view_meta_parameters(operation: &Value, expected_view: &str, expected_
     );
 }
 
+fn assert_compact_only_view_meta_parameters(operation: &Value, expected_meta: &str) {
+    let view = openapi_parameter(operation, "view");
+    assert_eq!(
+        view.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["compact"],
+            "default": "compact",
+        }))
+    );
+
+    let meta = openapi_parameter(operation, "meta");
+    assert_eq!(
+        meta.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["none", "summary", "full"],
+            "default": expected_meta,
+        }))
+    );
+}
+
 fn assert_no_not_implemented_response(operation: &Value) {
     assert!(
         operation
@@ -131,6 +153,43 @@ fn required_fields(schema: &Value) -> Vec<&str> {
                 .expect("required field names must be strings")
         })
         .collect()
+}
+
+fn property_names(schema: &Value) -> Vec<&str> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("schema must define properties")
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+fn assert_schema_omits(schema: &Value, denied_fields: &[&str]) {
+    let properties = property_names(schema);
+    for field in denied_fields {
+        assert!(
+            !properties.contains(field),
+            "compact schema unexpectedly exposes {field}"
+        );
+    }
+}
+
+const COMPACT_SCHEMA_DENYLIST: &[&str] = &[
+    "logical_name_id",
+    "surface_binding_id",
+    "projection_version_id",
+    "raw_fact_refs",
+    "normalized_event_ids",
+    "execution_trace_id",
+    "chain_positions",
+    "coverage",
+];
+
+fn assert_compact_schema_omits(document: &Value, schema_name: &str, extra_denied_fields: &[&str]) {
+    let schema = openapi_schema(document, schema_name);
+    assert_schema_omits(schema, COMPACT_SCHEMA_DENYLIST);
+    assert_schema_omits(schema, extra_denied_fields);
 }
 
 #[test]
@@ -237,7 +296,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "name",
         }))
     );
-    assert_view_meta_parameters(names, "compact", "summary");
+    assert_compact_only_view_meta_parameters(names, "summary");
     assert_no_not_implemented_response(names);
 
     let address_names_count = openapi_operation(&document, "/v1/addresses/{address}/names/count");
@@ -389,7 +448,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_parameter(name_records, "include").get("style"),
         Some(&json!("form"))
     );
-    assert_view_meta_parameters(name_records, "compact", "summary");
+    assert_compact_only_view_meta_parameters(name_records, "summary");
     assert_no_not_implemented_response(name_records);
 
     let inferred_name_records = openapi_operation(&document, "/v1/resolve/{name}/records");
@@ -420,7 +479,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_parameter(inferred_name_records, "include").get("style"),
         Some(&json!("form"))
     );
-    assert_view_meta_parameters(inferred_name_records, "compact", "summary");
+    assert_compact_only_view_meta_parameters(inferred_name_records, "summary");
     assert_no_not_implemented_response(inferred_name_records);
 
     let inferred_resolutions = openapi_operation(&document, "/v1/resolve/{name}");
@@ -462,7 +521,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "page_size",
         ]
     );
-    assert_view_meta_parameters(events, "compact", "summary");
+    assert_compact_only_view_meta_parameters(events, "summary");
     assert_no_not_implemented_response(events);
 
     let roles = openapi_operation(&document, "/v1/roles");
@@ -480,7 +539,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "page_size",
         ]
     );
-    assert_view_meta_parameters(roles, "compact", "summary");
+    assert_compact_only_view_meta_parameters(roles, "summary");
     assert_no_not_implemented_response(roles);
 
     let name_roles = openapi_operation(&document, "/v1/names/{namespace}/{name}/roles");
@@ -497,7 +556,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "page_size",
         ]
     );
-    assert_view_meta_parameters(name_roles, "compact", "summary");
+    assert_compact_only_view_meta_parameters(name_roles, "summary");
     assert_no_not_implemented_response(name_roles);
 
     let resource_lookup = openapi_operation(&document, "/v1/resources/lookup");
@@ -513,7 +572,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_parameter(resource_lookup, "name").get("required"),
         Some(&json!(true))
     );
-    assert_view_meta_parameters(resource_lookup, "compact", "summary");
+    assert_compact_only_view_meta_parameters(resource_lookup, "summary");
     assert_no_not_implemented_response(resource_lookup);
 
     let resolver_overview = openapi_operation(
@@ -665,6 +724,26 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(|properties| properties.get("data")),
         Some(&json!({ "$ref": "#/components/schemas/ResourceLookupData" }))
     );
+
+    assert_compact_schema_omits(&document, "CompactDomainSummary", &["resource_id", "provenance"]);
+    assert_compact_schema_omits(
+        &document,
+        "CompactRecordSummary",
+        &[
+            "resource_id",
+            "record_version_boundary",
+            "explicit_gaps",
+            "unsupported_families",
+            "provenance",
+        ],
+    );
+    assert_compact_schema_omits(
+        &document,
+        "CompactHistoryEvent",
+        &["normalized_event_id", "provenance"],
+    );
+    assert_compact_schema_omits(&document, "ResourceLookupData", &["namehash"]);
+    assert_compact_schema_omits(&document, "RoleRow", &["provenance"]);
 
     let resolution = openapi_schema(&document, "ResolutionResponse");
     assert_eq!(
@@ -966,6 +1045,59 @@ async fn openapi_json_route_serves_generated_contract() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload, openapi_document());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_only_routes_keep_full_view_compatibility_rejection() -> Result<()> {
+    for (uri, message) in [
+        (
+            "/v1/names?view=full",
+            "view=full is reserved for a later compact names implementation",
+        ),
+        (
+            "/v1/names/ens/alice.eth/records?view=full",
+            "view=full is not supported for compact name records",
+        ),
+        (
+            "/v1/resolve/alice.eth/records?view=full",
+            "view=full is not supported for compact name records",
+        ),
+        (
+            "/v1/names/ens/alice.eth/roles?view=full",
+            "view=full is not supported for compact name roles",
+        ),
+        (
+            "/v1/roles?view=full&account=0x0000000000000000000000000000000000000001",
+            "view=full is not supported for compact roles",
+        ),
+        (
+            "/v1/resources/lookup?namespace=ens&name=alice.eth&view=full",
+            "view=full is not supported for resource lookup",
+        ),
+        (
+            "/v1/events?view=full",
+            "view=full is reserved for /v1/events until the full event shape is documented",
+        ),
+    ] {
+        let response = app_router(openapi_docs_test_state())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(
+            payload.get("error").and_then(|error| error.get("code")),
+            Some(&json!("invalid_input")),
+            "{uri}"
+        );
+        assert_eq!(
+            payload.get("error").and_then(|error| error.get("message")),
+            Some(&json!(message)),
+            "{uri}"
+        );
+    }
 
     Ok(())
 }

@@ -3,6 +3,10 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
+use crate::evm_primitives::{
+    normalize_evm_address, normalize_evm_b256, normalize_optional_evm_address,
+};
+
 use super::types::{
     MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE, MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND,
     ManifestDriftAlertKind,
@@ -73,7 +77,7 @@ pub(super) async fn load_live_code_hash_drift_candidates(pool: &PgPool) -> Resul
         )
         SELECT *
         FROM latest_code
-        WHERE observed_code_hash <> expected_code_hash
+        WHERE lower(observed_code_hash) <> lower(expected_code_hash)
         ORDER BY namespace, source_family, chain, declaration_kind, declaration_name, declared_address
         "#,
     )
@@ -156,6 +160,22 @@ fn render_live_code_hash_drift_candidate(row: sqlx::postgres::PgRow) -> Result<V
     let raw_observed_at: OffsetDateTime = row
         .try_get("raw_observed_at")
         .context("missing live code-hash raw_observed_at")?;
+    let declared_address = normalize_evm_address(
+        &row.try_get::<String, _>("declared_address")
+            .context("missing live code-hash declared_address")?,
+    );
+    let expected_code_hash = normalize_evm_b256(
+        &row.try_get::<String, _>("expected_code_hash")
+            .context("missing live code-hash expected_code_hash")?,
+    );
+    let observed_code_hash = normalize_evm_b256(
+        &row.try_get::<String, _>("observed_code_hash")
+            .context("missing live code-hash observed_code_hash")?,
+    );
+    let observed_block_hash = normalize_evm_b256(
+        &row.try_get::<String, _>("observed_block_hash")
+            .context("missing live code-hash observed_block_hash")?,
+    );
 
     Ok(json!({
         "alert_type": ManifestDriftAlertKind::CodeHashDrift.alert_type(),
@@ -180,16 +200,16 @@ fn render_live_code_hash_drift_candidate(row: sqlx::postgres::PgRow) -> Result<V
         },
         "contract": {
             "contract_instance_id": contract_instance_id.to_string(),
-            "address": row.try_get::<String, _>("declared_address").context("missing live code-hash declared_address")?,
+            "address": declared_address,
         },
         "code_hash": {
-            "expected": row.try_get::<String, _>("expected_code_hash").context("missing live code-hash expected_code_hash")?,
-            "observed": row.try_get::<String, _>("observed_code_hash").context("missing live code-hash observed_code_hash")?,
+            "expected": expected_code_hash,
+            "observed": observed_code_hash,
             "observed_byte_length": row.try_get::<i64, _>("observed_code_byte_length").context("missing live code-hash observed_code_byte_length")?,
         },
         "observed_block": {
             "number": row.try_get::<i64, _>("observed_block_number").context("missing live code-hash observed_block_number")?,
-            "hash": row.try_get::<String, _>("observed_block_hash").context("missing live code-hash observed_block_hash")?,
+            "hash": observed_block_hash,
             "canonicality_state": row.try_get::<String, _>("observed_canonicality_state").context("missing live code-hash observed_canonicality_state")?,
         },
         "watched_target": {
@@ -232,6 +252,18 @@ fn render_live_proxy_implementation_candidate(row: sqlx::postgres::PgRow) -> Res
     } else {
         "missing_proxy_implementation_edge"
     };
+    let proxy_address = normalize_evm_address(
+        &row.try_get::<String, _>("proxy_address")
+            .context("missing live proxy proxy_address")?,
+    );
+    let expected_implementation_address = normalize_optional_evm_address(
+        &row.try_get::<Option<String>, _>("expected_implementation_address")
+            .context("missing live proxy expected_implementation_address")?,
+    );
+    let observed_implementation_address = normalize_optional_evm_address(
+        &row.try_get::<Option<String>, _>("observed_implementation_address")
+            .context("missing live proxy observed_implementation_address")?,
+    );
 
     Ok(json!({
         "alert_type": ManifestDriftAlertKind::ProxyImplementation.alert_type(),
@@ -260,16 +292,16 @@ fn render_live_proxy_implementation_candidate(row: sqlx::postgres::PgRow) -> Res
         },
         "proxy": {
             "contract_instance_id": proxy_contract_instance_id.to_string(),
-            "address": row.try_get::<String, _>("proxy_address").context("missing live proxy proxy_address")?,
+            "address": proxy_address,
         },
         "expected_implementation": {
             "contract_instance_id": expected_implementation_contract_instance_id.to_string(),
-            "address": row.try_get::<Option<String>, _>("expected_implementation_address").context("missing live proxy expected_implementation_address")?,
+            "address": expected_implementation_address,
         },
         "observed_implementation": {
             "contract_instance_id": observed_implementation_contract_instance_id
                 .map(|value| value.to_string()),
-            "address": row.try_get::<Option<String>, _>("observed_implementation_address").context("missing live proxy observed_implementation_address")?,
+            "address": observed_implementation_address,
         },
         "implementation_edge": {
             "discovery_edge_id": discovery_edge_id,

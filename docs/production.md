@@ -84,6 +84,9 @@ For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and
 
 - Keep PostgreSQL and MinIO unexposed at the host/network edge.
 - Keep JSON-RPC providers reachable only from the containers that need them.
+- Use [`runbooks/production-docker.md`](runbooks/production-docker.md) for
+  current-host Docker operations, monitoring, pause/resume, and recovery
+  checklists.
 - Use host firewall or cloud security groups to allow public `80/tcp` and
   `443/tcp`. Allow `443/udp` when HTTP/3 should be available. Do not publish
   database, object-store, or execution-node admin ports.

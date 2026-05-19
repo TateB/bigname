@@ -41,6 +41,13 @@ impl MigratedRegistryNodes {
         }
     }
 
+    pub(crate) fn from_delta(delta: HashSet<String>) -> Self {
+        Self {
+            baseline: Arc::new(HashSet::new()),
+            delta,
+        }
+    }
+
     fn from_baseline(baseline: HashSet<String>) -> Self {
         Self {
             baseline: Arc::new(baseline),
@@ -54,6 +61,10 @@ impl MigratedRegistryNodes {
 
     pub(crate) fn insert(&mut self, node: String) -> bool {
         self.delta.insert(node)
+    }
+
+    pub(crate) fn delta_nodes(&self) -> impl Iterator<Item = &String> {
+        self.delta.iter()
     }
 }
 

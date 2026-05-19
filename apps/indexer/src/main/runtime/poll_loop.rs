@@ -3,8 +3,13 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use crate::normalized_replay_catchup::normalized_replay_cursors_complete;
 use crate::provider::ProviderRegistry;
-use crate::reconciliation::{HeaderAuditMode, poll_provider_heads_with_adapter_sync};
+use crate::reconciliation::{
+    HeaderAuditMode, poll_provider_heads_with_adapter_sync,
+    sync_live_adapter_backlog_after_normalized_replay,
+};
+use crate::replay::deployment_profile_from_manifest_root;
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::intake::{
@@ -35,10 +40,13 @@ pub(crate) async fn run_poll_loop(
     runtime_watch_scope: RuntimeWatchScope,
     adapter_sync_on_manifest_refresh: bool,
     adapter_sync_on_live_poll: bool,
+    adapter_sync_on_live_poll_after_normalized_replay_catchup: bool,
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
     header_audit_mode: HeaderAuditMode,
 ) -> Result<()> {
+    let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
+    let mut live_poll_adapter_sync_restored_after_replay = false;
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
 
@@ -330,11 +338,62 @@ pub(crate) async fn run_poll_loop(
                     }
                 }
 
+                let provider_configured_chains =
+                    if adapter_sync_on_live_poll_after_normalized_replay_catchup {
+                        intake_chain_tasks
+                            .iter()
+                            .filter(|task| provider_registry.provider_for(&task.chain).is_some())
+                            .map(|task| task.chain.clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                let effective_adapter_sync_on_live_poll = if adapter_sync_on_live_poll {
+                    true
+                } else if adapter_sync_on_live_poll_after_normalized_replay_catchup {
+                    !provider_configured_chains.is_empty()
+                        && normalized_replay_cursors_complete(
+                            pool,
+                            &deployment_profile,
+                            &provider_configured_chains,
+                        )
+                        .await?
+                } else {
+                    false
+                };
+                if effective_adapter_sync_on_live_poll
+                    && !adapter_sync_on_live_poll
+                    && !live_poll_adapter_sync_restored_after_replay
+                {
+                    let backlog_summary = sync_live_adapter_backlog_after_normalized_replay(
+                        pool,
+                        &deployment_profile,
+                        &provider_configured_chains,
+                    )
+                    .await?;
+                    info!(
+                        service = "indexer",
+                        command = "poll",
+                        deployment_profile,
+                        post_replay_backlog_chain_count = backlog_summary.chain_count,
+                        post_replay_backlog_selected_block_count =
+                            backlog_summary.selected_block_count,
+                        post_replay_backlog_scanned_log_count = backlog_summary.scanned_log_count,
+                        post_replay_backlog_matched_log_count = backlog_summary.matched_log_count,
+                        post_replay_backlog_normalized_event_synced_count =
+                            backlog_summary.normalized_event_synced_count,
+                        post_replay_backlog_normalized_event_inserted_count =
+                            backlog_summary.normalized_event_inserted_count,
+                        "live raw payload adapter sync enabled after normalized replay catch-up completed"
+                    );
+                    live_poll_adapter_sync_restored_after_replay = true;
+                }
+
                 poll_provider_heads_with_adapter_sync(
                     pool,
                     &mut intake_chain_tasks,
                     provider_registry,
-                    adapter_sync_on_live_poll,
+                    effective_adapter_sync_on_live_poll,
                     header_audit_mode,
                 )
                 .await?;

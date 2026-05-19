@@ -31,10 +31,7 @@ pub(super) fn jsonb_safe_normalized_event(event: &NormalizedEvent) -> Normalized
     safe_event
 }
 
-pub(super) fn serialize_jsonb_value(
-    value: &serde_json::Value,
-    context: &'static str,
-) -> Result<String> {
+pub fn serialize_jsonb_value(value: &serde_json::Value, context: &'static str) -> Result<String> {
     if json_value_contains_nul(value) {
         return serde_json::to_string(&jsonb_safe_value(value)).context(context);
     }

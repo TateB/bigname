@@ -40,8 +40,8 @@ the API, the indexer, and the worker. The API listens on the host port from
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
 
-The indexer loads exactly one manifest root. Use `/app/manifests` for the
-mainnet profile or `/app/manifests-sepolia-dev` for the ENSv2 Sepolia dev
+The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
+for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
 profile. Do not point one runtime at both manifest roots.
 
 If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
@@ -61,6 +61,17 @@ configuration or a provider that cannot serve the selected block must fail
 closed with `409 stale` plus a configuration message; it must not fall back
 to declared record cache. The indexer RPC setting and Reth DB source settings do
 not satisfy this API live-execution provider requirement by themselves.
+
+The worker may use the same provider shape for projection-owned ENSv1 text
+hydration, configured as
+`BIGNAME_WORKER_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. During automatic
+all-current projection replay, the first worker handoff to continuous apply, and
+continuous `record_inventory_current` invalidation apply, the worker hydrates
+legacy `text:<key>` values only after the normalized-event row has been rebuilt
+and only at the stored chain checkpoint selected for the current projection.
+Missing worker RPC configuration leaves those projection cache entries explicit
+`unsupported`; it must not make the worker query provider `latest` or mutate
+normalized events.
 
 Deployments with a same-host Reth database can layer
 `docker-compose.reth-db.yml` on top of the server compose file. Set
@@ -126,6 +137,11 @@ operational intake work: completing bootstrap alone is not consumer-replacement
 or route-coverage evidence without the relevant projection, route, conformance,
 and rollout gates.
 
+Bootstrap backfill identity is tied to the selected deployment profile, chain,
+finite range, and source identity, not the manifest root path used by a given
+host. Moving an unchanged manifest corpus between directories must not make the
+indexer reread historical ranges.
+
 Automatic bootstrap partitions large job segments into child range leases for
 internal workers. `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS=0` selects an
 automatic worker count capped at 4; set a positive value to pin the count.
@@ -149,9 +165,29 @@ as a fallback.
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by
-the number of persisted raw logs replayed. The automatic cursor is one
-all-source chain cursor over persisted canonical raw facts; source-scoped replay
-is reserved for explicit repair/backfill runs.
+the number of persisted canonical raw-log event candidates considered. For adapters classified
+`stateless_raw_fact`, the cap bounds each cursor chunk. For implemented
+`stateful_closure_required` and `contextual_dependency_required` full-closure
+replay, the same cap bounds physical adapter pages while preserving whole-block
+boundaries, and adapter routing may then filter those pages down to the watched
+or generic source events consumed by the closure pass. If one block exceeds the
+cap, that whole block is still replayed as one page. Adapter implementations may also use a larger scan guard to bound one
+database range probe, but that guard is not a fixed replay window and should not
+force sparse eras through 512-block pages. The automatic cursor is one all-source
+chain cursor over persisted canonical raw facts, and chunk/log caps are only IO
+hints; they are not semantic adapter-state or dependency-closure snapshots. The
+ENSv1 unwrapped-authority closure implementation keeps its database scan guard
+at the catch-up chunk-block scale so sparse eras normally page by the configured
+candidate-log cap instead of a small fixed block window. Because those pages can
+carry many more derived events than the old small-window pages, the implementation
+flushes and checkpoints the adapter-private closure snapshot after each physical
+page. The
+runner fails closed for
+stateful/contextual adapters that do not have a documented closure/dependency
+replay session, rather than advancing the cursor over possibly divergent
+transition rows. Source-scoped replay is reserved for explicit repair/backfill
+runs and is not deterministic stateful/contextual regeneration unless the
+selection is closure-complete.
 Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.

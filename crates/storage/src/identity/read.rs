@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
-use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
+use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::CanonicalityState;
-
-use super::types::{NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage};
+use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 
 const DEFAULT_IDENTITY_READ_FILTER: &str = r#"
   AND canonicality_state IN (
@@ -333,105 +331,60 @@ fn identity_read_filter(include_noncanonical: bool) -> &'static str {
 
 pub(super) fn decode_token_lineage(row: PgRow) -> Result<TokenLineage> {
     Ok(TokenLineage {
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
 pub(super) fn decode_resource(row: PgRow) -> Result<Resource> {
     Ok(Resource {
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
 pub(super) fn decode_name_surface(row: PgRow) -> Result<NameSurface> {
     Ok(NameSurface {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        input_name: row.try_get("input_name").context("missing input_name")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        dns_encoded_name: row
-            .try_get("dns_encoded_name")
-            .context("missing dns_encoded_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        labelhashes: row.try_get("labelhashes").context("missing labelhashes")?,
-        normalizer_version: row
-            .try_get("normalizer_version")
-            .context("missing normalizer_version")?,
-        normalization_warnings: row
-            .try_get("normalization_warnings")
-            .context("missing normalization_warnings")?,
-        normalization_errors: row
-            .try_get("normalization_errors")
-            .context("missing normalization_errors")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        input_name: crate::sql_row::get(&row, "input_name")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        dns_encoded_name: crate::sql_row::get(&row, "dns_encoded_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        labelhashes: crate::sql_row::get(&row, "labelhashes")?,
+        normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
+        normalization_warnings: crate::sql_row::get(&row, "normalization_warnings")?,
+        normalization_errors: crate::sql_row::get(&row, "normalization_errors")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
 pub(super) fn decode_surface_binding(row: PgRow) -> Result<SurfaceBinding> {
     Ok(SurfaceBinding {
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        binding_kind: SurfaceBindingKind::parse(
-            &row.try_get::<String, _>("binding_kind")
-                .context("missing binding_kind")?,
-        )?,
-        active_from: row.try_get("active_from").context("missing active_from")?,
-        active_to: row.try_get("active_to").context("missing active_to")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        binding_kind: crate::sql_row::get(&row, "binding_kind")?,
+        active_from: crate::sql_row::get(&row, "active_from")?,
+        active_to: crate::sql_row::get(&row, "active_to")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }

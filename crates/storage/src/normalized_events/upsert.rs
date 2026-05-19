@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres};
-
-use crate::CanonicalityState;
+use tracing::info;
 
 use super::{types::NormalizedEvent, validation::validate_normalized_event};
 
@@ -17,6 +19,7 @@ use batch::{
     upsert_normalized_event_batch,
 };
 use sanitize::jsonb_safe_normalized_event;
+pub use sanitize::serialize_jsonb_value;
 
 pub(super) const NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE: usize = 10_000;
 
@@ -48,46 +51,105 @@ pub async fn upsert_normalized_events_with_summary(
         });
     }
 
+    let total_started = Instant::now();
+    let begin_started = Instant::now();
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for normalized-event upsert")?;
+    let transaction_begin_ms = begin_started.elapsed().as_millis();
 
+    let validate_started = Instant::now();
     let mut jsonb_safe_events = Vec::with_capacity(events.len());
     for event in events {
         validate_normalized_event(event)?;
         jsonb_safe_events.push(jsonb_safe_normalized_event(event));
     }
+    let validate_and_sanitize_ms = validate_started.elapsed().as_millis();
 
     let mut snapshots = Vec::with_capacity(events.len());
     let mut inserted_count = 0usize;
+    let mut chunk_count = 0usize;
+    let mut fast_insert_ms = 0u128;
+    let mut conflict_partition_ms = 0u128;
+    let mut conflict_load_ms = 0u128;
+    let mut conflict_snapshot_ms = 0u128;
+    let mut conflict_update_ms = 0u128;
+    let mut output_snapshot_ms = 0u128;
     for chunk in jsonb_safe_events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
-        let mut inserted_identities =
-            insert_normalized_events_do_nothing(&mut transaction, chunk).await?;
-        let mut inserted_flags = Vec::with_capacity(chunk.len());
+        chunk_count += 1;
+        let conflict_load_started = Instant::now();
+        let mut existing_events =
+            validate_existing_normalized_events(&mut transaction, chunk).await?;
+        conflict_load_ms += conflict_load_started.elapsed().as_millis();
+
+        let conflict_partition_started = Instant::now();
+        let mut missing_events = Vec::new();
         let mut conflicted_events = Vec::new();
         for event in chunk {
-            let inserted = inserted_identities.remove(&event.event_identity);
-            inserted_flags.push(inserted);
-            if !inserted {
+            if existing_events.contains_key(&event.event_identity) {
                 conflicted_events.push(event.clone());
             } else {
-                inserted_count += 1;
+                missing_events.push(event.clone());
             }
         }
-        let existing_events =
-            validate_existing_normalized_events(&mut transaction, &conflicted_events).await?;
+        conflict_partition_ms += conflict_partition_started.elapsed().as_millis();
+
+        let fast_insert_started = Instant::now();
+        let inserted_identities =
+            insert_normalized_events_do_nothing(&mut transaction, &missing_events).await?;
+        fast_insert_ms += fast_insert_started.elapsed().as_millis();
+        inserted_count += inserted_identities.len();
+
+        let raced_conflicted_events = missing_events
+            .iter()
+            .filter(|event| !inserted_identities.contains(&event.event_identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !raced_conflicted_events.is_empty() {
+            let conflict_load_started = Instant::now();
+            let raced_existing =
+                validate_existing_normalized_events(&mut transaction, &raced_conflicted_events)
+                    .await?;
+            conflict_load_ms += conflict_load_started.elapsed().as_millis();
+            existing_events.extend(raced_existing);
+            conflicted_events.extend(raced_conflicted_events);
+        }
+
+        let events_requiring_canonicality_refresh = conflicted_events
+            .iter()
+            .filter(|event| {
+                existing_events
+                    .get(&event.event_identity)
+                    .map(|existing| {
+                        existing
+                            .canonicality_state
+                            .merge_observation(event.canonicality_state)
+                            != existing.canonicality_state
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let conflict_snapshot_started = Instant::now();
         let mut conflicting_snapshots =
             normalized_event_snapshots_after_upsert(&conflicted_events, &existing_events);
         let mut conflicting_snapshots_by_identity = conflicting_snapshots
             .drain(..)
             .map(|event| (event.event_identity.clone(), event))
             .collect::<HashMap<_, _>>();
-        for event in &conflicted_events {
+        conflict_snapshot_ms += conflict_snapshot_started.elapsed().as_millis();
+
+        let conflict_update_started = Instant::now();
+        for event in &events_requiring_canonicality_refresh {
             upsert_normalized_event_batch(&mut transaction, std::slice::from_ref(event)).await?;
         }
-        for (event, inserted) in chunk.iter().zip(inserted_flags) {
-            if inserted {
+        conflict_update_ms += conflict_update_started.elapsed().as_millis();
+
+        let output_snapshot_started = Instant::now();
+        for event in chunk {
+            if inserted_identities.contains(&event.event_identity) {
                 snapshots.push(event.clone());
             } else {
                 snapshots.push(
@@ -97,17 +159,188 @@ pub async fn upsert_normalized_events_with_summary(
                 );
             }
         }
+        output_snapshot_ms += output_snapshot_started.elapsed().as_millis();
     }
 
+    let commit_started = Instant::now();
     transaction
         .commit()
         .await
         .context("failed to commit normalized-event upsert")?;
+    let commit_ms = commit_started.elapsed().as_millis();
+
+    info!(
+        service = "storage",
+        operation = "upsert_normalized_events",
+        normalized_event_count = events.len(),
+        inserted_count,
+        conflict_count = events.len().saturating_sub(inserted_count),
+        chunk_count,
+        event_kind_counts = ?count_normalized_events_by_event_kind(events),
+        source_family_counts = ?count_normalized_events_by_source_family(events),
+        transaction_begin_ms,
+        validate_and_sanitize_ms,
+        fast_insert_ms,
+        conflict_partition_ms,
+        conflict_load_ms,
+        conflict_snapshot_ms,
+        conflict_update_ms,
+        output_snapshot_ms,
+        commit_ms,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "normalized-event upsert timing completed"
+    );
 
     Ok(NormalizedEventUpsertSummary {
         snapshots,
         inserted_count,
     })
+}
+
+/// Insert missing normalized events or refresh canonicality for existing rows without returning
+/// event snapshots. Use this for replay paths that already own their in-memory event state and need
+/// bounded memory while committing large batches.
+pub async fn upsert_normalized_events_count_only(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+) -> Result<usize> {
+    if events.is_empty() {
+        return Ok(0);
+    }
+
+    let total_started = Instant::now();
+    let mut inserted_count = 0usize;
+    let mut chunk_count = 0usize;
+    let mut transaction_begin_ms = 0u128;
+    let mut validate_and_sanitize_ms = 0u128;
+    let mut fast_insert_ms = 0u128;
+    let mut conflict_partition_ms = 0u128;
+    let mut conflict_load_ms = 0u128;
+    let mut conflict_update_ms = 0u128;
+    let mut commit_ms = 0u128;
+
+    for raw_chunk in events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
+        chunk_count += 1;
+        let begin_started = Instant::now();
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("failed to open transaction for normalized-event count-only upsert chunk")?;
+        transaction_begin_ms += begin_started.elapsed().as_millis();
+
+        let validate_started = Instant::now();
+        let mut chunk = Vec::with_capacity(raw_chunk.len());
+        for event in raw_chunk {
+            validate_normalized_event(event)?;
+            chunk.push(jsonb_safe_normalized_event(event));
+        }
+        validate_and_sanitize_ms += validate_started.elapsed().as_millis();
+
+        let conflict_load_started = Instant::now();
+        let mut existing_events =
+            validate_existing_normalized_events(&mut transaction, &chunk).await?;
+        conflict_load_ms += conflict_load_started.elapsed().as_millis();
+
+        let conflict_partition_started = Instant::now();
+        let mut missing_events = Vec::new();
+        let mut conflicted_events = Vec::new();
+        for event in &chunk {
+            if existing_events.contains_key(&event.event_identity) {
+                conflicted_events.push(event.clone());
+            } else {
+                missing_events.push(event.clone());
+            }
+        }
+        conflict_partition_ms += conflict_partition_started.elapsed().as_millis();
+
+        let fast_insert_started = Instant::now();
+        let inserted_identities =
+            insert_normalized_events_do_nothing(&mut transaction, &missing_events).await?;
+        fast_insert_ms += fast_insert_started.elapsed().as_millis();
+        inserted_count += inserted_identities.len();
+
+        let raced_conflicted_events = missing_events
+            .iter()
+            .filter(|event| !inserted_identities.contains(&event.event_identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !raced_conflicted_events.is_empty() {
+            let conflict_load_started = Instant::now();
+            let raced_existing =
+                validate_existing_normalized_events(&mut transaction, &raced_conflicted_events)
+                    .await?;
+            conflict_load_ms += conflict_load_started.elapsed().as_millis();
+            existing_events.extend(raced_existing);
+            conflicted_events.extend(raced_conflicted_events);
+        }
+
+        let events_requiring_canonicality_refresh = conflicted_events
+            .iter()
+            .filter(|event| {
+                existing_events
+                    .get(&event.event_identity)
+                    .map(|existing| {
+                        existing
+                            .canonicality_state
+                            .merge_observation(event.canonicality_state)
+                            != existing.canonicality_state
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let conflict_update_started = Instant::now();
+        for event in &events_requiring_canonicality_refresh {
+            upsert_normalized_event_batch(&mut transaction, std::slice::from_ref(event)).await?;
+        }
+        conflict_update_ms += conflict_update_started.elapsed().as_millis();
+
+        let commit_started = Instant::now();
+        transaction
+            .commit()
+            .await
+            .context("failed to commit normalized-event count-only upsert chunk")?;
+        commit_ms += commit_started.elapsed().as_millis();
+    }
+
+    info!(
+        service = "storage",
+        operation = "upsert_normalized_events_count_only",
+        normalized_event_count = events.len(),
+        inserted_count,
+        conflict_count = events.len().saturating_sub(inserted_count),
+        chunk_count,
+        event_kind_counts = ?count_normalized_events_by_event_kind(events),
+        source_family_counts = ?count_normalized_events_by_source_family(events),
+        transaction_begin_ms,
+        validate_and_sanitize_ms,
+        fast_insert_ms,
+        conflict_partition_ms,
+        conflict_load_ms,
+        conflict_update_ms,
+        commit_ms,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "normalized-event count-only upsert timing completed"
+    );
+
+    Ok(inserted_count)
+}
+
+fn count_normalized_events_by_event_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for event in events {
+        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn count_normalized_events_by_source_family(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for event in events {
+        *counts.entry(event.source_family.clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 async fn validate_existing_normalized_events(
@@ -142,33 +375,13 @@ fn normalized_event_snapshots_after_upsert(
         .map(|event| {
             let mut snapshot = event.clone();
             if let Some(existing) = existing_by_identity.get(&event.event_identity) {
-                snapshot.canonicality_state = merged_canonicality_state(
-                    existing.canonicality_state,
-                    event.canonicality_state,
-                );
+                snapshot.canonicality_state = existing
+                    .canonicality_state
+                    .merge_observation(event.canonicality_state);
             }
             snapshot
         })
         .collect()
-}
-
-fn merged_canonicality_state(
-    existing: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match (existing, incoming) {
-        (_, CanonicalityState::Orphaned) => CanonicalityState::Orphaned,
-        (CanonicalityState::Orphaned, CanonicalityState::Observed) => CanonicalityState::Observed,
-        (existing, CanonicalityState::Observed) => existing,
-        (CanonicalityState::Orphaned, incoming) => incoming,
-        (CanonicalityState::Finalized, _) | (_, CanonicalityState::Finalized) => {
-            CanonicalityState::Finalized
-        }
-        (CanonicalityState::Safe, _) | (_, CanonicalityState::Safe) => CanonicalityState::Safe,
-        (CanonicalityState::Canonical, _) | (_, CanonicalityState::Canonical) => {
-            CanonicalityState::Canonical
-        }
-    }
 }
 
 fn ensure_normalized_event_identity_matches(

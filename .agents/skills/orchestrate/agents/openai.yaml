@@ -1,7 +1,0 @@
-interface:
-  display_name: "Orchestrate"
-  short_description: "Coordinate execution through subagents"
-  default_prompt: "Use $orchestrate so the current session orchestrates this work: classify the change, create bounded tasks, spawn subagents, steer them, and integrate the results without doing most implementation locally."
-
-policy:
-  allow_implicit_invocation: true

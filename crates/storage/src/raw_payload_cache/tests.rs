@@ -25,7 +25,7 @@ impl TestDatabase {
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for raw payload cache tests")?;
         let database_name = format!(
-            "bigname_storage_raw_payload_cache_test_{}_{}",
+            "bn_st_payload_{}_{}",
             std::process::id(),
             Uuid::new_v4().simple()
         );

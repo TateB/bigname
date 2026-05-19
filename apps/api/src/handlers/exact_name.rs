@@ -7,33 +7,17 @@ pub(super) async fn name_current(
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
+    let ExactNameInventoryRead {
+        row,
+        record_inventory_current,
+        selected_snapshot,
+    } = load_exact_name_inventory_read(
         &state.pool,
         &namespace,
+        &name,
         ExactNameSnapshotSelector::from(&query),
-        false,
     )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!("failed to load current projection for name {namespace}/{name}"),
-        )
-    })?;
-    let row =
-        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
-            .await
-            .map_err(|error| {
-                map_internal_api_error(
-                    error,
-                    format!("failed to load current projection for name {namespace}/{name}"),
-                )
-            })?;
-
-    let record_inventory_current =
-        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
-            .await
-            .map_err(snapshot_selection_api_error)?;
+    .await?;
 
     Ok(Json(build_name_response(
         row,
@@ -49,28 +33,17 @@ pub(super) async fn coverage_current(
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read(
         &state.pool,
         &namespace,
+        &name,
         ExactNameSnapshotSelector::from(&query),
-        false,
+        "current",
     )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!("failed to load current projection for name {namespace}/{name}"),
-        )
-    })?;
-    let row =
-        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
-            .await
-            .map_err(|error| {
-                map_internal_api_error(
-                    error,
-                    format!("failed to load current projection for name {namespace}/{name}"),
-                )
-            })?;
+    .await?;
 
     Ok(Json(build_name_coverage_response(row, &selected_snapshot)))
 }
@@ -82,36 +55,17 @@ pub(super) async fn explain_surface_binding_current(
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
-        &state.pool,
-        &namespace,
-        ExactNameSnapshotSelector::from(&query),
-        false,
-    )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!(
-                "failed to load surface-binding explain projection for name {namespace}/{name}"
-            ),
-        )
-    })?;
-    let row = load_name_current_for_selected_snapshot(
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read(
         &state.pool,
         &namespace,
         &name,
-        &selected_snapshot,
+        ExactNameSnapshotSelector::from(&query),
+        "surface-binding explain",
     )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!(
-                "failed to load surface-binding explain projection for name {namespace}/{name}"
-            ),
-        )
-    })?;
+    .await?;
 
     Ok(Json(build_name_surface_binding_explain_response(
         row,
@@ -126,36 +80,17 @@ pub(super) async fn explain_authority_control_current(
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
-        &state.pool,
-        &namespace,
-        ExactNameSnapshotSelector::from(&query),
-        false,
-    )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!(
-                "failed to load authority-control explain projection for name {namespace}/{name}"
-            ),
-        )
-    })?;
-    let row = load_name_current_for_selected_snapshot(
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read(
         &state.pool,
         &namespace,
         &name,
-        &selected_snapshot,
+        ExactNameSnapshotSelector::from(&query),
+        "authority-control explain",
     )
-    .await
-    .map_err(|error| {
-        map_internal_api_error(
-            error,
-            format!(
-                "failed to load authority-control explain projection for name {namespace}/{name}"
-            ),
-        )
-    })?;
+    .await?;
 
     Ok(Json(build_name_authority_control_explain_response(
         row,

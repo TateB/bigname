@@ -1,3 +1,5 @@
+#[path = "views/abi.rs"]
+mod abi;
 #[path = "views/bootstrap.rs"]
 mod bootstrap;
 #[path = "views/drift.rs"]
@@ -11,6 +13,7 @@ mod types;
 #[path = "views/watched.rs"]
 mod watched;
 
+pub use abi::*;
 pub use bootstrap::*;
 pub use drift::*;
 pub use resolver_profiles::*;

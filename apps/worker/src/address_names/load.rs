@@ -1,17 +1,51 @@
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use super::{
     constants::{CANONICAL_STATE_FILTER, RELEVANT_EVENT_KINDS},
     model::{CurrentBindingSeed, RelevantEvent},
     source_policy::{authority_derivation_kinds, authority_source_families},
-    util::{parse_canonicality_state, parse_surface_binding_kind},
 };
 
-pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBindingSeed>> {
-    let rows = sqlx::query(&format!(
+pub(super) async fn load_current_bindings_for_address(
+    pool: &PgPool,
+    address: &str,
+) -> Result<Vec<CurrentBindingSeed>> {
+    let rows = sqlx::query_as::<_, CurrentBindingSeed>(&format!(
         r#"
+        WITH affected_names AS (
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'RegistrationGranted'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'registrant' IS NOT NULL
+              AND ne.after_state ->> 'registrant' <> ''
+              AND lower(ne.after_state ->> 'registrant') = $1
+
+            UNION
+
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'TokenControlTransferred'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'to' IS NOT NULL
+              AND ne.after_state ->> 'to' <> ''
+              AND lower(ne.after_state ->> 'to') = $1
+
+            UNION
+
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'AuthorityTransferred'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'owner' IS NOT NULL
+              AND ne.after_state ->> 'owner' <> ''
+              AND lower(ne.after_state ->> 'owner') = $1
+        )
         SELECT
             ns.logical_name_id,
             ns.namespace,
@@ -35,6 +69,8 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
             r.canonicality_state::TEXT AS resource_state,
             tl.canonicality_state::TEXT AS token_lineage_state
         FROM surface_bindings sb
+        JOIN affected_names affected
+          ON affected.logical_name_id = sb.logical_name_id
         JOIN name_surfaces ns
           ON ns.logical_name_id = sb.logical_name_id
          AND ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -55,17 +91,20 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
         ORDER BY ns.logical_name_id
         "#
     ))
+    .bind(address)
     .fetch_all(pool)
     .await
-    .context("failed to load current bindings for address_names_current rebuild")?;
+    .with_context(|| {
+        format!("failed to load current bindings for address_names_current address {address}")
+    })?;
 
-    rows.into_iter().map(decode_current_binding_seed).collect()
+    Ok(rows)
 }
 
 pub(super) fn stream_current_bindings<'a>(
     pool: &'a PgPool,
 ) -> impl Stream<Item = Result<CurrentBindingSeed>> + 'a {
-    sqlx::query(
+    sqlx::query_as::<_, CurrentBindingSeed>(
         r#"
         SELECT
             ns.logical_name_id,
@@ -127,10 +166,7 @@ pub(super) fn stream_current_bindings<'a>(
         "#,
     )
     .fetch(pool)
-    .map(|row| {
-        row.context("failed to stream current bindings for address_names_current rebuild")
-            .and_then(decode_current_binding_seed)
-    })
+    .map(|row| row.context("failed to stream current bindings for address_names_current rebuild"))
 }
 
 pub(super) async fn load_relevant_events(
@@ -149,7 +185,7 @@ pub(super) async fn load_relevant_events(
         .collect::<Vec<_>>();
     let source_families = authority_source_families(namespace);
 
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query_as::<_, RelevantEvent>(&format!(
         r#"
         SELECT
             ne.normalized_event_id,
@@ -193,107 +229,5 @@ pub(super) async fn load_relevant_events(
         format!("failed to load address-name normalized events for {logical_name_id}")
     })?;
 
-    rows.into_iter().map(decode_relevant_event).collect()
-}
-
-fn decode_current_binding_seed(row: sqlx::postgres::PgRow) -> Result<CurrentBindingSeed> {
-    Ok(CurrentBindingSeed {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_chain_id: row
-            .try_get("surface_chain_id")
-            .context("missing surface_chain_id")?,
-        surface_block_hash: row
-            .try_get("surface_block_hash")
-            .context("missing surface_block_hash")?,
-        surface_block_number: row
-            .try_get("surface_block_number")
-            .context("missing surface_block_number")?,
-        surface_block_timestamp: row
-            .try_get("surface_block_timestamp")
-            .context("missing surface_block_timestamp")?,
-        surface_state: parse_canonicality_state(
-            &row.try_get::<String, _>("surface_state")
-                .context("missing surface_state")?,
-        )?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
-        binding_kind: parse_surface_binding_kind(
-            &row.try_get::<String, _>("binding_kind")
-                .context("missing binding_kind")?,
-        )?,
-        binding_chain_id: row
-            .try_get("binding_chain_id")
-            .context("missing binding_chain_id")?,
-        binding_block_hash: row
-            .try_get("binding_block_hash")
-            .context("missing binding_block_hash")?,
-        binding_block_number: row
-            .try_get("binding_block_number")
-            .context("missing binding_block_number")?,
-        binding_block_timestamp: row
-            .try_get("binding_block_timestamp")
-            .context("missing binding_block_timestamp")?,
-        binding_state: parse_canonicality_state(
-            &row.try_get::<String, _>("binding_state")
-                .context("missing binding_state")?,
-        )?,
-        resource_state: parse_canonicality_state(
-            &row.try_get::<String, _>("resource_state")
-                .context("missing resource_state")?,
-        )?,
-        token_lineage_state: row
-            .try_get::<Option<String>, _>("token_lineage_state")
-            .context("missing token_lineage_state")?
-            .map(|value| parse_canonicality_state(&value))
-            .transpose()?,
-    })
-}
-
-fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
-    Ok(RelevantEvent {
-        normalized_event_id: row
-            .try_get("normalized_event_id")
-            .context("missing normalized_event_id")?,
-        event_kind: row.try_get("event_kind").context("missing event_kind")?,
-        source_family: row
-            .try_get("source_family")
-            .context("missing source_family")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        source_manifest_id: row
-            .try_get("source_manifest_id")
-            .context("missing source_manifest_id")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        raw_fact_ref: row
-            .try_get("raw_fact_ref")
-            .context("missing raw_fact_ref")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
-        after_state: row.try_get("after_state").context("missing after_state")?,
-    })
+    Ok(rows)
 }

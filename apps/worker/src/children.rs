@@ -8,11 +8,10 @@ use bigname_storage::{
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool,
-    types::time::{OffsetDateTime, UtcOffset},
-};
+use sqlx::PgPool;
 use tokio::task::JoinSet;
+
+use crate::projection_json::format_timestamp;
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const CHILDREN_CURRENT_DERIVATION_KIND: &str = "children_current_rebuild";
@@ -292,19 +291,6 @@ fn chain_slot(chain_id: &str) -> &str {
         "base-mainnet" => "base",
         _ => chain_id,
     }
-}
-
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }
 
 #[cfg(test)]

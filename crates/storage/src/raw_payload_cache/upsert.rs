@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres};
 
-use crate::CanonicalityState;
-
 use super::decode::decode_raw_payload_cache_metadata;
 use super::normalization::{ensure_metadata_identity_matches, normalize_metadata_upsert};
 use super::read::load_raw_payload_cache_metadata_internal;
@@ -114,7 +112,9 @@ async fn upsert_raw_payload_cache_metadata_entry(
     })?;
 
     ensure_metadata_identity_matches(&existing, entry)?;
-    let next_state = merge_canonicality(existing.canonicality_state, entry.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(entry.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -160,27 +160,4 @@ async fn upsert_raw_payload_cache_metadata_entry(
     })?;
 
     decode_raw_payload_cache_metadata(snapshot)
-}
-
-fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
 }

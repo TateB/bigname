@@ -1,8 +1,9 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use super::active_emitters::ActiveEmitter;
 
@@ -93,34 +94,22 @@ pub(super) async fn load_reverse_raw_logs(
 
     rows.into_iter()
         .map(|row| {
-            let address = row
-                .try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?
-                .to_ascii_lowercase();
+            let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
             let emitter = emitters_by_address.get(&address).with_context(|| {
                 format!("missing active emitter metadata for chain {chain} address {address}")
             })?;
 
             Ok(ReverseRawLogRow {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("missing transaction_hash")?,
-                transaction_index: row
-                    .try_get("transaction_index")
-                    .context("missing transaction_index")?,
-                log_index: row.try_get("log_index").context("missing log_index")?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                transaction_hash: sql_row::get(&row, "transaction_hash")?,
+                transaction_index: sql_row::get(&row, "transaction_index")?,
+                log_index: sql_row::get(&row, "log_index")?,
                 emitting_address: address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
-                topics: row.try_get("topics").context("missing topics")?,
-                canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
-                )?,
+                topics: sql_row::get(&row, "topics")?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),
                 source_family: emitter.source_family.clone(),
@@ -145,15 +134,4 @@ fn reverse_source_scope_bindings(
         to_blocks.push(*to_block);
     }
     (addresses, from_blocks, to_blocks)
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

@@ -11,6 +11,7 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use uuid::Uuid;
 
 use super::*;
 use crate::{RawBlock, default_database_url, upsert_raw_blocks};
@@ -35,12 +36,7 @@ impl TestDatabase {
             .context("system clock is before unix epoch")?
             .as_nanos();
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let database_name = format!(
-            "bigname_storage_normalized_event_test_{}_{}_{}",
-            std::process::id(),
-            unique,
-            sequence
-        );
+        let database_name = format!("bn_st_ne_{}_{}_{}", std::process::id(), sequence, unique);
 
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -188,6 +184,71 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_rejects_resource_id_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut event = normalized_event(
+        "raw-log:resolver-changed",
+        "ResolverChanged",
+        CanonicalityState::Finalized,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(Uuid::from_u128(0x100));
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    event.resource_id = Some(Uuid::from_u128(0x200));
+    let error = upsert_normalized_events(database.pool(), std::slice::from_ref(&event))
+        .await
+        .expect_err("concrete resource-id changes must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("normalized event identity mismatch for event raw-log:resolver-changed"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_upsert_rejects_token_transfer_before_state_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut event = normalized_event(
+        "raw-log:token-control-transferred",
+        "TokenControlTransferred",
+        CanonicalityState::Finalized,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.source_family = "ens_v1_registrar_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.before_state = json!({
+        "from": "0x0000000000000000000000000000000000000001",
+    });
+    event.after_state = json!({
+        "labelhash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0x0000000000000000000000000000000000000002",
+    });
+
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    event.before_state = json!({
+        "from": "0x0000000000000000000000000000000000000003",
+    });
+    let error = upsert_normalized_events(database.pool(), std::slice::from_ref(&event))
+        .await
+        .expect_err("concrete token-transfer before-state changes must fail");
+
+    assert!(
+        error.to_string().contains(
+            "normalized event identity mismatch for event raw-log:token-control-transferred"
+        ),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_upsert_promotes_canonicality() -> Result<()> {
     let database = TestDatabase::new().await?;
 
@@ -213,6 +274,41 @@ async fn normalized_event_upsert_promotes_canonicality() -> Result<()> {
 
     assert_eq!(promoted.len(), 1);
     assert_eq!(promoted[0].canonicality_state, CanonicalityState::Finalized);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_upsert_skips_unchanged_conflicts() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let event = normalized_event(
+        "manifest:1:unchanged",
+        "SourceManifestUpdated",
+        CanonicalityState::Finalized,
+    );
+
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let anchored_observed_at = sqlx::types::time::OffsetDateTime::from_unix_timestamp(946_684_800)?;
+    sqlx::query("UPDATE normalized_events SET observed_at = $1 WHERE event_identity = $2")
+        .bind(anchored_observed_at)
+        .bind(&event.event_identity)
+        .execute(database.pool())
+        .await?;
+
+    let snapshots = upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+    assert_eq!(
+        snapshots[0].canonicality_state,
+        CanonicalityState::Finalized
+    );
+
+    let observed_at = sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
+        "SELECT observed_at FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(observed_at, anchored_observed_at);
 
     database.cleanup().await
 }

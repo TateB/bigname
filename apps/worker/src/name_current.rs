@@ -1,5 +1,4 @@
 mod coverage;
-mod decode;
 mod json;
 mod load;
 mod project;

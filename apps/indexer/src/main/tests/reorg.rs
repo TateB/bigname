@@ -811,6 +811,100 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
 }
 
 #[tokio::test]
+async fn reorg_common_ancestor_must_be_on_current_canonical_branch() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let ancestor = provider_block(
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        None,
+        1,
+    );
+    let old_two = provider_block(
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        Some(&ancestor.block_hash),
+        2,
+    );
+    let old_head = provider_block(
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        Some(&old_two.block_hash),
+        3,
+    );
+    let stray_two = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some(&ancestor.block_hash),
+        2,
+    );
+    let new_head = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&stray_two.block_hash),
+        3,
+    );
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            provider_block_to_lineage("ethereum-mainnet", &ancestor, CanonicalityState::Canonical),
+            provider_block_to_lineage("ethereum-mainnet", &old_two, CanonicalityState::Canonical),
+            provider_block_to_lineage("ethereum-mainnet", &old_head, CanonicalityState::Canonical),
+            provider_block_to_lineage("ethereum-mainnet", &stray_two, CanonicalityState::Observed),
+        ],
+    )
+    .await?;
+
+    let (provider, server) = bundle_provider(vec![stray_two.clone(), new_head.clone()]).await?;
+    let reconciliation = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        "ethereum-mainnet",
+        &ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: Some(old_head.block_hash.clone()),
+            canonical_block_number: Some(old_head.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+        &new_head,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+
+    assert_eq!(
+        reconciliation.status,
+        CanonicalReconciliationStatus::ReorgReconciled
+    );
+    assert_eq!(reconciliation.orphaned_block_count, 2);
+    assert_eq!(
+        reconciliation.raw_orphan_stop_before_hash.as_deref(),
+        Some(ancestor.block_hash.as_str())
+    );
+
+    let states = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT block_hash, canonicality_state::TEXT
+        FROM chain_lineage
+        WHERE chain_id = 'ethereum-mainnet'
+        ORDER BY block_number, block_hash
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            (ancestor.block_hash, "canonical".to_owned()),
+            (old_two.block_hash, "orphaned".to_owned()),
+            (stray_two.block_hash, "canonical".to_owned()),
+            (old_head.block_hash, "orphaned".to_owned()),
+            (new_head.block_hash, "canonical".to_owned()),
+        ]
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block_is_missing()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -902,7 +996,7 @@ async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block
             .bind(&losing_block.block_hash)
             .fetch_one(database.pool())
             .await?,
-        0
+        1
     );
     upsert_raw_transactions(
         database.pool(),

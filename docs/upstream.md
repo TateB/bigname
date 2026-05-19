@@ -1,6 +1,6 @@
 # Upstream references
 
-bigname anchors every ENSv1, ENSv2, Basenames, and admitted upstream app-metadata claim to a specific upstream commit pinned under `.refs/`. This doc is the human-readable companion to `.refs/MANIFEST.toml` — the pin table, rotation policy, and the intentional-divergence list.
+bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, reference-indexer comparison, and reference execution-client comparison claim to a specific upstream commit pinned under `.refs/`. This doc is the human-readable companion to `.refs/MANIFEST.toml` — the pin table, rotation policy, and the intentional-divergence list.
 
 ## Pinned refs
 
@@ -12,6 +12,9 @@ bigname anchors every ENSv1, ENSv2, Basenames, and admitted upstream app-metadat
 | `ens_subgraph` | `ensdomains/ens-subgraph` | `723f1b6a` | Reference ENSv1 indexer |
 | `ensnode` | `namehash/ensnode` | `2017ae62` | Alternative ENS indexer |
 | `ens_app_v3` | `ensdomains/ens-app-v3` | `71758582` | ENS app known resolver metadata |
+| `ponder` | `ponder-sh/ponder` | `c8f6935f` | Reference EVM indexer framework |
+| `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
+| `reth` | `paradigmxyz/reth` | `194ece23` | Reference Ethereum execution client |
 
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 
@@ -21,7 +24,7 @@ Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MA
 (upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)
 ```
 
-Use this exact shape everywhere — docs, ADRs, manifests, code comments, task writeups, agent output. Consistent format lets `verification_reviewer` and `upstream_auditor` verify citations mechanically.
+Use this exact shape everywhere — docs, ADRs, manifests, code comments, task writeups, agent output. Consistent format lets `$upstream-evidence`, `evidence_reader`, and `verification_reviewer` verify citations mechanically.
 
 ## Rotation policy
 
@@ -34,7 +37,7 @@ Use this exact shape everywhere — docs, ADRs, manifests, code comments, task w
   4. Re-grep the repo for `@ <key>@<old-short-commit>` citations; update any that point at content that changed across the bump.
   5. Add or edit entries in § Known divergences if the bump surfaced or resolved an intentional deviation.
   6. Commit with a message naming what upstream change motivated the bump, e.g. `chore(refs): bump ens_v1 to <new-sha> — adopt new reverseClaimer event`.
-- **Who decides**: whoever owns the surface affected. Ambiguous cases route through `$change-gate`; cross-surface bumps route through `verification_reviewer` after the sync.
+- **Who decides**: whoever owns the surface affected. Ambiguous cases route through `$contract-impact`; cross-surface bumps route through `verification_reviewer` after the sync.
 
 ## Known divergences
 
@@ -103,8 +106,8 @@ Per-entry format:
 > **Why**: the constraint that drove the divergence (consumer capability, storage invariant, coverage narrowing, etc.).
 > **Since**: commit or date the divergence was introduced.
 
-## Audit loop
+## Evidence checks
 
-`upstream_auditor` (read-only codex agent, `.codex/agents/upstream-auditor.toml`) diffs each pinned commit against its upstream `main`, identifies cited files that changed, and reports pins plausibly worth bumping. It does not bump; bumping stays manual per the rotation policy above.
+Use `$upstream-evidence` or `evidence_reader` when a change adds or relies on ENSv1, ENSv2, Basenames, admitted app-metadata, reference-indexer, or execution-client behavior claims. The check produces a claim-to-citation ledger and flags any divergence that belongs in this file.
 
-Run opportunistically when manifests/ADRs change, or on a weekly `$schedule`. Stale pins are not urgent by default — material upstream behavior change is the trigger, not calendar time.
+Pin drift checks are deliberate, not scheduled automation. Run them when manifests, ADRs, or load-bearing citations change. Stale pins are not urgent by default — material upstream behavior change is the trigger, not calendar time.

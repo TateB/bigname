@@ -1,51 +1,19 @@
-use std::collections::BTreeSet;
+use bigname_storage::{CanonicalityState, normalize_evm_address};
 
-use anyhow::{Context, Result, bail};
-use bigname_storage::{CanonicalityState, SurfaceBindingKind};
-use serde_json::Value;
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+pub(super) use crate::projection_json::{dedupe_json_values, format_timestamp, json_str};
 
 pub(super) fn normalize_address(value: impl AsRef<str>) -> String {
-    value.as_ref().to_ascii_lowercase()
-}
-
-pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state {value}"),
-    }
-}
-
-pub(super) fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface_binding kind {value}"),
-    }
+    normalize_evm_address(value.as_ref())
 }
 
 pub(super) fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
-    }
+    state.rank()
 }
 
 pub(super) fn weakest_canonicality(
     states: impl Iterator<Item = CanonicalityState>,
 ) -> Option<CanonicalityState> {
-    states.min_by_key(|state| canonicality_rank(*state))
+    CanonicalityState::weakest(states)
 }
 
 pub(super) fn chain_slot(chain_id: &str) -> String {
@@ -56,38 +24,4 @@ pub(super) fn chain_slot(chain_id: &str) -> String {
     } else {
         chain_id.to_owned()
     }
-}
-
-pub(super) fn format_timestamp(timestamp: OffsetDateTime) -> String {
-    let timestamp = timestamp.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        timestamp.year(),
-        u8::from(timestamp.month()),
-        timestamp.day(),
-        timestamp.hour(),
-        timestamp.minute(),
-        timestamp.second(),
-    )
-}
-
-pub(super) fn json_str(value: &Value, path: &[&str]) -> Option<String> {
-    path.iter()
-        .try_fold(value, |current, key| current.get(key))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-pub(super) fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut unique = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON for dedupe")?;
-        if seen.insert(key) {
-            unique.push(value);
-        }
-    }
-
-    Ok(unique)
 }

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Replay Safety"
+  short_description: "Guard replay, storage, and execution safety"
+  default_prompt: "Use $replay-safety to review this storage/replay/execution change for ownership, canonicality, rebuilds, invalidation, and migration risk."
+
+policy:
+  allow_implicit_invocation: true

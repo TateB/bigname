@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 
+use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
@@ -11,11 +12,13 @@ use bigname_storage::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use sha3::{Digest, Keccak256};
 use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
-use crate::provider::ChainProviderOps;
+use crate::{
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, provider::ChainProviderOps,
+    source_scope::watched_source_plan_uses_generic_resolver_scope,
+};
 
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
@@ -25,7 +28,6 @@ use super::{
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
 pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
@@ -96,7 +98,7 @@ pub(crate) fn hash_pinned_backfill_range_specs(
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Result<Value> {
-    if includes_generic_resolver_event_scope(source_plan) {
+    if watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return generic_topic_scan_source_identity_payload(source_plan);
     }
 
@@ -147,8 +149,16 @@ fn generic_topic_scan_source_identity_payload(
         }
     ]);
 
-    let mut payload = if selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    let mut payload = if source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
     {
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "source_identity_payload_format": "generic_resolver_event_topics_v1",
+        })
+    } else if selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD {
         json!({
             "selector_kind": source_plan.selector_kind.as_str(),
             "source_family": &source_plan.source_family,
@@ -184,19 +194,6 @@ fn generic_topic_scan_source_identity_payload(
     Ok(payload)
 }
 
-fn is_ens_v1_resolver_source_family_plan(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-}
-
-fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    is_ens_v1_resolver_source_family_plan(source_plan)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-}
-
 fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value {
     json!({
         "first": selected_targets.first(),
@@ -220,7 +217,7 @@ struct Keccak256Writer {
 
 impl Keccak256Writer {
     fn finalize(self) -> [u8; 32] {
-        self.hasher.finalize().into()
+        self.hasher.finalize().0
     }
 }
 
@@ -236,11 +233,7 @@ impl Write for Keccak256Writer {
 }
 
 fn hex_string(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    format!("0x{}", hex::encode(bytes))
 }
 
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
@@ -344,7 +337,10 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
     aggregate: &mut BackfillJobRunOutcome,
 ) -> Result<()> {
     let mut active_range = reserved_range.clone();
-    let mut block_number = active_range.checkpoint_block_number;
+    let mut block_number = active_range
+        .checkpoint_block_number
+        .checked_add(1)
+        .context("backfill checkpoint overflowed while computing resume block")?;
     let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
     let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
     let canonicality_evidence = match load_backfill_canonicality_evidence(
@@ -384,7 +380,7 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             &selected_target_addresses_for_chunk,
             provider,
             chunk_range,
-            canonicality_evidence,
+            canonicality_evidence.clone(),
             config.adapter_sync_mode,
             config.header_audit_mode,
         )

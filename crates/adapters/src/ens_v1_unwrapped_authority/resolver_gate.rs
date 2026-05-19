@@ -42,6 +42,7 @@ impl ResolverProfileGate {
     pub(super) async fn load_for_raw_logs(
         pool: &PgPool,
         raw_logs: &[AuthorityRawLogRow],
+        event_topics: &AuthorityEventTopics,
     ) -> Result<Self> {
         let mut ens_v1_targets = Vec::<(String, String)>::new();
         let mut basenames_targets = Vec::<(String, String)>::new();
@@ -54,7 +55,9 @@ impl ResolverProfileGate {
             let Some(topic0) = raw_log.topics.first() else {
                 continue;
             };
-            if resolver_fact_families_for_topic0(&raw_log.source_family, topic0).is_empty() {
+            if resolver_fact_families_for_topic0(&raw_log.source_family, topic0, event_topics)?
+                .is_empty()
+            {
                 continue;
             }
 
@@ -121,33 +124,35 @@ impl ResolverProfileGate {
         }
     }
 
-    pub(super) fn rejects_resolver_local_fact(&self, raw_log: &AuthorityRawLogRow) -> bool {
+    pub(super) fn rejects_resolver_local_fact(
+        &self,
+        raw_log: &AuthorityRawLogRow,
+        event_topics: &AuthorityEventTopics,
+    ) -> Result<bool> {
         if !resolver_source_family_has_profiles(&raw_log.source_family) {
-            return false;
-        }
-        if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
-            return false;
+            return Ok(false);
         }
 
         let Some(topic0) = raw_log.topics.first() else {
-            return false;
+            return Ok(false);
         };
-        let fact_families = resolver_fact_families_for_topic0(&raw_log.source_family, topic0);
+        let fact_families =
+            resolver_fact_families_for_topic0(&raw_log.source_family, topic0, event_topics)?;
         if fact_families.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         let chain_id = raw_log.chain_id.clone();
         let source_family = raw_log.source_family.clone();
         let emitting_address = raw_log.emitting_address.to_ascii_lowercase();
-        !fact_families.iter().any(|fact_family| {
+        Ok(!fact_families.iter().any(|fact_family| {
             self.supported_fact_families.contains(&(
                 chain_id.clone(),
                 source_family.clone(),
                 emitting_address.clone(),
                 fact_family,
             ))
-        })
+        }))
     }
 }
 
@@ -194,73 +199,78 @@ fn resolver_profile_admitted(source_family: &str, profile: &str) -> bool {
 pub(super) fn resolver_fact_families_for_topic0(
     source_family: &str,
     topic0: &str,
-) -> Vec<&'static str> {
-    if is_text_changed_topic0(topic0) {
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<&'static str>> {
+    if !resolver_source_family_has_profiles(source_family) {
+        return Ok(Vec::new());
+    }
+
+    if event_topics.is_text_changed_topic0(source_family, topic0)? {
         return match source_family {
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => vec!["resolver_record:text", "resolver_record"],
-            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec!["resolver_record"],
-            _ => Vec::new(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Ok(vec!["resolver_record:text", "resolver_record"]),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Ok(vec!["resolver_record"]),
+            _ => Ok(Vec::new()),
         };
     }
 
-    if topic0.eq_ignore_ascii_case(&name_changed_topic0()) {
+    if event_topics.matches(NAME_CHANGED_SIGNATURE, topic0)? {
         return match source_family {
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => vec!["resolver_record:name", "resolver_record"],
-            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec!["resolver_record"],
-            _ => Vec::new(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Ok(vec!["resolver_record:name", "resolver_record"]),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Ok(vec!["resolver_record"]),
+            _ => Ok(Vec::new()),
         };
     }
 
-    if topic0.eq_ignore_ascii_case(&addr_changed_topic0()) {
+    if event_topics.matches(ADDR_CHANGED_SIGNATURE, topic0)? {
         return match source_family {
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => vec!["resolver_record:addr", "resolver_record"],
-            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec!["resolver_record"],
-            _ => Vec::new(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Ok(vec!["resolver_record:addr", "resolver_record"]),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Ok(vec!["resolver_record"]),
+            _ => Ok(Vec::new()),
         };
     }
 
-    if topic0.eq_ignore_ascii_case(&address_changed_topic0()) {
+    if event_topics.matches(ADDRESS_CHANGED_SIGNATURE, topic0)? {
         return match source_family {
             SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => {
-                vec!["resolver_record:multicoin_addr", "resolver_record"]
+                Ok(vec!["resolver_record:multicoin_addr", "resolver_record"])
             }
-            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec!["resolver_record"],
-            _ => Vec::new(),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Ok(vec!["resolver_record"]),
+            _ => Ok(Vec::new()),
         };
     }
 
-    if topic0.eq_ignore_ascii_case(&version_changed_topic0()) {
+    if event_topics.matches(VERSION_CHANGED_SIGNATURE, topic0)? {
         return match source_family {
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => vec!["resolver_record_version"],
-            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec!["resolver_record"],
-            _ => Vec::new(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Ok(vec!["resolver_record_version"]),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Ok(vec!["resolver_record"]),
+            _ => Ok(Vec::new()),
         };
     }
 
     if source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
-        if topic0.eq_ignore_ascii_case(&abi_changed_topic0()) {
-            return vec!["resolver_record:abi", "resolver_record"];
+        if event_topics.matches(ABI_CHANGED_SIGNATURE, topic0)? {
+            return Ok(vec!["resolver_record:abi", "resolver_record"]);
         }
-        if topic0.eq_ignore_ascii_case(&content_changed_topic0())
-            || topic0.eq_ignore_ascii_case(&contenthash_changed_topic0())
+        if event_topics.matches(CONTENT_CHANGED_SIGNATURE, topic0)?
+            || event_topics.matches(CONTENTHASH_CHANGED_SIGNATURE, topic0)?
         {
-            return vec!["resolver_record:contenthash", "resolver_record"];
+            return Ok(vec!["resolver_record:contenthash", "resolver_record"]);
         }
-        if topic0.eq_ignore_ascii_case(&dns_record_changed_topic0())
-            || topic0.eq_ignore_ascii_case(&dns_record_deleted_topic0())
-            || topic0.eq_ignore_ascii_case(&dns_zonehash_changed_topic0())
+        if event_topics.matches(DNS_RECORD_CHANGED_SIGNATURE, topic0)?
+            || event_topics.matches(DNS_RECORD_DELETED_SIGNATURE, topic0)?
+            || event_topics.matches(DNS_ZONEHASH_CHANGED_SIGNATURE, topic0)?
         {
-            return vec!["resolver_record:dns", "resolver_record"];
+            return Ok(vec!["resolver_record:dns", "resolver_record"]);
         }
-        if topic0.eq_ignore_ascii_case(&interface_changed_topic0()) {
-            return vec!["resolver_record:interface", "resolver_record"];
+        if event_topics.matches(INTERFACE_CHANGED_SIGNATURE, topic0)? {
+            return Ok(vec!["resolver_record:interface", "resolver_record"]);
         }
-        if topic0.eq_ignore_ascii_case(&data_changed_topic0()) {
-            return vec!["resolver_record:data"];
+        if event_topics.matches(DATA_CHANGED_SIGNATURE, topic0)? {
+            return Ok(vec!["resolver_record:data"]);
         }
     }
 
-    Vec::new()
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -268,7 +278,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_profile_gate_keeps_observed_record_facts_without_supported_profile() {
+    fn resolver_profile_gate_rejects_unsupported_record_facts() -> Result<()> {
+        let event_topics = AuthorityEventTopics::for_tests();
         let supported_resolver = "0x00000000000000000000000000000000000000c1";
         let unsupported_resolver = "0x00000000000000000000000000000000000000c2";
         let eth_only_resolver = "0x00000000000000000000000000000000000000c3";
@@ -280,6 +291,12 @@ mod tests {
                     SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
                     supported_resolver.to_owned(),
                     "resolver_record",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                    "resolver_record_version",
                 ),
                 (
                     "ethereum-mainnet".to_owned(),
@@ -296,48 +313,47 @@ mod tests {
             ]),
         };
 
-        assert!(
-            !gate.rejects_resolver_local_fact(&resolver_log(
-                supported_resolver,
-                name_changed_topic0(),
-            ))
-        );
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
-            unsupported_resolver,
-            name_changed_topic0(),
-        )));
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
-            supported_resolver,
-            version_changed_topic0(),
-        )));
-        assert!(
-            !gate.rejects_resolver_local_fact(&resolver_log(
-                eth_only_resolver,
-                addr_changed_topic0(),
-            ))
-        );
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
-            eth_only_resolver,
-            address_changed_topic0(),
-        )));
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
-            multicoin_resolver,
-            address_changed_topic0(),
-        )));
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(supported_resolver, name_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(gate.rejects_resolver_local_fact(
+            &resolver_log(unsupported_resolver, name_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(supported_resolver, version_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(eth_only_resolver, addr_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(gate.rejects_resolver_local_fact(
+            &resolver_log(eth_only_resolver, address_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(multicoin_resolver, address_changed_topic0(),),
+            &event_topics
+        )?);
         assert_eq!(
             resolver_fact_families_for_topic0(
                 SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
                 &data_changed_topic0(),
-            ),
+                &event_topics,
+            )?,
             vec!["resolver_record:data"]
         );
         assert_eq!(
             resolver_fact_families_for_topic0(
                 SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
                 &pubkey_changed_topic0(),
-            ),
+                &event_topics,
+            )?,
             Vec::<&str>::new()
         );
+        Ok(())
     }
 
     fn resolver_log(emitting_address: &str, topic0: String) -> AuthorityRawLogRow {

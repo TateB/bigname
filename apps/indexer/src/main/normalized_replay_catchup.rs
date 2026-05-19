@@ -10,8 +10,11 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::reconciliation::{
-    RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
-    replay_raw_fact_normalized_events,
+    RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
+    RawFactNormalizedEventReplaySelection, active_closure_or_dependency_replay_adapters,
+    chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
+    sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    unsupported_closure_replay_adapters,
 };
 
 #[path = "normalized_replay_catchup/cursors.rs"]
@@ -27,6 +30,7 @@ use cursors::{
 };
 use indexes::{
     ensure_projection_indexes_after_catchup, prepare_deferred_projection_indexes_for_fresh_replay,
+    restore_deferred_projection_indexes,
 };
 use sources::{load_canonical_raw_log_bounds, select_log_bounded_replay_to_block};
 
@@ -35,7 +39,7 @@ pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 1
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS: u64 = 5;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES: bool = true;
 
-const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
+pub(crate) const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedReplayCatchupConfig {
@@ -65,6 +69,45 @@ struct NormalizedReplayCursor {
     next_block_number: i64,
     target_block_number: i64,
     last_replayed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetRefreshPolicy {
+    RefreshToLatestRawLog,
+    PreserveExistingTarget,
+}
+
+#[cfg(test)]
+pub(crate) async fn ensure_cursor_for_test(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    start_block: i64,
+    target_block: i64,
+    refresh_to_latest_raw_log: bool,
+) -> Result<(i64, i64, i64)> {
+    let policy = if refresh_to_latest_raw_log {
+        TargetRefreshPolicy::RefreshToLatestRawLog
+    } else {
+        TargetRefreshPolicy::PreserveExistingTarget
+    };
+    let cursor = ensure_cursor(
+        pool,
+        deployment_profile,
+        chain,
+        CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+        RawLogBounds {
+            start_block,
+            target_block,
+        },
+        policy,
+    )
+    .await?;
+    Ok((
+        cursor.range_start_block_number,
+        cursor.next_block_number,
+        cursor.target_block_number,
+    ))
 }
 
 impl NormalizedReplayCatchupConfig {
@@ -156,6 +199,14 @@ pub(crate) async fn run_normalized_replay_catchup(
     }
 }
 
+pub(crate) async fn normalized_replay_cursors_complete(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chains: &[String],
+) -> Result<bool> {
+    indexes::all_configured_cursors_complete(pool, deployment_profile, chains).await
+}
+
 pub(crate) async fn run_normalized_replay_catchup_iteration(
     pool: &PgPool,
     config: &NormalizedReplayCatchupConfig,
@@ -172,12 +223,20 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         }
         return Ok(CatchupIterationStatus::Idle);
     };
+    let closure_or_dependency_replay =
+        chain_has_closure_or_dependency_replay_adapter(pool, chain).await?;
+    let target_refresh_policy = if closure_or_dependency_replay {
+        TargetRefreshPolicy::PreserveExistingTarget
+    } else {
+        TargetRefreshPolicy::RefreshToLatestRawLog
+    };
     let cursor = ensure_cursor(
         pool,
         &config.deployment_profile,
         chain,
         CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         bounds,
+        target_refresh_policy,
     )
     .await?;
     let cursor = rewind_cursor_for_newly_observed_older_logs(
@@ -187,9 +246,6 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         cursor,
     )
     .await?;
-    if config.defer_projection_indexes {
-        prepare_deferred_projection_indexes_for_fresh_replay(pool, &cursor).await?;
-    }
     if cursor.next_block_number > cursor.target_block_number {
         if config.defer_projection_indexes {
             ensure_projection_indexes_after_catchup(
@@ -202,43 +258,81 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         return Ok(CatchupIterationStatus::Idle);
     }
 
-    let from_block = cursor.next_block_number;
-    let hard_to_block = from_block
-        .checked_add(config.chunk_blocks - 1)
-        .unwrap_or(cursor.target_block_number)
-        .min(cursor.target_block_number);
-    let to_block = select_log_bounded_replay_to_block(
-        pool,
-        chain,
-        from_block,
-        hard_to_block,
-        config.max_raw_logs_per_chunk,
-    )
-    .await?;
+    if config.defer_projection_indexes {
+        if closure_or_dependency_replay {
+            restore_deferred_projection_indexes(pool, &config.deployment_profile, &config.chains)
+                .await?;
+        } else {
+            prepare_deferred_projection_indexes_for_fresh_replay(pool, &cursor).await?;
+        }
+    }
+    let (from_block, to_block) = if closure_or_dependency_replay {
+        (cursor.range_start_block_number, cursor.target_block_number)
+    } else {
+        let from_block = cursor.next_block_number;
+        let hard_to_block = from_block
+            .checked_add(config.chunk_blocks - 1)
+            .unwrap_or(cursor.target_block_number)
+            .min(cursor.target_block_number);
+        let to_block = select_log_bounded_replay_to_block(
+            pool,
+            chain,
+            from_block,
+            hard_to_block,
+            config.max_raw_logs_per_chunk,
+        )
+        .await?;
+        (from_block, to_block)
+    };
     let started = Instant::now();
-    let outcome = replay_raw_fact_normalized_events(
-        pool,
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: config.deployment_profile.clone(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block,
-                to_block,
+    let outcome = if closure_or_dependency_replay {
+        replay_full_closure_or_dependency_normalized_events(
+            pool,
+            &config.deployment_profile,
+            chain,
+            from_block,
+            to_block,
+            config.max_raw_logs_per_chunk,
+        )
+        .await?
+    } else {
+        replay_raw_fact_normalized_events(
+            pool,
+            RawFactNormalizedEventReplayRequest {
+                deployment_profile: config.deployment_profile.clone(),
+                chain: chain.to_owned(),
+                selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                    from_block,
+                    to_block,
+                },
             },
-        },
-    )
-    .await?;
+        )
+        .await?
+    };
 
     advance_cursor(
         pool,
         &config.deployment_profile,
         chain,
         CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-        bounds.target_block,
+        if closure_or_dependency_replay {
+            to_block
+        } else {
+            bounds.target_block
+        },
         to_block,
         &outcome,
     )
     .await?;
+    if closure_or_dependency_replay {
+        bigname_adapters::clear_replay_adapter_checkpoints(
+            pool,
+            &config.deployment_profile,
+            chain,
+            CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+        )
+        .await?;
+    }
     if config.defer_projection_indexes {
         ensure_projection_indexes_after_catchup(pool, &config.deployment_profile, &config.chains)
             .await?;
@@ -253,6 +347,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         to_block,
         target_block = bounds.target_block,
         max_raw_logs_per_chunk = config.max_raw_logs_per_chunk,
+        closure_or_dependency_replay,
         selected_block_count = outcome.selected_block_count,
         canonical_raw_log_count = outcome.canonical_raw_log_count,
         scanned_raw_log_count = outcome.scanned_raw_log_count,
@@ -264,4 +359,58 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
     );
 
     Ok(CatchupIterationStatus::Progressed)
+}
+
+async fn replay_full_closure_or_dependency_normalized_events(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    from_block: i64,
+    to_block: i64,
+    max_raw_logs_per_page: usize,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    let adapters = active_closure_or_dependency_replay_adapters(pool, chain).await?;
+    let unsupported = unsupported_closure_replay_adapters(&adapters);
+    if !unsupported.is_empty() {
+        bail!(
+            "normalized-event replay selected closure/context-dependent adapter(s) {}; full closure replay is not implemented for these adapters",
+            unsupported.join(", ")
+        );
+    }
+
+    info!(
+        service = "indexer",
+        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+        chain,
+        from_block,
+        to_block,
+        max_raw_logs_per_page,
+        adapter_count = adapters.len(),
+        adapters = ?adapters,
+        "full closure normalized-event replay session started"
+    );
+
+    let summary = sync_full_closure_normalized_events_from_persisted_raw_payloads(
+        pool,
+        deployment_profile,
+        chain,
+        from_block,
+        to_block,
+        &adapters,
+        max_raw_logs_per_page,
+    )
+    .await?;
+
+    Ok(RawFactNormalizedEventReplayOutcome {
+        deployment_profile: deployment_profile.to_owned(),
+        chain: chain.to_owned(),
+        selection_kind: "full_closure",
+        source_scope_target_count: adapters.len(),
+        selected_block_count: 0,
+        canonical_raw_log_count: summary.scanned_log_count,
+        scanned_raw_log_count: summary.scanned_log_count,
+        matched_raw_log_count: summary.matched_log_count,
+        normalized_event_synced_count: summary.total_synced_count,
+        normalized_event_inserted_count: summary.total_inserted_count,
+    })
 }

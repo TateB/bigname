@@ -222,7 +222,7 @@ fn payload_cache_audit_metadata(
 fn checked_in_manifest_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("manifests")
+        .join("manifests/mainnet")
 }
 
 fn render_current_watch_plan(watched_contracts: &[WatchedContract]) -> Value {

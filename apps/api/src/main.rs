@@ -1,9 +1,6 @@
 #![recursion_limit = "256"]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -65,7 +62,7 @@ use crate::{
         ResolutionExecutionExplainQuery, ResolutionMode, ResolutionQuery, ResolutionRecordKey,
         ResolverOverviewQuery, ResourceLookupQuery, ResponseView, RolesQuery,
     },
-    routes::{API_ROUTE_DEFINITIONS, ApiRouteDefinition, ApiRouteId},
+    routes::API_ROUTE_DEFINITIONS,
     state::AppState,
     types::*,
 };

@@ -211,11 +211,3 @@ pub(super) fn registry_anchor_for_history(
         binding_manifest_id: reference.source_manifest_id,
     })
 }
-
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_default() += 1;
-    }
-    counts
-}

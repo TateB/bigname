@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::{
     JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockCodeObservationRequest,
     ProviderBlockCodeObservations, ProviderBlockSelection, ProviderCodeObservation,
-    decode::{normalize_address, normalize_hash, parse_hex_bytes},
+    decode::{address_hex_from_str, hash_hex_from_str, parse_hex_bytes},
     request::JsonRpcBatchCall,
 };
 
@@ -21,7 +21,7 @@ impl JsonRpcProvider {
         let mut observations = Vec::with_capacity(addresses.len());
 
         for address in addresses {
-            let address = normalize_address(address);
+            let address = address_hex_from_str(address)?;
             if let Some(observation) = cached_observations.get(&address) {
                 observations.push(observation.clone());
                 continue;
@@ -49,14 +49,15 @@ impl JsonRpcProvider {
         let mut call_keys = Vec::<(String, String, Value)>::new();
 
         for request in requests {
-            let block_hash = normalize_hash(&request.block_hash);
+            let block_hash =
+                hash_hex_from_str(&request.block_hash, "provider code observation block hash")?;
             let block_parameter =
                 ProviderBlockSelection::Hash(block_hash.clone()).json_rpc_parameter()?;
             let addresses = request
                 .addresses
                 .iter()
-                .map(|address| normalize_address(address))
-                .collect::<Vec<_>>();
+                .map(|address| address_hex_from_str(address))
+                .collect::<Result<Vec<_>>>()?;
 
             for address in &addresses {
                 let key = (block_hash.clone(), address.clone());

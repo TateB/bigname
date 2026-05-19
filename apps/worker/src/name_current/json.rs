@@ -1,14 +1,18 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
-use bigname_storage::HistoryEvent;
+use anyhow::Result;
+use bigname_storage::{HistoryEvent, normalize_evm_address};
 use serde_json::{Map, Value, json};
 use sqlx::types::time::OffsetDateTime;
+
+use crate::projection_json::dedupe_json_values;
 
 use super::types::{
     HistoryHeads, HistoryPointer, ProjectedFacts, RelevantEvent, WildcardSourceContext,
 };
 use super::{NAME_CURRENT_DERIVATION_KIND, RECORD_INVENTORY_UNSUPPORTED_REASON, ZERO_ADDRESS};
+
+pub(super) use crate::projection_json::{format_timestamp, json_i64, json_str};
 
 pub(super) fn build_declared_summary(facts: ProjectedFacts, topology: Option<Value>) -> Value {
     let surface_head = facts
@@ -137,19 +141,6 @@ pub(super) fn build_provenance(
     }))
 }
 
-pub(super) fn format_timestamp(timestamp: OffsetDateTime) -> String {
-    let timestamp = timestamp.to_offset(sqlx::types::time::UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        timestamp.year(),
-        u8::from(timestamp.month()),
-        timestamp.day(),
-        timestamp.hour(),
-        timestamp.minute(),
-        timestamp.second(),
-    )
-}
-
 fn format_unix_timestamp_value(timestamp: Option<i64>) -> Value {
     match timestamp {
         Some(timestamp) => OffsetDateTime::from_unix_timestamp(timestamp)
@@ -158,19 +149,6 @@ fn format_unix_timestamp_value(timestamp: Option<i64>) -> Value {
             .unwrap_or_else(|_| Value::Number(timestamp.into())),
         None => Value::Null,
     }
-}
-
-pub(super) fn json_str(value: &Value, path: &[&str]) -> Option<String> {
-    path.iter()
-        .try_fold(value, |current, key| current.get(key))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-pub(super) fn json_i64(value: &Value, path: &[&str]) -> Option<i64> {
-    path.iter()
-        .try_fold(value, |current, key| current.get(key))
-        .and_then(Value::as_i64)
 }
 
 fn event_manifest_version(event: &RelevantEvent) -> Value {
@@ -190,7 +168,7 @@ fn history_manifest_version(event: &HistoryEvent) -> Value {
 }
 
 pub(super) fn normalize_resolver_address(value: Option<&str>) -> Option<String> {
-    let normalized = value?.trim().to_ascii_lowercase();
+    let normalized = normalize_evm_address(value?.trim());
     if normalized.is_empty() || normalized == ZERO_ADDRESS {
         None
     } else {
@@ -229,18 +207,4 @@ pub(super) fn history_pointer_json(pointer: &HistoryPointer) -> Value {
         "event_kind": pointer.event_kind,
         "chain_position": pointer.chain_position,
     })
-}
-
-fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut unique = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON for dedupe")?;
-        if seen.insert(key) {
-            unique.push(value);
-        }
-    }
-
-    Ok(unique)
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::CanonicalityState;
+use crate::{CanonicalityState, evm_primitives::normalize_optional_evm_b256};
 
 use super::{
     manifest_json::ensure_json_object,
@@ -196,8 +196,14 @@ pub(super) fn manifest_alert_observation_create_from_rendered(
                     .get("discovery_edge_id")
                     .and_then(Value::as_i64)
             }),
-        expected_code_hash: alert_state_string_owned(observation, "expected_code_hash"),
-        observed_code_hash: alert_state_string_owned(observation, "observed_code_hash"),
+        expected_code_hash: normalize_optional_evm_b256(&alert_state_string_owned(
+            observation,
+            "expected_code_hash",
+        )),
+        observed_code_hash: normalize_optional_evm_b256(&alert_state_string_owned(
+            observation,
+            "observed_code_hash",
+        )),
         observed_code_byte_length: observation
             .alert_state
             .get("observed_code_byte_length")
@@ -208,10 +214,12 @@ pub(super) fn manifest_alert_observation_create_from_rendered(
                 .get("observed_block_number")
                 .and_then(Value::as_i64)
         }),
-        observed_block_hash: observation
-            .block_hash
-            .clone()
-            .or_else(|| alert_state_string_owned(observation, "observed_block_hash")),
+        observed_block_hash: normalize_optional_evm_b256(
+            &observation
+                .block_hash
+                .clone()
+                .or_else(|| alert_state_string_owned(observation, "observed_block_hash")),
+        ),
         observed_canonicality_state: Some(observation.canonicality_state),
         raw_fact_ref: observation.raw_fact_ref.clone(),
         expected_material: json!({}),

@@ -353,6 +353,166 @@ async fn normalized_replay_catchup_log_bound_allows_oversized_first_block() -> R
 }
 
 #[tokio::test]
+async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000130";
+    let reverse_address = "0x0000000000000000000000000000000000000131";
+    let wrapper_block = provider_block(
+        "0x3030303030303030303030303030303030303030303030303030303030303030",
+        Some("0x2929292929292929292929292929292929292929292929292929292929292929"),
+        30,
+    );
+    let reverse_block = provider_block(
+        "0x3131313131313131313131313131313131313131313131313131313131313131",
+        Some(&wrapper_block.block_hash),
+        31,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        393,
+        chain,
+        Uuid::from_u128(0x393),
+        wrapper_address,
+    )
+    .await?;
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        394,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(0x394),
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &wrapper_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &reverse_block,
+        reverse_address,
+        "0x0000000000000000000000000000000000000031",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query("DROP INDEX IF EXISTS normalized_events_namespace_idx")
+        .execute(database.pool())
+        .await
+        .context("failed to drop deferred normalized event index for stateful catch-up test")?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1,
+        1,
+    )?;
+    let status = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await?;
+    assert_eq!(
+        status,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+
+    let cursor_kind = "raw_fact_normalized_events";
+    let (last_completed, next_block) = sqlx::query_as::<_, (Option<i64>, i64)>(
+        r#"
+        SELECT last_completed_block_number, next_block_number
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = 'ethereum-mainnet'
+          AND cursor_kind = $1
+        "#,
+    )
+    .bind(cursor_kind)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(last_completed, Some(31));
+    assert_eq!(next_block, 32);
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events"
+        )
+        .fetch_one(database.pool())
+        .await?
+            > 0
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('normalized_events_namespace_idx') IS NOT NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "closure replay must restore deferred projection indexes before running"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_preserves_latched_closure_target() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            chain,
+            10,
+            20,
+            false,
+        )
+        .await?,
+        (10, 10, 20)
+    );
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            chain,
+            10,
+            25,
+            false,
+        )
+        .await?,
+        (10, 10, 20)
+    );
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            chain,
+            10,
+            25,
+            true,
+        )
+        .await?,
+        (10, 10, 25)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_chain_has_no_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -438,6 +598,13 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .context("failed to create normalized_replay_cursors table for indexer tests")?;
+    sqlx::raw_sql(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/20260509120000_normalized_replay_adapter_checkpoints.sql"
+    )))
+    .execute(pool)
+    .await
+    .context("failed to create normalized replay adapter checkpoint tables for indexer tests")?;
 
     Ok(())
 }

@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{ProviderLogsPayload, ProviderReceiptsPayload};
 use crate::provider::{
     JsonRpcProvider, MAX_TRANSACTION_RECEIPT_FALLBACK, ProviderLog, ProviderReceipt,
     ProviderTransaction, RAW_PAYLOAD_KIND_BLOCK_LOGS, RAW_PAYLOAD_KIND_BLOCK_RECEIPTS,
+    types::ProviderLogFilter,
 };
 
 impl JsonRpcProvider {
@@ -18,9 +19,7 @@ impl JsonRpcProvider {
         let payload = self
             .fetch_json_rpc_result_with_payload(
                 "eth_getLogs",
-                vec![json!({
-                    "blockHash": block_hash,
-                })],
+                vec![ProviderLogFilter::block_hash(block_hash)?.json_rpc_parameter()?],
             )
             .await?
             .with_cache_metadata(RAW_PAYLOAD_KIND_BLOCK_LOGS, "eth_getLogs", "block_hash");

@@ -1,4 +1,14 @@
 services:
+  api:
+    networks:
+      - default
+      - eth_archive_node
+
+  worker:
+    networks:
+      - default
+      - eth_archive_node
+
   indexer:
     entrypoint: ["/usr/local/bin/bigname"]
     ipc: host
@@ -13,3 +23,8 @@ services:
         hard: ${BIGNAME_INDEXER_RETH_DB_NOFILE_HARD:-1048576}
     volumes:
       - ${BIGNAME_INDEXER_RETH_DATADIR_HOST:?set BIGNAME_INDEXER_RETH_DATADIR_HOST to the host Reth datadir}:${BIGNAME_INDEXER_RETH_DATADIR_CONTAINER:-/reth-data}:rw
+
+networks:
+  eth_archive_node:
+    external: true
+    name: eth-archive-node_default

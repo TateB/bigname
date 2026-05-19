@@ -1,7 +1,0 @@
-interface:
-  display_name: "Manifest Rollout"
-  short_description: "Handle manifest and discovery changes"
-  default_prompt: "Use $manifest-rollout to review this manifest or discovery change and list the admission, capability, and invalidation consequences."
-
-policy:
-  allow_implicit_invocation: true

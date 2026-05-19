@@ -81,11 +81,30 @@ Query: `at`, `chain_positions`, `consistency`.
 
 Row-granular permission lineage stays on `GET /v1/resources/{resource_id}/permissions`. No `include` expansions.
 
+## Compact route knobs
+
+Compact routes advertise only the knobs they own:
+
+| Route | `view` | `mode` | `meta` |
+| --- | --- | --- | --- |
+| `GET /v1/names` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/names/{namespace}/{name}/children` | `compact`, `full` | none | `none`, `summary`, `full` |
+| `GET /v1/names/{namespace}/{name}/records` | `compact` only; `full` is compatibility-reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
+| `GET /v1/resolve/{name}/records` | `compact` only; `full` is compatibility-reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
+| `GET /v1/names/{namespace}/{name}/roles` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/roles` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/resources/lookup` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | `compact`, `full` | none | `none`, `summary`, `full` |
+| `GET /v1/events` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| History routes | `compact`, `full` | none | `none`, `summary`, `full` |
+
+`GET /v1/names` keeps its compatibility bridge: omitting `namespace` spans supported public namespaces. First-party app replacement code should pass an explicit namespace when it knows one. `GET /v1/names?name=...` is a compact collection filter that returns zero or one `CompactDomainSummary`; the canonical exact-name profile remains `GET /v1/names/{namespace}/{name}`.
+
 ## `GET /v1/names`
 
 Compact app-facing collection: exact lookup, address-owned lists, owner/registrant/effective-controller relations, name search, suggestions.
 
-Query: `namespace`, `name`, `prefix`, `contains`, `contains_nocase`, `owner`, `account`, `registrant`, `resolver`, `resolved_address`, `relation=token_holder|registrant|effective_controller|any`, `sort=name|expiry_date|registration_date|created_at`, `order=asc|desc`, `include=record_summaries,total_count`, `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `namespace`, `name`, `prefix`, `contains`, `contains_nocase`, `owner`, `account`, `registrant`, `resolver`, `resolved_address`, `relation=token_holder|registrant|effective_controller|any`, `sort=name|expiry_date|registration_date|created_at`, `order=asc|desc`, `include=record_summaries,total_count`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
 Defaults: `view=compact`, `meta=summary`, `relation=any` when `account` is supplied, `sort=name`, `order=asc`.
 
@@ -94,7 +113,7 @@ Each compact item is `CompactDomainSummary`.
 Rules:
 
 - `namespace` limits to one public namespace; without it, items span supported public namespaces and each carries its `namespace`.
-- `name` is exact lookup by normalized name. With `namespace`, it returns zero or one item.
+- `name` is a compact exact lookup filter by normalized name. With `namespace`, it returns zero or one item. It doesn't own the full exact-name profile semantics.
 - `prefix`, `contains`, `contains_nocase` are search filters compatible with `namespace`, address relation filters, and pagination. They aren't availability checks.
 - `owner` is the token-holder filter and equals `account` with `relation=token_holder`. Supplying both `owner` and `account` returns `400 invalid_input`.
 - `relation=any` returns the deduped union of token-holder, registrant, and effective-controller matches by `(namespace, normalized_name)`.
@@ -103,7 +122,7 @@ Rules:
 - Sort orders break ties on `(namespace, normalized_name, namehash)`. `null` sort values order after non-null on `asc`, before non-null on `desc`.
 - `include=record_summaries` adds compact record counts, known text-key hints, avatar/content-hash presence, and known coin-type hints from declared inventory/cache. No verified execution.
 - `include=total_count` populates `meta.total_count` for the filtered set before cursor slicing where supported. Unsupported combinations leave `total_count=null` and add `total_count` to `meta.unsupported_fields`.
-- `view=full` is reserved and returns `400 invalid_input` until the full item shape is documented.
+- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/names/{namespace}/{name}/children`
 
@@ -126,9 +145,9 @@ Rules:
 
 ## `GET /v1/names/{namespace}/{name}/records`
 
-Compact resolver records over declared inventory/cache and optional verified selectors. Current-projection read; doesn't run normalized-event catch-up scans.
+Compact resolver records over declared inventory/cache and optional verified selectors. Selected-snapshot projection read; doesn't run normalized-event catch-up scans.
 
-Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact|full`, `meta=none|summary|full`.
+Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
 
 Defaults: `mode=declared`, `view=compact`, `meta=summary`, `include=resolver_address`.
 
@@ -143,19 +162,20 @@ Rules:
 - `content_hash=true` requests the declared content-hash selector.
 - `coin_types` is a comma-separated list of textual coin-type selectors.
 - `mode=declared` uses `record_cache` and `record_inventory`. No live execution.
-- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/resolutions/{namespace}/{name}`. Supported ENS cache misses execute live through the configured Ethereum RPC provider using `latest`.
-- `mode=auto`: an authoritative declared profile uses local inventory/cache (including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild). Otherwise supported requested selectors use verified output, including non-persisted on-demand Universal Resolver execution at provider `latest` when no exact-snapshot output exists.
+- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/resolutions/{namespace}/{name}`. Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it.
+- `mode=auto`: an authoritative declared profile uses local inventory/cache only when the declared cache can satisfy every requested value from replayable state, including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild. Requested selectors with explicit declared gaps, unretained declared values, or no declared selectors use verified output instead, including on-demand Universal Resolver execution at the selected stored snapshot when no exact-snapshot output exists.
 - Without declared selectors, `mode=auto|verified|both` may probe the basic app profile set (`addr:60`, `avatar`, `contenthash`, text keys `description`, `url`, `email`).
-- On-demand `latest` calls return inline; they don't create exact-snapshot execution cache rows or block-anchored `raw_call_snapshots`. Use `GET /v1/resolutions/{namespace}/{name}` for persisted exact-block provenance.
+- On-demand execution never targets provider `latest` independently of the selected stored snapshot. If the provider cannot serve that block, the route returns `409 stale`; declared cache is not a fallback for a verified miss.
 - Selector-specific record history isn't on this route. Use `GET /v1/events` or history routes with event-type filters.
+- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/names/{namespace}/{name}/roles`
 
 Compact role rows for the name's current resource.
 
-Query: `account`, `role_bitmap`, `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `account`, `role_bitmap`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
-Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`.
+Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/addresses/{address}/names`
 
@@ -202,7 +222,7 @@ Query: `namespace`, `relation=token_holder|registrant|effective_controller|any`,
 
 Compact lookup from `{namespace, name}` to current `resource_id`.
 
-Query: `namespace`, `name`, `view=compact|full`, `meta=none|summary|full`. Both `namespace` and `name` are required.
+Query: `namespace`, `name`, `view=compact`, `meta=none|summary|full`. Both `namespace` and `name` are required.
 
 ```json
 {
@@ -216,7 +236,7 @@ Query: `namespace`, `name`, `view=compact|full`, `meta=none|summary|full`. Both 
 }
 ```
 
-`resource_id` is opaque and is the stable API key for resource-scoped roles and permissions. `resource_hex` is deferred unless a stable projected field is documented for the namespace; clients must not derive it from `resource_id`, `namehash`, token ID, or calldata. Reads the same exact-name projection as `GET /v1/names/{namespace}/{name}`.
+`resource_id` is opaque and is the stable API key for resource-scoped roles and permissions. `resource_hex` is deferred unless a stable projected field is documented for the namespace; clients must not derive it from `resource_id`, `namehash`, token ID, or calldata. Reads the same exact-name projection as `GET /v1/names/{namespace}/{name}`. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resources/{resource_id}/permissions`
 
@@ -240,7 +260,7 @@ Rules:
 
 Compact role rows by account, resource, or name.
 
-Query: `account`, `resource_id`, `namespace`, `name`, `role_bitmap`, `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `account`, `resource_id`, `namespace`, `name`, `role_bitmap`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
 Defaults: `view=compact`, `meta=summary`, sort `account_resource_scope_asc`.
 
@@ -253,7 +273,8 @@ Rules:
 - `account` filters by effective permission subject. It doesn't search owner, registrant, or address-name relations unless those subjects also exist in `permissions_current`.
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
-- `provenance` is compact section provenance. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+- Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resolvers/{chain_id}/{resolver_address}`
 
@@ -409,15 +430,15 @@ Rules:
 
 ## `GET /v1/resolve/{name}/records`
 
-Namespace-inferred convenience for `GET /v1/names/{namespace}/{name}/records`. Default `mode=auto`. Current-projection read (no normalized-event catch-up).
+Namespace-inferred convenience for `GET /v1/names/{namespace}/{name}/records`. Default `mode=auto`. Selected-snapshot projection read (no normalized-event catch-up).
 
-Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact|full`, `meta=none|summary|full`.
+Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
 
 Defaults: `mode=auto`, `view=compact`, `meta=summary`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`.
 
 Inference matches `GET /v1/resolve/{name}`. After inference, returns the same `CompactRecordSummary` and verified support boundary as the canonical compact records route. The default also turns on the common app-facing sections so one request returns resolver address, known text keys, avatar, content hash, and known coin addresses where available.
 
-Without declared selectors, `mode=auto` probes the basic app profile set and returns successful fallback text rows plus the ETH coin row when available. It doesn't claim `known_text_keys` inventory support from those probes. No `at`, `chain_positions`, or `consistency`. Supported ENS verified fallback uses provider `latest` and returns non-persisted selector results inline. Identity, support state, and errors stay namespace-local — Basenames doesn't fall back to ENS when the inferred tuple is missing.
+Without declared selectors, `mode=auto` probes the basic app profile set through verified resolution and returns successful fallback text rows plus the ETH coin row when available. It doesn't claim `known_text_keys` inventory support from those probes. No `at`, `chain_positions`, or `consistency`; the canonical default snapshot applies. Supported ENS verified fallback uses that selected stored snapshot and fails closed with `409 stale` when the provider cannot serve it. Identity, support state, and errors stay namespace-local — Basenames doesn't fall back to ENS when the inferred tuple is missing. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 
@@ -486,7 +507,7 @@ Reuses the normalized-event history contract; no separate ledger. `namespace` an
 
 Compact event search across name, address, resource, type, and block filters. Reuses the normalized-event history truth family.
 
-Query: `namespace`, `name`, `address`, `resource`, `resource_id`, `type`, `relation=token_holder|registrant|effective_controller|any`, `from_block`, `to_block`, `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `namespace`, `name`, `address`, `resource`, `resource_id`, `type`, `relation=token_holder|registrant|effective_controller|any`, `from_block`, `to_block`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
 Defaults: `view=compact`, `meta=summary`, sort `chain_position_desc`.
 
@@ -500,7 +521,7 @@ Rules:
 - `type` filters by normalized event type or route-owned compact type alias. Unsupported aliases return non-2xx `unsupported`.
 - `from_block` and `to_block` apply to canonical chain position. They don't trigger raw fact scans.
 - Observed and orphaned events are excluded.
-- `view=full` is reserved; until documented, it returns `400 invalid_input`.
+- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/primary-names/{address}`
 

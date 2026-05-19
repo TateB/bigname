@@ -1,15 +1,12 @@
 use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
-    invalidate_execution_outcomes_for_orphaned_blocks, load_chain_lineage_block,
-    mark_block_derived_normalized_events_range_orphaned, mark_chain_lineage_range_orphaned,
-    mark_identity_rows_range_orphaned, mark_raw_block_facts_range_orphaned,
+    chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
     upsert_chain_lineage_blocks,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::{
-    MAX_PARENT_FETCH_DEPTH,
     provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
     runtime::{IntakeChainTask, checkpoint_mode},
 };
@@ -21,14 +18,21 @@ use super::{
     },
     logging::log_chain_reconciliation_outcome,
     persistence::{
-        ensure_losing_branch_raw_blocks_exist, persist_reconciled_raw_blocks,
-        persist_reconciled_raw_code_hashes, persist_reconciled_raw_payloads,
+        persist_reconciled_raw_blocks, persist_reconciled_raw_code_hashes,
+        persist_reconciled_raw_payloads,
     },
     types::{
         CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
         HeaderAuditMode,
     },
 };
+
+#[path = "canonical/orphaning.rs"]
+mod orphaning;
+
+use orphaning::orphan_reorg_losing_branch_payloads;
+
+const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
 
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
@@ -168,72 +172,13 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     let head_change_set = head_change_set(task, heads, &canonical);
 
     if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
-        if let Some(current_canonical_hash) = task.checkpoint.canonical_block_hash.as_deref() {
-            ensure_losing_branch_raw_blocks_exist(
-                pool,
-                &task.chain,
-                current_canonical_hash,
-                canonical.raw_orphan_stop_before_hash.as_deref(),
-            )
-            .await?;
-            mark_raw_block_facts_range_orphaned(
-                pool,
-                &task.chain,
-                current_canonical_hash,
-                canonical.raw_orphan_stop_before_hash.as_deref(),
-            )
-            .await?;
-            let orphaned_normalized_event_count =
-                mark_block_derived_normalized_events_range_orphaned(
-                    pool,
-                    &task.chain,
-                    current_canonical_hash,
-                    canonical.raw_orphan_stop_before_hash.as_deref(),
-                )
-                .await?;
-            if orphaned_normalized_event_count > 0 {
-                info!(
-                    service = "indexer",
-                    chain = %task.chain,
-                    orphaned_normalized_event_count,
-                    "block-derived normalized events orphaned for the losing branch"
-                );
-            }
-            let orphaned_identity_counts = mark_identity_rows_range_orphaned(
-                pool,
-                &task.chain,
-                current_canonical_hash,
-                canonical.raw_orphan_stop_before_hash.as_deref(),
-            )
-            .await?;
-            if orphaned_identity_counts.token_lineage_count > 0
-                || orphaned_identity_counts.resource_count > 0
-                || orphaned_identity_counts.name_surface_count > 0
-                || orphaned_identity_counts.surface_binding_count > 0
-            {
-                info!(
-                    service = "indexer",
-                    chain = %task.chain,
-                    orphaned_token_lineage_count = orphaned_identity_counts.token_lineage_count,
-                    orphaned_resource_count = orphaned_identity_counts.resource_count,
-                    orphaned_name_surface_count = orphaned_identity_counts.name_surface_count,
-                    orphaned_surface_binding_count = orphaned_identity_counts.surface_binding_count,
-                    "identity rows orphaned for the losing branch"
-                );
-            }
-        }
-
-        let execution_invalidation_summary =
-            invalidate_execution_outcomes_for_orphaned_blocks(pool).await?;
-        if execution_invalidation_summary.deleted_outcome_count > 0 {
-            info!(
-                service = "indexer",
-                chain = %task.chain,
-                invalidated_execution_outcome_count =
-                    execution_invalidation_summary.deleted_outcome_count,
-                "execution cache outcomes invalidated for orphaned block dependencies"
-            );
-        }
+        orphan_reorg_losing_branch_payloads(
+            pool,
+            &task.chain,
+            task.checkpoint.canonical_block_hash.as_deref(),
+            canonical.raw_orphan_stop_before_hash.as_deref(),
+        )
+        .await?;
     }
 
     persist_reconciled_raw_blocks(pool, &task.chain, heads, &canonical, header_audit_mode).await?;
@@ -278,16 +223,26 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         .await?;
     }
 
+    let canonical_update = canonical.canonical.clone();
+    let (safe_update, finalized_update) = if canonical_update.is_some() {
+        (
+            heads.safe.as_ref().map(provider_block_to_checkpoint_ref),
+            heads
+                .finalized
+                .as_ref()
+                .map(provider_block_to_checkpoint_ref),
+        )
+    } else {
+        (None, None)
+    };
+
     let next_checkpoint = advance_chain_checkpoints(
         pool,
         &ChainCheckpointUpdate {
             chain_id: task.chain.clone(),
-            canonical: canonical.canonical.clone(),
-            safe: heads.safe.as_ref().map(provider_block_to_checkpoint_ref),
-            finalized: heads
-                .finalized
-                .as_ref()
-                .map(provider_block_to_checkpoint_ref),
+            canonical: canonical_update,
+            safe: safe_update,
+            finalized: finalized_update,
         },
     )
     .await?;
@@ -390,10 +345,26 @@ pub(crate) async fn reconcile_canonical_head(
         };
 
         if let Some(stored_parent) = load_chain_lineage_block(pool, chain, &parent_hash).await? {
-            if stored_parent.canonicality_state != CanonicalityState::Orphaned
+            let can_be_current_branch_ancestor = stored_parent.canonicality_state
+                != CanonicalityState::Orphaned
                 && current_canonical_number
-                    .is_some_and(|number| stored_parent.block_number <= number)
-            {
+                    .is_some_and(|number| stored_parent.block_number <= number);
+            let is_current_branch_ancestor = if can_be_current_branch_ancestor {
+                if let Some(head_hash) = current_canonical_hash {
+                    chain_lineage_contains_ancestor(
+                        pool,
+                        chain,
+                        head_hash,
+                        &stored_parent.block_hash,
+                    )
+                    .await?
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if can_be_current_branch_ancestor && is_current_branch_ancestor {
                 common_ancestor_hash = Some(stored_parent.block_hash.clone());
                 break;
             }

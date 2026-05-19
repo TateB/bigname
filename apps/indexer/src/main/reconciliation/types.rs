@@ -95,13 +95,7 @@ pub(crate) struct ChainReconciliationOutcome {
     pub(crate) finalized_block_number: Option<i64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RawFactNormalizedEventReplaySourceScope {
-    pub(crate) source_family: String,
-    pub(crate) address: String,
-    pub(crate) from_block: i64,
-    pub(crate) to_block: i64,
-}
+pub(crate) type RawFactNormalizedEventReplaySourceScope = crate::source_scope::SourceScopeTarget;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RawFactNormalizedEventReplaySelection {

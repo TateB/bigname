@@ -21,33 +21,22 @@ pub(super) fn build_manifest_alert_state(
     row: &sqlx::postgres::PgRow,
     observed_canonicality_state: Option<CanonicalityState>,
 ) -> Result<Value> {
-    let mut state = json_object(
-        row.try_get("alert_metadata")
-            .context("missing alert_metadata")?,
-    )?;
-    let expected_material: Value = row
-        .try_get("expected_material")
-        .context("missing expected_material")?;
-    let observed_material: Value = row
-        .try_get("observed_material")
-        .context("missing observed_material")?;
-    let watch_plan_metadata: Value = row
-        .try_get("watch_plan_metadata")
-        .context("missing watch_plan_metadata")?;
+    let mut state = json_object(crate::sql_row::get(row, "alert_metadata")?)?;
+    let expected_material: Value = crate::sql_row::get(row, "expected_material")?;
+    let observed_material: Value = crate::sql_row::get(row, "observed_material")?;
+    let watch_plan_metadata: Value = crate::sql_row::get(row, "watch_plan_metadata")?;
 
     insert_json(&mut state, "alert_type", alert_kind.alert_type());
     insert_json(&mut state, "alert_status", lifecycle_status.as_str());
     insert_json(
         &mut state,
         "source_family",
-        row.try_get::<String, _>("source_family")
-            .context("missing source_family")?,
+        crate::sql_row::get::<String>(row, "source_family")?,
     );
     insert_json(
         &mut state,
         "chain",
-        row.try_get::<String, _>("chain_id")
-            .context("missing chain_id")?,
+        crate::sql_row::get::<String>(row, "chain_id")?,
     );
     insert_optional_json(
         &mut state,

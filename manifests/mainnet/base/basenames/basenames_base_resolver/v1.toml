@@ -1,0 +1,58 @@
+# Bootstrap seed for the canonical Basenames L2Resolver on Base mainnet.
+# Address and L2Resolver profile / authorization surface:
+# (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc).
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_base_resolver"
+chain = "base-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "resolver"
+address = "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD"
+proxy_kind = "none"
+
+# L2Resolver event ABI fragments consumed by manifest-derived authority topic
+# lookup. The concrete resolver emits profile events through these profile
+# implementations:
+# (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L63 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/resolver/TextResolver.sol:L33 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L38 @ basenames@1809bbc).
+[[abi.events]]
+name = "AddrChanged"
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "NameChanged"
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "VersionChanged"
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+normalized_events = ["RecordVersionChanged"]

@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bigname_storage::default_database_url;
 use sqlx::{
     PgPool, Row,
@@ -49,6 +49,27 @@ impl TestDir {
         contents: &str,
     ) -> Result<PathBuf> {
         let directory = self.path.join(namespace).join(source_family);
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let path = directory.join(format!("{version_tag}.toml"));
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
+    fn write_manifest_for_chain_combo(
+        &self,
+        chain_combo: &str,
+        namespace: &str,
+        source_family: &str,
+        version_tag: &str,
+        contents: &str,
+    ) -> Result<PathBuf> {
+        let directory = self
+            .path
+            .join(chain_combo)
+            .join(namespace)
+            .join(source_family);
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = directory.join(format!("{version_tag}.toml"));
@@ -247,6 +268,50 @@ start_block = 4242
     .to_owned()
 }
 
+fn abi_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x0000000000000000000000000000000000000001"
+
+[[contracts]]
+role = "registry"
+address = "0x0000000000000000000000000000000000000002"
+proxy_kind = "none"
+
+[[abi.events]]
+name = "SubregistryUpdated"
+fragment = "event SubregistryUpdated(uint256 indexed node, address registry, address sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SubregistryChanged"]
+status = "supported"
+notes = "adapter-owned registry resource link input"
+
+[[abi.calls]]
+name = "resolver"
+fragment = "function resolver(bytes32 node) view returns (address)"
+target_roles = ["registry"]
+status = "shadow"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    .to_owned()
+}
+
 fn registry_manifest_contents(rollout_status: &str) -> String {
     format!(
         r#"
@@ -307,29 +372,27 @@ fn checked_in_manifest_contents(
     source_family: &str,
     version_tag: &str,
 ) -> Result<String> {
-    checked_in_profile_manifest_contents("manifests", namespace, source_family, version_tag)
+    for chain_combo in ["ethereum", "base"] {
+        let path = checked_in_manifest_root("manifests/mainnet")
+            .join(chain_combo)
+            .join(namespace)
+            .join(source_family)
+            .join(format!("{version_tag}.toml"));
+        if path.exists() {
+            return fs::read_to_string(&path)
+                .with_context(|| format!("failed to read checked-in manifest {}", path.display()));
+        }
+    }
+
+    bail!(
+        "failed to find checked-in manifest {namespace}/{source_family}/{version_tag}.toml in mainnet chain-combo roots"
+    );
 }
 
 fn checked_in_manifest_root(profile_root: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(profile_root)
-}
-
-fn checked_in_profile_manifest_contents(
-    profile_root: &str,
-    namespace: &str,
-    source_family: &str,
-    version_tag: &str,
-) -> Result<String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(profile_root)
-        .join(namespace)
-        .join(source_family)
-        .join(format!("{version_tag}.toml"));
-    fs::read_to_string(&path)
-        .with_context(|| format!("failed to read checked-in manifest {}", path.display()))
 }
 
 async fn load_single_contract_instance_for_address(
@@ -1147,6 +1210,37 @@ fn loads_valid_repository_manifest() -> Result<()> {
     assert_eq!(repository.manifests().len(), 1);
     assert_eq!(repository.manifests()[0].version_tag, "v1");
     assert_eq!(repository.manifests()[0].manifest.namespace, "ens");
+    assert!(repository.manifests()[0].manifest.abi.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn loads_chain_combo_repository_manifests() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest_for_chain_combo(
+        "ethereum",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.summary().namespace_count, 1);
+    assert_eq!(repository.summary().source_family_count, 1);
+    assert_eq!(repository.summary().manifest_count, 1);
+    assert_eq!(
+        repository.manifests()[0].relative_path,
+        PathBuf::from("ethereum/ens/ens_v2_registry_l1/v1.toml")
+    );
 
     Ok(())
 }
@@ -1171,6 +1265,101 @@ fn parses_optional_start_block_on_roots_and_contracts() -> Result<()> {
     assert_eq!(manifest.roots[0].start_block, Some(12_345));
     assert_eq!(manifest.contracts[0].start_block, Some(23_456));
     assert_eq!(manifest.contracts[1].start_block, None);
+
+    Ok(())
+}
+
+#[test]
+fn loads_manifest_abi_fragments() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &abi_manifest_contents())?;
+
+    let repository = load_repository(&test_dir.path)?;
+    let abi = &repository.manifests()[0].manifest.abi;
+
+    assert_eq!(abi.events.len(), 1);
+    assert_eq!(abi.events[0].name, "SubregistryUpdated");
+    assert_eq!(abi.events[0].emitter_roles, ["registry"]);
+    assert_eq!(abi.events[0].normalized_events, ["SubregistryChanged"]);
+    assert_eq!(
+        abi.events[0].status,
+        Some(CapabilitySupportStatus::Supported)
+    );
+    assert_eq!(abi.calls.len(), 1);
+    assert_eq!(abi.calls[0].name, "resolver");
+    assert_eq!(abi.calls[0].target_roles, ["registry"]);
+    assert_eq!(abi.calls[0].status, Some(CapabilitySupportStatus::Shadow));
+    let parsed_event = abi.events[0].parsed_event_view()?;
+    assert_eq!(
+        parsed_event.canonical_signature(),
+        "SubregistryUpdated(uint256,address,address)"
+    );
+    assert!(
+        parsed_event
+            .topic0()
+            .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
+    );
+    let parsed_call = abi.calls[0].parsed_function_view()?;
+    assert_eq!(parsed_call.canonical_signature(), "resolver(bytes32)");
+    assert_eq!(parsed_call.selector().len(), 10);
+
+    Ok(())
+}
+
+#[test]
+fn normalize_address_uses_alloy_for_standard_hex_without_tightening_fallbacks() {
+    assert_eq!(
+        normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"),
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+    );
+    assert_eq!(normalize_address("NOT-A-HEX-ADDRESS"), "not-a-hex-address");
+    assert_eq!(normalize_address("0xABC"), "0xabc");
+    assert_eq!(
+        normalize_address("00000000000000000000000000000000000000AA"),
+        "00000000000000000000000000000000000000aa"
+    );
+}
+
+#[test]
+fn rejects_invalid_manifest_abi_fragment() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &abi_manifest_contents().replacen("event SubregistryUpdated", "SubregistryUpdated", 1),
+    )?;
+
+    let error =
+        load_repository(&test_dir.path).expect_err("non-event ABI fragment must fail validation");
+    assert!(
+        error.to_string().contains("must use an event fragment"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_manifest_abi_unknown_roles() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &abi_manifest_contents().replacen(
+            r#"emitter_roles = ["registry"]"#,
+            r#"emitter_roles = ["missing_registry"]"#,
+            1,
+        ),
+    )?;
+
+    let error =
+        load_repository(&test_dir.path).expect_err("unknown ABI emitter role must fail validation");
+    assert!(
+        error.to_string().contains("unknown emitter role"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }
@@ -1284,9 +1473,35 @@ admission = "reachable_from_root"
 }
 
 #[test]
-fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
-    let main_repository = load_repository(checked_in_manifest_root("manifests"))?;
-    let sepolia_repository = load_repository(checked_in_manifest_root("manifests-sepolia-dev"))?;
+fn rejects_chain_combo_mismatch() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let path = test_dir.write_manifest_for_chain_combo(
+        "base",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path).expect_err("chain combo mismatch must fail");
+    assert!(
+        error.to_string().contains("does not match chain directory"),
+        "unexpected error for {}: {error:#}",
+        path.display()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
+    let main_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
 
     assert_eq!(
         sepolia_repository.summary().status,
@@ -1320,7 +1535,7 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
     assert!(!main_repository.manifests().iter().any(|loaded_manifest| {
         loaded_manifest
             .relative_path
-            .starts_with("ens/ens_v2_root_l1")
+            .starts_with("ethereum/ens/ens_v2_root_l1")
     }));
     assert!(
         !sepolia_repository
@@ -1329,7 +1544,7 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
             .any(|loaded_manifest| {
                 loaded_manifest
                     .relative_path
-                    .starts_with("ens/ens_v1_registry_l1")
+                    .starts_with("ethereum/ens/ens_v1_registry_l1")
             })
     );
 
@@ -1396,6 +1611,25 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
         normalize_address(&registry_manifest.contracts[0].address),
         "0x796fff2e907449be8d5921bcc215b1b76d89d080"
     );
+    assert_eq!(
+        registry_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "LabelRegistered",
+            "LabelReserved",
+            "LabelUnregistered",
+            "ExpiryUpdated",
+            "SubregistryUpdated",
+            "ResolverUpdated",
+            "TokenResource",
+            "TokenRegenerated",
+            "ParentUpdated",
+        ]
+    );
 
     let registrar_manifest_v1 = manifests_by_source_family_version[&("ens_v2_registrar_l1", 1)];
     assert_eq!(
@@ -1424,11 +1658,40 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
         registrar_manifest.capability_flags["exact_name_profile"].status,
         CapabilitySupportStatus::Supported
     );
+    assert_eq!(
+        registrar_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["NameRegistered", "NameRenewed"]
+    );
 
     let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 1)];
     assert!(resolver_manifest.roots.is_empty());
     assert!(resolver_manifest.contracts.is_empty());
     assert!(resolver_manifest.discovery_rules.is_empty());
+    assert_eq!(
+        resolver_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "AddressChanged",
+            "TextChanged",
+            "ContenthashChanged",
+            "NameChanged",
+            "VersionChanged",
+            "AliasChanged",
+            "NamedResource",
+            "NamedTextResource",
+            "NamedAddrResource",
+            "EACRolesChanged",
+        ]
+    );
 
     let admitted_addresses = sepolia_repository
         .manifests()
@@ -1455,10 +1718,10 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
 }
 
 #[tokio::test]
-async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> Result<()> {
+async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let main_repository = load_repository(checked_in_manifest_root("manifests"))?;
-    let sepolia_repository = load_repository(checked_in_manifest_root("manifests-sepolia-dev"))?;
+    let main_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
 
     assert_eq!(main_repository.summary().status, ManifestLoadStatus::Loaded);
     assert_eq!(
@@ -1655,6 +1918,40 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
         "ethereum-sepolia",
         "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c"
     ));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &sepolia_repository).await?;
+
+    let registry_manifest_id =
+        active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
+    let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
+
+    assert_eq!(events.len(), 9);
+    let label_registered = events
+        .iter()
+        .find(|event| event.name == "LabelRegistered")
+        .expect("registry manifest must declare LabelRegistered ABI");
+    assert_eq!(label_registered.manifest_id, registry_manifest_id);
+    assert_eq!(label_registered.source_family, "ens_v2_registry_l1");
+    assert_eq!(
+        label_registered.canonical_signature,
+        "LabelRegistered(uint256,bytes32,string,address,uint64,address)"
+    );
+    assert!(
+        label_registered
+            .topic0
+            .as_ref()
+            .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
+    );
+    assert_eq!(label_registered.emitter_roles, ["registry"]);
+    assert_eq!(label_registered.normalized_events, ["RegistrationGranted"]);
 
     database.cleanup().await?;
     Ok(())
@@ -2987,7 +3284,7 @@ async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> 
             "Basenames resolver manifest is missing upstream citation {citation}"
         );
     }
-    assert!(!resolver_manifest.contains("ResolverBase"));
+    assert!(!resolver_manifest.contains("public_resolver_compatible"));
     assert!(!resolver_manifest.contains("record-version"));
 
     test_dir.write_manifest(
@@ -3587,6 +3884,124 @@ async fn resolver_discovery_edges_do_not_become_transitive_registry_parents() ->
         .as_object()
         .expect("resolver discovery provenance must be an object")
         .contains_key(PROPAGATED_ROLE_PROVENANCE_FIELD)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let discovery_source = "unit-test-scoped-registry-observations";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let first_child_address = "0x0000000000000000000000000000000000000101";
+    let stale_child_address = "0x0000000000000000000000000000000000000102";
+    let replacement_child_address = "0x0000000000000000000000000000000000000103";
+    let observation =
+        |observation_key: &str, to_address: &str, block_number: i64| DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: to_address.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(block_number),
+            active_from_block_hash: Some(format!("0x{block_number:064x}")),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": observation_key,
+            }),
+        };
+
+    let initial_summary = reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[
+            observation("edge-a", first_child_address, 100),
+            observation("edge-b", stale_child_address, 101),
+        ],
+    )
+    .await?;
+    assert_eq!(initial_summary.inserted_edge_count, 2);
+
+    let first_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        first_child_address,
+    )
+    .await?;
+    let stale_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        stale_child_address,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(stale_child_id)
+    .execute(database.pool())
+    .await?;
+
+    let scoped_summary = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation("edge-a", replacement_child_address, 102)],
+    )
+    .await?;
+    assert_eq!(scoped_summary.inserted_edge_count, 1);
+    assert_eq!(scoped_summary.deactivated_edge_count, 1);
+
+    let replacement_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        replacement_child_address,
+    )
+    .await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(first_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(replacement_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(stale_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
     );
 
     database.cleanup().await?;

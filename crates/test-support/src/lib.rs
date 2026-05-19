@@ -24,6 +24,10 @@ pub fn database_url_from_env() -> String {
         .unwrap_or_else(|_| default_database_url().to_owned())
 }
 
+pub const fn test_database_harness_hint() -> &'static str {
+    "Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server."
+}
+
 #[derive(Clone, Debug)]
 pub struct TestDatabaseConfig {
     name_prefix: String,
@@ -105,7 +109,13 @@ impl TestDatabase {
             .max_connections(config.admin_max_connections)
             .connect_with(admin_options)
             .await
-            .context(config.admin_connect_context)?;
+            .with_context(|| {
+                format!(
+                    "{}. {}",
+                    config.admin_connect_context,
+                    test_database_harness_hint()
+                )
+            })?;
 
         sqlx::query(&format!(
             "CREATE DATABASE {}",
@@ -180,13 +190,27 @@ fn unique_database_name(prefix: &str) -> Result<String> {
         .context("system clock is before unix epoch")?
         .as_nanos();
     let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!("{}_{}_{unique:x}", std::process::id(), sequence);
+    let max_prefix_len = 63usize.saturating_sub(suffix.len() + 1);
+    let prefix = truncate_identifier_prefix(prefix, max_prefix_len);
 
-    Ok(format!(
-        "{prefix}_{}_{}_{}",
-        std::process::id(),
-        unique,
-        sequence
-    ))
+    if prefix.is_empty() {
+        Ok(suffix)
+    } else {
+        Ok(format!("{prefix}_{suffix}"))
+    }
+}
+
+fn truncate_identifier_prefix(prefix: &str, max_bytes: usize) -> String {
+    let mut end = 0;
+    for (index, character) in prefix.char_indices() {
+        let next = index + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    prefix[..end].to_owned()
 }
 
 fn quote_identifier(identifier: &str) -> String {

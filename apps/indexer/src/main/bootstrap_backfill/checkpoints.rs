@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use bigname_manifests::ManifestBootstrapTarget;
@@ -10,15 +10,11 @@ use crate::backfill::BackfillBlockRange;
 pub(super) async fn load_bootstrap_segment_checkpoint(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
-    manifests_root: &Path,
     chain: &str,
+    expected_source_identity: &Value,
     range: BackfillBlockRange,
     target_ids: &BTreeSet<String>,
 ) -> Result<Option<i64>> {
-    let idempotency_key_pattern = format!(
-        "indexer-bootstrap-backfill:%:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
-        manifests_root.display()
-    );
     let rows = sqlx::query(
         r#"
         SELECT
@@ -34,18 +30,17 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
           AND br.status <> 'pending'::backfill_lifecycle_status
           AND (
                 br.status = 'completed'::backfill_lifecycle_status
-                OR br.lease_expires_at IS NULL
-                OR br.lease_expires_at < now()
+              OR br.lease_expires_at IS NULL
+              OR br.lease_expires_at < now()
           )
-          AND bj.idempotency_key LIKE $3
-          AND br.range_start_block_number <= $5
-          AND br.range_end_block_number >= $4
-          AND bj.range_end_block_number >= $4
+          AND bj.idempotency_key LIKE 'indexer-bootstrap-backfill:%'
+          AND br.range_start_block_number <= $4
+          AND br.range_end_block_number >= $3
+          AND bj.range_end_block_number >= $3
         "#,
     )
     .bind(deployment_profile)
     .bind(chain)
-    .bind(idempotency_key_pattern)
     .bind(range.from_block)
     .bind(range.to_block)
     .fetch_all(pool)
@@ -73,21 +68,22 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
         });
     }
 
-    contiguous_bootstrap_segment_checkpoint(checkpoint_rows, range, target_ids)
+    contiguous_bootstrap_segment_checkpoint(
+        checkpoint_rows,
+        range,
+        expected_source_identity,
+        target_ids,
+    )
 }
 
 pub(super) async fn load_bootstrap_target_checkpoint(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
-    manifests_root: &Path,
     chain: &str,
+    expected_source_identity: &Value,
     range: BackfillBlockRange,
     target_id: &str,
 ) -> Result<Option<i64>> {
-    let idempotency_key_pattern = format!(
-        "indexer-bootstrap-backfill:%:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash=%",
-        manifests_root.display()
-    );
     let rows = sqlx::query(
         r#"
         SELECT
@@ -103,19 +99,18 @@ pub(super) async fn load_bootstrap_target_checkpoint(
           AND br.status <> 'pending'::backfill_lifecycle_status
           AND (
                 br.status = 'completed'::backfill_lifecycle_status
-                OR br.lease_expires_at IS NULL
-                OR br.lease_expires_at < now()
+              OR br.lease_expires_at IS NULL
+              OR br.lease_expires_at < now()
           )
-          AND bj.idempotency_key LIKE $3
-          AND br.range_start_block_number <= $5
-          AND br.range_end_block_number >= $4
-          AND bj.range_end_block_number >= $4
+          AND bj.idempotency_key LIKE 'indexer-bootstrap-backfill:%'
+          AND br.range_start_block_number <= $4
+          AND br.range_end_block_number >= $3
+          AND bj.range_end_block_number >= $3
         ORDER BY br.range_start_block_number ASC, br.checkpoint_block_number ASC
         "#,
     )
     .bind(deployment_profile)
     .bind(chain)
-    .bind(idempotency_key_pattern)
     .bind(range.from_block)
     .bind(range.to_block)
     .fetch_all(pool)
@@ -143,7 +138,12 @@ pub(super) async fn load_bootstrap_target_checkpoint(
         });
     }
 
-    contiguous_bootstrap_target_checkpoint(checkpoint_rows, range, target_id)
+    contiguous_bootstrap_target_checkpoint(
+        checkpoint_rows,
+        range,
+        expected_source_identity,
+        target_id,
+    )
 }
 
 pub(super) fn bootstrap_segment_target_ids(
@@ -170,6 +170,146 @@ fn source_identity_requested_target_ids(source_identity: &Value) -> Option<BTree
         .collect()
 }
 
+fn source_identity_hash_field(source_identity: &Value) -> Option<&str> {
+    source_identity
+        .get("source_identity_hash")
+        .and_then(Value::as_str)
+}
+
+fn source_identity_selected_target_ids(source_identity: &Value) -> Option<BTreeSet<String>> {
+    let selected_targets = source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)?;
+    selected_targets
+        .iter()
+        .map(|target| {
+            target
+                .get("contract_instance_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceIdentitySelectedTarget {
+    source_family: String,
+    contract_instance_id: String,
+    address: String,
+    effective_from_block: i64,
+    effective_to_block: i64,
+}
+
+fn source_identity_selected_target(
+    source_identity: &Value,
+    target_id: &str,
+) -> Option<SourceIdentitySelectedTarget> {
+    let selected_targets = source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)?;
+    selected_targets.iter().find_map(|target| {
+        if target.get("contract_instance_id").and_then(Value::as_str)? != target_id {
+            return None;
+        }
+        Some(SourceIdentitySelectedTarget {
+            source_family: target.get("source_family")?.as_str()?.to_owned(),
+            contract_instance_id: target.get("contract_instance_id")?.as_str()?.to_owned(),
+            address: target.get("address")?.as_str()?.to_ascii_lowercase(),
+            effective_from_block: target.get("effective_from_block")?.as_i64()?,
+            effective_to_block: target.get("effective_to_block")?.as_i64()?,
+        })
+    })
+}
+
+fn source_identity_generic_topic_scans(source_identity: &Value) -> Option<&Value> {
+    source_identity.get("generic_topic_scans")
+}
+
+fn source_identity_selected_target_matches(
+    source_target: &SourceIdentitySelectedTarget,
+    expected_target: &SourceIdentitySelectedTarget,
+) -> bool {
+    source_target.source_family == expected_target.source_family
+        && source_target.contract_instance_id == expected_target.contract_instance_id
+        && source_target.address == expected_target.address
+        && source_target.effective_from_block >= expected_target.effective_from_block
+        && source_target.effective_to_block <= expected_target.effective_to_block
+        && source_target.effective_from_block <= source_target.effective_to_block
+}
+
+fn source_identity_generic_topic_scan_matches_target(
+    source_identity: &Value,
+    expected_source_identity: &Value,
+    target_id: &str,
+) -> bool {
+    source_identity_generic_topic_scans(source_identity).is_some()
+        && source_identity_generic_topic_scans(source_identity)
+            == source_identity_generic_topic_scans(expected_source_identity)
+        && source_identity_requested_target_ids(source_identity)
+            .is_some_and(|target_ids| target_ids.contains(target_id))
+        && source_identity_requested_target_ids(expected_source_identity)
+            .is_some_and(|target_ids| target_ids.contains(target_id))
+}
+
+fn source_identity_matches_expected_targets(
+    source_identity: &Value,
+    expected_source_identity: &Value,
+    target_ids: &BTreeSet<String>,
+    require_exact_target_set: bool,
+) -> bool {
+    if source_identity_hash_field(source_identity).is_some()
+        && source_identity_hash_field(source_identity)
+            == source_identity_hash_field(expected_source_identity)
+    {
+        return true;
+    }
+
+    if source_identity.get("selector_kind") != expected_source_identity.get("selector_kind")
+        || source_identity.get("source_family") != expected_source_identity.get("source_family")
+    {
+        return false;
+    }
+    if require_exact_target_set {
+        if source_identity_requested_target_ids(source_identity).as_ref() != Some(target_ids)
+            || source_identity_requested_target_ids(expected_source_identity).as_ref()
+                != Some(target_ids)
+        {
+            return false;
+        }
+        let Some(source_selected_target_ids) = source_identity_selected_target_ids(source_identity)
+        else {
+            return false;
+        };
+        let Some(expected_selected_target_ids) =
+            source_identity_selected_target_ids(expected_source_identity)
+        else {
+            return false;
+        };
+        if source_selected_target_ids != expected_selected_target_ids
+            || !source_selected_target_ids.is_subset(target_ids)
+        {
+            return false;
+        }
+    }
+
+    target_ids.iter().all(|target_id| {
+        match (
+            source_identity_selected_target(source_identity, target_id),
+            source_identity_selected_target(expected_source_identity, target_id),
+        ) {
+            (Some(source_target), Some(expected_target)) => {
+                source_identity_selected_target_matches(&source_target, &expected_target)
+            }
+            (None, None) => source_identity_generic_topic_scan_matches_target(
+                source_identity,
+                expected_source_identity,
+                target_id,
+            ),
+            _ => false,
+        }
+    })
+}
+
 #[derive(Clone, Debug)]
 struct BootstrapTargetCheckpointRow {
     range_start_block_number: i64,
@@ -180,21 +320,36 @@ struct BootstrapTargetCheckpointRow {
 fn contiguous_bootstrap_target_checkpoint(
     rows: Vec<BootstrapTargetCheckpointRow>,
     range: BackfillBlockRange,
+    expected_source_identity: &Value,
     target_id: &str,
 ) -> Result<Option<i64>> {
+    let target_ids = BTreeSet::from([target_id.to_owned()]);
     contiguous_bootstrap_checkpoint(rows, range, |source_identity| {
         source_identity_requested_target_ids(source_identity)
             .is_some_and(|target_ids| target_ids.contains(target_id))
+            && source_identity_matches_expected_targets(
+                source_identity,
+                expected_source_identity,
+                &target_ids,
+                false,
+            )
     })
 }
 
 fn contiguous_bootstrap_segment_checkpoint(
     rows: Vec<BootstrapTargetCheckpointRow>,
     range: BackfillBlockRange,
+    expected_source_identity: &Value,
     target_ids: &BTreeSet<String>,
 ) -> Result<Option<i64>> {
     contiguous_bootstrap_checkpoint(rows, range, |source_identity| {
         source_identity_requested_target_ids(source_identity).as_ref() == Some(target_ids)
+            && source_identity_matches_expected_targets(
+                source_identity,
+                expected_source_identity,
+                target_ids,
+                true,
+            )
     })
 }
 
@@ -234,83 +389,5 @@ fn contiguous_bootstrap_checkpoint(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn target_checkpoint_walks_contiguous_jobs_for_same_target() -> Result<()> {
-        let target_id = "00000000-0000-0000-0000-000000000001";
-        let other_target_id = "00000000-0000-0000-0000-000000000002";
-        let rows = vec![
-            checkpoint_row(1, 10, &[target_id]),
-            checkpoint_row(11, 20, &[target_id, other_target_id]),
-        ];
-
-        assert_eq!(
-            contiguous_bootstrap_target_checkpoint(
-                rows,
-                BackfillBlockRange::new(1, 30)?,
-                target_id,
-            )?,
-            Some(20)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn target_checkpoint_stops_at_coverage_gap() -> Result<()> {
-        let target_id = "00000000-0000-0000-0000-000000000001";
-        let rows = vec![
-            checkpoint_row(1, 10, &[target_id]),
-            checkpoint_row(12, 20, &[target_id]),
-        ];
-
-        assert_eq!(
-            contiguous_bootstrap_target_checkpoint(
-                rows,
-                BackfillBlockRange::new(1, 30)?,
-                target_id,
-            )?,
-            Some(10)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn segment_checkpoint_ignores_non_contiguous_parallel_range_progress() -> Result<()> {
-        let target_id = "00000000-0000-0000-0000-000000000001";
-        let target_ids = BTreeSet::from([target_id.to_owned()]);
-        let rows = vec![
-            checkpoint_row(1, 10, &[target_id]),
-            checkpoint_row(21, 30, &[target_id]),
-        ];
-
-        assert_eq!(
-            contiguous_bootstrap_segment_checkpoint(
-                rows,
-                BackfillBlockRange::new(1, 40)?,
-                &target_ids,
-            )?,
-            Some(10)
-        );
-        Ok(())
-    }
-
-    fn checkpoint_row(
-        range_start_block_number: i64,
-        checkpoint_block_number: i64,
-        target_ids: &[&str],
-    ) -> BootstrapTargetCheckpointRow {
-        BootstrapTargetCheckpointRow {
-            range_start_block_number,
-            checkpoint_block_number,
-            source_identity: json!({
-                "requested_watched_targets": target_ids
-                    .iter()
-                    .map(|target_id| json!({ "contract_instance_id": target_id }))
-                    .collect::<Vec<_>>()
-            }),
-        }
-    }
-}
+#[path = "checkpoints/tests.rs"]
+mod tests;

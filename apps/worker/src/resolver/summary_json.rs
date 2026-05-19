@@ -1,10 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigname_storage::{PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+
+use crate::projection_json::{
+    dedupe_json_values, json_array_field, json_string_array_field, projection_coverage,
+};
 
 use super::{
     EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
@@ -17,6 +21,13 @@ use super::{
         AliasSeed, CurrentBindingSeed, ResolverTarget, load_alias_events, load_current_bindings,
         load_resolver_permissions,
     },
+};
+
+mod declared_summary;
+
+use declared_summary::{
+    build_binding_enumeration_not_projected_declared_summary, build_declared_summary,
+    build_unsupported_declared_summary,
 };
 
 pub(super) async fn build_resolver_current_row(
@@ -40,7 +51,7 @@ pub(super) async fn build_resolver_current_row(
     let skip_binding_enumeration = skip_known_binding_enumeration
         || skip_pending_binding_enumeration
         || skip_full_rebuild_binding_enumeration;
-    let skip_permission_enumeration = skip_full_rebuild_binding_enumeration;
+    let skip_permission_enumeration = skip_binding_enumeration;
     let bindings = if skip_binding_enumeration {
         Vec::new()
     } else {
@@ -159,221 +170,6 @@ fn last_recomputed_at(
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
 }
 
-fn build_declared_summary(
-    bindings: &[CurrentBindingSeed],
-    aliases: &[AliasSeed],
-    permissions: &[PermissionsCurrentRow],
-) -> Value {
-    json!({
-        "bindings": build_binding_summary(bindings.iter()),
-        "aliases": build_alias_summary(bindings, aliases),
-        "permissions": build_permissions_summary(permissions),
-        "role_holders": build_role_holders_summary(permissions),
-        "event_summary": build_event_summary(bindings, aliases, permissions),
-    })
-}
-
-fn build_binding_enumeration_not_projected_declared_summary(
-    permissions: &[PermissionsCurrentRow],
-    skip_permission_enumeration: bool,
-) -> Value {
-    let permissions_summary = if skip_permission_enumeration {
-        unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
-    } else {
-        build_permissions_summary(permissions)
-    };
-    let role_holders_summary = if skip_permission_enumeration {
-        unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
-    } else {
-        build_role_holders_summary(permissions)
-    };
-
-    json!({
-        "bindings": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
-        "aliases": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
-        "permissions": permissions_summary,
-        "role_holders": role_holders_summary,
-        "event_summary": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
-    })
-}
-
-fn build_permissions_summary(permissions: &[PermissionsCurrentRow]) -> Value {
-    json!({
-        "status": "supported",
-        "count": permissions.len(),
-        "items": permissions
-            .iter()
-            .map(|permission| {
-                json!({
-                    "resource_id": permission.resource_id,
-                    "subject": permission.subject,
-                    "effective_powers": permission.effective_powers,
-                    "grant_source": permission.grant_source,
-                    "revocation_source": permission.revocation_source,
-                })
-            })
-            .collect::<Vec<_>>(),
-    })
-}
-
-fn build_binding_summary<'a>(bindings: impl Iterator<Item = &'a CurrentBindingSeed>) -> Value {
-    let items = bindings.map(build_binding_item).collect::<Vec<_>>();
-    json!({
-        "status": "supported",
-        "count": items.len(),
-        "items": items,
-    })
-}
-
-fn build_binding_item(binding: &CurrentBindingSeed) -> Value {
-    json!({
-        "logical_name_id": binding.logical_name_id,
-        "canonical_display_name": binding.canonical_display_name,
-        "normalized_name": binding.normalized_name,
-        "namehash": binding.namehash,
-        "resource_id": binding.resource_id,
-        "surface_binding_id": binding.surface_binding_id,
-        "binding_kind": binding.binding_kind.as_str(),
-    })
-}
-
-fn build_alias_summary(bindings: &[CurrentBindingSeed], aliases: &[AliasSeed]) -> Value {
-    let mut items = bindings
-        .iter()
-        .filter(|binding| binding.binding_kind == SurfaceBindingKind::ResolverAliasPath)
-        .map(build_binding_item)
-        .collect::<Vec<_>>();
-    items.extend(aliases.iter().map(build_alias_item));
-    items.sort_by(|left, right| {
-        left.get("logical_name_id")
-            .and_then(Value::as_str)
-            .cmp(&right.get("logical_name_id").and_then(Value::as_str))
-            .then(
-                left.get("from_dns_encoded_name")
-                    .and_then(Value::as_str)
-                    .cmp(&right.get("from_dns_encoded_name").and_then(Value::as_str)),
-            )
-    });
-    json!({
-        "status": "supported",
-        "count": items.len(),
-        "items": items,
-    })
-}
-
-fn build_alias_item(alias: &AliasSeed) -> Value {
-    json!({
-        "logical_name_id": alias.logical_name_id,
-        "resource_id": alias.resource_id,
-        "binding_kind": "resolver_alias_path",
-        "alias_state": alias.after_state.get("alias_state").cloned().unwrap_or_else(|| json!("active")),
-        "active": alias.after_state.get("active").cloned().unwrap_or(Value::Bool(true)),
-        "chain_id": alias.chain_id,
-        "resolver_address": alias.resolver_address,
-        "from_dns_encoded_name": alias.after_state.get("from_dns_encoded_name").cloned().unwrap_or(Value::Null),
-        "to_dns_encoded_name": alias.after_state.get("to_dns_encoded_name").cloned().unwrap_or(Value::Null),
-        "from_name": alias.after_state.get("from_name").cloned().unwrap_or(Value::Null),
-        "to_name": alias.after_state.get("to_name").cloned().unwrap_or(Value::Null),
-        "to_logical_name_id": alias.after_state.get("to_logical_name_id").cloned().unwrap_or(Value::Null),
-        "to_resource_id": alias.after_state.get("to_resource_id").cloned().unwrap_or(Value::Null),
-        "latest_event_kind": EVENT_KIND_ALIAS_CHANGED,
-    })
-}
-
-fn build_role_holders_summary(permissions: &[PermissionsCurrentRow]) -> Value {
-    let mut holders = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
-
-    for permission in permissions {
-        let entry = holders
-            .entry(permission.subject.clone())
-            .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()));
-        entry.0.insert(permission.resource_id.to_string());
-        for power in json_string_array(&permission.effective_powers) {
-            entry.1.insert(power);
-        }
-    }
-
-    json!({
-        "status": "supported",
-        "count": holders.len(),
-        "items": holders
-            .into_iter()
-            .map(|(subject, (resource_ids, powers))| {
-                json!({
-                    "subject": subject,
-                    "resource_count": resource_ids.len(),
-                    "permission_row_count": resource_ids.len(),
-                    "effective_powers": powers.into_iter().collect::<Vec<_>>(),
-                    "resource_ids": resource_ids.into_iter().collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
-    })
-}
-
-fn build_event_summary(
-    bindings: &[CurrentBindingSeed],
-    aliases: &[AliasSeed],
-    permissions: &[PermissionsCurrentRow],
-) -> Value {
-    let resolver_changed_count = bindings.len();
-    let alias_changed_count = aliases.len();
-    let permission_changed_count = permissions
-        .iter()
-        .map(|permission| {
-            permission
-                .provenance
-                .get("normalized_event_ids")
-                .and_then(Value::as_array)
-                .map(|ids| ids.len())
-                .unwrap_or(0)
-        })
-        .sum::<usize>();
-    let total_count = resolver_changed_count + alias_changed_count + permission_changed_count;
-    let mut by_kind = serde_json::Map::new();
-    if alias_changed_count > 0 {
-        by_kind.insert(
-            EVENT_KIND_ALIAS_CHANGED.to_owned(),
-            Value::Number(alias_changed_count.into()),
-        );
-    }
-    if permission_changed_count > 0 {
-        by_kind.insert(
-            EVENT_KIND_PERMISSION_CHANGED.to_owned(),
-            Value::Number(permission_changed_count.into()),
-        );
-    }
-    if resolver_changed_count > 0 {
-        by_kind.insert(
-            EVENT_KIND_RESOLVER_CHANGED.to_owned(),
-            Value::Number(resolver_changed_count.into()),
-        );
-    }
-
-    json!({
-        "status": "supported",
-        "count": total_count,
-        "by_kind": by_kind,
-    })
-}
-
-fn build_unsupported_declared_summary(unsupported_reason: &str) -> Value {
-    json!({
-        "bindings": unsupported_summary(unsupported_reason),
-        "aliases": unsupported_summary(unsupported_reason),
-        "permissions": unsupported_summary(unsupported_reason),
-        "role_holders": unsupported_summary(unsupported_reason),
-        "event_summary": unsupported_summary(unsupported_reason),
-    })
-}
-
-fn unsupported_summary(unsupported_reason: &str) -> Value {
-    json!({
-        "status": "unsupported",
-        "unsupported_reason": unsupported_reason,
-    })
-}
-
 fn build_provenance(
     bindings: &[CurrentBindingSeed],
     aliases: &[AliasSeed],
@@ -388,7 +184,7 @@ fn build_provenance(
                 .map(|alias| Value::Number(alias.normalized_event_id.into())),
         )
         .chain(permissions.iter().flat_map(|permission| {
-            extract_json_array(&permission.provenance, "normalized_event_ids")
+            json_array_field(&permission.provenance, "normalized_event_ids")
         }))
         .collect::<Vec<_>>();
     let raw_fact_refs = bindings
@@ -398,7 +194,7 @@ fn build_provenance(
         .chain(
             permissions
                 .iter()
-                .flat_map(|permission| extract_json_array(&permission.provenance, "raw_fact_refs")),
+                .flat_map(|permission| json_array_field(&permission.provenance, "raw_fact_refs")),
         )
         .collect::<Vec<_>>();
     let manifest_versions =
@@ -419,7 +215,7 @@ fn build_provenance(
                 })
             }))
             .chain(permissions.iter().flat_map(|permission| {
-                extract_json_array(&permission.provenance, "manifest_versions")
+                json_array_field(&permission.provenance, "manifest_versions")
             }))
             .collect::<Vec<_>>();
 
@@ -445,18 +241,18 @@ fn build_coverage(
     source_classes.extend(aliases.iter().map(|alias| alias.source_family.clone()));
 
     for permission in permissions {
-        for value in extract_json_string_array(&permission.coverage, "source_classes_considered") {
+        for value in json_string_array_field(&permission.coverage, "source_classes_considered") {
             source_classes.insert(value);
         }
     }
 
-    json!({
-        "status": "full",
-        "exhaustiveness": "authoritative",
-        "source_classes_considered": source_classes.into_iter().collect::<Vec<_>>(),
-        "unsupported_reason": Value::Null,
-        "enumeration_basis": RESOLVER_CURRENT_ENUMERATION_BASIS,
-    })
+    projection_coverage(
+        "full",
+        "authoritative",
+        source_classes,
+        None,
+        RESOLVER_CURRENT_ENUMERATION_BASIS,
+    )
 }
 
 fn build_unsupported_coverage(
@@ -476,7 +272,7 @@ fn build_binding_enumeration_not_projected_coverage(
     source_family: Option<&str>,
 ) -> Value {
     let mut coverage = build_coverage(&[], &[], permissions);
-    let mut source_classes = extract_json_string_array(&coverage, "source_classes_considered")
+    let mut source_classes = json_string_array_field(&coverage, "source_classes_considered")
         .into_iter()
         .collect::<BTreeSet<_>>();
     if let Some(source_family) = source_family {
@@ -487,47 +283,4 @@ fn build_binding_enumeration_not_projected_coverage(
     coverage["source_classes_considered"] = json!(source_classes.into_iter().collect::<Vec<_>>());
     coverage["unsupported_reason"] = json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON);
     coverage
-}
-
-fn extract_json_array(value: &Value, field: &str) -> Vec<Value> {
-    value
-        .get(field)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn extract_json_string_array(value: &Value, field: &str) -> Vec<String> {
-    value
-        .get(field)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
-}
-
-fn json_string_array(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
-}
-
-fn dedupe_json_values(values: Vec<Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }

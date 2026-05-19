@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use bigname_storage::CanonicalityState;
 use sqlx::types::Uuid;
 
@@ -8,7 +7,10 @@ mod raw_logs;
 
 pub(super) use active_emitters::load_active_emitters;
 pub(super) use edges::load_registry_edges_by_observation_point;
-pub(super) use raw_logs::{load_registry_raw_logs, stream_registry_raw_logs};
+pub(super) use raw_logs::{
+    RegistryRawLogPosition, load_registry_raw_log_checkpoint_page, load_registry_raw_logs,
+    stream_registry_raw_logs,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct RegistryRawLogRow {
@@ -50,15 +52,4 @@ pub(super) struct ActiveRegistryEdge {
     pub(super) discovery_source: String,
     pub(super) from_contract_instance_id: Uuid,
     pub(super) to_contract_instance_id: Uuid,
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

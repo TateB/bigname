@@ -2,27 +2,6 @@ use bigname_storage::CanonicalityState;
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ActiveEmitter {
-    pub(super) address: String,
-    pub(super) contract_instance_id: Uuid,
-    pub(super) source_manifest_id: i64,
-    pub(super) namespace: String,
-    pub(super) source_family: String,
-    pub(super) manifest_version: i64,
-    pub(super) active_from_block_number: Option<i64>,
-    pub(super) active_to_block_number: Option<i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ActiveManifestMetadata {
-    pub(super) manifest_id: i64,
-    pub(super) chain: String,
-    pub(super) namespace: String,
-    pub(super) source_family: String,
-    pub(super) manifest_version: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ResolverRawLogRow {
     pub(super) chain_id: String,
     pub(super) block_hash: String,

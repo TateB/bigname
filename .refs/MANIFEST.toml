@@ -70,3 +70,30 @@ authoritative_for = [
   "first-party app known-resolver profile rows in docs/manifests.md",
   "known PublicResolver-generation profile admission comments in manifests/ens/ens_v1_resolver_l1/v1.toml",
 ]
+
+[refs.ponder]
+repo = "https://github.com/ponder-sh/ponder"
+commit = "c8f6935fb65176c01b40cae9056be704c0e5318e"
+purpose = "Reference EVM indexer framework. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check chain reorg, rollback, and realtime indexing design."
+authoritative_for = [
+  "cross-check scope for chain reorg and rollback handling in docs/chain-intake.md",
+  "comparison source for storage-bounded live indexing reliability rules",
+]
+
+[refs.graph_node]
+repo = "https://github.com/graphprotocol/graph-node"
+commit = "aefe17371c67ea4090034f61a4e69631d2270a5a"
+purpose = "Reference Graph Node indexer. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check chain reorg, revert, and deterministic indexing design."
+authoritative_for = [
+  "cross-check scope for chain reorg and revert handling in docs/chain-intake.md",
+  "comparison source for deterministic indexing and rollback boundaries",
+]
+
+[refs.reth]
+repo = "https://github.com/paradigmxyz/reth"
+commit = "194ece23c3e9b03a26042ea887246d359e4fc47e"
+purpose = "Reference Ethereum execution client. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check node-level block identity, canonical state, finalized/safe tags, and RPC behavior."
+authoritative_for = [
+  "cross-check scope for block-hash-first intake and RPC block selection in docs/chain-intake.md",
+  "comparison source for execution-client storage and canonical head behavior",
+]

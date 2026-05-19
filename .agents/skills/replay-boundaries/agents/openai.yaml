@@ -1,7 +1,0 @@
-interface:
-  display_name: "Replay Boundaries"
-  short_description: "Guard replay, projection, and execution rules"
-  default_prompt: "Use $replay-boundaries to review this storage or execution change for canonicality, ownership, and rebuild safety."
-
-policy:
-  allow_implicit_invocation: true

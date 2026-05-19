@@ -18,20 +18,27 @@ use crate::{
     provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
-        RawFactNormalizedEventReplaySelection, RawFactNormalizedEventReplaySourceScope,
-        log_raw_fact_normalized_event_replay_outcome, replay_raw_fact_normalized_events,
+        RawFactNormalizedEventReplaySelection, log_raw_fact_normalized_event_replay_outcome,
+        replay_raw_fact_normalized_events,
     },
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
 
 #[path = "bootstrap_backfill/checkpoints.rs"]
 mod checkpoints;
+#[path = "bootstrap_backfill/identity.rs"]
+mod identity;
 #[path = "bootstrap_backfill/planning.rs"]
 mod planning;
 
 use checkpoints::{
     bootstrap_segment_target_ids, load_bootstrap_segment_checkpoint,
     load_bootstrap_target_checkpoint,
+};
+pub(crate) use identity::bootstrap_backfill_idempotency_key;
+use identity::{
+    partitioned_bootstrap_backfill_idempotency_key, replay_source_scope_from_source_plan,
+    source_identity_hash_for_backfill,
 };
 use planning::{
     BootstrapBackfillTargetRange, bootstrap_target_range, narrow_manifest_bootstrap_source_plan,
@@ -42,8 +49,6 @@ const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_WORKERS: usize = 0;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS: i64 = 50_000;
 const MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS: usize = 4;
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BootstrapBackfillOutcome {
@@ -195,11 +200,37 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             };
 
             let mut range = range;
+            let mut checkpoint_source_plan = load_manifest_declared_watched_source_selector_plan(
+                pool,
+                &task.chain,
+                WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
+                    contract_instance_id: target.contract_instance_id,
+                }]),
+                range.from_block,
+                range.to_block,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to build bootstrap watched-target checkpoint source plan for chain {} target {} range {}..={}",
+                    task.chain,
+                    target.contract_instance_id,
+                    range.from_block,
+                    range.to_block
+                )
+            })?;
+            narrow_manifest_bootstrap_source_plan(
+                &mut checkpoint_source_plan,
+                std::slice::from_ref(&target),
+                range,
+            )?;
+            let checkpoint_source_identity =
+                backfill_job_source_identity_payload(&checkpoint_source_plan)?;
             if let Some(stored_checkpoint) = load_bootstrap_target_checkpoint(
                 pool,
                 &deployment_profile,
-                manifests_root,
                 &task.chain,
+                &checkpoint_source_identity,
                 range,
                 &target.contract_instance_id.to_string(),
             )
@@ -250,12 +281,41 @@ pub(crate) async fn run_startup_bootstrap_backfills(
 
         for segment in plan_bootstrap_backfill_segments(target_ranges)? {
             let segment_target_ids = bootstrap_segment_target_ids(&segment.targets);
+            let mut checkpoint_source_plan = load_manifest_declared_watched_source_selector_plan(
+                pool,
+                &task.chain,
+                WatchedSourceSelector::WatchedTargetSet(
+                    segment
+                        .targets
+                        .iter()
+                        .map(|target| WatchedTargetIdentity {
+                            contract_instance_id: target.contract_instance_id,
+                        })
+                        .collect(),
+                ),
+                segment.range.from_block,
+                segment.range.to_block,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to build bootstrap segment checkpoint source plan for chain {} range {}..={}",
+                    task.chain, segment.range.from_block, segment.range.to_block
+                )
+            })?;
+            narrow_manifest_bootstrap_source_plan(
+                &mut checkpoint_source_plan,
+                &segment.targets,
+                segment.range,
+            )?;
+            let checkpoint_source_identity =
+                backfill_job_source_identity_payload(&checkpoint_source_plan)?;
             let mut segment_range = segment.range;
             if let Some(stored_checkpoint) = load_bootstrap_segment_checkpoint(
                 pool,
                 &deployment_profile,
-                manifests_root,
                 &task.chain,
+                &checkpoint_source_identity,
                 segment.range,
                 &segment_target_ids,
             )
@@ -332,7 +392,6 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             let idempotency_key = if range_specs.len() == 1 {
                 bootstrap_backfill_idempotency_key(
                     &deployment_profile,
-                    manifests_root,
                     &task.chain,
                     &source_identity_hash,
                     segment_range,
@@ -340,7 +399,6 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             } else {
                 partitioned_bootstrap_backfill_idempotency_key(
                     &deployment_profile,
-                    manifests_root,
                     &task.chain,
                     &source_identity_hash,
                     segment_range,
@@ -380,7 +438,11 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                         selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
                             from_block: job_outcome.from_block,
                             to_block: job_outcome.to_block,
-                            source_scope: replay_source_scope_from_source_plan(&source_plan),
+                            source_scope: replay_source_scope_from_source_plan(
+                                &source_plan,
+                                job_outcome.from_block,
+                                job_outcome.to_block,
+                            ),
                         },
                     },
                 )
@@ -454,86 +516,4 @@ fn effective_bootstrap_backfill_worker_count(
     } else {
         1
     }
-}
-
-fn replay_source_scope_from_source_plan(
-    source_plan: &bigname_manifests::WatchedSourceSelectorPlan,
-) -> Vec<RawFactNormalizedEventReplaySourceScope> {
-    let mut scopes = Vec::new();
-    let resolver_range = source_plan
-        .selected_targets
-        .iter()
-        .filter(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        .fold(None, |range: Option<(i64, i64)>, target| {
-            Some(match range {
-                Some((from_block, to_block)) => (
-                    from_block.min(target.effective_from_block),
-                    to_block.max(target.effective_to_block),
-                ),
-                None => (target.effective_from_block, target.effective_to_block),
-            })
-        });
-    if let Some((from_block, to_block)) = resolver_range {
-        scopes.push(RawFactNormalizedEventReplaySourceScope {
-            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
-            address: GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
-            from_block,
-            to_block,
-        });
-    }
-
-    scopes.extend(source_plan.selected_targets.iter().filter_map(|target| {
-        if target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
-            return None;
-        }
-        Some(RawFactNormalizedEventReplaySourceScope {
-            source_family: target.source_family.clone(),
-            address: target.address.to_ascii_lowercase(),
-            from_block: target.effective_from_block,
-            to_block: target.effective_to_block,
-        })
-    }));
-    scopes
-}
-
-fn source_identity_hash_for_backfill(
-    source_plan: &bigname_manifests::WatchedSourceSelectorPlan,
-) -> Result<String> {
-    let payload = backfill_job_source_identity_payload(source_plan)?;
-    payload
-        .get("source_identity_hash")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .context("backfill source identity payload is missing source_identity_hash")
-}
-
-pub(crate) fn bootstrap_backfill_idempotency_key(
-    deployment_profile: &str,
-    manifests_root: &Path,
-    chain: &str,
-    source_identity_hash: &str,
-    range: BackfillBlockRange,
-) -> String {
-    format!(
-        "indexer-bootstrap-backfill:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
-        manifests_root.display(),
-        range.from_block,
-        range.to_block
-    )
-}
-
-fn partitioned_bootstrap_backfill_idempotency_key(
-    deployment_profile: &str,
-    manifests_root: &Path,
-    chain: &str,
-    source_identity_hash: &str,
-    range: BackfillBlockRange,
-    range_blocks: i64,
-) -> String {
-    format!(
-        "indexer-bootstrap-backfill:v2:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}:range_blocks={range_blocks}",
-        manifests_root.display(),
-        range.from_block,
-        range.to_block
-    )
 }

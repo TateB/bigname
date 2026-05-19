@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use bigname_storage::{normalize_evm_address, sql_row};
 use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -231,7 +232,7 @@ fn decode_primary_name_rebuild_input(row: PgRow) -> Result<PrimaryNameRebuildInp
 
             Ok::<NameClaimObservation, anyhow::Error>(NameClaimObservation {
                 key: tuple.key.clone(),
-                raw_name: row.try_get("raw_name").context("missing raw_name")?,
+                raw_name: sql_row::get(&row, "raw_name")?,
                 primary_claim_source,
             })
         })
@@ -244,25 +245,23 @@ fn decode_primary_name_rebuild_input(row: PgRow) -> Result<PrimaryNameRebuildInp
 }
 
 fn decode_name_claim_observation(row: PgRow) -> Result<NameClaimObservation> {
-    let primary_claim_source: Value = row
-        .try_get("primary_claim_source")
-        .context("missing primary_claim_source")?;
+    let primary_claim_source: Value = sql_row::get(&row, "primary_claim_source")?;
     primary_claim_source
         .as_object()
         .context("primary_claim_source must be a JSON object")?;
 
     Ok(NameClaimObservation {
         key: decode_tuple_key(&row)?,
-        raw_name: row.try_get("raw_name").context("missing raw_name")?,
+        raw_name: sql_row::get(&row, "raw_name")?,
         primary_claim_source,
     })
 }
 
 fn decode_tuple_key(row: &PgRow) -> Result<PrimaryNameTupleKey> {
-    let address = row
-        .try_get::<String, _>("address")
-        .context("missing primary-name address")?
-        .to_ascii_lowercase();
+    let address = normalize_evm_address(
+        &row.try_get::<String, _>("address")
+            .context("missing primary-name address")?,
+    );
     let namespace = row
         .try_get::<String, _>("namespace")
         .context("missing primary-name namespace")?;

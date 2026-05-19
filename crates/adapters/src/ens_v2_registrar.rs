@@ -1,6 +1,7 @@
 use anyhow::Result;
-use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
+
+use crate::normalized_event_support::upsert_normalized_events_with_counts;
 
 mod active_emitters;
 mod decoding;
@@ -15,11 +16,10 @@ mod tests;
 use active_emitters::load_active_emitters;
 use decoding::build_registrar_observation;
 use event_building::build_registrar_event;
-use persistence_summary::{
-    count_events_by_kind, count_inserted_events_by_kind, empty_summary,
-    load_existing_event_identities,
-};
+use persistence_summary::empty_summary;
 use raw_logs::load_registrar_raw_logs;
+
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 
 pub use persistence_summary::{EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary};
 
@@ -28,10 +28,9 @@ pub(super) const DERIVATION_KIND_ENS_V2_REGISTRAR: &str = "ens_v2_registrar";
 pub(super) const REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 pub(super) const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 pub(super) const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
-
-pub(super) const NAME_REGISTERED_SIGNATURE: &str =
+pub(super) const ABI_EVENT_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)";
-pub(super) const NAME_RENEWED_SIGNATURE: &str =
+pub(super) const ABI_EVENT_NAME_RENEWED_SIGNATURE: &str =
     "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)";
 
 impl EnsV2RegistrarSyncSummary {
@@ -40,7 +39,7 @@ impl EnsV2RegistrarSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, None).await
+        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, None, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -49,7 +48,8 @@ impl EnsV2RegistrarSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, Some(source_scope)).await
+        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, Some(source_scope), None)
+            .await
     }
 }
 
@@ -57,7 +57,15 @@ pub async fn sync_ens_v2_registrar(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2RegistrarSyncSummary> {
-    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None).await
+    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None, None).await
+}
+
+pub async fn sync_ens_v2_registrar_through_block(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: i64,
+) -> Result<EnsV2RegistrarSyncSummary> {
+    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None, Some(target_block_number)).await
 }
 
 async fn sync_ens_v2_registrar_with_scope(
@@ -66,6 +74,7 @@ async fn sync_ens_v2_registrar_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    max_block_number: Option<i64>,
 ) -> Result<EnsV2RegistrarSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
@@ -74,6 +83,20 @@ async fn sync_ens_v2_registrar_with_scope(
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
+    let manifest_ids = active_emitters
+        .iter()
+        .map(|emitter| emitter.source_manifest_id)
+        .collect::<Vec<_>>();
+    let event_topics = load_required_active_manifest_event_topic0s_by_signature(
+        pool,
+        &manifest_ids,
+        &[
+            ABI_EVENT_NAME_REGISTERED_SIGNATURE,
+            ABI_EVENT_NAME_RENEWED_SIGNATURE,
+        ],
+        "ENSv2 registrar",
+    )
+    .await?;
 
     let raw_logs = load_registrar_raw_logs(
         pool,
@@ -82,6 +105,7 @@ async fn sync_ens_v2_registrar_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
+        max_block_number,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -92,37 +116,26 @@ async fn sync_ens_v2_registrar_with_scope(
     let mut matched_log_count = 0usize;
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let Some(observation) = build_registrar_observation(raw_log)? else {
+        let Some(observation) = build_registrar_observation(raw_log, &event_topics)? else {
             continue;
         };
         matched_log_count += 1;
         events.push(build_registrar_event(pool, raw_log, observation).await?);
     }
 
-    let existing = load_existing_event_identities(pool, &events).await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
-    let synced_by_kind = count_events_by_kind(&events);
-    upsert_normalized_events(pool, &events).await?;
-
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                EnsV2RegistrarKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect();
+    let counts = upsert_normalized_events_with_counts(pool, &events, "ENSv2 registrar").await?;
+    let (total_synced_count, total_inserted_count, by_kind) = counts.into_parts_by_kind(
+        |synced_count, inserted_count| EnsV2RegistrarKindSyncSummary {
+            synced_count,
+            inserted_count,
+        },
+    );
 
     Ok(EnsV2RegistrarSyncSummary {
         scanned_log_count,
         matched_log_count,
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     })
 }

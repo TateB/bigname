@@ -46,7 +46,9 @@ impl TestDatabase {
             .max_connections(1)
             .connect_with(base_options.clone().database("postgres"))
             .await
-            .context("failed to connect admin pool for backfill job tests")?;
+            .context(
+                "failed to connect admin pool for backfill job tests. Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server.",
+            )?;
 
         sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
             .execute(&admin_pool)
@@ -129,8 +131,8 @@ async fn backfill_job_create_is_idempotent_and_rejects_range_widening() -> Resul
     assert_eq!(created.job.range_start_block_number, 100);
     assert_eq!(created.job.range_end_block_number, 120);
     assert_eq!(created.ranges.len(), 2);
-    assert_eq!(created.ranges[0].checkpoint_block_number, 100);
-    assert_eq!(created.ranges[1].checkpoint_block_number, 110);
+    assert_eq!(created.ranges[0].checkpoint_block_number, 99);
+    assert_eq!(created.ranges[1].checkpoint_block_number, 109);
 
     let repeated = create_backfill_job(database.pool(), &request).await?;
     assert_eq!(repeated.job.backfill_job_id, created.job.backfill_job_id);

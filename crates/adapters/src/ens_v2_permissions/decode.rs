@@ -1,100 +1,91 @@
-use anyhow::{Context, Result};
+use alloy_sol_types::sol;
+use anyhow::Result;
 
-use super::constants::{
-    EAC_ROLES_CHANGED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE, NAMED_RESOURCE_SIGNATURE,
-    NAMED_TEXT_RESOURCE_SIGNATURE,
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
+use crate::evm_abi::{
+    address_hex, decode_event_log, hex_string as prefixed_hex_string, u256_decimal, u256_word_hex,
 };
+
+use super::constants::*;
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
-use super::util::{
-    decode_dynamic_bytes, decode_dynamic_string, decode_u256_topic_decimal, keccak_signature_hex,
-    normalize_hex_32, normalize_hex_32_word, normalize_topic_address, word_at,
-};
+
+sol! {
+    #[derive(Debug)]
+    event NamedResource(uint256 indexed resource, bytes name);
+
+    #[derive(Debug)]
+    event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
+
+    #[derive(Debug)]
+    event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
+
+    #[derive(Debug)]
+    event EACRolesChanged(
+        uint256 indexed resource,
+        address indexed account,
+        uint256 oldRoles,
+        uint256 newRoles
+    );
+}
 
 pub(super) fn build_permissions_observation(
     raw_log: &PermissionsRawLogRow,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
 ) -> Result<Option<PermissionsObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_RESOURCE_SIGNATURE)) {
-        let resource = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NamedResource missing resource topic")?,
+    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE_SIGNATURE, topic0)? {
+        let event = decode_event_log::<NamedResource>(
+            &raw_log.topics,
+            &raw_log.data,
+            "NamedResource log is malformed",
         )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
         return Ok(Some(PermissionsObservation::NamedResource {
-            resource,
-            name,
+            resource: u256_word_hex(event.resource),
+            name: event.name.to_vec(),
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE)) {
-        let resource = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NamedTextResource missing resource topic")?,
+    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE, topic0)? {
+        let event = decode_event_log::<NamedTextResource>(
+            &raw_log.topics,
+            &raw_log.data,
+            "NamedTextResource log is malformed",
         )?;
-        let key_hash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("NamedTextResource missing key hash topic")?,
-        )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
-        let key = decode_dynamic_string(&raw_log.data, 1)?;
         return Ok(Some(PermissionsObservation::NamedTextResource {
-            resource,
-            name,
-            key_hash,
-            key,
+            resource: u256_word_hex(event.resource),
+            name: event.name.to_vec(),
+            key_hash: prefixed_hex_string(event.keyHash.as_slice()),
+            key: event.key,
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_ADDR_RESOURCE_SIGNATURE)) {
-        let resource = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NamedAddrResource missing resource topic")?,
+    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE, topic0)? {
+        let event = decode_event_log::<NamedAddrResource>(
+            &raw_log.topics,
+            &raw_log.data,
+            "NamedAddrResource log is malformed",
         )?;
-        let coin_type = decode_u256_topic_decimal(
-            raw_log
-                .topics
-                .get(2)
-                .context("NamedAddrResource missing coin type topic")?,
-        )?;
-        let name = decode_dynamic_bytes(&raw_log.data, 0)?;
         return Ok(Some(PermissionsObservation::NamedAddrResource {
-            resource,
-            name,
-            coin_type,
+            resource: u256_word_hex(event.resource),
+            name: event.name.to_vec(),
+            coin_type: u256_decimal(event.coinType),
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(EAC_ROLES_CHANGED_SIGNATURE)) {
-        let resource = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("EACRolesChanged missing resource topic")?,
+    if event_topics.matches(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE, topic0)? {
+        let event = decode_event_log::<EACRolesChanged>(
+            &raw_log.topics,
+            &raw_log.data,
+            "EACRolesChanged log is malformed",
         )?;
-        let account = normalize_topic_address(
-            raw_log
-                .topics
-                .get(2)
-                .context("EACRolesChanged missing account topic")?,
-        )?;
-        let old_role_bitmap = normalize_hex_32_word(word_at(&raw_log.data, 0)?)?;
-        let new_role_bitmap = normalize_hex_32_word(word_at(&raw_log.data, 1)?)?;
         return Ok(Some(PermissionsObservation::EacRolesChanged {
-            resource,
-            account,
-            old_role_bitmap,
-            new_role_bitmap,
+            resource: u256_word_hex(event.resource),
+            account: address_hex(event.account),
+            old_role_bitmap: u256_word_hex(event.oldRoles),
+            new_role_bitmap: u256_word_hex(event.newRoles),
         }));
     }
 

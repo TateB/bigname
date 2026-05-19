@@ -9,15 +9,10 @@ pub(super) async fn events(
     Query(query): Query<EventsQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<CompactEventsResponse>> {
-    let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
-    if view == ResponseView::Full {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_input",
-            message: "view=full is reserved for /v1/events until the full event shape is documented"
-                .to_owned(),
-        });
-    }
+    parse_compact_only_response_view(
+        query.view.as_deref(),
+        "view=full is reserved for /v1/events until the full event shape is documented",
+    )?;
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let parsed = parse_events_filter(&query)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;

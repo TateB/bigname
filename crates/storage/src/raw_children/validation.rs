@@ -1,8 +1,6 @@
 use anyhow::{Result, bail};
 
 use super::types::{RawLog, RawReceipt, RawTransaction};
-use crate::CanonicalityState;
-
 pub(super) fn validate_raw_transaction(transaction: &RawTransaction) -> Result<()> {
     if transaction.block_number < 0 {
         bail!(
@@ -158,27 +156,4 @@ pub(super) fn ensure_raw_log_identity_matches(existing: &RawLog, incoming: &RawL
     }
 
     Ok(())
-}
-
-pub(super) fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
 }

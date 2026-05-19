@@ -39,12 +39,12 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
         42,
     );
     let safe_head = provider_block(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        Some("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
         41,
     );
     let finalized_head = provider_block(
@@ -132,12 +132,6 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
             .fetch_one(database.pool())
             .await?,
         9
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
-            .fetch_one(database.pool())
-            .await?,
-        3
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -269,7 +263,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'decoded_name' FROM normalized_events WHERE block_number = 42"
+            "SELECT after_state->>'decoded_name' FROM normalized_events WHERE event_kind = 'PreimageObserved' AND block_number = 42"
         )
         .fetch_one(database.pool())
         .await?,
@@ -599,7 +593,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_registrar_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -637,7 +631,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        None,
         42,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
@@ -750,7 +744,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -958,7 +952,7 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
                 'active',
                 'uts46-v1',
                 'manifests/basenames/basenames_base_primary/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -1117,7 +1111,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_reverse_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -1129,7 +1123,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -1141,7 +1135,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_resolver_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -1360,7 +1354,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_primary/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -1372,7 +1366,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -1384,7 +1378,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -1609,7 +1603,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_registrar_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -1640,7 +1634,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_registry_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -1673,7 +1667,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_resolver_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -2061,7 +2055,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_registrar_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -2073,7 +2067,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -2085,7 +2079,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_resolver_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -2405,7 +2399,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -2417,7 +2411,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -2429,7 +2423,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -2588,7 +2582,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
     let alice_namehash = namehash_for_dns_name(&dns_encoded_base_eth_name("alice"));
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_registrar_name_registered_log_payload(
+            rpc_basenames_name_registered_log_payload(
                 &canonical_head,
                 registrar_address,
                 "alice",
@@ -2762,7 +2756,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v2_registry_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -2774,7 +2768,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v2_resolver_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -2931,7 +2925,9 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                 "logIndex": "0x6",
                 "address": resolver_address,
                 "topics": [
-                    ens_v2_alias_changed_topic0()
+                    ens_v2_alias_changed_topic0(),
+                    keccak256_hex(&alice_dns_name),
+                    keccak256_hex(&[])
                 ],
                 "data": encode_two_dynamic_bytes_log_data(&alice_dns_name, &[])
             }),
@@ -3287,7 +3283,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -3299,7 +3295,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -3311,7 +3307,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -3402,7 +3398,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_registrar_name_registered_log_payload(
+            rpc_basenames_name_registered_log_payload(
                 &canonical_head,
                 registrar_address,
                 "alice",

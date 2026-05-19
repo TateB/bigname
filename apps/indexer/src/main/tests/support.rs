@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use alloy_primitives::keccak256;
 use bigname_manifests::load_discovery_admission_state;
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NameSurface, Resource,
@@ -29,6 +30,7 @@ use tokio::{
 };
 
 use super::*;
+use crate::run_mode::IndexerRunMode;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -86,6 +88,111 @@ impl Drop for TestManifestDir {
     }
 }
 
+pub(crate) fn test_manifest_payload() -> Value {
+    json!({
+        "abi": {
+            "events": test_manifest_abi_events(),
+        },
+    })
+}
+
+pub(crate) fn test_manifest_payload_with_abi(mut payload: Value) -> Value {
+    let Some(object) = payload.as_object_mut() else {
+        return test_manifest_payload();
+    };
+    object.entry("abi").or_insert_with(|| {
+        json!({
+            "events": test_manifest_abi_events(),
+        })
+    });
+    payload
+}
+
+pub(crate) fn test_manifest_abi_events() -> Vec<Value> {
+    TEST_MANIFEST_EVENT_SIGNATURES
+        .iter()
+        .map(|signature| {
+            let name = signature
+                .split_once('(')
+                .map(|(name, _)| name)
+                .expect("test ABI signature must include parameters");
+            json!({
+                "name": name,
+                "fragment": format!("event {signature}"),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn test_manifest_abi_toml() -> String {
+    TEST_MANIFEST_EVENT_SIGNATURES
+        .iter()
+        .map(|signature| {
+            let name = signature
+                .split_once('(')
+                .map(|(name, _)| name)
+                .expect("test ABI signature must include parameters");
+            format!(
+                r#"
+[[abi.events]]
+name = "{name}"
+fragment = "event {signature}"
+"#
+            )
+        })
+        .collect()
+}
+
+const TEST_MANIFEST_EVENT_SIGNATURES: &[&str] = &[
+    "ABIChanged(bytes32,uint256)",
+    "AddrChanged(bytes32,address)",
+    "AddressChanged(bytes32,uint256,bytes)",
+    "AliasChanged(bytes,bytes,bytes,bytes)",
+    "ContentChanged(bytes32,bytes32)",
+    "ContenthashChanged(bytes32,bytes)",
+    "DNSRecordChanged(bytes32,bytes,uint16,bytes)",
+    "DNSRecordDeleted(bytes32,bytes,uint16)",
+    "DNSZonehashChanged(bytes32,bytes,bytes)",
+    "DataChanged(bytes32,string,string,bytes)",
+    "EACRolesChanged(uint256,address,uint256,uint256)",
+    "ExpiryExtended(bytes32,uint64)",
+    "ExpiryUpdated(uint256,uint64,address)",
+    "FusesSet(bytes32,uint32)",
+    "InterfaceChanged(bytes32,bytes4,address)",
+    "LabelRegistered(uint256,bytes32,string,address,uint64,address)",
+    "LabelReserved(uint256,bytes32,string,uint64,address)",
+    "LabelUnregistered(uint256,address)",
+    "NameChanged(bytes32,string)",
+    "NameRegistered(string,bytes32,address,uint256)",
+    "NameRegistered(string,bytes32,address,uint256,uint256)",
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)",
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)",
+    "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)",
+    "NameRenewed(string,bytes32,uint256)",
+    "NameRenewed(string,bytes32,uint256,uint256)",
+    "NameRenewed(string,bytes32,uint256,uint256,bytes32)",
+    "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
+    "NameUnwrapped(bytes32,address)",
+    "NameWrapped(bytes32,bytes,address,uint32,uint64)",
+    "NamedAddrResource(uint256,bytes,uint256)",
+    "NamedResource(uint256,bytes)",
+    "NamedTextResource(uint256,bytes,bytes32,string)",
+    "NewOwner(bytes32,bytes32,address)",
+    "NewResolver(bytes32,address)",
+    "NewTTL(bytes32,uint64)",
+    "ParentUpdated(address,string,address)",
+    "ResolverUpdated(uint256,address,address)",
+    "SubregistryUpdated(uint256,address,address)",
+    "TextChanged(bytes32,string,string)",
+    "TextChanged(bytes32,string,string,string)",
+    "TokenRegenerated(uint256,uint256)",
+    "TokenResource(uint256,uint256)",
+    "Transfer(address,address,uint256)",
+    "Transfer(bytes32,address)",
+    "TransferSingle(address,address,address,uint256,uint256)",
+    "VersionChanged(bytes32,uint64)",
+];
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
@@ -115,7 +222,9 @@ impl TestDatabase {
             .max_connections(1)
             .connect_with(base_options.clone().database("postgres"))
             .await
-            .context("failed to connect admin pool for indexer tests")?;
+            .context(
+                "failed to connect admin pool for indexer tests. Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server.",
+            )?;
 
         sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
             .execute(&admin_pool)
@@ -167,24 +276,27 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create capability_support_status type for indexer tests")?;
-        sqlx::query(
+        let default_manifest_payload = serde_json::to_string(&test_manifest_payload())
+            .context("failed to serialize test manifest ABI payload")?
+            .replace('\'', "''");
+        sqlx::query(&format!(
             r#"
                 CREATE TABLE manifest_versions (
                     manifest_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
                     manifest_version BIGINT NOT NULL DEFAULT 1,
                     namespace TEXT NOT NULL DEFAULT 'ens',
-                    source_family TEXT NOT NULL DEFAULT 'ens_test',
+                    source_family TEXT NOT NULL DEFAULT 'ens_v1_wrapper_l1',
                     chain TEXT NOT NULL,
                     deployment_epoch TEXT NOT NULL DEFAULT 'bootstrap',
                     rollout_status manifest_rollout_status NOT NULL,
                     normalizer_version TEXT NOT NULL DEFAULT 'uts46-v1',
                     file_path TEXT NOT NULL DEFAULT 'tests/v1.toml',
-                    manifest_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    manifest_payload JSONB NOT NULL DEFAULT '{default_manifest_payload}'::jsonb,
                     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (namespace, source_family, chain, deployment_epoch, manifest_version)
                 )
-                "#,
-        )
+                "#
+        ))
         .execute(&pool)
         .await
         .context("failed to create manifest_versions table for indexer tests")?;
@@ -858,7 +970,7 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
-            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number - 1 AND checkpoint_block_number <= range_end_block_number),
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             lease_token TEXT,
             lease_owner TEXT,
@@ -942,6 +1054,7 @@ fn manifest_contents_with_contract(
     let implementation = implementation_address
         .map(|address| format!("implementation = \"{address}\""))
         .unwrap_or_default();
+    let abi = test_manifest_abi_toml();
 
     format!(
         r#"
@@ -970,12 +1083,14 @@ proxy_kind = "{proxy_kind}"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
     )
 }
 
 fn ens_v1_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_registry_l1"
@@ -1000,12 +1115,16 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 fn basenames_base_registry_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "basenames"
 source_family = "basenames_base_registry"
@@ -1030,8 +1149,11 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 fn ens_v1_new_owner_topic0() -> String {
@@ -1957,6 +2079,10 @@ fn registrar_name_registered_topic0() -> String {
     keccak256_hex(b"NameRegistered(string,bytes32,address,uint256,uint256)")
 }
 
+fn basenames_name_registered_topic0() -> String {
+    keccak256_hex(b"NameRegistered(string,bytes32,address,uint256)")
+}
+
 fn registry_new_resolver_topic0() -> String {
     keccak256_hex(b"NewResolver(bytes32,address)")
 }
@@ -2060,19 +2186,11 @@ fn namehash_for_dns_name(dns_name: &[u8]) -> String {
 
     let mut node = [0u8; 32];
     for label in labels.iter().rev() {
-        let label_hash = {
-            let mut hasher = Keccak256::new();
-            hasher.update(label);
-            let digest = hasher.finalize();
-            let mut output = [0u8; 32];
-            output.copy_from_slice(&digest);
-            output
-        };
-        let mut hasher = Keccak256::new();
-        hasher.update(node);
-        hasher.update(label_hash);
-        let digest = hasher.finalize();
-        node.copy_from_slice(&digest);
+        let label_hash = keccak256(label);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&node);
+        combined[32..].copy_from_slice(label_hash.as_slice());
+        node.copy_from_slice(keccak256(combined).as_slice());
     }
 
     hex_string(&node)
@@ -2182,6 +2300,23 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> S
     hex_string(&data)
 }
 
+fn encode_basenames_name_registered_log_data(label: &str, expiry_unix: i64) -> String {
+    let label_bytes = label.as_bytes();
+    let mut data = Vec::new();
+
+    data.extend_from_slice(&abi_word_u64(64));
+    data.extend_from_slice(&abi_word_u64(expiry_unix as u64));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(label_bytes.len()).expect("Basenames label test payload must fit in u64"),
+    ));
+    data.extend_from_slice(label_bytes);
+
+    let padded_length = label_bytes.len().div_ceil(32) * 32;
+    data.resize(32 * 3 + padded_length, 0);
+
+    hex_string(&data)
+}
+
 fn encode_ens_v2_label_registered_log_data(label: &str, owner: &str, expiry_unix: i64) -> String {
     let label_bytes = label.as_bytes();
     let mut data = Vec::new();
@@ -2219,6 +2354,28 @@ fn rpc_registrar_name_registered_log_payload(
             hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
         ],
         "data": encode_registrar_name_registered_log_data(label, expiry_unix)
+    })
+}
+
+fn rpc_basenames_name_registered_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    expiry_unix: i64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": "0x0",
+        "address": address,
+        "topics": [
+            basenames_name_registered_topic0(),
+            labelhash_hex(label),
+            hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
+        ],
+        "data": encode_basenames_name_registered_log_data(label, expiry_unix)
     })
 }
 

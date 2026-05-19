@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::{Request, Uri};
-use hyper_util::{
-    client::legacy::{Client, connect::HttpConnector},
-    rt::TokioExecutor,
+use alloy_json_rpc::{
+    Id, Request as JsonRpcRequest, RequestPacket, ResponsePacket, ResponsePayload,
 };
-use serde_json::{Value, json};
+use alloy_transport_http::Http;
+use anyhow::{Context, Result, bail};
+use reqwest::Url;
+use serde_json::Value;
+use tower::Service;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChainRpcUrls {
@@ -56,8 +55,7 @@ impl ChainRpcUrls {
 
 #[derive(Clone)]
 pub(crate) struct JsonRpcHttpClient {
-    endpoint: Uri,
-    client: Client<HttpConnector, Full<Bytes>>,
+    transport: Http<reqwest::Client>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,43 +75,26 @@ pub(crate) struct JsonRpcCallError {
 impl JsonRpcHttpClient {
     pub(crate) fn new(endpoint: &str) -> Result<Self> {
         let endpoint = endpoint
-            .parse::<Uri>()
+            .parse::<Url>()
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
-        if endpoint.scheme_str() != Some("http") {
+        if endpoint.scheme() != "http" {
             bail!(
                 "unsupported RPC endpoint scheme for {endpoint}; bootstrap on-demand execution currently supports only http:// URLs"
             );
         }
 
-        let connector = HttpConnector::new();
-        let client = Client::builder(TokioExecutor::new()).build(connector);
-        Ok(Self { endpoint, client })
+        Ok(Self {
+            transport: Http::with_client(reqwest::Client::new(), endpoint),
+        })
     }
 
     pub(crate) async fn call(&self, method: &str, params: Vec<Value>) -> Result<JsonRpcCallResult> {
-        let request_payload = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-        let response_payload = self
-            .send_json_rpc_payload(method, request_payload.clone())
-            .await?;
-        let response = decode_json_rpc_response(&response_payload)?;
-        let result = if let Some(error) = response.error {
-            Err(JsonRpcCallError {
-                code: Some(error.code),
-                message: error.message,
-                data: error.data,
-            })
-        } else {
-            response.result.ok_or_else(|| JsonRpcCallError {
-                code: None,
-                message: "JSON-RPC response omitted result".to_owned(),
-                data: None,
-            })
-        };
+        let request = JsonRpcRequest::new(method.to_owned(), Id::Number(1), params)
+            .serialize()
+            .context("failed to encode JSON-RPC request")?;
+        let request_payload = serde_json::from_str(request.serialized().get())
+            .context("failed to decode serialized JSON-RPC request")?;
+        let (response_payload, result) = self.send_json_rpc_request(method, request).await?;
 
         Ok(JsonRpcCallResult {
             request_payload,
@@ -122,66 +103,42 @@ impl JsonRpcHttpClient {
         })
     }
 
-    async fn send_json_rpc_payload(&self, request_context: &str, payload: Value) -> Result<Value> {
-        let request = Request::post(self.endpoint.clone())
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(payload.to_string())))
-            .context("failed to build JSON-RPC request")?;
-        let response =
-            self.client.request(request).await.with_context(|| {
-                format!("failed to send JSON-RPC request for {request_context}")
-            })?;
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
+    async fn send_json_rpc_request(
+        &self,
+        request_context: &str,
+        request: alloy_json_rpc::SerializedRequest,
+    ) -> Result<(Value, std::result::Result<Value, JsonRpcCallError>)> {
+        let mut transport = self.transport.clone();
+        let response = transport
+            .call(RequestPacket::Single(request))
             .await
-            .context("failed to read JSON-RPC response body")?
-            .to_bytes();
-
-        if !status.is_success() {
-            let response_body = String::from_utf8_lossy(&body);
+            .with_context(|| format!("failed to send JSON-RPC request for {request_context}"))?;
+        let ResponsePacket::Single(response) = response else {
             bail!(
-                "provider request for {request_context} failed with HTTP {status}: {response_body}"
+                "provider returned a batch response for single JSON-RPC request {request_context}"
             );
-        }
-
-        serde_json::from_slice::<Value>(&body).context("failed to decode JSON-RPC response")
+        };
+        let response_payload =
+            serde_json::to_value(&response).context("failed to encode JSON-RPC response")?;
+        let result =
+            match response.payload {
+                ResponsePayload::Success(result) => Ok(raw_value_to_json(result.as_ref())
+                    .context("failed to decode JSON-RPC result")?),
+                ResponsePayload::Failure(error) => Err(JsonRpcCallError {
+                    code: Some(error.code),
+                    message: error.message.into_owned(),
+                    data: error
+                        .data
+                        .as_deref()
+                        .map(raw_value_to_json)
+                        .transpose()
+                        .context("failed to decode JSON-RPC error data")?,
+                }),
+            };
+        Ok((response_payload, result))
     }
 }
 
-fn decode_json_rpc_response(value: &Value) -> Result<JsonRpcResponse> {
-    serde_json::from_value(value.clone()).context("failed to decode JSON-RPC response")
-}
-
-#[derive(Debug)]
-struct JsonRpcResponse {
-    result: Option<Value>,
-    error: Option<JsonRpcError>,
-}
-
-impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct RawJsonRpcResponse {
-            result: Option<Value>,
-            error: Option<JsonRpcError>,
-        }
-
-        let raw = RawJsonRpcResponse::deserialize(deserializer)?;
-        Ok(Self {
-            result: raw.result,
-            error: raw.error,
-        })
-    }
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-    data: Option<Value>,
+fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
+    serde_json::from_str(value.get()).context("failed to decode raw JSON value")
 }

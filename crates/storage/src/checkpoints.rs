@@ -2,7 +2,13 @@ use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use sqlx::{Executor, Postgres, Row, postgres::PgRow};
 
-use crate::lineage::{CanonicalityState, ensure_chain_lineage_block, promote_chain_lineage_path};
+use crate::lineage::{
+    CanonicalityState, chain_lineage_contains_ancestor_internal, ensure_chain_lineage_block,
+    promote_chain_lineage_path,
+};
+
+mod rewind;
+pub use rewind::rewind_chain_checkpoints_to_ancestor;
 
 /// Persisted checkpoint row for one watched chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,11 +163,29 @@ pub async fn advance_chain_checkpoints(
                 &canonical.block_hash,
                 stop_before_hash,
                 CanonicalityState::Canonical,
+                false,
             )
             .await?;
         }
     }
+    let current_canonical = current
+        .canonical_block_hash
+        .as_ref()
+        .zip(current.canonical_block_number)
+        .map(|(block_hash, block_number)| CheckpointBlockRef {
+            block_hash: block_hash.clone(),
+            block_number,
+        });
+    let effective_canonical = update.canonical.as_ref().or(current_canonical.as_ref());
     if let Some(safe) = &update.safe {
+        ensure_checkpoint_target_on_canonical_branch(
+            &mut transaction,
+            &update.chain_id,
+            "safe",
+            effective_canonical,
+            safe,
+        )
+        .await?;
         let stop_before_hash = current.safe_block_hash.as_deref();
         if checkpoint_target_needs_promotion(stop_before_hash, safe) {
             promote_chain_lineage_path(
@@ -170,11 +194,20 @@ pub async fn advance_chain_checkpoints(
                 &safe.block_hash,
                 stop_before_hash,
                 CanonicalityState::Safe,
+                stop_before_hash.is_some(),
             )
             .await?;
         }
     }
     if let Some(finalized) = &update.finalized {
+        ensure_checkpoint_target_on_canonical_branch(
+            &mut transaction,
+            &update.chain_id,
+            "finalized",
+            effective_canonical,
+            finalized,
+        )
+        .await?;
         let stop_before_hash = current.finalized_block_hash.as_deref();
         if checkpoint_target_needs_promotion(stop_before_hash, finalized) {
             promote_chain_lineage_path(
@@ -183,6 +216,7 @@ pub async fn advance_chain_checkpoints(
                 &finalized.block_hash,
                 stop_before_hash,
                 CanonicalityState::Finalized,
+                stop_before_hash.is_some(),
             )
             .await?;
         }
@@ -209,7 +243,51 @@ fn checkpoint_target_needs_promotion(
     current_hash != Some(target.block_hash.as_str())
 }
 
-async fn ensure_chain_checkpoint_rows<'e, E>(executor: E, chain_ids: &[String]) -> Result<u64>
+async fn ensure_checkpoint_target_on_canonical_branch(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    chain_id: &str,
+    checkpoint_name: &str,
+    canonical: Option<&CheckpointBlockRef>,
+    target: &CheckpointBlockRef,
+) -> Result<()> {
+    let Some(canonical) = canonical else {
+        return Ok(());
+    };
+    if canonical.block_hash == target.block_hash {
+        return Ok(());
+    }
+    if target.block_number > canonical.block_number {
+        bail!(
+            "{checkpoint_name} checkpoint for chain {chain_id} block {} at {} is ahead of canonical branch head {} at {}",
+            target.block_hash,
+            target.block_number,
+            canonical.block_hash,
+            canonical.block_number
+        );
+    }
+
+    if chain_lineage_contains_ancestor_internal(
+        &mut **transaction,
+        chain_id,
+        &canonical.block_hash,
+        &target.block_hash,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "{checkpoint_name} checkpoint for chain {chain_id} block {} is not on the canonical branch ending at {}",
+        target.block_hash,
+        canonical.block_hash
+    )
+}
+
+pub(super) async fn ensure_chain_checkpoint_rows<'e, E>(
+    executor: E,
+    chain_ids: &[String],
+) -> Result<u64>
 where
     E: Executor<'e, Database = Postgres>,
 {
@@ -348,7 +426,7 @@ fn collect_chain_ids(chain_ids: &[String]) -> Vec<String> {
     chain_ids
 }
 
-fn decode_snapshot(row: PgRow) -> Result<ChainCheckpoint> {
+pub(super) fn decode_snapshot(row: PgRow) -> Result<ChainCheckpoint> {
     let chain_id = row
         .try_get::<String, _>("chain_id")
         .context("failed to decode chain checkpoint chain_id")?;

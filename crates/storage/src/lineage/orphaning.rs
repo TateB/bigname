@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 
-use super::reads::{load_chain_lineage_path, load_lineage_snapshots_for_hashes};
+use super::reads::{
+    ensure_chain_lineage_path_reaches_stop, load_chain_lineage_path,
+    load_lineage_snapshots_for_hashes,
+};
 use super::types::ChainLineageBlock;
 
 /// Walk a stored branch from `from_hash` through parent links and mark each row
@@ -31,6 +34,7 @@ pub async fn mark_chain_lineage_range_orphaned(
     if path.is_empty() {
         bail!("missing stored lineage row for chain {chain_id} block {from_hash}");
     }
+    ensure_chain_lineage_path_reaches_stop(chain_id, from_hash, stop_before_hash, &path)?;
 
     let block_hashes = path
         .iter()

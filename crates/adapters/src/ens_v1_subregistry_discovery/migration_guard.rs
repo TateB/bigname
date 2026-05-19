@@ -1,7 +1,5 @@
-use anyhow::{Context, Result};
-use serde_json::Value;
-
 use crate::registry_migration_cache::MigratedRegistryNodes;
+use anyhow::{Context, Result};
 
 use super::{
     CONTRACT_ROLE_REGISTRY, CONTRACT_ROLE_REGISTRY_OLD, ENS_V1_REGISTRY_SOURCE_FAMILY,
@@ -81,7 +79,7 @@ pub(super) fn registry_migration_guard_action(
 
 pub(super) fn rewrite_old_registry_assignment(
     assignment: &mut ObservedRegistryAssignment,
-    emitters: &[ActiveEmitter],
+    current_registry: Option<&ActiveEmitter>,
     action: &RegistryMigrationGuardAction,
 ) {
     if !matches!(
@@ -94,35 +92,40 @@ pub(super) fn rewrite_old_registry_assignment(
     if assignment.raw_log.contract_role.as_deref() != Some(CONTRACT_ROLE_REGISTRY_OLD) {
         return;
     }
-    let Some(current_registry) = emitters.iter().find(|emitter| {
-        emitter.source_family == ENS_V1_REGISTRY_SOURCE_FAMILY
-            && emitter.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY)
-    }) else {
+    let Some(current_registry) = current_registry else {
         return;
     };
 
     if assignment.discovery_kind == RegistryDiscoveryKind::Resolver {
-        let node = assignment
-            .observation
-            .provenance
-            .get("node")
-            .and_then(|value| value.as_str())
-            .unwrap_or(ZERO_NODE);
+        let node = assignment.node.as_deref().unwrap_or(ZERO_NODE);
         assignment.observation_key = format!("resolver:{}:{node}", current_registry.address);
     }
-    assignment.observation.from_address = current_registry.address.clone();
-    assignment.observation.provenance["observation_key"] =
-        Value::String(assignment.observation_key.clone());
-    assignment.observation.provenance["authority_from_address"] =
-        Value::String(current_registry.address.clone());
-    assignment.observation.provenance["ens_registry_old_migration_epoch_input"] = Value::Bool(true);
+    assignment.from_address = current_registry.address.clone();
+    assignment.migration_epoch_input = true;
     if matches!(
         action,
         RegistryMigrationGuardAction::OldRootResolverException
     ) {
-        assignment.observation.provenance["ens_registry_old_root_resolver_exception"] =
-            Value::Bool(true);
+        assignment.old_root_resolver_exception = true;
     }
+}
+
+pub(super) fn current_registry_emitter(emitters: &[ActiveEmitter]) -> Option<&ActiveEmitter> {
+    emitters
+        .iter()
+        .filter(|emitter| {
+            emitter.source_family == ENS_V1_REGISTRY_SOURCE_FAMILY
+                && emitter.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY)
+        })
+        .min_by(|left, right| emitter_precedence(left).cmp(&emitter_precedence(right)))
+}
+
+fn emitter_precedence(emitter: &ActiveEmitter) -> (i32, i64, sqlx::types::Uuid) {
+    (
+        emitter.source_rank,
+        emitter.source_manifest_id,
+        emitter.contract_instance_id,
+    )
 }
 
 fn is_old_registry(raw_log: &RegistryRawLogRow) -> bool {

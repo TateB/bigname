@@ -1,7 +1,0 @@
-interface:
-  display_name: "Phased Continuation"
-  short_description: "Research, execute, and repeat"
-  default_prompt: "Use $phased-continuation to enter orchestration mode with $orchestrate, ask next_slice_researcher for the next viable slices, execute them, and then research again until blocked or redirected."
-
-policy:
-  allow_implicit_invocation: true

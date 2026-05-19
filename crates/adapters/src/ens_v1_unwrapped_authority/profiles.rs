@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AuthorityProfile {
+    Ens,
+    Basenames,
+}
+
 impl AuthorityProfile {
     pub(super) const fn namespace(self) -> &'static str {
         match self {

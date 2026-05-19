@@ -3,18 +3,14 @@ use std::{collections::BTreeMap, time::Instant};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
-    CanonicalityState, ChainCheckpoint, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
-    RawReceipt, RawTransaction, load_chain_checkpoint, upsert_chain_lineage_blocks,
-    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
-    upsert_raw_receipts, upsert_raw_transactions,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
+    RawTransaction, upsert_chain_lineage_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
 
 use crate::{
-    provider::{
-        ChainProviderOps, ProviderBlock, ProviderBlockCodeObservationRequest, ProviderHeadSnapshot,
-        ProviderLog,
-    },
+    provider::{ChainProviderOps, ProviderBlockCodeObservationRequest, ProviderLog},
     reconciliation::{
         HeaderAuditMode, ensure_provider_bundle_matches_raw_block,
         provider_block_to_lineage_with_header_audit_mode,
@@ -27,6 +23,8 @@ use crate::{
     },
 };
 
+#[path = "fetching/canonicality.rs"]
+mod canonicality;
 #[path = "fetching/log_ranges.rs"]
 mod log_ranges;
 #[path = "fetching/sparse.rs"]
@@ -35,12 +33,11 @@ mod sparse;
 use super::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome,
     range_resolution::resolve_backfill_range,
-    selection::{
-        SelectedTargetIntervalIndex, backfill_adapter_sync_scope,
-        selected_target_addresses_at_block,
-    },
+    selection::{SelectedTargetIntervalIndex, selected_target_addresses_at_block},
 };
+use crate::source_scope::SourceScope;
 
+pub(super) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
 use log_ranges::{
     fetch_backfill_logs_by_safe_ranges, selected_addresses_for_materialized_block,
     uses_topic_first_source_family_scan,
@@ -51,78 +48,6 @@ use sparse::{
 };
 
 const DEFAULT_RAW_ONLY_SPARSE_MAX_LOGS_PER_PUSH: usize = 10_000;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct BackfillCanonicalityEvidence {
-    canonical_block_number: Option<i64>,
-    safe_block_number: Option<i64>,
-    finalized_block_number: Option<i64>,
-}
-
-impl BackfillCanonicalityEvidence {
-    fn from_heads(heads: &ProviderHeadSnapshot) -> Self {
-        Self {
-            canonical_block_number: Some(heads.canonical.block_number),
-            safe_block_number: heads.safe.as_ref().map(|block| block.block_number),
-            finalized_block_number: heads.finalized.as_ref().map(|block| block.block_number),
-        }
-    }
-
-    fn include_checkpoint(&mut self, checkpoint: Option<&ChainCheckpoint>) {
-        let Some(checkpoint) = checkpoint else {
-            return;
-        };
-
-        self.canonical_block_number = max_optional_i64(
-            self.canonical_block_number,
-            checkpoint.canonical_block_number,
-        );
-        self.safe_block_number =
-            max_optional_i64(self.safe_block_number, checkpoint.safe_block_number);
-        self.finalized_block_number = max_optional_i64(
-            self.finalized_block_number,
-            checkpoint.finalized_block_number,
-        );
-    }
-
-    fn state_for_block(self, block: &ProviderBlock) -> CanonicalityState {
-        if self
-            .finalized_block_number
-            .is_some_and(|finalized| block.block_number <= finalized)
-        {
-            CanonicalityState::Finalized
-        } else if self
-            .safe_block_number
-            .is_some_and(|safe| block.block_number <= safe)
-        {
-            CanonicalityState::Safe
-        } else if self
-            .canonical_block_number
-            .is_some_and(|canonical| block.block_number <= canonical)
-        {
-            CanonicalityState::Canonical
-        } else {
-            CanonicalityState::Observed
-        }
-    }
-}
-
-pub(super) async fn load_backfill_canonicality_evidence(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    provider: &(impl ChainProviderOps + ?Sized),
-) -> Result<BackfillCanonicalityEvidence> {
-    let heads = provider.fetch_chain_heads().await.with_context(|| {
-        format!("failed to load provider checkpoint evidence for chain {chain}")
-    })?;
-    let checkpoint = load_chain_checkpoint(pool, chain)
-        .await
-        .with_context(|| format!("failed to load stored checkpoint evidence for chain {chain}"))?;
-    let mut evidence = BackfillCanonicalityEvidence::from_heads(&heads);
-    evidence.include_checkpoint(checkpoint.as_ref());
-
-    Ok(evidence)
-}
 
 pub(crate) async fn run_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
@@ -136,7 +61,9 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let source_scope = backfill_adapter_sync_scope(source_plan, range.from_block, range.to_block);
+    let source_scope =
+        SourceScope::from_watched_source_plan(source_plan, range.from_block, range.to_block);
+    let adapter_sync_scope = source_scope.adapter_sync_scope();
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     let resolved_blocks = resolve_backfill_range(provider, range).await?;
@@ -251,6 +178,13 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut code_observation_requests = Vec::new();
+    let bundle_blocks = bundles
+        .iter()
+        .map(|bundle| bundle.block.clone())
+        .collect::<Vec<_>>();
+    let canonicality_states = canonicality_evidence
+        .states_for_blocks(pool, &watched_chain.chain, provider, &bundle_blocks)
+        .await?;
 
     for (resolved_block, bundle) in resolved_blocks.iter().zip(bundles.iter()) {
         if bundle.block.block_number != resolved_block.block_number {
@@ -263,7 +197,10 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             );
         }
 
-        let canonicality_state = canonicality_evidence.state_for_block(&bundle.block);
+        let canonicality_state = canonicality_states
+            .get(&bundle.block.block_hash)
+            .copied()
+            .unwrap_or(CanonicalityState::Observed);
         let raw_block = provider_block_to_raw_block_with_header_audit_mode(
             &watched_chain.chain,
             &bundle.block,
@@ -384,7 +321,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                 pool,
                 &watched_chain.chain,
                 &block_hashes,
-                &source_scope,
+                &adapter_sync_scope,
             )
             .await?;
         }
@@ -447,12 +384,4 @@ fn raw_only_sparse_max_logs_per_push_from_env() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_RAW_ONLY_SPARSE_MAX_LOGS_PER_PUSH)
-}
-
-fn max_optional_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
 }

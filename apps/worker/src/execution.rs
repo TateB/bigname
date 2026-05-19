@@ -6,7 +6,7 @@ use bigname_storage::{
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
-    invalidate_execution_outcomes_for_topology_boundary_and_request_key,
+    invalidate_execution_outcomes_for_topology_boundary_and_request_key, normalize_evm_address,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -204,7 +204,7 @@ impl VerifiedPrimaryNameBoundaryInvalidation {
 }
 
 fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
-    format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
+    format!("{namespace}:{}:{coin_type}", normalize_evm_address(address))
 }
 
 #[cfg(test)]

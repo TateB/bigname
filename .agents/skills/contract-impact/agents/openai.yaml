@@ -1,0 +1,7 @@
+interface:
+  display_name: "Contract Impact"
+  short_description: "Classify docs, ownership, and boundary risk"
+  default_prompt: "Use $contract-impact to classify this bigname change and list the docs, artifacts, owner, and blockers it affects."
+
+policy:
+  allow_implicit_invocation: true

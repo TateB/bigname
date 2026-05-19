@@ -1,5 +1,5 @@
+use super::migration_guard::registry_new_owner_child_node_from_topics;
 use super::*;
-use super::{ids::new_owner_topic0, migration_guard::registry_new_owner_child_node_from_topics};
 use crate::registry_migration_cache::{
     MigratedRegistryNodes, RegistryMigrationMarkerEmitter,
     load_migrated_registry_nodes_before_block as load_cached_migrated_registry_nodes_before_block,
@@ -36,6 +36,7 @@ pub(super) async fn load_migrated_registry_nodes_before_block(
     chain: &str,
     active_emitters: &[ActiveEmitter],
     before_block: i64,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<MigratedRegistryNodes> {
     let current_registry_emitters = active_emitters
         .iter()
@@ -63,7 +64,7 @@ pub(super) async fn load_migrated_registry_nodes_before_block(
         chain,
         &emitters,
         before_block,
-        &new_owner_topic0(),
+        event_topics.topic0(NEW_OWNER_SIGNATURE)?,
         registry_new_owner_child_node_from_topics,
     )
     .await

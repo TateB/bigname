@@ -1,14 +1,14 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
-use sha3::Digest;
+use bigname_manifests::WatchedSourceSelectorPlan;
 use tracing::info;
 
-use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
+use crate::{
+    ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s},
+    provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock},
+    source_scope::watched_source_plan_uses_generic_resolver_scope,
+};
 
 use super::super::{
     BackfillBlockRange,
@@ -17,24 +17,6 @@ use super::super::{
         selected_log_range_requests_without_source_family, selected_target_addresses_at_block,
     },
 };
-
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES: &[&str] = &[
-    "ABIChanged(bytes32,uint256)",
-    "AddrChanged(bytes32,address)",
-    "AddressChanged(bytes32,uint256,bytes)",
-    "ContentChanged(bytes32,bytes32)",
-    "ContenthashChanged(bytes32,bytes)",
-    "DNSRecordChanged(bytes32,bytes,uint16,bytes)",
-    "DNSRecordDeleted(bytes32,bytes,uint16)",
-    "DNSZonehashChanged(bytes32,bytes,bytes)",
-    "DataChanged(bytes32,string,string,bytes)",
-    "InterfaceChanged(bytes32,bytes4,address)",
-    "NameChanged(bytes32,string)",
-    "TextChanged(bytes32,string,string)",
-    "TextChanged(bytes32,string,string,string)",
-    "VersionChanged(bytes32,uint64)",
-];
 
 pub(super) async fn fetch_backfill_logs_by_safe_ranges(
     provider: &(impl ChainProviderOps + ?Sized),
@@ -229,30 +211,18 @@ struct SourceFamilyTopicScan {
 fn source_family_topic_scan(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Option<SourceFamilyTopicScan> {
-    if !includes_generic_resolver_event_scope(source_plan) {
+    if !watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return None;
     }
 
     Some(SourceFamilyTopicScan {
-        topic0s: ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES
-            .iter()
-            .map(|signature| topic0_hex(signature))
-            .collect(),
+        topic0s: generic_resolver_record_topic0s(),
         scan_all_emitters: true,
     })
 }
 
 fn scans_all_resolver_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    includes_generic_resolver_event_scope(source_plan)
-}
-
-fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    watched_source_plan_uses_generic_resolver_scope(source_plan)
 }
 
 fn merge_logs_by_block(
@@ -280,14 +250,4 @@ fn same_log_identity(left: &ProviderLog, right: &ProviderLog) -> bool {
             .transaction_hash
             .eq_ignore_ascii_case(&right.transaction_hash)
         && left.log_index == right.log_index
-}
-
-fn topic0_hex(signature: &str) -> String {
-    let digest = sha3::Keccak256::digest(signature.as_bytes());
-    let mut output = String::with_capacity(66);
-    output.push_str("0x");
-    for byte in digest {
-        write!(&mut output, "{byte:02x}").expect("writing to String must not fail");
-    }
-    output
 }

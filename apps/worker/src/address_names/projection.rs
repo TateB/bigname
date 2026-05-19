@@ -13,33 +13,6 @@ use super::{
     util::dedupe_json_values,
 };
 
-pub(super) async fn build_rows(
-    pool: &PgPool,
-    bindings: &[CurrentBindingSeed],
-    address_filter: Option<&str>,
-) -> Result<Vec<AddressNameCurrentRow>> {
-    let mut rows = Vec::new();
-
-    for binding in bindings {
-        let events = load_relevant_events(
-            pool,
-            &binding.namespace,
-            &binding.logical_name_id,
-            &binding.surface_chain_id,
-        )
-        .await?;
-        let relations = project_relations(binding, &events);
-        rows.extend(build_relation_rows(
-            binding,
-            &events,
-            relations,
-            address_filter,
-        )?);
-    }
-
-    Ok(rows)
-}
-
 pub(super) async fn build_rows_for_binding(
     pool: &PgPool,
     binding: &CurrentBindingSeed,

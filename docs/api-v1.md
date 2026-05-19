@@ -47,8 +47,9 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified resolution on `GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/resolutions/{namespace}/{name}`, `GET /v1/resolve/{name}`, `GET /v1/names/{namespace}/{name}/records`, and `GET /v1/resolve/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
+- Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
 Cross-chain rules:
 
@@ -144,7 +145,7 @@ Rules:
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is the route-level summary. Mixed declared+verified routes may add section-local `provenance` where derivations differ.
 - `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
-- `view=full` returns the full envelope when the route documents one; otherwise it's reserved and returns `400 invalid_input`.
+- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
 ## Shared objects
@@ -294,7 +295,7 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `CompactRecordSummary`
 
-`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
+`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. `mode=auto` uses declared cache only when it can satisfy the requested values from replayable state; explicit declared gaps, unretained declared values, or missing declared selectors fall through to verified output for supported selectors. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
 
 ### `CompactHistoryEvent`
 
@@ -302,7 +303,7 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `RoleRow`
 
-`account`, `resource_hex`, `resource_id`, `name`, `role_bitmap`, `effective_powers`, `provenance`. `resource_id` is opaque and stable; clients treat it as such. `resource_hex` is nullable and appears only when a stable projected hex exists.
+`account`, `resource_hex`, `resource_id`, `name`, `role_bitmap`, `effective_powers`. `resource_id` is opaque and stable; clients treat it as such. `resource_hex` is nullable and appears only when a stable projected hex exists. Row-granular grant lineage is exposed by `GET /v1/resources/{resource_id}/permissions`, not compact role rows.
 
 ### `ResolverOverviewCompact`
 
@@ -324,11 +325,11 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /v1/names` | Compact name search, exact lookup, address relations, suggestions. |
+| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
 | `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
-| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors. |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource. |
+| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain detail. |
 | `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view. |
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view. |
@@ -338,15 +339,15 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
-| `GET /v1/events` | Compact event search across name, address, resource, type, block filters. |
-| `GET /v1/roles` | Compact role rows by account, resource, or name. |
-| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`. |
+| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
+| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
+| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview (full envelope). |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, cache, verified queries. |
 | `GET /v1/resolve/{name}` | Namespace-inferred convenience for resolution. |
-| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records. |
+| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records; compact view only. |
 | `GET /v1/primary-names/{address}` | Claimed and verified primary name for `(address, namespace, coin_type)`. |
 | `GET /healthz` | Liveness check. Not part of the `v1` contract. |
 
@@ -389,7 +390,7 @@ Rules:
 - Malformed snapshot selectors, unsupported position slots, missing required slots, mixed-profile positions, and `at` plus `chain_positions` together return `400 invalid_input`.
 - A coherent selector that can't be served from current projections returns `409 stale`.
 - A selector whose supplied lineage, canonicality floor, or cross-chain reconciliation can't form one snapshot returns `409 conflict`.
-- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified resolution instead executes on demand, then returns `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
+- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand, then return `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
 
 ## Versioning
 

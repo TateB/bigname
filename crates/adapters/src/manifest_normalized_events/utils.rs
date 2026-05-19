@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
     ManifestCodeHashObservation, ManifestDeclaredContractDriftInput, ManifestDriftInputs,
     WatchedContractSource,
 };
-use bigname_storage::{CanonicalityState, NormalizedEvent};
+use bigname_storage::CanonicalityState;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -53,14 +53,6 @@ pub(super) fn event_identity(prefix: &str, key: Value) -> Result<String> {
     ))
 }
 
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
 pub(super) fn code_hash_observation_key(
     chain: &str,
     contract_instance_id: Uuid,
@@ -80,14 +72,8 @@ pub(super) fn watched_contract_source_name(
 }
 
 pub(super) fn canonicality_state_from_view(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => anyhow::bail!("failed to parse manifest drift canonicality state {value}"),
-    }
+    CanonicalityState::parse(value)
+        .with_context(|| format!("failed to parse manifest drift canonicality state {value}"))
 }
 
 pub(super) fn manifest_version_i64(manifest_version: u64) -> Result<i64> {

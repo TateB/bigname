@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
+use alloy_json_rpc::{
+    Id, Request as JsonRpcRequest, RequestPacket, Response, ResponsePacket, ResponsePayload,
+    SerializedRequest,
+};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{
     JsonRpcProvider,
@@ -34,27 +38,17 @@ impl JsonRpcProvider {
         method: &str,
         params: Vec<Value>,
     ) -> Result<JsonRpcResultPayload> {
-        let payload = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-        let body = self.send_json_rpc_payload(method, payload).await?;
+        let request = json_rpc_request(method.to_owned(), 1, params)?;
+        let body = self
+            .send_json_rpc_payload(method, RequestPacket::Single(request))
+            .await?;
 
         let fingerprint = JsonRpcPayloadFingerprint::for_body(&body)?;
-        let response = serde_json::from_slice::<JsonRpcResponse>(&body)
+        let response = serde_json::from_slice::<Response>(&body)
             .context("failed to decode JSON-RPC response")?;
-        if let Some(error) = response.error {
-            bail!(
-                "provider returned JSON-RPC error {}: {}",
-                error.code,
-                error.message
-            );
-        }
 
         Ok(JsonRpcResultPayload {
-            result: response.result,
+            result: json_rpc_response_result(response, method)?,
             fingerprint,
         })
     }
@@ -93,26 +87,25 @@ impl JsonRpcProvider {
         &self,
         calls: &[JsonRpcBatchCall],
     ) -> Result<Vec<Option<Value>>> {
-        let payload = Value::Array(
+        let payload = RequestPacket::Batch(
             calls
                 .iter()
                 .enumerate()
                 .map(|(index, call)| {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": index + 1,
-                        "method": call.method,
-                        "params": call.params.clone(),
-                    })
+                    json_rpc_request(
+                        call.method.to_owned(),
+                        (index + 1) as u64,
+                        call.params.clone(),
+                    )
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         );
         let body = self.send_json_rpc_payload("batch", payload).await?;
-        let response_value = serde_json::from_slice::<Value>(&body)
+        let response_packet = serde_json::from_slice::<ResponsePacket>(&body)
             .context("failed to decode JSON-RPC batch response")?;
-        let response_values = response_value
-            .as_array()
-            .context("expected JSON-RPC batch response array")?;
+        let ResponsePacket::Batch(response_values) = response_packet else {
+            bail!("expected JSON-RPC batch response array");
+        };
         let expected_methods = calls
             .iter()
             .enumerate()
@@ -120,21 +113,13 @@ impl JsonRpcProvider {
             .collect::<BTreeMap<_, _>>();
         let mut results_by_id = BTreeMap::<i64, Option<Value>>::new();
 
-        for response_value in response_values {
-            let response = serde_json::from_value::<JsonRpcResponse>(response_value.clone())
-                .context("failed to decode JSON-RPC batch response item")?;
-            let id = response.response_id()?;
+        for response in response_values {
+            let id = response_id(&response.id)?;
             let method = expected_methods
                 .get(&id)
                 .with_context(|| format!("provider returned unexpected JSON-RPC batch id {id}"))?;
-            if let Some(error) = response.error {
-                bail!(
-                    "provider returned JSON-RPC error for batched {method} id {id}: {}: {}",
-                    error.code,
-                    error.message
-                );
-            }
-            if results_by_id.insert(id, response.result).is_some() {
+            let result = json_rpc_response_result(response, method)?;
+            if results_by_id.insert(id, result).is_some() {
                 bail!("provider returned duplicate JSON-RPC batch response id {id}");
             }
         }
@@ -154,10 +139,17 @@ impl JsonRpcProvider {
         Ok(results)
     }
 
-    async fn send_json_rpc_payload(&self, request_context: &str, payload: Value) -> Result<Bytes> {
+    async fn send_json_rpc_payload(
+        &self,
+        request_context: &str,
+        payload: RequestPacket,
+    ) -> Result<Bytes> {
+        let payload = payload
+            .serialize()
+            .context("failed to encode JSON-RPC request payload")?;
         let request = Request::post(self.endpoint.clone())
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(payload.to_string())))
+            .body(Full::new(Bytes::copy_from_slice(payload.get().as_bytes())))
             .context("failed to build JSON-RPC request")?;
         let response =
             self.client.request(request).await.with_context(|| {
@@ -181,45 +173,36 @@ impl JsonRpcProvider {
         Ok(body)
     }
 }
-#[derive(Debug)]
-struct JsonRpcResponse {
-    id: Option<Value>,
-    result: Option<Value>,
-    error: Option<JsonRpcError>,
+
+fn json_rpc_request(method: String, id: u64, params: Vec<Value>) -> Result<SerializedRequest> {
+    JsonRpcRequest::new(method, Id::Number(id), params)
+        .serialize()
+        .context("failed to encode JSON-RPC request")
 }
 
-impl JsonRpcResponse {
-    fn response_id(&self) -> Result<i64> {
-        self.id
-            .as_ref()
-            .and_then(Value::as_i64)
-            .context("missing or non-integer JSON-RPC response id")
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct RawJsonRpcResponse {
-            id: Option<Value>,
-            result: Option<Value>,
-            error: Option<JsonRpcError>,
+fn json_rpc_response_result(response: Response, method: &str) -> Result<Option<Value>> {
+    match response.payload {
+        ResponsePayload::Success(result) => {
+            let value = raw_value_to_json(result.as_ref())?;
+            Ok((!value.is_null()).then_some(value))
         }
-
-        let raw = RawJsonRpcResponse::deserialize(deserializer)?;
-        Ok(Self {
-            id: raw.id,
-            result: raw.result,
-            error: raw.error,
-        })
+        ResponsePayload::Failure(error) => {
+            bail!(
+                "provider returned JSON-RPC error for {method}: {}: {}",
+                error.code,
+                error.message
+            )
+        }
     }
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
+fn response_id(id: &Id) -> Result<i64> {
+    match id {
+        Id::Number(value) => i64::try_from(*value).context("JSON-RPC response id overflows i64"),
+        Id::String(_) | Id::None => bail!("missing or non-integer JSON-RPC response id"),
+    }
+}
+
+fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
+    serde_json::from_str(value.get()).context("failed to decode raw JSON value")
 }

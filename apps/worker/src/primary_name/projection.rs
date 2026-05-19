@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    clear_primary_names_current, delete_primary_name_current,
+    clear_primary_names_current, delete_primary_name_current, normalize_evm_address,
     upsert_primary_name_current_snapshots,
 };
 use futures_util::{TryStreamExt, pin_mut};
@@ -265,5 +265,5 @@ fn count_statuses(rows: &[PrimaryNameCurrentRow]) -> StatusCounts {
 }
 
 fn normalize_address(address: &str) -> String {
-    address.to_ascii_lowercase()
+    normalize_evm_address(address)
 }

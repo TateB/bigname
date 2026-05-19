@@ -12,10 +12,11 @@ mod loading;
 mod types;
 mod utils;
 
+use crate::normalized_event_support::count_events_by_kind;
 use builders::build_normalized_events;
 use loading::{load_active_capabilities, load_normalized_event_counts_by_kind};
 pub use types::{ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary};
-use utils::{active_proxy_contracts_by_manifest, count_events_by_kind};
+use utils::active_proxy_contracts_by_manifest;
 
 /// Sync manifest-derived normalized events from stored active manifest state.
 pub async fn sync_manifest_normalized_events(

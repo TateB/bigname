@@ -17,10 +17,7 @@ use super::{
         load_manifest_code_hash_observations_for_watched_contracts,
     },
     types::ManifestCodeHashObservation,
-    watched::{
-        load_watched_contracts_by_source_family,
-        load_watched_contracts_by_source_family_and_addresses,
-    },
+    watched::load_watched_contracts_by_source_family,
 };
 
 const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
@@ -79,7 +76,7 @@ pub async fn load_basenames_l2_resolver_profile_admissions_for_targets(
         .iter()
         .map(|contract| contract.contract_instance_id)
         .collect::<Vec<_>>();
-    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
+    let target_contracts = load_resolver_profile_target_watched_contracts(
         pool,
         BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
         targets,
@@ -235,6 +232,389 @@ pub(super) async fn load_resolver_profile_seed_watched_contracts(
         .collect()
 }
 
+pub(super) async fn load_resolver_profile_target_watched_contracts(
+    pool: &PgPool,
+    source_family: &str,
+    targets: &[(String, String)],
+) -> Result<Vec<WatchedContract>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let targets = targets
+        .iter()
+        .map(|(chain, address)| (chain.clone(), normalize_address(address)))
+        .collect::<BTreeSet<_>>();
+    let chains = targets
+        .iter()
+        .map(|(chain, _)| chain.clone())
+        .collect::<Vec<_>>();
+    let addresses = targets
+        .iter()
+        .map(|(_, address)| address.clone())
+        .collect::<Vec<_>>();
+
+    let rows = sqlx::query(
+        r#"
+        WITH target_addresses AS (
+            SELECT DISTINCT chain, address
+            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS target(chain, address)
+        ),
+        target_instances AS (
+            SELECT
+                target.chain,
+                target.address,
+                cia.contract_instance_id,
+                cia.active_from_block_number,
+                cia.active_to_block_number
+            FROM target_addresses target
+            JOIN contract_instance_addresses cia
+              ON cia.chain_id = target.chain
+             AND cia.address = target.address
+             AND cia.deactivated_at IS NULL
+        ),
+        manifest_declared AS (
+            SELECT DISTINCT
+                ti.chain AS chain,
+                mv.source_family AS source_family,
+                ti.address AS address,
+                mci.contract_instance_id AS contract_instance_id,
+                CASE
+                    WHEN mci.declaration_kind = 'root' THEN 'manifest_root'
+                    ELSE 'manifest_contract'
+                END::TEXT AS source,
+                mv.manifest_id AS source_manifest_id,
+                CASE
+                    WHEN manifest_range.start_block IS NULL THEN ti.active_from_block_number
+                    WHEN ti.active_from_block_number IS NULL THEN manifest_range.start_block
+                    ELSE GREATEST(manifest_range.start_block, ti.active_from_block_number)
+                END AS active_from_block_number,
+                ti.active_to_block_number AS active_to_block_number
+            FROM target_instances ti
+            JOIN manifest_contract_instances mci
+              ON mci.contract_instance_id = ti.contract_instance_id
+            JOIN manifest_versions mv
+              ON mv.manifest_id = mci.manifest_id
+             AND mv.chain = ti.chain
+             AND mv.rollout_status = 'active'
+             AND mv.source_family = $3
+            LEFT JOIN LATERAL (
+                SELECT (entry ->> 'start_block')::BIGINT AS start_block
+                FROM jsonb_array_elements(
+                    CASE
+                        WHEN mci.declaration_kind = 'root' THEN mv.manifest_payload -> 'roots'
+                        ELSE mv.manifest_payload -> 'contracts'
+                    END
+                ) entry
+                WHERE (
+                        mci.declaration_kind = 'root'
+                        AND entry ->> 'name' = mci.declaration_name
+                    )
+                   OR (
+                        mci.declaration_kind = 'contract'
+                        AND entry ->> 'role' = mci.declaration_name
+                    )
+                ORDER BY start_block NULLS LAST
+                LIMIT 1
+            ) manifest_range ON TRUE
+        ),
+        direct_other_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                mv.source_family AS source_family,
+                mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            WHERE mv.rollout_status = 'active'
+              AND mv.source_family = $3
+              AND mv.source_family NOT IN (
+                  'ens_v1_registry_l1',
+                  'ens_v2_registry_l1',
+                  'basenames_base_registry'
+              )
+        ),
+        direct_registry_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                mv.source_family AS source_family,
+                mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            WHERE mv.rollout_status = 'active'
+              AND mv.source_family = $3
+              AND mv.source_family IN (
+                  'ens_v1_registry_l1',
+                  'ens_v2_registry_l1',
+                  'basenames_base_registry'
+              )
+        ),
+        resolver_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                target_mv.source_family AS source_family,
+                target_mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            JOIN manifest_versions target_mv
+              ON target_mv.rollout_status = 'active'
+             AND target_mv.namespace = mv.namespace
+             AND target_mv.chain = mv.chain
+             AND target_mv.deployment_epoch = mv.deployment_epoch
+             AND target_mv.source_family = CASE
+                 WHEN mv.source_family = 'ens_v1_registry_l1'
+                     THEN 'ens_v1_resolver_l1'
+                 WHEN mv.source_family = 'ens_v2_registry_l1'
+                     THEN 'ens_v2_resolver_l1'
+                 WHEN mv.source_family = 'basenames_base_registry'
+                     THEN 'basenames_base_resolver'
+                 ELSE NULL
+             END
+            WHERE mv.rollout_status = 'active'
+              AND mv.source_family IN (
+                  'ens_v1_registry_l1',
+                  'ens_v2_registry_l1',
+                  'basenames_base_registry'
+              )
+              AND target_mv.source_family = $3
+        ),
+        direct_other_discovery_scoped AS (
+            SELECT
+                ti.chain AS chain,
+                candidate.source_family AS source_family,
+                ti.address AS address,
+                ti.contract_instance_id AS contract_instance_id,
+                'discovery_edge'::TEXT AS source,
+                candidate.source_manifest_id AS source_manifest_id,
+                CASE
+                    WHEN active_edge.active_from_block_number IS NULL THEN ti.active_from_block_number
+                    WHEN ti.active_from_block_number IS NULL THEN active_edge.active_from_block_number
+                    ELSE GREATEST(active_edge.active_from_block_number, ti.active_from_block_number)
+                END AS active_from_block_number,
+                CASE
+                    WHEN active_edge.active_to_block_number IS NULL THEN ti.active_to_block_number
+                    WHEN ti.active_to_block_number IS NULL THEN active_edge.active_to_block_number
+                    ELSE LEAST(active_edge.active_to_block_number, ti.active_to_block_number)
+                END AS active_to_block_number
+            FROM target_instances ti
+            JOIN direct_other_edge_sources candidate
+              ON candidate.chain = ti.chain
+            JOIN LATERAL (
+                SELECT de.active_from_block_number, de.active_to_block_number
+                FROM discovery_edges de
+                WHERE de.chain_id = ti.chain
+                  AND de.to_contract_instance_id = ti.contract_instance_id
+                  AND de.source_manifest_id = candidate.edge_source_manifest_id
+                  AND de.deactivated_at IS NULL
+                  AND de.edge_kind <> 'migration'
+                  AND (
+                      de.active_from_block_number IS NULL
+                      OR ti.active_to_block_number IS NULL
+                      OR de.active_from_block_number <= ti.active_to_block_number
+                  )
+                  AND (
+                      ti.active_from_block_number IS NULL
+                      OR de.active_to_block_number IS NULL
+                      OR ti.active_from_block_number <= de.active_to_block_number
+                  )
+                LIMIT 1
+            ) active_edge ON TRUE
+        ),
+        direct_registry_discovery_scoped AS (
+            SELECT
+                ti.chain AS chain,
+                candidate.source_family AS source_family,
+                ti.address AS address,
+                ti.contract_instance_id AS contract_instance_id,
+                'discovery_edge'::TEXT AS source,
+                candidate.source_manifest_id AS source_manifest_id,
+                CASE
+                    WHEN active_edge.active_from_block_number IS NULL THEN ti.active_from_block_number
+                    WHEN ti.active_from_block_number IS NULL THEN active_edge.active_from_block_number
+                    ELSE GREATEST(active_edge.active_from_block_number, ti.active_from_block_number)
+                END AS active_from_block_number,
+                CASE
+                    WHEN active_edge.active_to_block_number IS NULL THEN ti.active_to_block_number
+                    WHEN ti.active_to_block_number IS NULL THEN active_edge.active_to_block_number
+                    ELSE LEAST(active_edge.active_to_block_number, ti.active_to_block_number)
+                END AS active_to_block_number
+            FROM target_instances ti
+            JOIN direct_registry_edge_sources candidate
+              ON candidate.chain = ti.chain
+            JOIN LATERAL (
+                SELECT de.active_from_block_number, de.active_to_block_number
+                FROM discovery_edges de
+                WHERE de.chain_id = ti.chain
+                  AND de.to_contract_instance_id = ti.contract_instance_id
+                  AND de.source_manifest_id = candidate.edge_source_manifest_id
+                  AND de.deactivated_at IS NULL
+                  AND de.edge_kind <> 'migration'
+                  AND de.edge_kind <> 'resolver'
+                  AND (
+                      de.active_from_block_number IS NULL
+                      OR ti.active_to_block_number IS NULL
+                      OR de.active_from_block_number <= ti.active_to_block_number
+                  )
+                  AND (
+                      ti.active_from_block_number IS NULL
+                      OR de.active_to_block_number IS NULL
+                      OR ti.active_from_block_number <= de.active_to_block_number
+                  )
+                LIMIT 1
+            ) active_edge ON TRUE
+        ),
+        resolver_discovery_scoped AS (
+            SELECT
+                ti.chain AS chain,
+                candidate.source_family AS source_family,
+                ti.address AS address,
+                ti.contract_instance_id AS contract_instance_id,
+                'discovery_edge'::TEXT AS source,
+                candidate.source_manifest_id AS source_manifest_id,
+                CASE
+                    WHEN active_edge.active_from_block_number IS NULL THEN ti.active_from_block_number
+                    WHEN ti.active_from_block_number IS NULL THEN active_edge.active_from_block_number
+                    ELSE GREATEST(active_edge.active_from_block_number, ti.active_from_block_number)
+                END AS active_from_block_number,
+                CASE
+                    WHEN active_edge.active_to_block_number IS NULL THEN ti.active_to_block_number
+                    WHEN ti.active_to_block_number IS NULL THEN active_edge.active_to_block_number
+                    ELSE LEAST(active_edge.active_to_block_number, ti.active_to_block_number)
+                END AS active_to_block_number
+            FROM target_instances ti
+            JOIN resolver_edge_sources candidate
+              ON candidate.chain = ti.chain
+            JOIN LATERAL (
+                SELECT de.active_from_block_number, de.active_to_block_number
+                FROM discovery_edges de
+                WHERE de.chain_id = ti.chain
+                  AND de.to_contract_instance_id = ti.contract_instance_id
+                  AND de.source_manifest_id = candidate.edge_source_manifest_id
+                  AND de.deactivated_at IS NULL
+                  AND de.edge_kind = 'resolver'
+                  AND (
+                      de.active_from_block_number IS NULL
+                      OR ti.active_to_block_number IS NULL
+                      OR de.active_from_block_number <= ti.active_to_block_number
+                  )
+                  AND (
+                      ti.active_from_block_number IS NULL
+                      OR de.active_to_block_number IS NULL
+                      OR ti.active_from_block_number <= de.active_to_block_number
+                  )
+                LIMIT 1
+            ) active_edge ON TRUE
+        ),
+        discovery_scoped AS (
+            SELECT
+                chain,
+                source_family,
+                address,
+                contract_instance_id,
+                source,
+                source_manifest_id,
+                active_from_block_number,
+                active_to_block_number
+            FROM direct_other_discovery_scoped
+
+            UNION
+
+            SELECT
+                chain,
+                source_family,
+                address,
+                contract_instance_id,
+                source,
+                source_manifest_id,
+                active_from_block_number,
+                active_to_block_number
+            FROM direct_registry_discovery_scoped
+
+            UNION
+
+            SELECT
+                chain,
+                source_family,
+                address,
+                contract_instance_id,
+                source,
+                source_manifest_id,
+                active_from_block_number,
+                active_to_block_number
+            FROM resolver_discovery_scoped
+        )
+        SELECT
+            chain,
+            source_family,
+            address,
+            contract_instance_id,
+            source,
+            source_manifest_id,
+            active_from_block_number,
+            active_to_block_number
+        FROM manifest_declared
+
+        UNION
+
+        SELECT
+            chain,
+            source_family,
+            address,
+            contract_instance_id,
+            source,
+            source_manifest_id,
+            active_from_block_number,
+            active_to_block_number
+        FROM discovery_scoped
+
+        ORDER BY 1, 2, 3, 5, 6, 4
+        "#,
+    )
+    .bind(&chains)
+    .bind(&addresses)
+    .bind(source_family)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load scoped resolver-profile targets for {source_family}")
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let source = row
+                .try_get::<String, _>("source")
+                .context("failed to read resolver-profile target source")?;
+            Ok(WatchedContract {
+                chain: row
+                    .try_get("chain")
+                    .context("failed to read resolver-profile target chain")?,
+                source_family: row
+                    .try_get("source_family")
+                    .context("failed to read resolver-profile target source_family")?,
+                address: normalize_address(
+                    &row.try_get::<String, _>("address")
+                        .context("failed to read resolver-profile target address")?,
+                ),
+                contract_instance_id: row
+                    .try_get("contract_instance_id")
+                    .context("failed to read resolver-profile target contract_instance_id")?,
+                source: WatchedContractSource::from_db_value(&source)?,
+                source_manifest_id: row
+                    .try_get("source_manifest_id")
+                    .context("failed to read resolver-profile target source_manifest_id")?,
+                active_from_block_number: row
+                    .try_get("active_from_block_number")
+                    .context("failed to read resolver-profile target active_from_block_number")?,
+                active_to_block_number: row
+                    .try_get("active_to_block_number")
+                    .context("failed to read resolver-profile target active_to_block_number")?,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ResolverProfileAdmissionConfig {
     pub(super) source_family: &'static str,
@@ -295,6 +675,11 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
         }
     }
 
+    sort_resolver_profile_admissions(&mut admissions);
+    admissions
+}
+
+pub(super) fn sort_resolver_profile_admissions(admissions: &mut [ResolverProfileAdmission]) {
     admissions.sort_by(|left, right| {
         (
             left.chain.as_str(),
@@ -303,6 +688,7 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
             left.contract_instance_id,
             left.active_from_block_number,
             left.active_to_block_number,
+            left.profile.as_str(),
             left.fact_family.as_str(),
         )
             .cmp(&(
@@ -312,10 +698,10 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
                 right.contract_instance_id,
                 right.active_from_block_number,
                 right.active_to_block_number,
+                right.profile.as_str(),
                 right.fact_family.as_str(),
             ))
     });
-    admissions
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

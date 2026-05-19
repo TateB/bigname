@@ -1,31 +1,16 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail};
-use sha3::Digest;
 use sqlx::Row;
 
 use super::ReplayRawLogSelection;
-use crate::reconciliation::types::RawFactNormalizedEventReplaySourceScope;
-
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
-const ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES: &[&str] = &[
-    "ABIChanged(bytes32,uint256)",
-    "AddrChanged(bytes32,address)",
-    "AddressChanged(bytes32,uint256,bytes)",
-    "ContentChanged(bytes32,bytes32)",
-    "ContenthashChanged(bytes32,bytes)",
-    "DNSRecordChanged(bytes32,bytes,uint16,bytes)",
-    "DNSRecordDeleted(bytes32,bytes,uint16)",
-    "DNSZonehashChanged(bytes32,bytes,bytes)",
-    "DataChanged(bytes32,string,string,bytes)",
-    "InterfaceChanged(bytes32,bytes4,address)",
-    "NameChanged(bytes32,string)",
-    "TextChanged(bytes32,string,string)",
-    "TextChanged(bytes32,string,string,string)",
-    "VersionChanged(bytes32,uint64)",
-];
+use crate::{
+    ens_v1_resolver::{
+        GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        generic_resolver_record_topic0s,
+    },
+    reconciliation::types::RawFactNormalizedEventReplaySourceScope,
+};
 
 pub(super) async fn load_replay_raw_log_selection_for_scoped_range(
     pool: &sqlx::PgPool,
@@ -45,7 +30,7 @@ pub(super) async fn load_replay_raw_log_selection_for_scoped_range(
     }
     let (source_families, addresses, from_blocks, to_blocks) =
         source_scope_filter_bindings(&source_scope);
-    let ens_v1_resolver_event_topic0s = ens_v1_resolver_event_topic0s();
+    let ens_v1_resolver_event_topic0s = generic_resolver_record_topic0s();
 
     let canonical_raw_log_count = sqlx::query_scalar::<_, i64>(
         r#"
@@ -317,21 +302,4 @@ fn source_scope_filter_bindings(
     }
 
     (source_families, addresses, from_blocks, to_blocks)
-}
-
-fn ens_v1_resolver_event_topic0s() -> Vec<String> {
-    ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES
-        .iter()
-        .map(|signature| topic0_hex(signature))
-        .collect()
-}
-
-fn topic0_hex(signature: &str) -> String {
-    let digest = sha3::Keccak256::digest(signature.as_bytes());
-    let mut output = String::with_capacity(66);
-    output.push_str("0x");
-    for byte in digest {
-        write!(&mut output, "{byte:02x}").expect("writing to String must not fail");
-    }
-    output
 }

@@ -1,5 +1,17 @@
 use super::*;
+use bigname_storage::sql_row;
 
+mod lineage;
+mod orphaning;
+
+pub(super) use lineage::{build_resource, build_token_lineage, build_token_lineage_from_boundary};
+use orphaning::orphan_stale_overlapping_surface_bindings;
+#[cfg(test)]
+use orphaning::stale_overlapping_surface_binding_candidates;
+
+const EXISTING_SURFACE_BINDING_LOOKUP_NAME_CHUNK_SIZE: usize = 5_000;
+
+#[cfg(test)]
 pub(super) fn coalesce_name_surfaces_for_upsert(surfaces: &mut Vec<NameSurface>) {
     let mut seen = HashSet::<String>::new();
     surfaces.retain(|surface| seen.insert(surface.logical_name_id.clone()));
@@ -108,120 +120,6 @@ fn trim_incoming_bindings_at_existing_starts(
     }
 }
 
-async fn orphan_stale_overlapping_surface_bindings(
-    pool: &PgPool,
-    incoming: &[SurfaceBinding],
-    existing: &mut Vec<SurfaceBinding>,
-) -> Result<usize> {
-    let candidates = stale_overlapping_surface_binding_candidates(incoming, existing);
-    if candidates.is_empty() {
-        return Ok(0);
-    }
-
-    let mut surface_binding_ids = Vec::with_capacity(candidates.len());
-    let mut resource_ids = Vec::with_capacity(candidates.len());
-    for (surface_binding_id, resource_id) in candidates {
-        surface_binding_ids.push(surface_binding_id);
-        resource_ids.push(resource_id);
-    }
-
-    let rows = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        WITH candidate(surface_binding_id, resource_id) AS (
-            SELECT *
-            FROM unnest($1::UUID[], $2::UUID[])
-        ),
-        event_backed AS (
-            SELECT DISTINCT normalized_events.resource_id
-            FROM normalized_events
-            JOIN candidate
-              ON candidate.resource_id = normalized_events.resource_id
-            WHERE normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
-        )
-        UPDATE surface_bindings
-        SET
-            canonicality_state = 'orphaned'::canonicality_state,
-            observed_at = now()
-        FROM candidate
-        WHERE surface_bindings.surface_binding_id = candidate.surface_binding_id
-          AND surface_bindings.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND NOT EXISTS (
-              SELECT 1
-              FROM event_backed
-              WHERE event_backed.resource_id = candidate.resource_id
-          )
-        RETURNING surface_bindings.surface_binding_id
-        "#,
-    )
-    .bind(&surface_binding_ids)
-    .bind(&resource_ids)
-    .fetch_all(pool)
-    .await
-    .context(
-        "failed to orphan stale overlapping surface bindings before restricted authority replay",
-    )?;
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let orphaned_ids = rows.into_iter().collect::<HashSet<_>>();
-    existing.retain(|binding| !orphaned_ids.contains(&binding.surface_binding_id));
-
-    tracing::warn!(
-        adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-        orphaned_surface_binding_count = orphaned_ids.len(),
-        "orphaned stale overlapping surface bindings before restricted authority replay"
-    );
-
-    Ok(orphaned_ids.len())
-}
-
-fn stale_overlapping_surface_binding_candidates(
-    incoming: &[SurfaceBinding],
-    existing: &[SurfaceBinding],
-) -> BTreeMap<Uuid, Uuid> {
-    let mut incoming_by_name = BTreeMap::<&str, Vec<&SurfaceBinding>>::new();
-    for binding in incoming
-        .iter()
-        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
-    {
-        incoming_by_name
-            .entry(binding.logical_name_id.as_str())
-            .or_default()
-            .push(binding);
-    }
-
-    let mut candidates = BTreeMap::new();
-    for existing in existing.iter().filter(|binding| {
-        binding.provenance.get("adapter").and_then(Value::as_str)
-            == Some(DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY)
-            && surface_binding_exclusion_applies(binding.canonicality_state)
-    }) {
-        let Some(incoming_for_name) = incoming_by_name.get(existing.logical_name_id.as_str())
-        else {
-            continue;
-        };
-        if incoming_for_name.iter().any(|incoming| {
-            incoming.surface_binding_id != existing.surface_binding_id
-                && surface_binding_ranges_overlap(existing, incoming)
-        }) {
-            candidates.insert(existing.surface_binding_id, existing.resource_id);
-        }
-    }
-
-    candidates
-}
-
-fn surface_binding_ranges_overlap(left: &SurfaceBinding, right: &SurfaceBinding) -> bool {
-    right
-        .active_to
-        .is_none_or(|right_active_to| left.active_from < right_active_to)
-        && left
-            .active_to
-            .is_none_or(|left_active_to| right.active_from < left_active_to)
-}
-
 fn ensure_same_surface_binding_identity(
     existing: &SurfaceBinding,
     incoming: &SurfaceBinding,
@@ -269,9 +167,7 @@ fn merge_replayed_canonicality(
             }
         }
         CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned
-                || canonicality_rank(incoming) > canonicality_rank(current)
-            {
+            if current == CanonicalityState::Orphaned || incoming.rank() > current.rank() {
                 incoming
             } else {
                 current
@@ -280,50 +176,14 @@ fn merge_replayed_canonicality(
     }
 }
 
-fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
-    }
-}
-
 pub(super) async fn build_name_surface(
-    pool: &PgPool,
+    _pool: &PgPool,
     name: &NameMetadata,
     reference: Option<&ObservationRef>,
 ) -> Result<Option<NameSurface>> {
     let Some(reference) = reference else {
         return Ok(None);
     };
-
-    if let Some(existing) =
-        load_name_surface_including_noncanonical(pool, &name.logical_name_id).await?
-    {
-        return Ok(Some(NameSurface {
-            logical_name_id: existing.logical_name_id,
-            namespace: existing.namespace,
-            input_name: existing.input_name,
-            canonical_display_name: existing.canonical_display_name,
-            normalized_name: existing.normalized_name,
-            dns_encoded_name: existing.dns_encoded_name,
-            namehash: existing.namehash,
-            labelhashes: existing.labelhashes,
-            normalizer_version: existing.normalizer_version,
-            normalization_warnings: existing.normalization_warnings,
-            normalization_errors: existing.normalization_errors,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance: json!({
-                "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-                "logical_name_id": name.logical_name_id,
-            }),
-            canonicality_state: reference.canonicality_state,
-        }));
-    }
 
     Ok(Some(NameSurface {
         logical_name_id: name.logical_name_id.clone(),
@@ -349,121 +209,12 @@ pub(super) async fn build_name_surface(
     }))
 }
 
-pub(super) async fn build_token_lineage(
-    pool: &PgPool,
-    token_lineage_id: Uuid,
-    chain: &str,
-    reference: &ObservationRef,
-    provenance: serde_json::Value,
-) -> Result<TokenLineage> {
-    if let Some(existing) =
-        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
-    {
-        return Ok(TokenLineage {
-            token_lineage_id: existing.token_lineage_id,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(TokenLineage {
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
-}
-
-pub(super) async fn build_token_lineage_from_boundary(
-    pool: &PgPool,
-    token_lineage_id: Uuid,
-    chain: &str,
-    reference: &BoundaryRef,
-    provenance: serde_json::Value,
-) -> Result<TokenLineage> {
-    if let Some(existing) =
-        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
-    {
-        return Ok(TokenLineage {
-            token_lineage_id: existing.token_lineage_id,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(TokenLineage {
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
-}
-
-pub(super) async fn build_resource(
-    pool: &PgPool,
-    resource_id: Uuid,
-    token_lineage_id: Option<Uuid>,
-    chain: &str,
-    reference: &BoundaryRef,
-    provenance: serde_json::Value,
-) -> Result<Resource> {
-    if let Some(existing) = load_resource_including_noncanonical(pool, resource_id).await? {
-        return Ok(Resource {
-            resource_id: existing.resource_id,
-            token_lineage_id: existing.token_lineage_id.or(token_lineage_id),
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(Resource {
-        resource_id,
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
-}
-
 pub(super) async fn build_surface_binding(
-    pool: &PgPool,
+    _pool: &PgPool,
     logical_name_id: &str,
     segment: &BindingSegment,
     chain: &str,
 ) -> Result<SurfaceBinding> {
-    if let Some(existing) =
-        load_surface_binding_including_noncanonical(pool, segment.surface_binding_id).await?
-    {
-        return Ok(SurfaceBinding {
-            surface_binding_id: existing.surface_binding_id,
-            logical_name_id: existing.logical_name_id,
-            resource_id: existing.resource_id,
-            binding_kind: existing.binding_kind,
-            active_from: existing.active_from,
-            active_to: segment.active_to.or(existing.active_to),
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance: existing.provenance,
-            canonicality_state: segment.anchor_ref.canonicality_state,
-        });
-    }
-
     Ok(SurfaceBinding {
         surface_binding_id: segment.surface_binding_id,
         logical_name_id: logical_name_id.to_owned(),
@@ -491,31 +242,67 @@ pub(super) async fn prepend_existing_open_binding_closures(
         return Ok(0);
     }
 
-    let mut closure_points = BTreeMap::<String, (OffsetDateTime, CanonicalityState)>::new();
-    let incoming_binding_ids = bindings
-        .iter()
-        .map(|binding| binding.surface_binding_id)
-        .collect::<HashSet<_>>();
-    for binding in bindings
-        .iter()
-        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
-    {
-        closure_points
-            .entry(binding.logical_name_id.clone())
-            .and_modify(|(active_from, canonicality_state)| {
-                if binding.active_from < *active_from {
-                    *active_from = binding.active_from;
-                    *canonicality_state = binding.canonicality_state;
-                }
-            })
-            .or_insert((binding.active_from, binding.canonicality_state));
+    let mut closures = Vec::new();
+    let mut group_start = 0usize;
+    while group_start < bindings.len() {
+        let group_end = next_surface_binding_name_chunk_end(bindings, group_start);
+        let incoming = &mut bindings[group_start..group_end];
+        let logical_name_ids = incoming
+            .iter()
+            .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+            .map(|binding| binding.logical_name_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if logical_name_ids.is_empty() {
+            group_start = group_end;
+            continue;
+        }
+
+        let mut existing_bindings =
+            load_existing_surface_bindings_for_logical_names(pool, &logical_name_ids).await?;
+
+        orphan_stale_overlapping_surface_bindings(pool, incoming, &mut existing_bindings).await?;
+        trim_incoming_bindings_at_existing_starts(incoming, &existing_bindings);
+
+        let mut chunk_closures =
+            existing_binding_closures_for_incoming(&existing_bindings, incoming);
+        log_unresolved_surface_binding_overlaps(&existing_bindings, incoming, &chunk_closures);
+        closures.append(&mut chunk_closures);
+
+        group_start = group_end;
     }
 
-    if closure_points.is_empty() {
+    if closures.is_empty() {
         return Ok(0);
     }
 
-    let logical_name_ids = closure_points.keys().cloned().collect::<Vec<_>>();
+    let closure_count = closures.len();
+    let mut next_bindings = closures;
+    next_bindings.append(bindings);
+    *bindings = next_bindings;
+
+    Ok(closure_count)
+}
+
+fn next_surface_binding_name_chunk_end(bindings: &[SurfaceBinding], start: usize) -> usize {
+    let mut end = start;
+    let mut distinct_names = 0usize;
+    while end < bindings.len() && distinct_names < EXISTING_SURFACE_BINDING_LOOKUP_NAME_CHUNK_SIZE {
+        let logical_name_id = bindings[end].logical_name_id.as_str();
+        distinct_names += 1;
+        end += 1;
+        while end < bindings.len() && bindings[end].logical_name_id == logical_name_id {
+            end += 1;
+        }
+    }
+    end
+}
+
+async fn load_existing_surface_bindings_for_logical_names(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<Vec<SurfaceBinding>> {
     let rows = sqlx::query(
         r#"
         SELECT
@@ -536,51 +323,193 @@ pub(super) async fn prepend_existing_open_binding_closures(
         ORDER BY logical_name_id, active_from, surface_binding_id
         "#,
     )
-    .bind(&logical_name_ids)
+    .bind(logical_name_ids)
     .fetch_all(pool)
     .await
     .context("failed to load existing surface bindings for restricted authority replay")?;
 
-    let mut existing_bindings = rows
-        .into_iter()
+    rows.into_iter()
         .map(decode_adapter_surface_binding)
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
 
-    orphan_stale_overlapping_surface_bindings(pool, bindings, &mut existing_bindings).await?;
+fn log_unresolved_surface_binding_overlaps(
+    existing_bindings: &[SurfaceBinding],
+    incoming: &[SurfaceBinding],
+    closures: &[SurfaceBinding],
+) {
+    let closure_active_tos = closures
+        .iter()
+        .filter_map(|closure| {
+            closure
+                .active_to
+                .map(|active_to| (closure.surface_binding_id, active_to))
+        })
+        .collect::<HashMap<_, _>>();
+    let incoming_same_id_active_tos = incoming
+        .iter()
+        .filter_map(|binding| {
+            binding
+                .active_to
+                .map(|active_to| (binding.surface_binding_id, active_to))
+        })
+        .fold(
+            HashMap::new(),
+            |mut map, (surface_binding_id, active_to)| {
+                map.entry(surface_binding_id)
+                    .and_modify(|current: &mut OffsetDateTime| *current = (*current).min(active_to))
+                    .or_insert(active_to);
+                map
+            },
+        );
+    let incoming_by_name = incoming
+        .iter()
+        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+        .fold(
+            BTreeMap::<&str, Vec<&SurfaceBinding>>::new(),
+            |mut map, binding| {
+                map.entry(binding.logical_name_id.as_str())
+                    .or_default()
+                    .push(binding);
+                map
+            },
+        );
 
-    trim_incoming_bindings_at_existing_starts(bindings, &existing_bindings);
-
-    let mut closures = Vec::new();
-    for existing in existing_bindings {
-        let Some((close_at, canonicality_state)) = closure_points.get(&existing.logical_name_id)
+    let mut unresolved_count = 0usize;
+    let mut samples = Vec::new();
+    for existing in existing_bindings
+        .iter()
+        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+    {
+        let Some(incoming_for_name) = incoming_by_name.get(existing.logical_name_id.as_str())
         else {
             continue;
         };
-        if incoming_binding_ids.contains(&existing.surface_binding_id)
-            || existing.active_from >= *close_at
-            || existing
-                .active_to
-                .is_some_and(|active_to| active_to <= *close_at)
-        {
+        let planned_active_to = closure_active_tos
+            .get(&existing.surface_binding_id)
+            .copied()
+            .or_else(|| {
+                incoming_same_id_active_tos
+                    .get(&existing.surface_binding_id)
+                    .copied()
+            });
+        let existing_active_to = planned_active_to
+            .map(|active_to| {
+                existing
+                    .active_to
+                    .map_or(active_to, |current| current.min(active_to))
+            })
+            .or(existing.active_to);
+        for incoming in incoming_for_name {
+            if incoming.surface_binding_id == existing.surface_binding_id {
+                continue;
+            }
+            if !surface_binding_ranges_overlap_parts(
+                existing.active_from,
+                existing_active_to,
+                incoming.active_from,
+                incoming.active_to,
+            ) {
+                continue;
+            }
+            unresolved_count += 1;
+            if samples.len() < 5 {
+                samples.push(json!({
+                    "logical_name_id": existing.logical_name_id.clone(),
+                    "existing_surface_binding_id": existing.surface_binding_id,
+                    "existing_resource_id": existing.resource_id,
+                    "existing_active_from": existing.active_from.unix_timestamp(),
+                    "existing_active_to": existing_active_to.map(|value| value.unix_timestamp()),
+                    "incoming_surface_binding_id": incoming.surface_binding_id,
+                    "incoming_resource_id": incoming.resource_id,
+                    "incoming_active_from": incoming.active_from.unix_timestamp(),
+                    "incoming_active_to": incoming.active_to.map(|value| value.unix_timestamp()),
+                }));
+            }
+        }
+    }
+
+    if unresolved_count > 0 {
+        tracing::warn!(
+            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            unresolved_surface_binding_overlap_count = unresolved_count,
+            unresolved_surface_binding_overlap_samples = ?samples,
+            "restricted authority replay left overlapping surface bindings after closure planning"
+        );
+    }
+}
+
+fn surface_binding_ranges_overlap_parts(
+    left_active_from: OffsetDateTime,
+    left_active_to: Option<OffsetDateTime>,
+    right_active_from: OffsetDateTime,
+    right_active_to: Option<OffsetDateTime>,
+) -> bool {
+    right_active_to.is_none_or(|right_active_to| left_active_from < right_active_to)
+        && left_active_to.is_none_or(|left_active_to| right_active_from < left_active_to)
+}
+
+fn existing_binding_closures_for_incoming(
+    existing_bindings: &[SurfaceBinding],
+    incoming: &[SurfaceBinding],
+) -> Vec<SurfaceBinding> {
+    let incoming_binding_ids = incoming
+        .iter()
+        .map(|binding| binding.surface_binding_id)
+        .collect::<HashSet<_>>();
+    let mut incoming_by_name = BTreeMap::<&str, Vec<&SurfaceBinding>>::new();
+    for binding in incoming
+        .iter()
+        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+    {
+        incoming_by_name
+            .entry(binding.logical_name_id.as_str())
+            .or_default()
+            .push(binding);
+    }
+
+    let mut closures = Vec::new();
+    for existing in existing_bindings {
+        if incoming_binding_ids.contains(&existing.surface_binding_id) {
             continue;
         }
 
+        let Some((close_at, canonicality_state)) =
+            next_incoming_binding_start(existing, &incoming_by_name)
+        else {
+            continue;
+        };
+
         closures.push(SurfaceBinding {
-            active_to: Some(*close_at),
-            canonicality_state: *canonicality_state,
-            ..existing
+            active_to: Some(close_at),
+            canonicality_state,
+            ..existing.clone()
         });
     }
 
-    if closures.is_empty() {
-        return Ok(0);
-    }
+    closures
+}
 
-    let closure_count = closures.len();
-    closures.append(bindings);
-    *bindings = closures;
-
-    Ok(closure_count)
+fn next_incoming_binding_start(
+    existing: &SurfaceBinding,
+    incoming_by_name: &BTreeMap<&str, Vec<&SurfaceBinding>>,
+) -> Option<(OffsetDateTime, CanonicalityState)> {
+    incoming_by_name
+        .get(existing.logical_name_id.as_str())?
+        .iter()
+        .filter(|incoming| incoming.surface_binding_id != existing.surface_binding_id)
+        .filter(|incoming| existing.active_from < incoming.active_from)
+        .filter(|incoming| {
+            existing
+                .active_to
+                .is_none_or(|active_to| active_to > incoming.active_from)
+        })
+        .min_by(|left, right| {
+            left.active_from
+                .cmp(&right.active_from)
+                .then_with(|| left.surface_binding_id.cmp(&right.surface_binding_id))
+        })
+        .map(|incoming| (incoming.active_from, incoming.canonicality_state))
 }
 
 fn surface_binding_exclusion_applies(canonicality_state: CanonicalityState) -> bool {
@@ -592,53 +521,18 @@ fn surface_binding_exclusion_applies(canonicality_state: CanonicalityState) -> b
 
 fn decode_adapter_surface_binding(row: sqlx::postgres::PgRow) -> Result<SurfaceBinding> {
     Ok(SurfaceBinding {
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        binding_kind: decode_adapter_surface_binding_kind(
-            &row.try_get::<String, _>("binding_kind")
-                .context("missing binding_kind")?,
-        )?,
-        active_from: row.try_get("active_from").context("missing active_from")?,
-        active_to: row.try_get("active_to").context("missing active_to")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: decode_adapter_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        surface_binding_id: sql_row::get(&row, "surface_binding_id")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        binding_kind: sql_row::get(&row, "binding_kind")?,
+        active_from: sql_row::get(&row, "active_from")?,
+        active_to: sql_row::get(&row, "active_to")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
     })
-}
-
-fn decode_adapter_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
-}
-
-fn decode_adapter_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }
 
 #[cfg(test)]

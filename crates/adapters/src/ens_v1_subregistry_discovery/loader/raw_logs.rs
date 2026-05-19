@@ -1,16 +1,35 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
 use super::super::{
-    hex_topic::normalize_address,
+    CONTRACT_ROLE_REGISTRY_OLD,
+    hex_topic::{
+        new_owner_topic0, new_resolver_topic0, new_ttl_topic0, normalize_address,
+        registry_transfer_topic0,
+    },
     scope::{
         RegistryRawLogSourceScopeTarget, emitter_for_block_and_scope,
         scoped_ranges_for_active_emitters,
     },
 };
-use super::{ActiveEmitter, RegistryRawLogRow, parse_canonicality_state};
+use super::{ActiveEmitter, RegistryRawLogRow};
 use anyhow::{Context, Result};
 use futures_util::TryStreamExt;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::ens_v1_subregistry_discovery) struct RegistryRawLogPosition {
+    pub(in crate::ens_v1_subregistry_discovery) block_number: i64,
+    pub(in crate::ens_v1_subregistry_discovery) transaction_index: i64,
+    pub(in crate::ens_v1_subregistry_discovery) log_index: i64,
+    pub(in crate::ens_v1_subregistry_discovery) emitting_address: String,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::ens_v1_subregistry_discovery) struct RegistryRawLogPage {
+    pub(in crate::ens_v1_subregistry_discovery) raw_logs: Vec<RegistryRawLogRow>,
+    pub(in crate::ens_v1_subregistry_discovery) last_position: Option<RegistryRawLogPosition>,
+}
 
 pub(in crate::ens_v1_subregistry_discovery) async fn load_registry_raw_logs(
     pool: &PgPool,
@@ -50,60 +69,72 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs(
             .or_default()
             .push(emitter);
     }
-    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
-    let watched_range_addresses = emitters
-        .iter()
-        .map(|emitter| emitter.address.clone())
-        .collect::<Vec<_>>();
-    let watched_effective_from_blocks = emitters
-        .iter()
-        .map(|emitter| emitter.active_from_block_number.unwrap_or(0))
-        .collect::<Vec<_>>();
-    let watched_effective_to_blocks = emitters
-        .iter()
-        .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
+    let assignment_topics = [new_owner_topic0(), new_resolver_topic0()];
+    let old_registry_migration_topics = [registry_transfer_topic0(), new_ttl_topic0()];
+    let old_registry_addresses = emitters_by_address
+        .values()
+        .filter_map(|address_emitters| {
+            address_emitters
+                .iter()
+                .find(|emitter| {
+                    emitter.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY_OLD)
+                })
+                .map(|emitter| emitter.address.clone())
+        })
         .collect::<Vec<_>>();
 
     let mut rows = sqlx::query(
         r#"
-        SELECT
-            chain_id,
-            block_hash,
-            block_number,
-            transaction_hash,
-            transaction_index,
-            log_index,
-            emitting_address,
-            topics,
-            data,
-            canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs
-        WHERE chain_id = $1
-          AND lower(emitting_address) = ANY($2::TEXT[])
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($3::TEXT[], $4::BIGINT[], $5::BIGINT[]) AS watched(
-                  address,
-                  effective_from_block,
-                  effective_to_block
+        SELECT *
+        FROM (
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs
+            WHERE chain_id = $1
+              AND lower(topics[1]) = ANY($2::TEXT[])
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
               )
-              WHERE watched.address = lower(emitting_address)
-                AND block_number BETWEEN watched.effective_from_block
-                    AND watched.effective_to_block
-          )
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+            UNION ALL
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs
+            WHERE chain_id = $1
+              AND lower(emitting_address) = ANY($4::TEXT[])
+              AND lower(topics[1]) = ANY($3::TEXT[])
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        ) selected_raw_logs
         ORDER BY block_number, transaction_index, log_index, emitting_address
         "#,
     )
     .bind(chain)
-    .bind(&watched_addresses)
-    .bind(&watched_range_addresses)
-    .bind(&watched_effective_from_blocks)
-    .bind(&watched_effective_to_blocks)
+    .bind(&assignment_topics)
+    .bind(&old_registry_migration_topics)
+    .bind(&old_registry_addresses)
     .fetch(pool);
 
     let mut scanned_log_count = 0usize;
@@ -112,26 +143,175 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs(
         .await
         .with_context(|| format!("failed to stream ENSv1 registry raw logs for chain {chain}"))?
     {
-        let emitting_address = normalize_address(
-            &row.try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?,
-        );
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
-        let emitter = emitters_by_address
+        let emitting_address =
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
+        let Some(emitter) = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
-            .with_context(|| {
-                format!(
-                    "missing active emitter attribution for chain {chain} address {emitting_address}"
-                )
-            })?;
+        else {
+            continue;
+        };
         let raw_log = registry_raw_log_from_row(row, emitting_address, block_number, emitter)?;
         handle_raw_log(raw_log)?;
         scanned_log_count += 1;
     }
     Ok(scanned_log_count)
+}
+
+pub(in crate::ens_v1_subregistry_discovery) async fn load_registry_raw_log_checkpoint_page(
+    pool: &PgPool,
+    chain: &str,
+    emitters: &[ActiveEmitter],
+    from_block: i64,
+    to_block: i64,
+    start_after: Option<&RegistryRawLogPosition>,
+    limit: i64,
+) -> Result<RegistryRawLogPage> {
+    if emitters.is_empty() {
+        return Ok(RegistryRawLogPage {
+            raw_logs: Vec::new(),
+            last_position: None,
+        });
+    }
+
+    let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
+    for emitter in emitters.iter().cloned() {
+        emitters_by_address
+            .entry(emitter.address.clone())
+            .or_default()
+            .push(emitter);
+    }
+    let assignment_topics = [new_owner_topic0(), new_resolver_topic0()];
+    let old_registry_migration_topics = [registry_transfer_topic0(), new_ttl_topic0()];
+    let old_registry_addresses = emitters_by_address
+        .values()
+        .filter_map(|address_emitters| {
+            address_emitters
+                .iter()
+                .find(|emitter| {
+                    emitter.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY_OLD)
+                })
+                .map(|emitter| emitter.address.clone())
+        })
+        .collect::<Vec<_>>();
+    let last_block = start_after.map(|position| position.block_number);
+    let last_transaction_index = start_after.map(|position| position.transaction_index);
+    let last_log_index = start_after.map(|position| position.log_index);
+    let last_emitting_address = start_after.map(|position| position.emitting_address.as_str());
+
+    let rows = sqlx::query(
+        r#"
+        SELECT *
+        FROM (
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs
+            WHERE chain_id = $1
+              AND block_number BETWEEN $2 AND $3
+              AND lower(topics[1]) = ANY($4::TEXT[])
+              AND (
+                  $7::BIGINT IS NULL
+                  OR (block_number, transaction_index, log_index, lower(emitting_address))
+                      > ($7::BIGINT, $8::BIGINT, $9::BIGINT, $10::TEXT)
+              )
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            UNION ALL
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                log_index,
+                emitting_address,
+                topics,
+                data,
+                canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs
+            WHERE chain_id = $1
+              AND block_number BETWEEN $2 AND $3
+              AND lower(emitting_address) = ANY($6::TEXT[])
+              AND lower(topics[1]) = ANY($5::TEXT[])
+              AND (
+                  $7::BIGINT IS NULL
+                  OR (block_number, transaction_index, log_index, lower(emitting_address))
+                      > ($7::BIGINT, $8::BIGINT, $9::BIGINT, $10::TEXT)
+              )
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        ) selected_raw_logs
+        ORDER BY block_number, transaction_index, log_index, lower(emitting_address)
+        LIMIT $11
+        "#,
+    )
+    .bind(chain)
+    .bind(from_block)
+    .bind(to_block)
+    .bind(&assignment_topics)
+    .bind(&old_registry_migration_topics)
+    .bind(&old_registry_addresses)
+    .bind(last_block)
+    .bind(last_transaction_index)
+    .bind(last_log_index)
+    .bind(last_emitting_address)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load checkpointed ENSv1 registry raw-log page for chain {chain} range {from_block}..={to_block}"
+        )
+    })?;
+
+    let mut raw_logs = Vec::new();
+    let mut last_position = None;
+    for row in rows {
+        let emitting_address =
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
+        let transaction_index = sql_row::get(&row, "transaction_index")?;
+        let log_index = sql_row::get(&row, "log_index")?;
+        last_position = Some(RegistryRawLogPosition {
+            block_number,
+            transaction_index,
+            log_index,
+            emitting_address: emitting_address.clone(),
+        });
+        let Some(emitter) = emitters_by_address
+            .get(&emitting_address)
+            .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
+        else {
+            continue;
+        };
+        raw_logs.push(registry_raw_log_from_row(
+            row,
+            emitting_address,
+            block_number,
+            emitter,
+        )?);
+    }
+
+    Ok(RegistryRawLogPage {
+        raw_logs,
+        last_position,
+    })
 }
 
 async fn load_registry_raw_logs_internal(
@@ -327,12 +507,9 @@ async fn load_registry_raw_logs_internal(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &row.try_get::<String, _>("emitting_address")
-                    .context("missing emitting_address")?,
+                &sql_row::get::<String>(&row, "emitting_address")?,
             );
-            let block_number = row
-                .try_get("block_number")
-                .context("missing block_number")?;
+            let block_number = sql_row::get(&row, "block_number")?;
             let emitter = emitters_by_address
                 .get(&emitting_address)
                 .and_then(|emitters| {
@@ -369,23 +546,16 @@ fn registry_raw_log_from_row(
     emitter: &ActiveEmitter,
 ) -> Result<RegistryRawLogRow> {
     Ok(RegistryRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
         block_number,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
+        transaction_hash: sql_row::get(&row, "transaction_hash")?,
+        transaction_index: sql_row::get(&row, "transaction_index")?,
+        log_index: sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        topics: sql_row::get(&row, "topics")?,
+        data: sql_row::get(&row, "data")?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
         emitting_contract_instance_id: emitter.contract_instance_id,
         source_manifest_id: emitter.source_manifest_id,
         namespace: emitter.namespace.clone(),

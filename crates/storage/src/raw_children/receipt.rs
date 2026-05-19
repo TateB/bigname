@@ -5,7 +5,7 @@ use super::{
     decode::decode_raw_receipt,
     load::load_raw_receipt_internal,
     types::RawReceipt,
-    validation::{ensure_raw_receipt_identity_matches, merge_canonicality, validate_raw_receipt},
+    validation::{ensure_raw_receipt_identity_matches, validate_raw_receipt},
 };
 
 /// Insert missing raw receipt rows or refresh canonicality for already observed
@@ -381,7 +381,9 @@ async fn upsert_raw_receipt(
     })?;
 
     ensure_raw_receipt_identity_matches(&existing, receipt)?;
-    let next_state = merge_canonicality(existing.canonicality_state, receipt.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(receipt.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"

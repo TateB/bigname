@@ -5,6 +5,7 @@ mod audit;
 mod backfill_jobs;
 mod checkpoints;
 mod children;
+mod evm_primitives;
 mod execution;
 mod history;
 mod identity;
@@ -23,6 +24,7 @@ mod record_inventory;
 mod resolution_support;
 mod resolver;
 mod snapshot_selection;
+pub mod sql_row;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -53,7 +55,8 @@ pub use backfill_jobs::{
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
-    load_chain_checkpoint, load_chain_checkpoint_snapshots, sync_chain_checkpoints,
+    load_chain_checkpoint, load_chain_checkpoint_snapshots, rewind_chain_checkpoints_to_ancestor,
+    sync_chain_checkpoints,
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
@@ -63,6 +66,7 @@ pub use children::{
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
+pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
@@ -92,12 +96,14 @@ pub use identity::{
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
     load_token_lineage_including_noncanonical, mark_identity_rows_range_orphaned,
-    mark_surface_binding_range_orphaned, upsert_name_surfaces, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    mark_surface_binding_range_orphaned, upsert_name_surfaces,
+    upsert_name_surfaces_without_snapshots, upsert_resources, upsert_resources_without_snapshots,
+    upsert_surface_bindings, upsert_surface_bindings_without_snapshots, upsert_token_lineages,
+    upsert_token_lineages_without_snapshots,
 };
 pub use lineage::{
-    CanonicalityState, ChainLineageBlock, load_chain_lineage_block,
-    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
+    load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
     upsert_chain_lineage_blocks_without_snapshots,
 };
 pub use name_current::{
@@ -112,7 +118,8 @@ pub use name_current::{
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
     load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
-    upsert_normalized_events, upsert_normalized_events_with_summary,
+    serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_count_only,
+    upsert_normalized_events_with_summary,
 };
 pub use permissions::{
     PermissionScope, PermissionsCurrentAccountResourceCursor,

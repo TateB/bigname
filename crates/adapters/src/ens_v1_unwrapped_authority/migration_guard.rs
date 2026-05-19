@@ -1,4 +1,5 @@
 use super::*;
+use crate::evm_abi;
 use crate::registry_migration_cache::MigratedRegistryNodes;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +24,7 @@ impl RegistryMigrationGuardAction {
 
 pub(super) fn registry_migration_guard_action(
     raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<RegistryMigrationGuardAction> {
     if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRY_L1 {
         return Ok(RegistryMigrationGuardAction::None);
@@ -31,7 +33,7 @@ pub(super) fn registry_migration_guard_action(
         return Ok(RegistryMigrationGuardAction::None);
     };
 
-    if topic0.eq_ignore_ascii_case(&new_owner_topic0()) {
+    if event_topics.matches(NEW_OWNER_SIGNATURE, topic0)? {
         let node = registry_new_owner_child_node(raw_log)?;
         return Ok(if is_old_registry(raw_log) {
             RegistryMigrationGuardAction::SuppressIfMigrated(node)
@@ -44,17 +46,17 @@ pub(super) fn registry_migration_guard_action(
         return Ok(RegistryMigrationGuardAction::None);
     }
 
-    if topic0.eq_ignore_ascii_case(&new_resolver_topic0()) {
+    if event_topics.matches(NEW_RESOLVER_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "NewResolver")?,
         ));
     }
-    if topic0.eq_ignore_ascii_case(&registry_transfer_topic0()) {
+    if event_topics.matches(REGISTRY_TRANSFER_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "Transfer")?,
         ));
     }
-    if topic0.eq_ignore_ascii_case(&new_ttl_topic0()) {
+    if event_topics.matches(NEW_TTL_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "NewTTL")?,
         ));
@@ -95,19 +97,5 @@ fn registry_indexed_node(raw_log: &AuthorityRawLogRow, event_name: &str) -> Resu
 }
 
 fn hash_pair(left: &str, right: &str) -> Result<String> {
-    let mut bytes = [0u8; 64];
-    bytes[..32].copy_from_slice(&decode_hex_32(left)?);
-    bytes[32..].copy_from_slice(&decode_hex_32(right)?);
-    Ok(keccak256_hex(&bytes))
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    let normalized = normalize_hex_32(value)?;
-    let mut output = [0u8; 32];
-    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).context("hex topic chunk must be utf-8")?;
-        output[index] =
-            u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
-    }
-    Ok(output)
+    evm_abi::child_namehash_hex(left, right)
 }

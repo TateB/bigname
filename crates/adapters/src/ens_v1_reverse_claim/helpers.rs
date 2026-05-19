@@ -1,10 +1,17 @@
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Result, bail};
-use sha3::{Digest, Keccak256};
 
-use super::{
-    REVERSE_CLAIMED_SIGNATURE, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
-    SOURCE_FAMILY_ENS_V1_REVERSE_L1,
-};
+use crate::evm_abi;
+#[cfg(test)]
+pub(super) use crate::evm_abi::hex_string;
+pub(super) use crate::evm_abi::namehash_hex;
+
+use super::{SOURCE_FAMILY_BASENAMES_BASE_PRIMARY, SOURCE_FAMILY_ENS_V1_REVERSE_L1};
+
+sol! {
+    #[derive(Debug)]
+    event ReverseClaimed(address indexed addr, bytes32 indexed node);
+}
 
 pub(super) fn supports_reverse_claim_source_family(source_family: &str) -> bool {
     matches!(
@@ -37,58 +44,13 @@ pub(super) fn reverse_node_for_address(address: &str) -> Result<String> {
 }
 
 pub(super) fn normalize_hex_32(value: &str) -> Result<String> {
-    let normalized = value.to_ascii_lowercase();
-    let normalized = if normalized.starts_with("0x") {
-        normalized
-    } else {
-        format!("0x{normalized}")
-    };
-    if normalized.len() != 66 {
-        bail!("expected 32-byte hex value, got {normalized}");
-    }
-    Ok(normalized)
+    evm_abi::normalize_hex_32(value)
 }
 
 pub(super) fn normalize_topic_address(value: &str) -> Result<String> {
-    let normalized = normalize_hex_32(value)?;
-    Ok(format!("0x{}", &normalized[26..]))
+    evm_abi::topic_address_hex(value)
 }
 
 pub(super) fn reverse_claimed_topic0() -> String {
-    keccak256_hex(REVERSE_CLAIMED_SIGNATURE.as_bytes())
-}
-
-pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
-    let mut node = [0u8; 32];
-    for label in labels.iter().rev() {
-        let label_hash = {
-            let mut digest = Keccak256::new();
-            digest.update(label);
-            let output = digest.finalize();
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&output);
-            bytes
-        };
-        let mut digest = Keccak256::new();
-        digest.update(node);
-        digest.update(label_hash);
-        let output = digest.finalize();
-        node.copy_from_slice(&output);
-    }
-
-    hex_string(&node)
-}
-
-pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    let mut digest = Keccak256::new();
-    digest.update(bytes);
-    hex_string(&digest.finalize())
-}
-
-pub(super) fn hex_string(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    evm_abi::hex_string(ReverseClaimed::SIGNATURE_HASH.as_slice())
 }

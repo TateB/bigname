@@ -9,6 +9,8 @@ mod manifest_drift;
 mod name_current;
 mod permissions;
 mod primary_name;
+mod projection_apply;
+mod projection_json;
 mod raw_facts;
 mod record_inventory;
 mod replay;

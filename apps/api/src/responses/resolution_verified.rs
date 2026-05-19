@@ -124,8 +124,39 @@ mod resolution_verified {
             .await
     }
 
-    pub(super) fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
-        readback::record_inventory_lookup_key(row)
+    pub(super) async fn load_explicit_unsupported_record_inventory_current(
+        pool: &PgPool,
+        row: &NameCurrentRow,
+    ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+        readback::load_explicit_unsupported_record_inventory_current(pool, row).await
+    }
+
+    pub(super) async fn load_record_inventory_current_matching_selected_snapshot(
+        pool: &PgPool,
+        row: &NameCurrentRow,
+        selected_snapshot: &SelectedSnapshot,
+        allow_selected_superset: bool,
+    ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+        readback::load_record_inventory_current_matching_selected_snapshot(
+            pool,
+            row,
+            selected_snapshot,
+            allow_selected_superset,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_inventory_chain_positions_match_selected_snapshot(
+        projected: &ChainPositions,
+        selected_snapshot: &SelectedSnapshot,
+        allow_selected_superset: bool,
+    ) -> bool {
+        readback::record_inventory_chain_positions_match_selected_snapshot(
+            projected,
+            selected_snapshot,
+            allow_selected_superset,
+        )
     }
 
     pub(super) fn resolution_verified_support_boundary(
@@ -134,31 +165,17 @@ mod resolution_verified {
     ) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
         readback::resolution_verified_support_boundary(row, record_inventory_row)
     }
-
-    pub(super) fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {
-        readback::record_version_boundary_has_pointer(record_version_boundary)
-    }
-
-    pub(super) async fn find_supported_record_inventory_boundary(
-        pool: &PgPool,
-        resource_id: Uuid,
-        record_version_boundary: &JsonValue,
-    ) -> Result<Option<JsonValue>> {
-        readback::find_supported_record_inventory_boundary(
-            pool,
-            resource_id,
-            record_version_boundary,
-        )
-        .await
-    }
 }
 
 use self::resolution_verified::{
     build_resolution_declared_state, build_resolution_execution_cache_key,
     build_resolution_execution_explain_verified_state, build_resolution_verified_state,
-    find_supported_record_inventory_boundary, lookup_resolution_verified_outcome,
+    lookup_resolution_verified_outcome, load_explicit_unsupported_record_inventory_current,
+    load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current, load_supported_record_inventory_current_for_snapshot,
-    record_inventory_lookup_key, record_version_boundary_has_pointer,
-    ResolutionVerifiedOutcomeLookup,
-    resolution_execution_cache_lookup_records, resolution_verified_support_boundary,
+    ResolutionVerifiedOutcomeLookup, resolution_execution_cache_lookup_records,
+    resolution_verified_support_boundary,
 };
+
+#[cfg(test)]
+pub(crate) use self::resolution_verified::record_inventory_chain_positions_match_selected_snapshot;

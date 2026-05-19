@@ -200,14 +200,10 @@ pub(super) fn ensure_name_surface_identity_matches(
     incoming: &NameSurface,
 ) -> Result<()> {
     if existing.namespace != incoming.namespace
-        || existing.input_name != incoming.input_name
-        || existing.canonical_display_name != incoming.canonical_display_name
         || existing.normalized_name != incoming.normalized_name
         || existing.dns_encoded_name != incoming.dns_encoded_name
         || existing.namehash != incoming.namehash
         || existing.labelhashes != incoming.labelhashes
-        || existing.normalizer_version != incoming.normalizer_version
-        || existing.normalization_warnings != incoming.normalization_warnings
         || existing.normalization_errors != incoming.normalization_errors
     {
         bail!(

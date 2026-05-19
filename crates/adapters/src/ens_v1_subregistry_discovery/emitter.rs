@@ -32,7 +32,7 @@ pub(super) async fn emit_registry_changed_events(
     let mut assignments = Vec::with_capacity(NORMALIZED_EVENT_UPSERT_CHUNK_SIZE);
     let mut summary = RegistryChangedEventEmitSummary::default();
     for assignment in latest_assignments.values() {
-        if !discovery_sources.contains(assignment.observation.discovery_source.as_str()) {
+        if !discovery_sources.contains(assignment.discovery_source.as_str()) {
             continue;
         }
         assignments.push(assignment);
@@ -47,7 +47,7 @@ pub(super) async fn emit_registry_changed_events(
     Ok(summary)
 }
 
-async fn emit_registry_changed_event_chunk(
+pub(super) async fn emit_registry_changed_event_chunk(
     pool: &PgPool,
     assignments: &[&ObservedRegistryAssignment],
     events: &mut Vec<bigname_storage::NormalizedEvent>,
@@ -59,7 +59,7 @@ async fn emit_registry_changed_event_chunk(
 
     let requested_edges = assignments
         .iter()
-        .filter(|assignment| assignment.observation.to_address != ZERO_ADDRESS)
+        .filter(|assignment| assignment.to_address != ZERO_ADDRESS)
         .map(|assignment| registry_edge_lookup_key(assignment))
         .collect::<Vec<_>>();
     let edges_by_observation_point =
@@ -78,7 +78,7 @@ async fn emit_registry_changed_event_chunk(
     Ok(())
 }
 
-async fn flush_registry_changed_events(
+pub(super) async fn flush_registry_changed_events(
     pool: &PgPool,
     events: &mut Vec<bigname_storage::NormalizedEvent>,
     summary: &mut RegistryChangedEventEmitSummary,
@@ -108,7 +108,7 @@ fn registry_edge_lookup_key(
     assignment: &ObservedRegistryAssignment,
 ) -> (String, String, i64, String) {
     (
-        assignment.observation.discovery_source.clone(),
+        assignment.discovery_source.clone(),
         assignment.observation_key.clone(),
         assignment.raw_log.block_number,
         assignment.raw_log.block_hash.clone(),

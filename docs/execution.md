@@ -37,7 +37,7 @@ Live-execution rules:
 - unsupported selector families and unsupported verified path classes stay selector-local `status=unsupported`; on-demand execution does not widen the support boundary
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution` is persisted-trace readback only
 
-The compact records routes — `GET /v1/names/{namespace}/{name}/records` and `GET /v1/resolve/{name}/records` — use the same supported-selector boundary but are current UI reads. When they need on-demand ENS verified values they call the Universal Resolver with the provider `latest` block tag, return the result inline, and do not persist exact-snapshot execution cache rows or `raw_call_snapshots`.
+The compact records routes — `GET /v1/names/{namespace}/{name}/records` and `GET /v1/resolve/{name}/records` — use the same supported-selector boundary and selected stored snapshot as the canonical resolution route. When they need on-demand ENS verified values, they execute against that snapshot, persist the trace and outcome, and fail closed with `409 stale` when the provider cannot serve the selected block. They never target provider `latest` independently of the selected snapshot.
 
 ### Namespace inference
 

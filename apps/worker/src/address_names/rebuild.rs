@@ -6,10 +6,10 @@ use tokio::task::JoinSet;
 
 use super::{
     AddressNamesCurrentRebuildSummary,
-    cleanup::delete_stale_address_names_current_rows_for_address,
-    load::{load_current_bindings, stream_current_bindings},
+    cleanup::delete_stale_address_names_current_rows_for_address_keys,
+    load::{load_current_bindings_for_address, stream_current_bindings},
     model::CurrentBindingSeed,
-    projection::{build_rows, build_rows_for_binding},
+    projection::build_rows_for_binding,
     util::normalize_address,
 };
 
@@ -101,12 +101,38 @@ async fn rebuild_one_address(
     address: &str,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
-    let bindings = load_current_bindings(pool).await?;
-    let rows = build_rows(pool, &bindings, Some(normalized_address.as_str())).await?;
-    let upserted_row_count = upsert_address_names_current_rows(pool, &rows).await?.len();
-    let deleted_row_count =
-        delete_stale_address_names_current_rows_for_address(pool, &normalized_address, &rows)
-            .await?;
+    let bindings = load_current_bindings_for_address(pool, &normalized_address).await?;
+    let mut replacement_keys = Vec::new();
+    let mut rows = Vec::with_capacity(ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE);
+    let mut upserted_row_count = 0usize;
+
+    for binding in &bindings {
+        let binding_rows =
+            build_rows_for_binding(pool, binding, Some(normalized_address.as_str())).await?;
+        replacement_keys.extend(binding_rows.iter().map(|row| {
+            (
+                row.logical_name_id.clone(),
+                row.relation.as_str().to_owned(),
+            )
+        }));
+        rows.extend(binding_rows);
+
+        if rows.len() >= ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {
+            upserted_row_count += upsert_address_names_current_rows(pool, &rows).await?.len();
+            rows.clear();
+        }
+    }
+
+    if !rows.is_empty() {
+        upserted_row_count += upsert_address_names_current_rows(pool, &rows).await?.len();
+    }
+
+    let deleted_row_count = delete_stale_address_names_current_rows_for_address_keys(
+        pool,
+        &normalized_address,
+        &replacement_keys,
+    )
+    .await?;
 
     Ok(AddressNamesCurrentRebuildSummary {
         requested_address_count: 1,

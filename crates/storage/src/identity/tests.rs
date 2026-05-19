@@ -18,8 +18,10 @@ use super::{
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
     load_token_lineage_including_noncanonical, mark_identity_rows_range_orphaned,
-    mark_surface_binding_range_orphaned, upsert_name_surfaces, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    mark_surface_binding_range_orphaned, upsert_name_surfaces,
+    upsert_name_surfaces_without_snapshots, upsert_resources, upsert_resources_without_snapshots,
+    upsert_surface_bindings, upsert_surface_bindings_without_snapshots, upsert_token_lineages,
+    upsert_token_lineages_without_snapshots,
 };
 use crate::{
     CanonicalityState, ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks,
@@ -380,6 +382,424 @@ async fn upsert_surface_binding_tightens_replayed_active_to() -> Result<()> {
     assert_eq!(
         load_surface_binding(database.pool(), surface_binding_id).await?,
         Some(tightened_binding)
+    );
+
+    database.cleanup().await
+}
+
+async fn load_surface_binding_observed_at(
+    pool: &PgPool,
+    surface_binding_id: Uuid,
+) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM surface_bindings WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load surface binding observed_at")
+}
+
+async fn load_resource_observed_at(pool: &PgPool, resource_id: Uuid) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM resources WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load resource observed_at")
+}
+
+async fn load_token_lineage_observed_at(
+    pool: &PgPool,
+    token_lineage_id: Uuid,
+) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM token_lineages WHERE token_lineage_id = $1",
+    )
+    .bind(token_lineage_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load token lineage observed_at")
+}
+
+async fn load_name_surface_observed_at(
+    pool: &PgPool,
+    logical_name_id: &str,
+) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM name_surfaces WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load name surface observed_at")
+}
+
+#[tokio::test]
+async fn no_snapshot_token_lineage_upsert_accepts_compatible_existing_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf100);
+    let anchored_observed_at = timestamp(946_684_800);
+    let initial_lineage = token_lineage(
+        token_lineage_id,
+        "ens",
+        "token_no_snapshot_initial",
+        111,
+        CanonicalityState::Canonical,
+    );
+    upsert_token_lineages_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&initial_lineage),
+    )
+    .await?;
+
+    sqlx::query("UPDATE token_lineages SET observed_at = $1 WHERE token_lineage_id = $2")
+        .bind(anchored_observed_at)
+        .bind(token_lineage_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor token lineage observed_at")?;
+
+    let mut compatible_lineage = token_lineage(
+        token_lineage_id,
+        "ens",
+        "token_no_snapshot_later",
+        112,
+        CanonicalityState::Finalized,
+    );
+    compatible_lineage.provenance =
+        json!({"source": "ens", "anchor": "token_lineage", "later_observation": true});
+    upsert_token_lineages_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&compatible_lineage),
+    )
+    .await?;
+
+    let mut expected_lineage = initial_lineage;
+    expected_lineage.canonicality_state = CanonicalityState::Finalized;
+    assert_eq!(
+        load_token_lineage(database.pool(), token_lineage_id).await?,
+        Some(expected_lineage)
+    );
+    assert_eq!(
+        load_token_lineage_observed_at(database.pool(), token_lineage_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_resource_upsert_accepts_compatible_existing_resource() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf101);
+    let resource_id = Uuid::from_u128(0xf102);
+    let anchored_observed_at = timestamp(946_684_800);
+
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            token_lineage_id,
+            "ens",
+            "token_resource_no_snapshot",
+            111,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let initial_resource = resource(
+        resource_id,
+        Some(token_lineage_id),
+        "ens",
+        "resource_no_snapshot_initial",
+        112,
+        CanonicalityState::Canonical,
+    );
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&initial_resource))
+        .await?;
+
+    sqlx::query("UPDATE resources SET observed_at = $1 WHERE resource_id = $2")
+        .bind(anchored_observed_at)
+        .bind(resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor resource observed_at")?;
+
+    let mut compatible_resource = resource(
+        resource_id,
+        Some(token_lineage_id),
+        "ens",
+        "resource_no_snapshot_later",
+        113,
+        CanonicalityState::Finalized,
+    );
+    compatible_resource.provenance =
+        json!({"source": "ens", "anchor": "resource", "later_observation": true});
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&compatible_resource))
+        .await?;
+
+    let mut expected_resource = initial_resource;
+    expected_resource.canonicality_state = CanonicalityState::Finalized;
+    assert_eq!(
+        load_resource(database.pool(), resource_id).await?,
+        Some(expected_resource)
+    );
+    assert_eq!(
+        load_resource_observed_at(database.pool(), resource_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:no-snapshot-surface.eth";
+    let anchored_observed_at = timestamp(946_684_800);
+    let initial_surface = name_surface(
+        logical_name_id,
+        "no-snapshot-surface.eth",
+        "no-snapshot-surface.eth",
+        "surface_no_snapshot_initial",
+        113,
+        CanonicalityState::Canonical,
+    );
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&initial_surface))
+        .await?;
+
+    sqlx::query("UPDATE name_surfaces SET observed_at = $1 WHERE logical_name_id = $2")
+        .bind(anchored_observed_at)
+        .bind(logical_name_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor name surface observed_at")?;
+
+    let mut compatible_surface = name_surface(
+        logical_name_id,
+        "no-snapshot-surface.eth",
+        "no-snapshot-surface.eth",
+        "surface_no_snapshot_later",
+        114,
+        CanonicalityState::Finalized,
+    );
+    compatible_surface.input_name = "No-Snapshot-Surface.eth".to_owned();
+    compatible_surface.canonical_display_name = "no-snapshot-surface.eth".to_owned();
+    compatible_surface.normalizer_version = "ensip15@later-compatible".to_owned();
+    compatible_surface.normalization_warnings = json!(["display_metadata_changed"]);
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&compatible_surface),
+    )
+    .await?;
+
+    let mut expected_surface = initial_surface;
+    expected_surface.canonicality_state = CanonicalityState::Finalized;
+    assert_eq!(
+        load_name_surface(database.pool(), logical_name_id).await?,
+        Some(expected_surface)
+    );
+    assert_eq!(
+        load_name_surface_observed_at(database.pool(), logical_name_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_surface_binding_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x2011);
+    let surface_binding_id = Uuid::from_u128(0x3011);
+    let anchored_observed_at = timestamp(946_684_800);
+    let earlier_close = timestamp(1_717_171_900);
+    let later_close = timestamp(1_717_172_100);
+
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "resource_no_snapshot_idempotent",
+            112,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            "ens:no-snapshot-idempotent.eth",
+            "no-snapshot-idempotent.eth",
+            "no-snapshot-idempotent.eth",
+            "surface_no_snapshot_idempotent",
+            113,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let initial_binding = binding(BindingSeed {
+        surface_binding_id,
+        logical_name_id: "ens:no-snapshot-idempotent.eth",
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_171_700),
+        active_to: Some(later_close),
+        source: "declared_registry_path",
+        chain_label: "binding_no_snapshot_idempotent",
+        block_number: 114,
+        canonicality_state: CanonicalityState::Canonical,
+    });
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&initial_binding),
+    )
+    .await?;
+
+    sqlx::query("UPDATE surface_bindings SET observed_at = $1 WHERE surface_binding_id = $2")
+        .bind(anchored_observed_at)
+        .bind(surface_binding_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor surface binding observed_at")?;
+
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&initial_binding),
+    )
+    .await?;
+    assert_eq!(
+        load_surface_binding_observed_at(database.pool(), surface_binding_id).await?,
+        anchored_observed_at
+    );
+
+    let tightened_binding = SurfaceBinding {
+        active_to: Some(earlier_close),
+        ..initial_binding
+    };
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&tightened_binding),
+    )
+    .await?;
+    assert_eq!(
+        load_surface_binding(database.pool(), surface_binding_id).await?,
+        Some(tightened_binding)
+    );
+    assert!(
+        load_surface_binding_observed_at(database.pool(), surface_binding_id).await?
+            > anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_surface_binding_upsert_closes_existing_before_opening_replacement()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let old_resource_id = Uuid::from_u128(0x2012);
+    let new_resource_id = Uuid::from_u128(0x2013);
+    let old_binding_id = Uuid::from_u128(0x3012);
+    let new_binding_id = Uuid::from_u128(0x3013);
+    let first_start = timestamp(1_717_171_700);
+    let rebind_at = timestamp(1_717_171_900);
+
+    upsert_resources(
+        database.pool(),
+        &[
+            resource(
+                old_resource_id,
+                None,
+                "ens",
+                "resource_no_snapshot_old",
+                116,
+                CanonicalityState::Finalized,
+            ),
+            resource(
+                new_resource_id,
+                None,
+                "ens",
+                "resource_no_snapshot_new",
+                117,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            "ens:no-snapshot-rebind.eth",
+            "no-snapshot-rebind.eth",
+            "no-snapshot-rebind.eth",
+            "surface_no_snapshot_rebind",
+            118,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let initial_binding = binding(BindingSeed {
+        surface_binding_id: old_binding_id,
+        logical_name_id: "ens:no-snapshot-rebind.eth",
+        resource_id: old_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: first_start,
+        active_to: None,
+        source: "no_snapshot_old",
+        chain_label: "binding_no_snapshot_old",
+        block_number: 119,
+        canonicality_state: CanonicalityState::Finalized,
+    });
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&initial_binding),
+    )
+    .await?;
+
+    let closed_binding = SurfaceBinding {
+        active_to: Some(rebind_at),
+        ..initial_binding
+    };
+    let replacement_binding = binding(BindingSeed {
+        surface_binding_id: new_binding_id,
+        logical_name_id: "ens:no-snapshot-rebind.eth",
+        resource_id: new_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: rebind_at,
+        active_to: None,
+        source: "no_snapshot_new",
+        chain_label: "binding_no_snapshot_new",
+        block_number: 120,
+        canonicality_state: CanonicalityState::Finalized,
+    });
+
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        &[closed_binding.clone(), replacement_binding.clone()],
+    )
+    .await?;
+
+    let bindings =
+        load_surface_bindings_by_logical_name_id(database.pool(), "ens:no-snapshot-rebind.eth")
+            .await?;
+    assert_eq!(
+        bindings,
+        vec![closed_binding.clone(), replacement_binding.clone()]
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), old_binding_id).await?,
+        Some(closed_binding)
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), new_binding_id).await?,
+        Some(replacement_binding)
     );
 
     database.cleanup().await

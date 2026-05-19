@@ -273,7 +273,7 @@ pub(super) fn build_canonicality_summary(
     }
 
     let status =
-        weakest_canonicality(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
+        CanonicalityState::weakest(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
     json!({
         "status": status.as_str(),
         "chains": chain_states
@@ -290,7 +290,7 @@ fn merge_chain_state(
 ) {
     let replacement = chain_states
         .get(chain_id)
-        .map(|current| canonicality_rank(state) < canonicality_rank(*current))
+        .map(|current| state.rank() < current.rank())
         .unwrap_or(true);
     if replacement {
         chain_states.insert(chain_id.to_owned(), state);
@@ -303,6 +303,7 @@ pub(super) fn project_facts(
     history_heads: &HistoryHeads,
 ) -> Result<ProjectedFacts> {
     let mut facts = ProjectedFacts::default();
+    let mut latest_explicit_resolver_observation_block: Option<i64> = None;
 
     for event in events {
         if let Some(status) = json_str(&event.after_state, &["status"]) {
@@ -353,6 +354,13 @@ pub(super) fn project_facts(
             EVENT_KIND_RESOLVER_CHANGED
                 if current_binding.map(|binding| binding.resource_id) == event.resource_id =>
             {
+                let is_boundary = is_authority_epoch_resolver_boundary(event);
+                if is_boundary
+                    && event.block_number.is_some()
+                    && event.block_number == latest_explicit_resolver_observation_block
+                {
+                    continue;
+                }
                 let resolver_address = normalize_resolver_address(
                     json_str(&event.after_state, &["resolver"]).as_deref(),
                 );
@@ -370,6 +378,9 @@ pub(super) fn project_facts(
                     .and_then(|_| event.chain_id.clone());
                 facts.resolver_address = resolver_address;
                 facts.latest_resolver_event_kind = Some(event.event_kind.clone());
+                if !is_boundary {
+                    latest_explicit_resolver_observation_block = event.block_number;
+                }
             }
             _ => {}
         }
@@ -389,6 +400,10 @@ pub(super) fn project_facts(
         .map(history_pointer_from_event);
 
     Ok(facts)
+}
+
+fn is_authority_epoch_resolver_boundary(event: &RelevantEvent) -> bool {
+    json_str(&event.after_state, &["source_event"]).as_deref() == Some("AuthorityEpochChanged")
 }
 
 pub(super) fn max_timestamp(
@@ -419,22 +434,6 @@ pub(super) fn max_timestamp(
             .map(|observation| observation.candidate.timestamp),
     );
     timestamps.into_iter().max()
-}
-
-fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
-    }
-}
-
-fn weakest_canonicality(
-    states: impl Iterator<Item = CanonicalityState>,
-) -> Option<CanonicalityState> {
-    states.min_by_key(|state| canonicality_rank(*state))
 }
 
 pub(super) fn chain_slot(chain_id: &str) -> String {

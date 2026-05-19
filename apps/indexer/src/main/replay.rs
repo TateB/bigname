@@ -123,7 +123,7 @@ mod tests {
     fn backfill_args() -> BackfillArgs {
         BackfillArgs {
             database: DatabaseConfig::default(),
-            manifests_root: PathBuf::from("manifests"),
+            manifests_root: PathBuf::from("manifests/mainnet"),
             chain_rpc_urls: Vec::new(),
             chain_reth_db_sources: Vec::new(),
             chain: "ethereum-mainnet".to_owned(),
@@ -217,6 +217,14 @@ mod tests {
         assert_eq!(
             deployment_profile_from_manifest_root(&PathBuf::from("manifests")),
             "mainnet"
+        );
+        assert_eq!(
+            deployment_profile_from_manifest_root(&PathBuf::from("manifests/mainnet")),
+            "mainnet"
+        );
+        assert_eq!(
+            deployment_profile_from_manifest_root(&PathBuf::from("manifests/sepolia")),
+            "sepolia"
         );
         assert_eq!(
             deployment_profile_from_manifest_root(&PathBuf::from("manifests-sepolia-dev")),

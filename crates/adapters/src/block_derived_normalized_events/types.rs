@@ -48,15 +48,6 @@ pub(super) struct ActiveEmitter {
     pub(super) source_rank: i32,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct ActiveManifestMetadata {
-    pub(super) manifest_id: i64,
-    pub(super) chain: String,
-    pub(super) namespace: String,
-    pub(super) source_family: String,
-    pub(super) manifest_version: i64,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RawLogSourceScopeTarget {
     pub(super) source_family: String,

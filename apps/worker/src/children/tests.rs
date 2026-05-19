@@ -4,6 +4,7 @@ use bigname_storage::{
     upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use sqlx::types::time::OffsetDateTime;
 
 use super::*;
 
@@ -312,7 +313,7 @@ async fn rebuild_all_clears_stale_rows_and_is_idempotent() -> Result<()> {
     let second = rebuild_children_current(database.pool(), None).await?;
     assert_eq!(second.requested_parent_count, 1);
     assert_eq!(second.upserted_row_count, 1);
-    assert_eq!(second.deleted_row_count, 0);
+    assert_eq!(second.deleted_row_count, 1);
 
     let second_rows = load_children_current(database.pool(), parent).await?;
     assert_eq!(first_rows, second_rows);

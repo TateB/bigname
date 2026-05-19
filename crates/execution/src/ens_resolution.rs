@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use crate::ens_resolution_abi::{digest_json, dns_encode_name, namehash};
+use crate::ens_resolution_abi::{
+    UNIVERSAL_RESOLVER_RESOLVE_SELECTOR, digest_json, dns_encode_name, namehash, selector_hex,
+};
 use crate::ens_resolution_call::{SelectorCall, execute_record_call};
 use crate::persistence::PersistEnsExactNameVerifiedResolutionRequest;
 use crate::rpc::{ChainRpcUrls, JsonRpcHttpClient};
@@ -396,7 +398,7 @@ fn call_step(
         "resolver": declared_resolver_address(row),
         "name": row.normalized_name,
         "record_key": record.record_key,
-        "selector": "0x9061b923",
+        "selector": selector_hex(UNIVERSAL_RESOLVER_RESOLVE_SELECTOR),
         "resolver_selector": call.resolver_selector,
         "block_selector": call.block_selector.clone(),
         "calldata": call.universal_calldata,

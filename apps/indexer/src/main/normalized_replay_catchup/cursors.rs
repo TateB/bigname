@@ -4,7 +4,10 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::RawFactNormalizedEventReplayOutcome;
 
-use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor, RawLogBounds};
+use super::{
+    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor, RawLogBounds,
+    TargetRefreshPolicy,
+};
 
 pub(super) async fn ensure_cursor(
     pool: &PgPool,
@@ -12,6 +15,7 @@ pub(super) async fn ensure_cursor(
     chain: &str,
     cursor_kind: &str,
     bounds: RawLogBounds,
+    target_refresh_policy: TargetRefreshPolicy,
 ) -> Result<NormalizedReplayCursor> {
     let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
         r#"
@@ -38,10 +42,13 @@ pub(super) async fn ensure_cursor(
                     )
                 ELSE normalized_replay_cursors.next_block_number
             END,
-            target_block_number = GREATEST(
-                normalized_replay_cursors.target_block_number,
-                EXCLUDED.target_block_number
-            ),
+            target_block_number = CASE
+                WHEN $6 THEN GREATEST(
+                    normalized_replay_cursors.target_block_number,
+                    EXCLUDED.target_block_number
+                )
+                ELSE normalized_replay_cursors.target_block_number
+            END,
             updated_at = now()
         RETURNING
             range_start_block_number,
@@ -55,6 +62,10 @@ pub(super) async fn ensure_cursor(
     .bind(cursor_kind)
     .bind(bounds.start_block)
     .bind(bounds.target_block)
+    .bind(matches!(
+        target_refresh_policy,
+        TargetRefreshPolicy::RefreshToLatestRawLog
+    ))
     .fetch_one(pool)
     .await
     .with_context(|| {

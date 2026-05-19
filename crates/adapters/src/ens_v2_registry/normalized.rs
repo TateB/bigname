@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
@@ -52,12 +50,4 @@ pub(super) fn normalized_event(
         before_state,
         after_state,
     }
-}
-
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
 }

@@ -1,7 +1,0 @@
-interface:
-  display_name: "Parallel Pickup"
-  short_description: "Split work into safe subagent slices"
-  default_prompt: "Use $parallel-pickup to take this bigname task, split it into safe owned slices, and parallelize it with subagents."
-
-policy:
-  allow_implicit_invocation: true

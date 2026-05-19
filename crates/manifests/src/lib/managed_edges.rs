@@ -5,6 +5,9 @@ mod children;
 #[path = "managed_edges/source_graph.rs"]
 mod source_graph;
 
-pub(crate) use active_addresses::reconcile_active_contract_instance_addresses;
+pub(crate) use active_addresses::{
+    reconcile_active_contract_instance_addresses,
+    reconcile_active_contract_instance_addresses_for_ids,
+};
 pub(crate) use children::replace_manifest_children;
 pub(crate) use source_graph::reconcile_manifest_source_graph;

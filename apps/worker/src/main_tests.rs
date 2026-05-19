@@ -48,6 +48,8 @@ fn replay_all_current_projections_cli_is_available() {
         Command::Replay(args) => match args.command {
             ReplayCommand::AllCurrentProjections(args) => {
                 assert!(!args.json);
+                assert!(args.chain_rpc_urls.is_empty());
+                assert_eq!(args.text_hydration_batch_size, 250);
             }
         },
         other => panic!("expected replay command, got {other:?}"),

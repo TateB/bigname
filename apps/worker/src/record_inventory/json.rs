@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 
+use crate::projection_json::{dedupe_json_values, projection_coverage};
+
 use super::{
     chain_position::chain_position_value,
     constants::*,
@@ -242,18 +244,15 @@ pub(super) fn build_coverage(events: &[RelevantEvent]) -> Value {
     let source_classes_considered = events
         .iter()
         .map(|event| event.source_family.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(Value::String)
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
 
-    json!({
-        "status": "full",
-        "exhaustiveness": "authoritative",
-        "source_classes_considered": source_classes_considered,
-        "unsupported_reason": Value::Null,
-        "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
-    })
+    projection_coverage(
+        "full",
+        "authoritative",
+        source_classes_considered,
+        None,
+        RECORD_INVENTORY_ENUMERATION_BASIS,
+    )
 }
 
 pub(super) fn build_canonicality_summary(events: &[RelevantEvent]) -> Value {
@@ -300,31 +299,6 @@ fn canonicality_rank(state: CanonicalityState) -> u8 {
     }
 }
 
-pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "observed" => Ok(CanonicalityState::Observed),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => anyhow::bail!("unknown canonicality_state value {value}"),
-    }
-}
-
 fn supported_native_addr_record_key() -> String {
     format!("{SUPPORTED_ADDR_RECORD_FAMILY}:{SUPPORTED_NATIVE_ADDR_SELECTOR_KEY}")
-}
-
-fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }

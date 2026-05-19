@@ -1,7 +1,0 @@
-interface:
-  display_name: "Change Gate"
-  short_description: "Classify shared-interface changes first"
-  default_prompt: "Use $change-gate to classify this bigname change and tell me which frozen docs and owners it affects."
-
-policy:
-  allow_implicit_invocation: true

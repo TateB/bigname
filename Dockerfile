@@ -16,7 +16,6 @@ COPY apps apps
 COPY crates crates
 COPY migrations migrations
 COPY manifests manifests
-COPY manifests-sepolia-dev manifests-sepolia-dev
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -36,11 +35,10 @@ COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
 COPY --from=builder /app/target/release/bigname-indexer /usr/local/bin/bigname-indexer
 COPY --from=builder /app/target/release/bigname-worker /usr/local/bin/bigname-worker
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
-COPY --from=builder --chown=bigname:bigname /app/manifests-sepolia-dev /app/manifests-sepolia-dev
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 
 ENV BIGNAME_API_BIND_ADDR=0.0.0.0:3000 \
-    BIGNAME_INDEXER_MANIFESTS_ROOT=/app/manifests \
+    BIGNAME_INDEXER_MANIFESTS_ROOT=/app/manifests/mainnet \
     RUST_LOG=info
 
 EXPOSE 3000

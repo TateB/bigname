@@ -354,37 +354,11 @@ pub(super) fn encode_cursor(cursor: &CursorEnvelope) -> String {
 }
 
 pub(super) fn encode_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("hex encoding must write into string");
-    }
-    encoded
+    hex::encode(bytes)
 }
 
 pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return None;
-    }
-
-    let mut decoded = Vec::with_capacity(value.len() / 2);
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = decode_hex_nibble(bytes[index])?;
-        let low = decode_hex_nibble(bytes[index + 1])?;
-        decoded.push((high << 4) | low);
-        index += 2;
-    }
-    Some(decoded)
-}
-
-pub(super) fn decode_hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
+    hex::decode(value).ok()
 }
 
 pub(super) fn history_cursor_fields(row: &HistoryEvent) -> BTreeMap<String, String> {

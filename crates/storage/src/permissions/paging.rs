@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::projection_helpers::{checked_page_limit_i64, checked_page_size_usize};
+use crate::projection_helpers::{
+    checked_page_limit_i64, checked_page_size_usize, split_keyset_page,
+};
 
 use super::{
     decode::{decode_permissions_current_full_filter_summary, decode_permissions_current_row},
@@ -79,17 +81,13 @@ pub async fn load_permissions_current_page(
             })?
     };
 
-    let mut rows = page_rows
+    let rows = page_rows
         .into_iter()
         .map(decode_permissions_current_row)
         .collect::<Result<Vec<_>>>()?;
-    let has_next_page = rows.len() > page_size_usize;
-    if has_next_page {
-        rows.truncate(page_size_usize);
-    }
-    let next_cursor = has_next_page
-        .then(|| rows.last().map(PermissionsCurrentKeysetCursor::from))
-        .flatten();
+    let (rows, next_cursor) = split_keyset_page(rows, page_size_usize, |row| {
+        PermissionsCurrentKeysetCursor::from(row)
+    });
 
     let summary = load_permissions_current_full_filter_summary(
         pool,
@@ -163,20 +161,13 @@ pub async fn load_permissions_current_account_resource_page(
             .context("failed to load permissions_current account/resource page")?
     };
 
-    let mut rows = page_rows
+    let rows = page_rows
         .into_iter()
         .map(decode_permissions_current_row)
         .collect::<Result<Vec<_>>>()?;
-    let has_next_page = rows.len() > page_size_usize;
-    if has_next_page {
-        rows.truncate(page_size_usize);
-    }
-    let next_cursor = has_next_page
-        .then(|| {
-            rows.last()
-                .map(PermissionsCurrentAccountResourceCursor::from)
-        })
-        .flatten();
+    let (rows, next_cursor) = split_keyset_page(rows, page_size_usize, |row| {
+        PermissionsCurrentAccountResourceCursor::from(row)
+    });
 
     let summary =
         load_permissions_current_account_resource_summary(pool, subject, resource_id).await?;

@@ -42,6 +42,24 @@ pub(crate) struct RunArgs {
         default_value_t = 5_u64
     )]
     pub(crate) poll_interval_secs: u64,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_WORKER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_TEXT_HYDRATION_MULTICALL3_ADDRESS",
+        default_value = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    )]
+    pub(crate) text_hydration_multicall3_address: String,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_TEXT_HYDRATION_BATCH_SIZE",
+        default_value_t = 250_usize
+    )]
+    pub(crate) text_hydration_batch_size: usize,
 }
 
 #[derive(Args, Debug)]
@@ -332,6 +350,24 @@ pub(crate) struct AllCurrentProjectionsArgs {
     pub(crate) database: DatabaseConfig,
     #[arg(long)]
     pub(crate) json: bool,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_WORKER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_TEXT_HYDRATION_MULTICALL3_ADDRESS",
+        default_value = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    )]
+    pub(crate) text_hydration_multicall3_address: String,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_TEXT_HYDRATION_BATCH_SIZE",
+        default_value_t = 250_usize
+    )]
+    pub(crate) text_hydration_batch_size: usize,
 }
 
 #[derive(Args, Debug)]

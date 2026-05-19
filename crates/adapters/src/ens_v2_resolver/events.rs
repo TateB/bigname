@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, HashSet};
-
 use anyhow::{Context, Result};
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
@@ -359,25 +357,4 @@ fn raw_log_preimage_fact_ref(raw_log: &ResolverRawLogRow) -> Value {
         "topic2": raw_log.topics.get(2).cloned(),
         "data_hex": hex_string(&raw_log.data),
     })
-}
-
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-pub(super) fn count_inserted_events_by_kind(
-    events: &[NormalizedEvent],
-    existing: &HashSet<String>,
-) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        if !existing.contains(&event.event_identity) {
-            *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-        }
-    }
-    counts
 }

@@ -2,19 +2,21 @@ use anyhow::{Context, Result};
 use sqlx::Postgres;
 
 use super::merge::{
-    StableObservationInput, merge_binding_active_to, merge_canonicality,
-    merge_stable_row_observation, merge_token_lineage_anchor,
+    StableObservationInput, merge_stable_row_observation, merge_token_lineage_anchor,
 };
 use super::read::{
-    decode_name_surface, decode_resource, decode_surface_binding, decode_token_lineage,
-    load_name_surface_internal, load_resource_internal, load_surface_binding_internal,
-    load_token_lineage_internal,
+    decode_name_surface, decode_resource, decode_token_lineage, load_name_surface_internal,
+    load_resource_internal, load_token_lineage_internal,
 };
-use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
+use super::types::{NameSurface, Resource, TokenLineage};
 use super::validate::{
     ensure_name_surface_identity_matches, ensure_resource_identity_matches,
-    ensure_surface_binding_identity_matches, ensure_token_lineage_identity_matches,
+    ensure_token_lineage_identity_matches,
 };
+
+mod surface_binding;
+
+pub(super) use surface_binding::upsert_surface_binding;
 
 pub(super) async fn upsert_token_lineage(
     executor: &mut sqlx::Transaction<'_, Postgres>,
@@ -93,10 +95,9 @@ pub(super) async fn upsert_token_lineage(
             token_lineage.token_lineage_id
         )
     })?;
-    let next_state = merge_canonicality(
-        existing.canonicality_state,
-        token_lineage.canonicality_state,
-    );
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(token_lineage.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -213,7 +214,9 @@ pub(super) async fn upsert_resource(
             resource.resource_id
         )
     })?;
-    let next_state = merge_canonicality(existing.canonicality_state, resource.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(resource.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -383,8 +386,9 @@ pub(super) async fn upsert_name_surface(
             name_surface.logical_name_id
         )
     })?;
-    let next_state =
-        merge_canonicality(existing.canonicality_state, name_surface.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(name_surface.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -432,114 +436,4 @@ pub(super) async fn upsert_name_surface(
     })?;
 
     decode_name_surface(snapshot)
-}
-
-pub(super) async fn upsert_surface_binding(
-    executor: &mut sqlx::Transaction<'_, Postgres>,
-    binding: &SurfaceBinding,
-) -> Result<SurfaceBinding> {
-    let provenance = serde_json::to_string(&binding.provenance)
-        .context("failed to serialize surface-binding provenance")?;
-
-    if let Some(snapshot) = sqlx::query(
-        r#"
-        INSERT INTO surface_bindings (
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::canonicality_state)
-        ON CONFLICT (surface_binding_id) DO NOTHING
-        RETURNING
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        "#,
-    )
-    .bind(binding.surface_binding_id)
-    .bind(&binding.logical_name_id)
-    .bind(binding.resource_id)
-    .bind(binding.binding_kind.as_str())
-    .bind(binding.active_from)
-    .bind(binding.active_to)
-    .bind(&binding.chain_id)
-    .bind(&binding.block_hash)
-    .bind(binding.block_number)
-    .bind(provenance)
-    .bind(binding.canonicality_state.as_str())
-    .fetch_optional(&mut **executor)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to insert surface binding {}",
-            binding.surface_binding_id
-        )
-    })? {
-        return decode_surface_binding(snapshot);
-    }
-
-    let existing = load_surface_binding_internal(&mut **executor, binding.surface_binding_id, true)
-        .await?
-        .with_context(|| {
-            format!(
-                "failed to reload existing surface binding {} after insert conflict",
-                binding.surface_binding_id
-            )
-        })?;
-
-    ensure_surface_binding_identity_matches(&existing, binding)?;
-    let next_active_to = merge_binding_active_to(existing.active_to, binding.active_to)?;
-    let next_state = merge_canonicality(existing.canonicality_state, binding.canonicality_state);
-
-    let snapshot = sqlx::query(
-        r#"
-        UPDATE surface_bindings
-        SET
-            active_to = $2,
-            canonicality_state = $3::canonicality_state,
-            observed_at = now()
-        WHERE surface_binding_id = $1
-        RETURNING
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        "#,
-    )
-    .bind(binding.surface_binding_id)
-    .bind(next_active_to)
-    .bind(next_state.as_str())
-    .fetch_one(&mut **executor)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to refresh existing surface binding {}",
-            binding.surface_binding_id
-        )
-    })?;
-
-    decode_surface_binding(snapshot)
 }

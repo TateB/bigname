@@ -157,7 +157,7 @@ Family ownership is fixed:
 
 ## Source manifests
 
-Manifests pin each source family by version and live at `manifests/<namespace>/<source_family>/<version>.toml`. Alternate profiles live under profile-specific roots (e.g. `manifests-sepolia-dev/`); one runtime selects exactly one.
+Manifests pin each source family by version and live under a selected profile root at `manifests/<profile>/<chain_combo>/<namespace>/<source_family>/<version>.toml`. The shipped runtime default is `manifests/mainnet/`; the Sepolia profile root is `manifests/sepolia/`. One runtime selects exactly one profile root.
 
 Each manifest contains: `manifest_version`, `namespace`, `source_family`, `chain`, `deployment_epoch`, `rollout_status` (`draft` | `shadow` | `active` | `deprecated`), `normalizer_version`, `capability_flags` (`unsupported` | `shadow` | `supported`), `roots`, `contracts`, `discovery_rules`. `start_block` is optional inclusive bootstrap metadata; omitted means unknown — adapters preserve that state rather than inferring zero.
 
@@ -257,6 +257,8 @@ ENSv2 mappings:
 ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` carries wrapper fuse changes that mask effective powers without inventing new subject grants.
 
 Every normalized event carries: namespace, `logical_name_id` when applicable, `resource_id` when applicable, source family, manifest version, chain position, raw fact reference, derivation kind, canonicality flag, and before/after state where possible.
+
+Normalized events are semantic adapter transitions. A row may be stateless when every payload field is derivable from one selected raw fact, stateful when fields such as `before_state`, resource continuity, authority metadata, resolver state, wrapper state, registrar expiry, and permission provenance depend on the adapter's prior canonical observations, or contextual when identity/resource/discovery fields depend on another adapter-owned output already being stable. Stateful replay is deterministic only from a full closure boundary for that adapter/source graph; contextual replay is deterministic only after dependency closure is stable or inside a topologically ordered closure replay. Source-family slices, target slices, block-hash selections, and IO chunks are not semantic substitutes for those closures.
 
 ## Resolution
 

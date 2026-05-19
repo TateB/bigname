@@ -1,8 +1,13 @@
 use anyhow::Result;
 use bigname_storage::{CanonicalityState, NormalizedEvent};
 use sqlx::types::{Uuid, time::OffsetDateTime};
+use std::collections::HashMap;
+
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
+use crate::evm_abi::keccak_signature_hex;
 
 use super::{
+    constants::*,
     decode::build_resolver_observation,
     events::{alias_preimage_events, named_dns_preimage_events},
     types::{ResolverObservation, ResolverRawLogRow},
@@ -48,7 +53,8 @@ pub(crate) fn build_preimage_observed_events(
         manifest_version: input.manifest_version,
     };
 
-    let Some(observation) = build_resolver_observation(&raw_log)? else {
+    let event_topics = test_resolver_event_topics();
+    let Some(observation) = build_resolver_observation(&raw_log, &event_topics)? else {
         return Ok(Vec::new());
     };
     match observation {
@@ -66,4 +72,45 @@ pub(crate) fn build_preimage_observed_events(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn test_resolver_event_topics() -> ActiveManifestEventTopic0sBySignature {
+    ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+        (
+            ABI_EVENT_ADDRESS_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_ADDRESS_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_TEXT_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_TEXT_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_CONTENTHASH_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_CONTENTHASH_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAME_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAME_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_VERSION_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_VERSION_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_ALIAS_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_ALIAS_CHANGED_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAMED_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_RESOURCE_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE),
+        ),
+    ]))
 }

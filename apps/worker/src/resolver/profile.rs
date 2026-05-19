@@ -33,6 +33,29 @@ impl ResolverProfileGate {
                 .context("failed to load Basenames L2Resolver profile admissions")?,
         );
 
+        Ok(Self::from_admissions(admissions))
+    }
+
+    pub(super) async fn load_for_target(pool: &PgPool, target: &ResolverTarget) -> Result<Self> {
+        let targets = [(target.chain_id.clone(), target.resolver_address.clone())];
+        let mut admissions =
+            bigname_manifests::load_ens_v1_public_resolver_profile_admissions_for_targets(
+                pool, &targets,
+            )
+            .await
+            .context("failed to load scoped ENSv1 PublicResolver profile admissions")?;
+        admissions.extend(
+            bigname_manifests::load_basenames_l2_resolver_profile_admissions_for_targets(
+                pool, &targets,
+            )
+            .await
+            .context("failed to load scoped Basenames L2Resolver profile admissions")?,
+        );
+
+        Ok(Self::from_admissions(admissions))
+    }
+
+    fn from_admissions(admissions: Vec<bigname_manifests::ResolverProfileAdmission>) -> Self {
         let mut binding_enumeration_skipped_targets = BTreeSet::new();
         let admissions = admissions
             .into_iter()
@@ -57,10 +80,10 @@ impl ResolverProfileGate {
             })
             .collect();
 
-        Ok(Self {
+        Self {
             admissions,
             binding_enumeration_skipped_targets,
-        })
+        }
     }
 
     pub(super) fn target_status_for_bindings(

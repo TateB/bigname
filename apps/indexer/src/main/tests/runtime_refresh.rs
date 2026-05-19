@@ -6,7 +6,7 @@ use bigname_manifests::{
 #[tokio::test]
 async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet");
     let manifest_repository = load_manifest_repository(&manifests_root)?;
 
     let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
@@ -25,12 +25,12 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     assert_eq!(runtime_state.sync_summary.synced_manifest_count, 16);
     assert_eq!(runtime_state.sync_summary.active_manifest_count, 11);
     assert_eq!(runtime_state.sync_summary.root_count, 6);
-    assert_eq!(runtime_state.sync_summary.contract_count, 20);
+    assert_eq!(runtime_state.sync_summary.contract_count, 26);
     assert_eq!(runtime_state.sync_summary.capability_count, 10);
     assert_eq!(runtime_state.sync_summary.discovery_rule_count, 8);
     assert_eq!(runtime_state.discovery_admission.active_manifest_count, 11);
     assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
-    assert_eq!(runtime_state.discovery_admission.active_contract_count, 15);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 21);
     assert_eq!(runtime_state.discovery_admission.active_rule_count, 4);
     assert_eq!(
         runtime_state
@@ -40,11 +40,11 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
-        14
+        20
     );
     assert_eq!(
         runtime_state.watched_contract_summary.source_entry_count,
-        18
+        24
     );
     assert_eq!(
         runtime_state.watched_contract_summary.manifest_root_count,
@@ -54,7 +54,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         runtime_state
             .watched_contract_summary
             .manifest_contract_count,
-        15
+        21
     );
     assert_eq!(
         runtime_state.watched_contract_summary.discovery_edge_count,
@@ -79,18 +79,24 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
                 chain: "ethereum-mainnet".to_owned(),
                 addresses: vec![
                     "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+                    "0x1da022710df5002339274aadee8d58218e9d6ab5".to_owned(),
+                    "0x226159d592e2b063810a10ebf6dcbada94ed68b8".to_owned(),
+                    "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63".to_owned(),
                     "0x253553366da8546fc250f225fe3d25d0c782303b".to_owned(),
                     "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5".to_owned(),
                     "0x314159265dd8dbb310642f98f50c066173c1259b".to_owned(),
+                    "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
                     "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
                     "0x59e16fccd424cc24e280be16e11bcd56fb0ce547".to_owned(),
+                    "0x5ffc014343cd971b7eb70732021e26c35b744cc4".to_owned(),
                     "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb".to_owned(),
                     "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401".to_owned(),
+                    "0xdaaf96c344f63131acadd0ea35170e7892d3dfba".to_owned(),
                     "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31".to_owned(),
                     "0xf29100983e058b709f3d539b0c765937b804ac15".to_owned(),
                 ],
                 manifest_root_entry_count: 2,
-                manifest_contract_entry_count: 11,
+                manifest_contract_entry_count: 17,
                 discovery_edge_entry_count: 0,
             }
         ]
@@ -106,7 +112,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
 #[tokio::test]
 async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet");
     let manifest_repository = load_manifest_repository(&manifests_root)?;
     let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
     let mut intake_tasks =
@@ -1570,6 +1576,7 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
 }
 
 fn manifest_contents_with_root_code_hash(root_address: &str, code_hash: &str) -> String {
+    let abi = test_manifest_abi_toml();
     format!(
         r#"
 manifest_version = 1
@@ -1597,12 +1604,14 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
     )
 }
 
 fn ens_v1_registry_resolver_discovery_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_registry_l1"
@@ -1632,12 +1641,16 @@ admission = "reachable_from_root"
 edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 fn ens_v1_resolver_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_resolver_l1"
@@ -1650,8 +1663,11 @@ contracts = []
 discovery_rules = []
 
 [capability_flags]
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 async fn insert_raw_new_resolver_log_for_node(

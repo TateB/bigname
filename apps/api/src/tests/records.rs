@@ -103,6 +103,7 @@ async fn get_name_records_returns_declared_compact_summary() -> Result<()> {
             "support_status": "supported",
             "unsupported_filters": [],
             "unsupported_fields": [],
+            "total_count": null,
             "value_source": {
                 "mode": "declared",
                 "declared_status": "supported",
@@ -405,20 +406,17 @@ async fn get_resolve_records_defaults_auto_to_declared_all_available_records() -
 }
 
 #[tokio::test]
-async fn get_resolve_records_uses_current_projection_without_snapshot_catchup() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
+async fn get_resolve_records_returns_stale_when_default_snapshot_outruns_projection() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2211);
     let token_lineage_id = Uuid::from_u128(0x1111);
     let surface_binding_id = Uuid::from_u128(0x3311);
 
     database
-        .seed_name_current_binding(
+        .seed_name_current_binding_migrated(
             logical_name_id,
-            "ens",
-            "alice.eth",
-            "Alice.eth",
-            "namehash:alice.eth",
             resource_id,
             token_lineage_id,
             surface_binding_id,
@@ -438,16 +436,44 @@ async fn get_resolve_records_uses_current_projection_without_snapshot_catchup() 
             resource_id,
         ))
         .await?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xlater-binding",
+            Some("0xbinding"),
+            21_000_004,
+            1_713_331_204,
+        )],
+    )
+    .await
+    .context("failed to insert later lineage block for compact records stale test")?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[history_event(
+            "api-test:compact-records-later-input",
+            Some(logical_name_id),
+            Some(resource_id),
+            Some("ethereum-mainnet"),
+            Some(21_000_004),
+            Some("0xlater-binding"),
+            Some("0xtx:compact-records-later-input"),
+            Some(0),
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await
+    .context("failed to insert later projection input for compact records stale test")?;
     sqlx::query(
         r#"
         UPDATE chain_checkpoints
         SET
-            canonical_block_hash = '0xlater-not-in-lineage',
-            canonical_block_number = 21_000_100,
-            safe_block_hash = '0xlater-not-in-lineage',
-            safe_block_number = 21_000_100,
-            finalized_block_hash = '0xlater-not-in-lineage',
-            finalized_block_number = 21_000_100
+            canonical_block_hash = '0xlater-binding',
+            canonical_block_number = 21_000_004,
+            safe_block_hash = '0xlater-binding',
+            safe_block_number = 21_000_004,
+            finalized_block_hash = '0xlater-binding',
+            finalized_block_number = 21_000_004
         WHERE chain_id = 'ethereum-mainnet'
         "#,
     )
@@ -463,23 +489,11 @@ async fn get_resolve_records_uses_current_projection_without_snapshot_catchup() 
                 .expect("request must build"),
         )
         .await
-        .context("current compact records request failed")?;
+        .context("selected-snapshot compact records request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload.pointer("/meta/value_source"),
-        Some(&json!({
-            "mode": "auto",
-            "declared_status": "supported",
-            "source": "record_inventory_current",
-        }))
-    );
-    assert_eq!(
-        payload.pointer("/data/coin_addresses/60/value"),
-        Some(&json!("0x0000000000000000000000000000000000000abc"))
-    );
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
 
     database.cleanup().await?;
     Ok(())
@@ -590,6 +604,244 @@ async fn get_resolve_records_auto_uses_verified_for_pending_resolver_profile() -
     assert_eq!(
         payload.pointer("/meta/value_source/verified_status"),
         Some(&json!("supported"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_auto_uses_verified_when_declared_inventory_has_no_selectors(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2222);
+    let token_lineage_id = Uuid::from_u128(0x1122);
+    let surface_binding_id = Uuid::from_u128(0x3322);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000063);
+    let fallback_record_keys = [
+        "addr:60",
+        "avatar",
+        "contenthash",
+        "text:description",
+        "text:url",
+        "text:email",
+    ];
+    let request_key = resolution_execution_request_key(&fallback_record_keys);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000f0"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "not_found",
+            "failure_reason": "no_avatar_record"
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash_record"
+        },
+        {
+            "record_key": "text:description",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "text:url",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "text:email",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([]);
+    inventory.explicit_gaps = json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60",
+        "gap_reason": "not_observed_on_current_resolver"
+    }]);
+    inventory.entries = json!([]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &fallback_record_keys,
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto no-selector compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x00000000000000000000000000000000000000f0"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/verified_status"),
+        Some(&json!("supported"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_auto_uses_verified_when_declared_cache_value_is_unretained(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2223);
+    let token_lineage_id = Uuid::from_u128(0x1123);
+    let surface_binding_id = Uuid::from_u128(0x3323);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000064);
+    let request_key = resolution_execution_request_key(&["avatar"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([{
+        "record_key": "text:avatar",
+        "record_family": "text",
+        "selector_key": "avatar",
+        "cacheable": true
+    }]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([{
+        "record_key": "text:avatar",
+        "record_family": "text",
+        "selector_key": "avatar",
+        "status": "unsupported",
+        "unsupported_reason": "value_not_retained_in_normalized_events"
+    }]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["avatar"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records?include=avatar")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto unretained compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/avatar/value"),
+        Some(&json!("https://cdn.example.test/alice.png"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
     );
 
     database.cleanup().await?;
@@ -949,6 +1201,7 @@ async fn get_name_records_surfaces_missing_inventory_as_unsupported_metadata() -
             "support_status": "partial",
             "unsupported_filters": [],
             "unsupported_fields": ["record_cache", "record_inventory"],
+            "total_count": null,
             "value_source": {
                 "mode": "declared",
                 "declared_status": "unsupported",

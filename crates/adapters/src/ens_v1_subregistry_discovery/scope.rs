@@ -1,8 +1,5 @@
-use std::collections::HashSet;
-
-use anyhow::{Context, Result, bail};
-use bigname_manifests::DiscoveryObservation;
-use sqlx::{PgPool, Row};
+use anyhow::{Result, bail};
+use sqlx::PgPool;
 
 use crate::registry_migration_cache::{
     MigratedRegistryNodes, RegistryMigrationMarkerEmitter,
@@ -76,92 +73,6 @@ pub(super) async fn load_migrated_registry_nodes_before_block(
         new_owner_child_node_from_topics,
     )
     .await
-}
-
-pub(super) async fn load_active_registry_edge_observations_excluding_keys(
-    pool: &PgPool,
-    discovery_sources: &[String],
-    excluded_observation_keys: &HashSet<(String, String)>,
-) -> Result<Vec<DiscoveryObservation>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            de.chain_id,
-            de.edge_kind,
-            de.discovery_source,
-            de.active_from_block_number,
-            de.active_from_block_hash,
-            de.active_to_block_number,
-            de.active_to_block_hash,
-            de.provenance,
-            de.provenance ->> 'observation_key' AS observation_key,
-            from_cia.address AS from_address,
-            to_cia.address AS to_address
-        FROM discovery_edges de
-        JOIN contract_instance_addresses from_cia
-          ON from_cia.contract_instance_id = de.from_contract_instance_id
-         AND from_cia.deactivated_at IS NULL
-        JOIN contract_instance_addresses to_cia
-          ON to_cia.contract_instance_id = de.to_contract_instance_id
-         AND to_cia.deactivated_at IS NULL
-        WHERE de.discovery_source = ANY($1::TEXT[])
-          AND de.deactivated_at IS NULL
-        ORDER BY de.discovery_source, observation_key
-        "#,
-    )
-    .bind(discovery_sources)
-    .fetch_all(pool)
-    .await
-    .context("failed to load active ENSv1 registry discovery edge carry-forward observations")?;
-
-    rows.into_iter()
-        .filter_map(|row| {
-            let discovery_source = match row.try_get::<String, _>("discovery_source") {
-                Ok(value) => value,
-                Err(error) => return Some(Err(error.into())),
-            };
-            let observation_key = match row.try_get::<Option<String>, _>("observation_key") {
-                Ok(Some(value)) => value,
-                Ok(None) => {
-                    return Some(Err(anyhow::anyhow!(
-                        "active ENSv1 registry edge missing provenance.observation_key"
-                    )));
-                }
-                Err(error) => return Some(Err(error.into())),
-            };
-            if excluded_observation_keys.contains(&(discovery_source.clone(), observation_key)) {
-                return None;
-            }
-            Some((|| {
-                Ok(DiscoveryObservation {
-                    chain: row.try_get("chain_id").context("missing chain_id")?,
-                    from_address: normalize_address(
-                        &row.try_get::<String, _>("from_address")
-                            .context("missing from_address")?,
-                    ),
-                    to_address: normalize_address(
-                        &row.try_get::<String, _>("to_address")
-                            .context("missing to_address")?,
-                    ),
-                    edge_kind: row.try_get("edge_kind").context("missing edge_kind")?,
-                    discovery_source,
-                    active_from_block_number: row
-                        .try_get("active_from_block_number")
-                        .context("missing active_from_block_number")?,
-                    active_from_block_hash: row
-                        .try_get("active_from_block_hash")
-                        .context("missing active_from_block_hash")?,
-                    active_to_block_number: row
-                        .try_get("active_to_block_number")
-                        .context("missing active_to_block_number")?,
-                    active_to_block_hash: row
-                        .try_get("active_to_block_hash")
-                        .context("missing active_to_block_hash")?,
-                    provenance: row.try_get("provenance").context("missing provenance")?,
-                })
-            })())
-        })
-        .collect()
 }
 
 pub(super) fn scoped_ranges_for_active_emitters(

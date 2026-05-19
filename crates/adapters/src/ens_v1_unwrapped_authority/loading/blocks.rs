@@ -1,10 +1,12 @@
 use super::super::*;
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, postgres::PgRow, types::time::OffsetDateTime};
+use bigname_storage::sql_row;
+use sqlx::{PgPool, postgres::PgRow, types::time::OffsetDateTime};
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     pool: &PgPool,
     chain: &str,
+    target_block_number: Option<i64>,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let rows = sqlx::query(
         r#"
@@ -16,6 +18,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
             canonicality_state::TEXT AS canonicality_state
         FROM chain_lineage
         WHERE chain_id = $1
+          AND ($2::BIGINT IS NULL OR block_number <= $2::BIGINT)
           AND canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -25,6 +28,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
         "#,
     )
     .bind(chain)
+    .bind(target_block_number)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load canonical raw blocks for chain {chain}"))?;
@@ -32,18 +36,11 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     rows.into_iter()
         .map(|row| {
             Ok(RawBlockSnapshot {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                block_timestamp: row
-                    .try_get("block_timestamp")
-                    .context("missing block_timestamp")?,
-                canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
-                )?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                block_timestamp: sql_row::get(&row, "block_timestamp")?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
             })
         })
         .collect()
@@ -53,13 +50,19 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_res
     pool: &PgPool,
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let Some(replay_head) = restricted_replay_head_block(raw_logs) else {
         return Ok(Vec::new());
     };
-    let mut blocks =
-        load_release_boundary_blocks_for_authority_logs(pool, chain, raw_logs, &replay_head)
-            .await?;
+    let mut blocks = load_release_boundary_blocks_for_authority_logs(
+        pool,
+        chain,
+        raw_logs,
+        &replay_head,
+        event_topics,
+    )
+    .await?;
     blocks.push(replay_head);
 
     blocks.sort_by(|left, right| {
@@ -98,11 +101,14 @@ async fn load_release_boundary_blocks_for_authority_logs(
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
     replay_head: &RawBlockSnapshot,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let mut release_timestamps = Vec::new();
     let mut release_namespaces = Vec::new();
     for raw_log in raw_logs {
-        let Some(release_timestamp) = release_boundary_timestamp_for_authority_log(raw_log)? else {
+        let Some(release_timestamp) =
+            release_boundary_timestamp_for_authority_log(raw_log, event_topics)?
+        else {
             continue;
         };
         release_timestamps.push(release_timestamp);
@@ -164,6 +170,7 @@ async fn load_release_boundary_blocks_for_authority_logs(
 
 fn release_boundary_timestamp_for_authority_log(
     raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Option<OffsetDateTime>> {
     let Some(profile) = authority_profile_for_source_family(&raw_log.source_family) else {
         return Ok(None);
@@ -175,18 +182,17 @@ fn release_boundary_timestamp_for_authority_log(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
-    let expiry_word_start = registrar_name_registered_expiry_word_start(topic0)
-        .or_else(|| registrar_name_renewed_expiry_word_start(topic0));
-    let Some(expiry_word_start) = expiry_word_start else {
+    let expiry = if let Some(registration) =
+        decode_registrar_name_registered_data(raw_log, topic0, event_topics)?
+    {
+        registration.expiry
+    } else if let Some(renewal) = decode_registrar_name_renewed_data(raw_log, topic0, event_topics)?
+    {
+        renewal.expiry
+    } else {
         return Ok(None);
     };
 
-    let expiry = abi_word_to_i64(
-        raw_log
-            .data
-            .get(expiry_word_start..expiry_word_start + 32)
-            .context("registrar authority log is missing expiry word")?,
-    )?;
     let expiry = OffsetDateTime::from_unix_timestamp(expiry)
         .context("registrar authority log expiry is not a valid unix timestamp")?;
     release_after_grace(expiry).map(Some)
@@ -194,17 +200,10 @@ fn release_boundary_timestamp_for_authority_log(
 
 fn raw_block_snapshot_from_row(row: PgRow) -> Result<RawBlockSnapshot> {
     Ok(RawBlockSnapshot {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: sql_row::get(&row, "chain_id")?,
+        block_hash: sql_row::get(&row, "block_hash")?,
+        block_number: sql_row::get(&row, "block_number")?,
+        block_timestamp: sql_row::get(&row, "block_timestamp")?,
+        canonicality_state: sql_row::get(&row, "canonicality_state")?,
     })
 }

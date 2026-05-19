@@ -1,10 +1,13 @@
+use bigname_storage::sql_row;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
-use super::{active_emitters::ActiveEmitter, decoding::normalize_address};
+use crate::ens_v2_common::{normalize_address, source_scope_bindings};
+
+use super::{SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, active_emitters::ActiveEmitter};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RegistrarRawLogRow {
@@ -31,6 +34,7 @@ pub(super) async fn load_registrar_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    max_block_number: Option<i64>,
 ) -> Result<Vec<RegistrarRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -43,10 +47,12 @@ pub(super) async fn load_registrar_raw_logs(
         .collect::<HashMap<_, _>>();
     let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
     let (scope_addresses, scope_from_blocks, scope_to_blocks) =
-        registrar_source_scope_bindings(source_scope);
+        source_scope_bindings(source_scope, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1);
     if source_scope.is_some() && scope_addresses.is_empty() {
         return Ok(Vec::new());
     }
+    let has_max_block_number = max_block_number.is_some();
+    let max_block_number = max_block_number.unwrap_or(i64::MAX);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -64,6 +70,7 @@ pub(super) async fn load_registrar_raw_logs(
         WHERE chain_id = $1
           AND LOWER(emitting_address) = ANY($2::TEXT[])
           AND ($3::BOOLEAN = FALSE OR block_hash = ANY($4::TEXT[]))
+          AND ($9::BOOLEAN = FALSE OR block_number <= $10::BIGINT)
           AND (
               $5::BOOLEAN = FALSE
               OR EXISTS (
@@ -91,6 +98,8 @@ pub(super) async fn load_registrar_raw_logs(
     .bind(&scope_addresses)
     .bind(&scope_from_blocks)
     .bind(&scope_to_blocks)
+    .bind(has_max_block_number)
+    .bind(max_block_number)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load ENSv2 registrar raw logs for chain {chain}"))?;
@@ -98,8 +107,7 @@ pub(super) async fn load_registrar_raw_logs(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &row.try_get::<String, _>("emitting_address")
-                    .context("missing emitting_address")?,
+                &sql_row::get::<String>(&row, "emitting_address")?,
             );
             let emitter = emitters_by_address
                 .get(&emitting_address)
@@ -109,25 +117,16 @@ pub(super) async fn load_registrar_raw_logs(
                     )
                 })?;
             Ok(RegistrarRawLogRow {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("missing transaction_hash")?,
-                transaction_index: row
-                    .try_get("transaction_index")
-                    .context("missing transaction_index")?,
-                log_index: row.try_get("log_index").context("missing log_index")?,
+                chain_id: sql_row::get(&row, "chain_id")?,
+                block_hash: sql_row::get(&row, "block_hash")?,
+                block_number: sql_row::get(&row, "block_number")?,
+                transaction_hash: sql_row::get(&row, "transaction_hash")?,
+                transaction_index: sql_row::get(&row, "transaction_index")?,
+                log_index: sql_row::get(&row, "log_index")?,
                 emitting_address,
-                topics: row.try_get("topics").context("missing topics")?,
-                data: row.try_get("data").context("missing data")?,
-                canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
-                )?,
+                topics: sql_row::get(&row, "topics")?,
+                data: sql_row::get(&row, "data")?,
+                canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),
                 source_family: emitter.source_family.clone(),
@@ -135,32 +134,4 @@ pub(super) async fn load_registrar_raw_logs(
             })
         })
         .collect()
-}
-
-fn registrar_source_scope_bindings(
-    source_scope: Option<&[(String, String, i64, i64)]>,
-) -> (Vec<String>, Vec<i64>, Vec<i64>) {
-    let mut addresses = Vec::new();
-    let mut from_blocks = Vec::new();
-    let mut to_blocks = Vec::new();
-    for (source_family, address, from_block, to_block) in source_scope.unwrap_or(&[]) {
-        if source_family != "ens_v2_registrar_l1" {
-            continue;
-        }
-        addresses.push(address.to_ascii_lowercase());
-        from_blocks.push(*from_block);
-        to_blocks.push(*to_block);
-    }
-    (addresses, from_blocks, to_blocks)
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

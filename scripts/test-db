@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/test-db [--] [command...]
+
+Runs database-backed tests against an isolated local PostgreSQL container.
+
+Defaults:
+  command                             cargo test --workspace --all-features
+  BIGNAME_TEST_POSTGRES_CONTAINER     bigname-test-postgres
+  BIGNAME_TEST_POSTGRES_IMAGE         postgres:16-alpine
+  BIGNAME_TEST_POSTGRES_PORT          55432
+  BIGNAME_TEST_POSTGRES_DB            bigname
+  BIGNAME_TEST_POSTGRES_USER          bigname
+  BIGNAME_TEST_POSTGRES_PASSWORD      bigname
+
+Set BIGNAME_TEST_DATABASE_URL to use an already-running PostgreSQL server
+instead of starting the test container.
+USAGE
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+
+if [ "$#" -eq 0 ]; then
+  set -- cargo test --workspace --all-features
+fi
+
+redact_url() {
+  printf '%s' "$1" | sed -E 's#(postgres(ql)?://[^:/@]+):[^@]+@#\1:***@#'
+}
+
+if [ -n "${BIGNAME_TEST_DATABASE_URL:-}" ]; then
+  export BIGNAME_DATABASE_URL="$BIGNAME_TEST_DATABASE_URL"
+  export DATABASE_URL="$BIGNAME_TEST_DATABASE_URL"
+  printf 'Using existing test PostgreSQL: %s\n' "$(redact_url "$BIGNAME_DATABASE_URL")"
+  exec "$@"
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  printf '%s\n' "docker is required unless BIGNAME_TEST_DATABASE_URL is set" >&2
+  exit 1
+fi
+
+container="${BIGNAME_TEST_POSTGRES_CONTAINER:-bigname-test-postgres}"
+image="${BIGNAME_TEST_POSTGRES_IMAGE:-postgres:16-alpine}"
+port="${BIGNAME_TEST_POSTGRES_PORT:-55432}"
+database="${BIGNAME_TEST_POSTGRES_DB:-bigname}"
+user="${BIGNAME_TEST_POSTGRES_USER:-bigname}"
+password="${BIGNAME_TEST_POSTGRES_PASSWORD:-bigname}"
+
+if docker inspect "$container" >/dev/null 2>&1; then
+  running="$(docker inspect --format '{{.State.Running}}' "$container")"
+  if [ "$running" != "true" ]; then
+    docker start "$container" >/dev/null
+  fi
+else
+  docker run \
+    --detach \
+    --name "$container" \
+    --env "POSTGRES_DB=$database" \
+    --env "POSTGRES_USER=$user" \
+    --env "POSTGRES_PASSWORD=$password" \
+    --publish "127.0.0.1:$port:5432" \
+    "$image" >/dev/null
+fi
+
+for attempt in $(seq 1 60); do
+  if docker exec "$container" pg_isready -U "$user" -d "$database" >/dev/null 2>&1; then
+    break
+  fi
+
+  if [ "$attempt" -eq 60 ]; then
+    printf '%s\n' "test PostgreSQL container did not become ready" >&2
+    docker logs "$container" >&2 || true
+    exit 1
+  fi
+
+  sleep 1
+done
+
+export BIGNAME_DATABASE_URL="postgres://$user:$password@127.0.0.1:$port/$database"
+export DATABASE_URL="$BIGNAME_DATABASE_URL"
+
+printf 'Using test PostgreSQL: %s\n' "$(redact_url "$BIGNAME_DATABASE_URL")"
+exec "$@"

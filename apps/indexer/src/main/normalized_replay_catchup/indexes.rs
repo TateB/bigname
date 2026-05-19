@@ -73,9 +73,7 @@ pub(super) async fn ensure_projection_indexes_after_catchup(
     {
         return Ok(());
     }
-    if !any_index_missing(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
-        && !any_index_exists(pool, TEMPORARY_REPLAY_INDEXES).await?
-    {
+    if !projection_indexes_need_restore(pool).await? {
         return Ok(());
     }
 
@@ -88,8 +86,7 @@ pub(super) async fn ensure_projection_indexes_after_catchup(
         "normalized replay complete; rebuilding deferred projection indexes"
     );
 
-    create_deferred_projection_indexes(pool).await?;
-    drop_temporary_replay_indexes(pool).await?;
+    ensure_deferred_projection_indexes_ready(pool, deployment_profile, chains).await?;
 
     info!(
         service = "indexer",
@@ -100,6 +97,57 @@ pub(super) async fn ensure_projection_indexes_after_catchup(
         "deferred normalized replay projection indexes are ready"
     );
     Ok(())
+}
+
+pub(super) async fn restore_deferred_projection_indexes(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chains: &[String],
+) -> Result<()> {
+    if !projection_indexes_need_restore(pool).await? {
+        return Ok(());
+    }
+
+    info!(
+        service = "indexer",
+        command = "run",
+        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+        deployment_profile,
+        chain_count = chains.len(),
+        "normalized replay selected closure/dependency adapters; restoring deferred projection indexes before failing closed"
+    );
+
+    ensure_deferred_projection_indexes_ready(pool, deployment_profile, chains).await?;
+
+    info!(
+        service = "indexer",
+        command = "run",
+        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+        deployment_profile,
+        chain_count = chains.len(),
+        "deferred normalized replay projection indexes are ready"
+    );
+    Ok(())
+}
+
+async fn ensure_deferred_projection_indexes_ready(
+    pool: &PgPool,
+    _deployment_profile: &str,
+    _chains: &[String],
+) -> Result<()> {
+    if !projection_indexes_need_restore(pool).await? {
+        return Ok(());
+    }
+
+    create_deferred_projection_indexes(pool).await?;
+    drop_temporary_replay_indexes(pool).await
+}
+
+async fn projection_indexes_need_restore(pool: &PgPool) -> Result<bool> {
+    Ok(
+        any_index_missing(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
+            || any_index_exists(pool, TEMPORARY_REPLAY_INDEXES).await?,
+    )
 }
 
 fn should_defer_projection_indexes(
@@ -167,7 +215,7 @@ mod tests {
     }
 }
 
-async fn all_configured_cursors_complete(
+pub(super) async fn all_configured_cursors_complete(
     pool: &PgPool,
     deployment_profile: &str,
     chains: &[String],
@@ -227,25 +275,18 @@ async fn all_configured_cursors_complete(
 async fn chain_has_canonical_raw_logs(pool: &PgPool, chain: &str) -> Result<bool> {
     sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT EXISTS (
-            SELECT 1
+        SELECT (
+            SELECT raw_log_id
             FROM raw_logs
-            JOIN chain_lineage AS lineage
-              ON lineage.chain_id = raw_logs.chain_id
-             AND lineage.block_hash = raw_logs.block_hash
             WHERE raw_logs.chain_id = $1
-              AND lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
               AND raw_logs.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
+            ORDER BY raw_logs.block_number DESC
             LIMIT 1
-        )
+        ) IS NOT NULL
         "#,
     )
     .bind(chain)

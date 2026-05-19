@@ -1585,16 +1585,6 @@
               "null"
             ]
           },
-          "provenance": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          },
           "resource_hex": {
             "type": [
               "object",
@@ -2103,15 +2093,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3136,15 +3125,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3518,7 +3506,7 @@
             }
           },
           {
-            "description": "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+            "description": "Compact records read mode. `auto` uses declared cache when it can satisfy the requested values from replayable state, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
             "in": "query",
             "name": "mode",
             "required": false,
@@ -3602,15 +3590,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3724,15 +3711,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4223,7 +4209,7 @@
             }
           },
           {
-            "description": "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+            "description": "Compact records read mode. `auto` uses declared cache when it can satisfy the requested values from replayable state, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
             "in": "query",
             "name": "mode",
             "required": false,
@@ -4307,15 +4293,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4590,15 +4575,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4813,15 +4797,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }

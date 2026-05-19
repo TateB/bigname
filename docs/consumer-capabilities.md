@@ -28,11 +28,11 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 
 | Capability | Route | Notes |
 | --- | --- | --- |
-| exact name profile | `GET /v1/names/{namespace}/{name}` (full), `GET /v1/names?namespace=...&name=...` (compact) | Compact hides provenance and projection metadata; full keeps the canonical exact-name envelope. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
+| exact name profile | `GET /v1/names/{namespace}/{name}` (full), `GET /v1/names?namespace=...&name=...` (compact compatibility filter) | Compact hides provenance and projection metadata and returns zero or one `CompactDomainSummary`; full keeps the canonical exact-name envelope. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
 | names by address | `GET /v1/names?account=...&relation=token_holder|any` with optional `contains=`, `prefix=`, `sort=name|expiry_date|registration_date` | Compact `CompactDomainSummary` rows. Count via `GET /v1/addresses/{address}/names/count` or `include=total_count`. |
 | names by address with role summary | `GET /v1/addresses/{address}/names?include=role_summary` | Additive expansion over the same address-to-surface collection — not a separate route. Adds `role_summary`, `subname_count`, `record_count`, `status`, `expiry`. |
 | declared children | `GET /v1/names/{namespace}/{name}/children?include=counts` | Declared direct-child bucket only. Linked, alias, and wildcard buckets are not enumerated. |
-| record inventory and cache | `GET /v1/resolutions/{namespace}/{name}` (full), `GET /v1/resolve/{name}/records` and `GET /v1/names/{namespace}/{name}/records` (compact) | `record_inventory` defines the stable selector space; `record_cache` is the last-known declared value over that space. The compact route defaults to `mode=auto`: declared cache when an authoritative resolver profile owns the selector, verified resolution for supported selectors otherwise, and a bounded basic-profile probe when no declared selectors exist. |
+| record inventory and cache | `GET /v1/resolutions/{namespace}/{name}` (full), `GET /v1/resolve/{name}/records` and `GET /v1/names/{namespace}/{name}/records` (compact) | `record_inventory` defines the stable selector space; `record_cache` is the last-known declared value over that space. The compact route defaults to `mode=auto`: declared cache when it can satisfy the requested values from replayable local state, verified resolution for supported selectors otherwise, and a bounded basic-profile probe when no declared selectors exist. |
 | verified record reads | `GET /v1/resolutions/{namespace}/{name}` `verified_queries` plus the execution explain route | Verified queries are execution-derived. They do not backfill `record_inventory` or `record_cache` in the same response. |
 | name history | `GET /v1/history/names/{namespace}/{name}` | Canonical normalized-event reads with `scope=surface|resource|both`. |
 | address history | `GET /v1/history/addresses/{address}` | Address-anchor composition over the same history contract. |
@@ -44,7 +44,9 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 | compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
 | compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, projected `role_bitmap`, and effective powers. |
 
-The compact defaults across these routes suppress provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads unless the caller passes `meta=full`, `view=full`, or uses an explain/audit surface.
+Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` compatibility-reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
+
+`GET /v1/names` keeps the compatibility bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
 

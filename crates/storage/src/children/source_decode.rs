@@ -5,35 +5,17 @@ use super::types::DeclaredChildEventSource;
 
 pub(super) fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredChildEventSource> {
     Ok(DeclaredChildEventSource {
-        parent_logical_name_id: row
-            .try_get("parent_logical_name_id")
-            .context("missing parent_logical_name_id")?,
-        child_logical_name_id: row
-            .try_get("child_logical_name_id")
-            .context("missing child_logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        normalized_event_id: row
-            .try_get("normalized_event_id")
-            .context("missing normalized_event_id")?,
-        event_identity: row
-            .try_get("event_identity")
-            .context("missing event_identity")?,
-        source_family: row
-            .try_get("source_family")
-            .context("missing source_family")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        source_manifest_id: row
-            .try_get("source_manifest_id")
-            .context("missing source_manifest_id")?,
+        parent_logical_name_id: crate::sql_row::get(&row, "parent_logical_name_id")?,
+        child_logical_name_id: crate::sql_row::get(&row, "child_logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        normalized_event_id: crate::sql_row::get(&row, "normalized_event_id")?,
+        event_identity: crate::sql_row::get(&row, "event_identity")?,
+        source_family: crate::sql_row::get(&row, "source_family")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        source_manifest_id: crate::sql_row::get(&row, "source_manifest_id")?,
         chain_id: row
             .try_get::<Option<String>, _>("chain_id")
             .context("missing chain_id")?
@@ -54,17 +36,9 @@ pub(super) fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredC
             .try_get::<Option<i64>, _>("log_index")
             .context("missing log_index")?
             .context("declared child source is missing log_index")?,
-        raw_fact_ref: row
-            .try_get("raw_fact_ref")
-            .context("missing raw_fact_ref")?,
-        normalized_event_ids: row
-            .try_get("normalized_event_ids")
-            .context("missing normalized_event_ids")?,
-        raw_fact_refs: row
-            .try_get("raw_fact_refs")
-            .context("missing raw_fact_refs")?,
-        manifest_versions: row
-            .try_get("manifest_versions")
-            .context("missing manifest_versions")?,
+        raw_fact_ref: crate::sql_row::get(&row, "raw_fact_ref")?,
+        normalized_event_ids: crate::sql_row::get(&row, "normalized_event_ids")?,
+        raw_fact_refs: crate::sql_row::get(&row, "raw_fact_refs")?,
+        manifest_versions: crate::sql_row::get(&row, "manifest_versions")?,
     })
 }

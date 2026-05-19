@@ -215,7 +215,8 @@ async fn minimal_lineage_replay_can_be_audit_enriched_without_clearing_fields() 
         timestamp,
         CanonicalityState::Canonical,
     );
-    let refreshed = upsert_chain_lineage_blocks(database.pool(), &[audited.clone()]).await?;
+    let refreshed =
+        upsert_chain_lineage_blocks(database.pool(), std::slice::from_ref(&audited)).await?;
     assert_eq!(
         refreshed[0].canonicality_state,
         CanonicalityState::Canonical

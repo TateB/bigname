@@ -1,4 +1,5 @@
 use super::*;
+use alloy_primitives::{Address, hex};
 
 pub(super) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
     match scope.unwrap_or("both") {
@@ -45,6 +46,21 @@ pub(super) fn parse_response_view(
     }
 }
 
+pub(super) fn parse_compact_only_response_view(
+    view: Option<&str>,
+    full_view_message: &str,
+) -> ApiResult<()> {
+    if parse_response_view(view, ResponseView::Compact)? == ResponseView::Full {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: full_view_message.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResult<MetaMode> {
     let Some(meta) = meta.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default);
@@ -63,16 +79,7 @@ pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResul
 }
 
 pub(super) fn parse_primary_name_address(address: &str) -> ApiResult<String> {
-    let normalized = normalize_address(address.trim());
-    let is_valid = normalized.len() == 42
-        && normalized.starts_with("0x")
-        && normalized
-            .as_bytes()
-            .iter()
-            .skip(2)
-            .all(|byte| byte.is_ascii_hexdigit());
-
-    if is_valid {
+    if let Some(normalized) = normalize_standard_evm_address(address.trim()) {
         Ok(normalized)
     } else {
         Err(ApiError {
@@ -225,13 +232,13 @@ pub(super) fn parse_permission_scope_filter(
         ("resolver", Some(chain_id), Some(resolver_address), None) => {
             Some(PermissionScope::Resolver {
                 chain_id: chain_id.to_owned(),
-                resolver_address: resolver_address.to_ascii_lowercase(),
+                resolver_address: normalize_address(resolver_address),
             })
         }
         ("record_manager", Some(chain_id), Some(manager_address), None) => {
             Some(PermissionScope::RecordManager {
                 chain_id: chain_id.to_owned(),
-                manager_address: manager_address.to_ascii_lowercase(),
+                manager_address: normalize_address(manager_address),
             })
         }
         ("migration_derived", Some(predecessor_resource_id), None, None) => {
@@ -400,7 +407,20 @@ pub(super) fn parse_children_include_counts(include: Option<&str>) -> ApiResult<
 }
 
 pub(super) fn normalize_address(address: &str) -> String {
-    address.to_ascii_lowercase()
+    normalize_standard_evm_address(address).unwrap_or_else(|| address.to_ascii_lowercase())
+}
+
+fn normalize_standard_evm_address(value: &str) -> Option<String> {
+    if value.len() != 42 || (!value.starts_with("0x") && !value.starts_with("0X")) {
+        return None;
+    }
+
+    let address = format!("0x{}", &value[2..]).parse::<Address>().ok()?;
+    Some(format_prefixed_hex(address.as_slice()))
+}
+
+fn format_prefixed_hex(bytes: impl AsRef<[u8]>) -> String {
+    format!("0x{}", hex::encode(bytes))
 }
 
 pub(super) fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {
@@ -424,4 +444,39 @@ pub(super) fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
 
 pub(super) fn collect_unique(values: impl Iterator<Item = String>) -> Vec<String> {
     values.collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_address_uses_alloy_for_standard_hex_without_tightening_fallbacks() {
+        assert_eq!(
+            normalize_address("0X00000000000C2E074eC69A0dFb2997BA6C7d2E1E"),
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+        );
+        assert_eq!(normalize_address("NOT-A-HEX-ADDRESS"), "not-a-hex-address");
+        assert_eq!(normalize_address("0xABC"), "0xabc");
+        assert_eq!(
+            normalize_address("00000000000000000000000000000000000000AA"),
+            "00000000000000000000000000000000000000aa"
+        );
+    }
+
+    #[test]
+    fn parse_primary_name_address_keeps_existing_validation_boundary() {
+        let parsed = match parse_primary_name_address(
+            " 0X00000000000C2E074eC69A0dFb2997BA6C7d2E1E ",
+        ) {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("standard address should parse"),
+        };
+        assert_eq!(
+            parsed,
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+        );
+        assert!(parse_primary_name_address("0xABC").is_err());
+        assert!(parse_primary_name_address("00000000000000000000000000000000000000AA").is_err());
+    }
 }

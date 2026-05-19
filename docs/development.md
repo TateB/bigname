@@ -18,6 +18,36 @@ The compose stack starts:
 
 Stop the local services with `docker compose down`. Add `-v` if you also want to remove the local data volumes.
 
+## Database-backed tests
+
+Run DB-backed Rust tests through the local test harness:
+
+```sh
+./scripts/test-db
+```
+
+Do not run DB-backed tests directly with `cargo test` unless
+`BIGNAME_DATABASE_URL` or `DATABASE_URL` already points at a reachable local
+PostgreSQL server. Direct runs otherwise sit on the default development URL and
+usually fail with an admin-pool timeout; rerun the same command through
+`./scripts/test-db -- ...`.
+
+The harness starts or reuses an isolated `postgres:16-alpine` container named
+`bigname-test-postgres` on `127.0.0.1:55432`, exports both
+`BIGNAME_DATABASE_URL` and `DATABASE_URL`, and then runs the requested command.
+It intentionally does not source `.env`, so server-oriented values such as
+`postgres:5432` do not leak into host-side cargo test runs.
+
+Pass a focused command after `--`:
+
+```sh
+./scripts/test-db -- cargo test -p bigname-worker projection_apply -- --nocapture
+```
+
+Set `BIGNAME_TEST_DATABASE_URL` to point at an already-running PostgreSQL server
+instead of using Docker. That server must allow the configured user to create
+and drop temporary test databases.
+
 ## Bootstrap Migration Hygiene
 
 During bootstrap, bigname has no active deployments or shared production
@@ -40,9 +70,9 @@ stored watch plan, creates persisted chain checkpoint rows for active watched
 chains, and then polls configured provider sources.
 
 Set `BIGNAME_INDEXER_MANIFESTS_ROOT` to select one runtime profile. The default
-is `manifests` for the shipped mainnet profile. Use `manifests-sepolia-dev` only
-when running the ENSv2 Sepolia dev profile; do not load it beside `manifests` in
-the same local database.
+is `manifests/mainnet` for the shipped mainnet profile. Use `manifests/sepolia`
+only when running the ENSv2 Sepolia profile; do not load it beside
+`manifests/mainnet` in the same local database.
 
 Set `BIGNAME_INDEXER_CHAIN_RPC_URLS` to a comma-delimited list of
 `<chain>=<url>` entries matching active watched chains in the selected profile:

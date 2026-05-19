@@ -10,8 +10,7 @@ bigname turns onchain state from Ethereum and Base into a versioned `v1` REST co
 - `apps/indexer` — chain intake, manifest sync, backfill, head-following
 - `apps/worker` — projections, replay, verified execution, inspection commands
 - `crates/` — domain types, storage, manifests, adapters (ENSv1, ENSv2, Basenames), execution
-- `manifests/` — checked-in mainnet source manifests for ENS and Basenames
-- `manifests-sepolia-dev/` — alternate ENSv2 dev profile (selected at runtime, not loaded together)
+- `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
 - `migrations/` — Postgres schema
 - `docs/` — how it works
 - `tests/conformance/` — TypeScript conformance harness
@@ -62,7 +61,7 @@ Start with [`docs/architecture.md`](docs/architecture.md) for the model, then di
 - [`docs/projections.md`](docs/projections.md) — current-state read models
 - [`docs/execution.md`](docs/execution.md) — verified resolution and primary names
 - [`docs/consumer-capabilities.md`](docs/consumer-capabilities.md) — what each capability covers
-- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md) — running it
+- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md), [`docs/runbooks/`](docs/runbooks/) — running it
 - [`docs/upstream.md`](docs/upstream.md) — pinned upstream refs and intentional divergences
 - [`docs/adrs/`](docs/adrs/) — architecture decisions
 

@@ -1,0 +1,82 @@
+# Active ENSv1 registry admission on Ethereum mainnet with registry-observed
+# resolver discovery and migration-aware ENSRegistryOld intake.
+# ENSv1 emits resolver changes from the registry event surface:
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f).
+manifest_version = 3
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }
+
+[[roots]]
+name = "ENSRegistry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+# Start block is ens_subgraph reference-only metadata for the current registry.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
+start_block = 9380380
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+proxy_kind = "none"
+# Start block is ens_subgraph reference-only metadata for the current registry.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
+start_block = 9380380
+
+[[contracts]]
+# ENSRegistryOld is admitted as a distinct migration-epoch registry input in
+# this source family.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6).
+role = "registry_old"
+address = "0x314159265dd8dbb310642f98f50c066173c1259b"
+proxy_kind = "none"
+start_block = 3327417
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+
+# Registry event ABI fragments consumed by manifest-derived authority topic
+# lookup. Event declarations are pinned in the ENS registry interface:
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L15 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NewOwner"
+fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityTransferred"]
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(bytes32 indexed node, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityTransferred"]
+
+[[abi.events]]
+name = "NewResolver"
+fragment = "event NewResolver(bytes32 indexed node, address resolver)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["ResolverChanged"]
+
+[[abi.events]]
+name = "NewTTL"
+fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityEpochChanged"]

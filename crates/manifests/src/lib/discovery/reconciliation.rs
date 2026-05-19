@@ -1,13 +1,18 @@
 #[path = "reconciliation/bulk.rs"]
 mod bulk;
+#[path = "reconciliation/existing.rs"]
+mod existing;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, types::Uuid};
+use anyhow::{Context, Result, ensure};
+use sqlx::{PgPool, types::Uuid};
 
 use super::admission::DiscoveryAdmissionState;
-use super::loading::load_discovery_admission_state_with_excluded_source;
+use super::loading::{
+    load_discovery_admission_state_with_excluded_source,
+    load_scoped_discovery_admission_state_with_excluded_source,
+};
 use super::provenance::{
     discovery_edge_propagates_role, discovery_edge_provenance, is_zero_address, observation_key,
 };
@@ -18,11 +23,16 @@ use super::types::{
 };
 use crate::{
     REACHABLE_FROM_ROOT_ADMISSION, normalize_address, reconcile_active_contract_instance_addresses,
+    reconcile_active_contract_instance_addresses_for_ids,
 };
 
 use self::bulk::{
     PendingContractInstanceSeed, insert_pending_contract_instance_seeds,
     insert_reconciled_discovery_edges,
+};
+use self::existing::{
+    load_active_reconciled_discovery_descendant_edges, load_active_reconciled_discovery_edges,
+    load_active_reconciled_discovery_edges_by_observation_keys,
 };
 
 fn observation_terminal_states(
@@ -133,90 +143,8 @@ pub async fn reconcile_discovery_observations(
         observations,
     )
     .await?;
-    let existing_rows = sqlx::query(
-        r#"
-        SELECT
-            de.discovery_edge_id,
-            de.provenance ->> 'observation_key' AS observation_key,
-            de.chain_id,
-            de.edge_kind,
-            de.from_contract_instance_id,
-            de.to_contract_instance_id,
-            de.discovery_source,
-            de.source_manifest_id,
-            de.admission,
-            de.active_from_block_number,
-            de.active_from_block_hash,
-            de.provenance,
-            cia.address AS to_address
-        FROM discovery_edges de
-        JOIN contract_instance_addresses cia
-          ON cia.contract_instance_id = de.to_contract_instance_id
-         AND cia.deactivated_at IS NULL
-        WHERE de.discovery_source = $1
-          AND de.deactivated_at IS NULL
-        "#,
-    )
-    .bind(discovery_source)
-    .fetch_all(transaction.as_mut())
-    .await
-    .with_context(|| {
-        format!("failed to load active discovery edges for discovery_source {discovery_source}")
-    })?;
-
-    let existing_edges = existing_rows
-        .into_iter()
-        .map(|row| {
-            let observation_key = row
-                .try_get::<Option<String>, _>("observation_key")
-                .context("failed to read observation_key")?
-                .context(
-                    "active reconciled discovery edge is missing provenance.observation_key",
-                )?;
-            Ok(ExistingReconciledDiscoveryEdge {
-                discovery_edge_id: row
-                    .try_get("discovery_edge_id")
-                    .context("failed to read discovery_edge_id")?,
-                to_address: normalize_address(
-                    &row.try_get::<String, _>("to_address")
-                        .context("failed to read to_address")?,
-                ),
-                spec: ReconciledDiscoveryEdgeSpec {
-                    observation_key,
-                    chain: row.try_get("chain_id").context("failed to read chain_id")?,
-                    edge_kind: row
-                        .try_get("edge_kind")
-                        .context("failed to read edge_kind")?,
-                    from_contract_instance_id: row
-                        .try_get("from_contract_instance_id")
-                        .context("failed to read from_contract_instance_id")?,
-                    to_contract_instance_id: row
-                        .try_get("to_contract_instance_id")
-                        .context("failed to read to_contract_instance_id")?,
-                    discovery_source: row
-                        .try_get("discovery_source")
-                        .context("failed to read discovery_source")?,
-                    source_manifest_id: row
-                        .try_get::<Option<i64>, _>("source_manifest_id")
-                        .context("failed to read source_manifest_id")?
-                        .unwrap_or(-1),
-                    admission: row
-                        .try_get("admission")
-                        .context("failed to read admission")?,
-                    active_from_block_number: row
-                        .try_get("active_from_block_number")
-                        .context("failed to read active_from_block_number")?,
-                    active_from_block_hash: row
-                        .try_get("active_from_block_hash")
-                        .context("failed to read active_from_block_hash")?,
-                    provenance_json: row
-                        .try_get::<serde_json::Value, _>("provenance")
-                        .context("failed to read provenance")?
-                        .to_string(),
-                },
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let existing_edges =
+        load_active_reconciled_discovery_edges(transaction.as_mut(), discovery_source).await?;
 
     let desired_set = desired_edges.iter().cloned().collect::<HashSet<_>>();
     let existing_set = existing_edges
@@ -288,6 +216,193 @@ pub async fn reconcile_discovery_observations(
         .commit()
         .await
         .context("failed to commit discovery-edge reconciliation transaction")?;
+
+    Ok(DiscoveryReconciliationSummary {
+        active_edge_count: desired_edges.len(),
+        admitted_edge_count: admitted_edges.len(),
+        inserted_edge_count,
+        deactivated_edge_count,
+        admitted_edges,
+    })
+}
+
+pub async fn reconcile_scoped_discovery_observations(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+) -> Result<DiscoveryReconciliationSummary> {
+    if observations.is_empty() {
+        return Ok(DiscoveryReconciliationSummary {
+            active_edge_count: 0,
+            admitted_edge_count: 0,
+            inserted_edge_count: 0,
+            deactivated_edge_count: 0,
+            admitted_edges: Vec::new(),
+        });
+    }
+    for observation in observations {
+        ensure!(
+            observation.discovery_source == discovery_source,
+            "scoped discovery observation for {} cannot be reconciled under {}",
+            observation.discovery_source,
+            discovery_source
+        );
+    }
+
+    let admission_state = load_scoped_discovery_admission_state_with_excluded_source(
+        pool,
+        Some(discovery_source),
+        observations,
+    )
+    .await?;
+    let direct_terminal_states_by_key = observation_terminal_states(observations)?;
+    let observations_by_key = observations
+        .iter()
+        .map(|observation| Ok((observation_key(observation)?, observation)))
+        .collect::<Result<HashMap<_, _>>>()?;
+    let mut touched_observation_keys = direct_terminal_states_by_key
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    touched_observation_keys.sort();
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start scoped discovery-edge reconciliation transaction")?;
+    let (desired_edges, admitted_edges) = resolve_reconciled_discovery_edge_specs(
+        &admission_state,
+        transaction.as_mut(),
+        observations,
+    )
+    .await?;
+    let existing_edges = load_active_reconciled_discovery_edges_by_observation_keys(
+        transaction.as_mut(),
+        discovery_source,
+        &touched_observation_keys,
+    )
+    .await?;
+
+    let desired_set = desired_edges.iter().cloned().collect::<HashSet<_>>();
+    let existing_set = existing_edges
+        .iter()
+        .map(|edge| edge.spec.clone())
+        .collect::<HashSet<_>>();
+    let mut deactivation_terminal_states_by_edge_id =
+        BTreeMap::<i64, ObservationTerminalState>::new();
+    let mut removed_parent_edges = Vec::<(String, Uuid, ObservationTerminalState)>::new();
+    let mut affected_contract_instance_ids = HashSet::<Uuid>::new();
+
+    for existing_edge in &existing_edges {
+        if desired_set.contains(&existing_edge.spec) {
+            continue;
+        }
+        let Some(observation) = observations_by_key.get(&existing_edge.spec.observation_key) else {
+            continue;
+        };
+        let Some(terminal_state) = direct_terminal_states_by_key
+            .get(&existing_edge.spec.observation_key)
+            .cloned()
+        else {
+            continue;
+        };
+        let next_address = normalize_address(&observation.to_address);
+        if !is_zero_address(&next_address) && next_address == existing_edge.to_address {
+            continue;
+        }
+
+        deactivation_terminal_states_by_edge_id
+            .insert(existing_edge.discovery_edge_id, terminal_state.clone());
+        affected_contract_instance_ids.insert(existing_edge.spec.from_contract_instance_id);
+        affected_contract_instance_ids.insert(existing_edge.spec.to_contract_instance_id);
+        if discovery_edge_propagates_role(&existing_edge.spec.edge_kind) {
+            removed_parent_edges.push((
+                existing_edge.spec.chain.clone(),
+                existing_edge.spec.to_contract_instance_id,
+                terminal_state,
+            ));
+        }
+    }
+
+    for (chain, parent_contract_instance_id, terminal_state) in removed_parent_edges {
+        let descendants = load_active_reconciled_discovery_descendant_edges(
+            transaction.as_mut(),
+            discovery_source,
+            &chain,
+            &[parent_contract_instance_id],
+        )
+        .await?;
+        for descendant in descendants {
+            if desired_set.contains(&descendant.spec) {
+                continue;
+            }
+            deactivation_terminal_states_by_edge_id
+                .entry(descendant.discovery_edge_id)
+                .or_insert_with(|| terminal_state.clone());
+            affected_contract_instance_ids.insert(descendant.spec.from_contract_instance_id);
+            affected_contract_instance_ids.insert(descendant.spec.to_contract_instance_id);
+        }
+    }
+
+    let mut deactivated_edge_count = 0;
+    for (discovery_edge_id, terminal_state) in deactivation_terminal_states_by_edge_id {
+        sqlx::query(
+            r#"
+            UPDATE discovery_edges
+            SET active_to_block_number = COALESCE($2, active_to_block_number),
+                active_to_block_hash = COALESCE($3, active_to_block_hash),
+                deactivated_at = COALESCE(
+                    (
+                        SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
+                        FROM chain_lineage rb
+                        WHERE rb.chain_id = $4
+                          AND rb.block_hash = $3
+                        LIMIT 1
+                    ),
+                    now()
+                )
+            WHERE discovery_edge_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(discovery_edge_id)
+        .bind(terminal_state.block_number)
+        .bind(terminal_state.block_hash.as_deref())
+        .bind(terminal_state.chain.as_str())
+        .execute(transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to deactivate scoped discovery_edge_id {}",
+                discovery_edge_id
+            )
+        })?;
+        deactivated_edge_count += 1;
+    }
+
+    let new_edges = desired_edges
+        .iter()
+        .filter(|desired_edge| !existing_set.contains(*desired_edge))
+        .collect::<Vec<_>>();
+    for new_edge in &new_edges {
+        affected_contract_instance_ids.insert(new_edge.from_contract_instance_id);
+        affected_contract_instance_ids.insert(new_edge.to_contract_instance_id);
+    }
+    let inserted_edge_count =
+        insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+
+    if inserted_edge_count > 0 || deactivated_edge_count > 0 {
+        reconcile_active_contract_instance_addresses_for_ids(
+            transaction.as_mut(),
+            &affected_contract_instance_ids,
+        )
+        .await?;
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit scoped discovery-edge reconciliation transaction")?;
 
     Ok(DiscoveryReconciliationSummary {
         active_edge_count: desired_edges.len(),

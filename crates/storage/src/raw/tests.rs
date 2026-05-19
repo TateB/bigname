@@ -241,9 +241,12 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
         canonicality_state: CanonicalityState::Finalized,
     };
 
-    upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[lineage_anchor.clone()])
-        .await?;
-    upsert_raw_blocks_without_snapshots(database.pool(), &[raw_anchor.clone()]).await?;
+    upsert_chain_lineage_blocks_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&lineage_anchor),
+    )
+    .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), std::slice::from_ref(&raw_anchor)).await?;
     let initial_lineage_observed_at = sqlx::query_scalar::<_, OffsetDateTime>(
         "SELECT observed_at FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2",
     )
@@ -351,9 +354,12 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
     .await?;
     assert_eq!(audited_header_audit_count, 1);
 
-    upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[lineage_anchor.clone()])
-        .await?;
-    upsert_raw_blocks_without_snapshots(database.pool(), &[raw_anchor.clone()]).await?;
+    upsert_chain_lineage_blocks_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&lineage_anchor),
+    )
+    .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), std::slice::from_ref(&raw_anchor)).await?;
     let minimal_replayed_lineage =
         load_chain_lineage_block(database.pool(), "eth-mainnet", "0xempty")
             .await?
@@ -417,7 +423,7 @@ async fn minimal_raw_block_replay_can_be_audit_enriched_without_clearing_fields(
     upsert_raw_blocks(database.pool(), &[minimal.clone()]).await?;
 
     let audited = raw_block(CanonicalityState::Canonical);
-    let refreshed = upsert_raw_blocks(database.pool(), &[audited.clone()]).await?;
+    let refreshed = upsert_raw_blocks(database.pool(), std::slice::from_ref(&audited)).await?;
     assert_eq!(
         refreshed[0].canonicality_state,
         CanonicalityState::Canonical

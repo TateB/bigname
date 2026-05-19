@@ -2,15 +2,17 @@ use anyhow::Result;
 use bigname_storage::CanonicalityState;
 use serde_json::json;
 use sqlx::types::Uuid;
+use std::collections::HashMap;
 
-use super::constants::{
-    EAC_ROLES_CHANGED_SIGNATURE, EVENT_KIND_PERMISSION_CHANGED, NAMED_TEXT_RESOURCE_SIGNATURE,
-};
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
+use crate::evm_abi::keccak_signature_hex;
+
+use super::constants::*;
 use super::decode::build_permissions_observation;
 use super::hints::{fallback_resource_hint, resolver_resource_hint};
 use super::normalized::permission_changed_event;
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
-use super::util::{hex_string, keccak_signature_hex};
+use super::util::hex_string;
 
 #[test]
 fn decodes_named_text_resource_observation() -> Result<()> {
@@ -20,14 +22,15 @@ fn decodes_named_text_resource_observation() -> Result<()> {
     let key = b"avatar";
     let raw_log = raw_log(
         vec![
-            keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE),
+            keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
             resource.clone(),
             key_hash.clone(),
         ],
         encode_two_dynamic(&name, key),
     );
 
-    let observation = build_permissions_observation(&raw_log)?;
+    let event_topics = test_permissions_event_topics();
+    let observation = build_permissions_observation(&raw_log, &event_topics)?;
 
     match observation {
         Some(PermissionsObservation::NamedTextResource {
@@ -83,7 +86,7 @@ fn builds_permission_changed_event_payload() -> Result<()> {
     let name = dns_name("alice", "eth");
     let raw_log = raw_log(
         vec![
-            keccak_signature_hex(EAC_ROLES_CHANGED_SIGNATURE),
+            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
             resource.clone(),
             address_topic(account),
         ],
@@ -259,4 +262,25 @@ fn bitmap_with_last_byte(value: u8) -> Vec<u8> {
 
 fn bitmap_hex_with_last_byte(value: u8) -> String {
     format!("0x{}", hex_string(bitmap_with_last_byte(value)))
+}
+
+fn test_permissions_event_topics() -> ActiveManifestEventTopic0sBySignature {
+    ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+        (
+            ABI_EVENT_NAMED_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_RESOURCE_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE),
+        ),
+        (
+            ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),
+        ),
+    ]))
 }

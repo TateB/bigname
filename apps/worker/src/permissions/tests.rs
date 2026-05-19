@@ -488,6 +488,7 @@ async fn full_rebuild_clears_stale_rows_and_partitions_by_resource_id() -> Resul
     let database = TestDatabase::new().await?;
     let first_resource_id = Uuid::from_u128(0x7400);
     let second_resource_id = Uuid::from_u128(0x7401);
+    let missing_resource_id = Uuid::from_u128(0x7402);
     let stale_resource_id = Uuid::from_u128(0x74ff);
 
     seed_resources(
@@ -547,6 +548,17 @@ async fn full_rebuild_clears_stale_rows_and_partitions_by_resource_id() -> Resul
                 None,
                 131,
                 0,
+            ),
+            permission_event(
+                "missing-resource",
+                missing_resource_id,
+                "0x0000000000000000000000000000000000000def",
+                json!({"kind": "resource"}),
+                json!(["set_records"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 32})),
+                None,
+                131,
+                1,
             ),
         ],
     )

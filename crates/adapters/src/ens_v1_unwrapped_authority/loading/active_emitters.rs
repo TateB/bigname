@@ -1,3 +1,4 @@
+use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use super::super::scope::{
@@ -9,7 +10,9 @@ use bigname_manifests::{
     WatchedContract, WatchedContractSource, load_manifest_declared_watched_contracts,
     load_watched_contracts,
 };
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
+
+use crate::adapter_manifest::{required_source_manifest_id, watched_contract_manifest_ids};
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     pool: &PgPool,
@@ -22,26 +25,11 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     }
     let contract_roles = load_manifest_contract_roles(pool, &watched_contracts).await?;
 
-    let manifest_ids = watched_contracts
-        .iter()
-        .map(|contract| {
-            contract.source_manifest_id.with_context(|| {
-                format!(
-                    "watched contract {} on {} is missing source_manifest_id",
-                    contract.address, contract.chain
-                )
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
-
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
     let mut emitters = Vec::new();
     for watched_contract in watched_contracts {
-        let Some(source_manifest_id) = watched_contract.source_manifest_id else {
-            continue;
-        };
+        let source_manifest_id = required_source_manifest_id(&watched_contract)?;
         let Some(manifest) = active_manifests.get(&source_manifest_id) else {
             continue;
         };
@@ -191,24 +179,244 @@ async fn load_scoped_discovery_watched_contracts(
     chain: &str,
     source_scope: &[AuthorityRawLogSourceScopeTarget],
 ) -> Result<Vec<WatchedContract>> {
-    let scoped_source_families = source_scope
+    let scoped_targets = source_scope
+        .iter()
+        .filter(|target| is_unwrapped_authority_source_family(&target.source_family))
+        .filter(|target| !is_generic_resolver_event_source_scope_target(target))
+        .collect::<Vec<_>>();
+    if scoped_targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scoped_source_families = scoped_targets
         .iter()
         .map(|target| target.source_family.clone())
         .collect::<Vec<_>>();
-    let scoped_addresses = source_scope
+    let scoped_addresses = scoped_targets
         .iter()
         .map(|target| target.address.clone())
         .collect::<Vec<_>>();
-    let scoped_from_blocks = source_scope
+    let scoped_from_blocks = scoped_targets
         .iter()
         .map(|target| target.effective_from_block)
         .collect::<Vec<_>>();
-    let scoped_to_blocks = source_scope
+    let scoped_to_blocks = scoped_targets
         .iter()
         .map(|target| target.effective_to_block)
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let exact_block_scope = scoped_targets
+        .iter()
+        .all(|target| target.effective_from_block == target.effective_to_block);
+
+    // Live and block-hash replay scopes are exact block probes. For those, the replay only needs
+    // to prove that a discovery edge admits the target at that block; loading every historical
+    // edge for the same target repeatedly burns memory and query time.
+    let rows = if exact_block_scope {
+        sqlx::query(
+            r#"
+            WITH scoped_targets AS (
+                SELECT DISTINCT
+                    source_family,
+                    address,
+                    effective_from_block,
+                    effective_to_block
+                FROM unnest($2::TEXT[], $3::TEXT[], $4::BIGINT[], $5::BIGINT[]) AS scoped(
+                    source_family,
+                    address,
+                    effective_from_block,
+                    effective_to_block
+                )
+            ),
+            scoped_addresses AS (
+                SELECT
+                    scoped.source_family AS scoped_source_family,
+                    scoped.effective_from_block,
+                    scoped.effective_to_block,
+                    cia.contract_instance_id,
+                    cia.chain_id,
+                    cia.address
+                FROM scoped_targets scoped
+                JOIN contract_instance_addresses cia
+                  ON cia.chain_id = $1
+                 AND lower(cia.address) = scoped.address
+                 AND cia.deactivated_at IS NULL
+                 AND (
+                     cia.active_from_block_number IS NULL
+                     OR cia.active_from_block_number <= scoped.effective_to_block
+                 )
+                 AND (
+                     cia.active_to_block_number IS NULL
+                     OR scoped.effective_from_block <= cia.active_to_block_number
+                 )
+            ),
+            direct_other_edge_sources AS (
+                SELECT
+                    mv.chain,
+                    mv.source_family AS edge_source_family,
+                    mv.manifest_id AS edge_source_manifest_id,
+                    mv.source_family AS source_family,
+                    mv.manifest_id AS source_manifest_id
+                FROM manifest_versions mv
+                WHERE mv.rollout_status = 'active'
+                  AND mv.chain = $1
+                  AND mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
+            ),
+            direct_registry_edge_sources AS (
+                SELECT
+                    mv.chain,
+                    mv.source_family AS edge_source_family,
+                    mv.manifest_id AS edge_source_manifest_id,
+                    mv.source_family AS source_family,
+                    mv.manifest_id AS source_manifest_id
+                FROM manifest_versions mv
+                WHERE mv.rollout_status = 'active'
+                  AND mv.chain = $1
+                  AND mv.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+            ),
+            resolver_edge_sources AS (
+                SELECT
+                    mv.chain,
+                    mv.source_family AS edge_source_family,
+                    mv.manifest_id AS edge_source_manifest_id,
+                    target_mv.source_family AS source_family,
+                    target_mv.manifest_id AS source_manifest_id
+                FROM manifest_versions mv
+                JOIN manifest_versions target_mv
+                  ON target_mv.rollout_status = 'active'
+                 AND target_mv.namespace = mv.namespace
+                 AND target_mv.chain = mv.chain
+                 AND target_mv.deployment_epoch = mv.deployment_epoch
+                 AND target_mv.source_family = CASE
+                     WHEN mv.source_family = 'ens_v1_registry_l1'
+                         THEN 'ens_v1_resolver_l1'
+                     WHEN mv.source_family = 'basenames_base_registry'
+                         THEN 'basenames_base_resolver'
+                     ELSE NULL
+                 END
+                WHERE mv.rollout_status = 'active'
+                  AND mv.chain = $1
+                  AND mv.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+            )
+            SELECT
+                chain,
+                source_family,
+                address,
+                contract_instance_id,
+                source_manifest_id,
+                active_from_block_number,
+                active_to_block_number
+            FROM (
+                SELECT
+                    scoped.chain_id AS chain,
+                    candidate.source_family AS source_family,
+                    scoped.address AS address,
+                    scoped.contract_instance_id AS contract_instance_id,
+                    candidate.source_manifest_id AS source_manifest_id,
+                    scoped.effective_from_block AS active_from_block_number,
+                    scoped.effective_to_block AS active_to_block_number
+                FROM scoped_addresses scoped
+                JOIN direct_other_edge_sources candidate
+                  ON candidate.chain = scoped.chain_id
+                 AND candidate.source_family = scoped.scoped_source_family
+                JOIN LATERAL (
+                    SELECT 1
+                    FROM discovery_edges de
+                    WHERE de.source_manifest_id = candidate.edge_source_manifest_id
+                      AND de.to_contract_instance_id = scoped.contract_instance_id
+                      AND de.chain_id = scoped.chain_id
+                      AND de.deactivated_at IS NULL
+                      AND de.edge_kind <> 'migration'
+                      AND (
+                          de.active_from_block_number IS NULL
+                          OR de.active_from_block_number <= scoped.effective_to_block
+                      )
+                      AND (
+                          de.active_to_block_number IS NULL
+                          OR scoped.effective_from_block <= de.active_to_block_number
+                      )
+                    LIMIT 1
+                ) active_edge ON TRUE
+
+                UNION
+
+                SELECT
+                    scoped.chain_id AS chain,
+                    candidate.source_family AS source_family,
+                    scoped.address AS address,
+                    scoped.contract_instance_id AS contract_instance_id,
+                    candidate.source_manifest_id AS source_manifest_id,
+                    scoped.effective_from_block AS active_from_block_number,
+                    scoped.effective_to_block AS active_to_block_number
+                FROM scoped_addresses scoped
+                JOIN direct_registry_edge_sources candidate
+                  ON candidate.chain = scoped.chain_id
+                 AND candidate.source_family = scoped.scoped_source_family
+                JOIN LATERAL (
+                    SELECT 1
+                    FROM discovery_edges de
+                    WHERE de.source_manifest_id = candidate.edge_source_manifest_id
+                      AND de.to_contract_instance_id = scoped.contract_instance_id
+                      AND de.chain_id = scoped.chain_id
+                      AND de.deactivated_at IS NULL
+                      AND de.edge_kind <> 'migration'
+                      AND de.edge_kind <> 'resolver'
+                      AND (
+                          de.active_from_block_number IS NULL
+                          OR de.active_from_block_number <= scoped.effective_to_block
+                      )
+                      AND (
+                          de.active_to_block_number IS NULL
+                          OR scoped.effective_from_block <= de.active_to_block_number
+                      )
+                    LIMIT 1
+                ) active_edge ON TRUE
+
+                UNION
+
+                SELECT
+                    scoped.chain_id AS chain,
+                    candidate.source_family AS source_family,
+                    scoped.address AS address,
+                    scoped.contract_instance_id AS contract_instance_id,
+                    candidate.source_manifest_id AS source_manifest_id,
+                    scoped.effective_from_block AS active_from_block_number,
+                    scoped.effective_to_block AS active_to_block_number
+                FROM scoped_addresses scoped
+                JOIN resolver_edge_sources candidate
+                  ON candidate.chain = scoped.chain_id
+                 AND candidate.source_family = scoped.scoped_source_family
+                JOIN LATERAL (
+                    SELECT 1
+                    FROM discovery_edges de
+                    WHERE de.source_manifest_id = candidate.edge_source_manifest_id
+                      AND de.to_contract_instance_id = scoped.contract_instance_id
+                      AND de.chain_id = scoped.chain_id
+                      AND de.deactivated_at IS NULL
+                      AND de.edge_kind = 'resolver'
+                      AND (
+                          de.active_from_block_number IS NULL
+                          OR de.active_from_block_number <= scoped.effective_to_block
+                      )
+                      AND (
+                          de.active_to_block_number IS NULL
+                          OR scoped.effective_from_block <= de.active_to_block_number
+                      )
+                    LIMIT 1
+                ) active_edge ON TRUE
+            ) discovered
+            ORDER BY chain, source_family, address, source_manifest_id, contract_instance_id
+            "#,
+        )
+        .bind(chain)
+        .bind(&scoped_source_families)
+        .bind(&scoped_addresses)
+        .bind(&scoped_from_blocks)
+        .bind(&scoped_to_blocks)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query(
         r#"
         WITH scoped_targets AS (
             SELECT DISTINCT
@@ -236,87 +444,264 @@ async fn load_scoped_discovery_watched_contracts(
             FROM scoped_targets scoped
             JOIN contract_instance_addresses cia
               ON cia.chain_id = $1
-             AND cia.address = scoped.address
+             AND lower(cia.address) = scoped.address
              AND cia.deactivated_at IS NULL
+        ),
+        direct_other_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                mv.source_family AS source_family,
+                mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            WHERE mv.rollout_status = 'active'
+              AND mv.chain = $1
+              AND mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        ),
+        direct_registry_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                mv.source_family AS source_family,
+                mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            WHERE mv.rollout_status = 'active'
+              AND mv.chain = $1
+              AND mv.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        ),
+        resolver_edge_sources AS (
+            SELECT
+                mv.chain,
+                mv.source_family AS edge_source_family,
+                mv.manifest_id AS edge_source_manifest_id,
+                target_mv.source_family AS source_family,
+                target_mv.manifest_id AS source_manifest_id
+            FROM manifest_versions mv
+            JOIN manifest_versions target_mv
+              ON target_mv.rollout_status = 'active'
+             AND target_mv.namespace = mv.namespace
+             AND target_mv.chain = mv.chain
+             AND target_mv.deployment_epoch = mv.deployment_epoch
+             AND target_mv.source_family = CASE
+                 WHEN mv.source_family = 'ens_v1_registry_l1'
+                     THEN 'ens_v1_resolver_l1'
+                 WHEN mv.source_family = 'basenames_base_registry'
+                     THEN 'basenames_base_resolver'
+                 ELSE NULL
+             END
+            WHERE mv.rollout_status = 'active'
+              AND mv.chain = $1
+              AND mv.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        ),
+        direct_other_discovery_scoped AS (
+            SELECT
+                de.chain_id AS chain,
+                candidate.source_family AS source_family,
+                scoped.address AS address,
+                de.to_contract_instance_id AS contract_instance_id,
+                candidate.source_manifest_id AS source_manifest_id,
+                GREATEST(
+                    scoped.effective_from_block,
+                    COALESCE(de.active_from_block_number, scoped.effective_from_block),
+                    COALESCE(scoped.address_active_from_block_number, scoped.effective_from_block)
+                ) AS active_from_block_number,
+                LEAST(
+                    scoped.effective_to_block,
+                    COALESCE(de.active_to_block_number, scoped.effective_to_block),
+                    COALESCE(scoped.address_active_to_block_number, scoped.effective_to_block)
+                ) AS active_to_block_number
+            FROM scoped_addresses scoped
+            JOIN direct_other_edge_sources candidate
+              ON candidate.chain = scoped.chain_id
+             AND candidate.source_family = scoped.scoped_source_family
+            JOIN discovery_edges de
+              ON de.source_manifest_id = candidate.edge_source_manifest_id
+             AND de.to_contract_instance_id = scoped.contract_instance_id
+             AND de.chain_id = scoped.chain_id
+             AND de.deactivated_at IS NULL
+             AND de.edge_kind <> 'migration'
+            WHERE (
+                  de.active_from_block_number IS NULL
+                  OR scoped.address_active_to_block_number IS NULL
+                  OR de.active_from_block_number <= scoped.address_active_to_block_number
+              )
+              AND (
+                  scoped.address_active_from_block_number IS NULL
+                  OR de.active_to_block_number IS NULL
+                  OR scoped.address_active_from_block_number <= de.active_to_block_number
+              )
+              AND scoped.effective_from_block <= COALESCE(
+                  CASE
+                      WHEN de.active_to_block_number IS NULL THEN scoped.address_active_to_block_number
+                      WHEN scoped.address_active_to_block_number IS NULL THEN de.active_to_block_number
+                      ELSE LEAST(de.active_to_block_number, scoped.address_active_to_block_number)
+                  END,
+                  9223372036854775807
+              )
+              AND COALESCE(
+                  CASE
+                      WHEN de.active_from_block_number IS NULL THEN scoped.address_active_from_block_number
+                      WHEN scoped.address_active_from_block_number IS NULL THEN de.active_from_block_number
+                      ELSE GREATEST(de.active_from_block_number, scoped.address_active_from_block_number)
+                  END,
+                  0
+              ) <= scoped.effective_to_block
+        ),
+        direct_registry_discovery_scoped AS (
+            SELECT
+                de.chain_id AS chain,
+                candidate.source_family AS source_family,
+                scoped.address AS address,
+                de.to_contract_instance_id AS contract_instance_id,
+                candidate.source_manifest_id AS source_manifest_id,
+                GREATEST(
+                    scoped.effective_from_block,
+                    COALESCE(de.active_from_block_number, scoped.effective_from_block),
+                    COALESCE(scoped.address_active_from_block_number, scoped.effective_from_block)
+                ) AS active_from_block_number,
+                LEAST(
+                    scoped.effective_to_block,
+                    COALESCE(de.active_to_block_number, scoped.effective_to_block),
+                    COALESCE(scoped.address_active_to_block_number, scoped.effective_to_block)
+                ) AS active_to_block_number
+            FROM scoped_addresses scoped
+            JOIN direct_registry_edge_sources candidate
+              ON candidate.chain = scoped.chain_id
+             AND candidate.source_family = scoped.scoped_source_family
+            JOIN discovery_edges de
+              ON de.source_manifest_id = candidate.edge_source_manifest_id
+             AND de.to_contract_instance_id = scoped.contract_instance_id
+             AND de.chain_id = scoped.chain_id
+             AND de.deactivated_at IS NULL
+             AND de.edge_kind <> 'migration'
+             AND de.edge_kind <> 'resolver'
+            WHERE (
+                  de.active_from_block_number IS NULL
+                  OR scoped.address_active_to_block_number IS NULL
+                  OR de.active_from_block_number <= scoped.address_active_to_block_number
+              )
+              AND (
+                  scoped.address_active_from_block_number IS NULL
+                  OR de.active_to_block_number IS NULL
+                  OR scoped.address_active_from_block_number <= de.active_to_block_number
+              )
+              AND scoped.effective_from_block <= COALESCE(
+                  CASE
+                      WHEN de.active_to_block_number IS NULL THEN scoped.address_active_to_block_number
+                      WHEN scoped.address_active_to_block_number IS NULL THEN de.active_to_block_number
+                      ELSE LEAST(de.active_to_block_number, scoped.address_active_to_block_number)
+                  END,
+                  9223372036854775807
+              )
+              AND COALESCE(
+                  CASE
+                      WHEN de.active_from_block_number IS NULL THEN scoped.address_active_from_block_number
+                      WHEN scoped.address_active_from_block_number IS NULL THEN de.active_from_block_number
+                      ELSE GREATEST(de.active_from_block_number, scoped.address_active_from_block_number)
+                  END,
+                  0
+              ) <= scoped.effective_to_block
+        ),
+        resolver_discovery_scoped AS (
+            SELECT
+                de.chain_id AS chain,
+                candidate.source_family AS source_family,
+                scoped.address AS address,
+                de.to_contract_instance_id AS contract_instance_id,
+                candidate.source_manifest_id AS source_manifest_id,
+                GREATEST(
+                    scoped.effective_from_block,
+                    COALESCE(de.active_from_block_number, scoped.effective_from_block),
+                    COALESCE(scoped.address_active_from_block_number, scoped.effective_from_block)
+                ) AS active_from_block_number,
+                LEAST(
+                    scoped.effective_to_block,
+                    COALESCE(de.active_to_block_number, scoped.effective_to_block),
+                    COALESCE(scoped.address_active_to_block_number, scoped.effective_to_block)
+                ) AS active_to_block_number
+            FROM scoped_addresses scoped
+            JOIN resolver_edge_sources candidate
+              ON candidate.chain = scoped.chain_id
+             AND candidate.source_family = scoped.scoped_source_family
+            JOIN discovery_edges de
+              ON de.source_manifest_id = candidate.edge_source_manifest_id
+             AND de.to_contract_instance_id = scoped.contract_instance_id
+             AND de.chain_id = scoped.chain_id
+             AND de.deactivated_at IS NULL
+             AND de.edge_kind = 'resolver'
+            WHERE (
+                  de.active_from_block_number IS NULL
+                  OR scoped.address_active_to_block_number IS NULL
+                  OR de.active_from_block_number <= scoped.address_active_to_block_number
+              )
+              AND (
+                  scoped.address_active_from_block_number IS NULL
+                  OR de.active_to_block_number IS NULL
+                  OR scoped.address_active_from_block_number <= de.active_to_block_number
+              )
+              AND scoped.effective_from_block <= COALESCE(
+                  CASE
+                      WHEN de.active_to_block_number IS NULL THEN scoped.address_active_to_block_number
+                      WHEN scoped.address_active_to_block_number IS NULL THEN de.active_to_block_number
+                      ELSE LEAST(de.active_to_block_number, scoped.address_active_to_block_number)
+                  END,
+                  9223372036854775807
+              )
+              AND COALESCE(
+                  CASE
+                      WHEN de.active_from_block_number IS NULL THEN scoped.address_active_from_block_number
+                      WHEN scoped.address_active_from_block_number IS NULL THEN de.active_from_block_number
+                      ELSE GREATEST(de.active_from_block_number, scoped.address_active_from_block_number)
+                  END,
+                  0
+              ) <= scoped.effective_to_block
         )
+        SELECT DISTINCT
+            chain,
+            source_family,
+            address,
+            contract_instance_id,
+            source_manifest_id,
+            active_from_block_number,
+            active_to_block_number
+        FROM direct_other_discovery_scoped
+
+        UNION
+
         SELECT
-            de.chain_id AS chain,
-            COALESCE(target_mv.source_family, mv.source_family) AS source_family,
-            scoped.address AS address,
-            de.to_contract_instance_id AS contract_instance_id,
-            COALESCE(target_mv.manifest_id, de.source_manifest_id) AS source_manifest_id,
-            CASE
-                WHEN de.active_from_block_number IS NULL THEN scoped.address_active_from_block_number
-                WHEN scoped.address_active_from_block_number IS NULL THEN de.active_from_block_number
-                ELSE GREATEST(de.active_from_block_number, scoped.address_active_from_block_number)
-            END AS active_from_block_number,
-            CASE
-                WHEN de.active_to_block_number IS NULL THEN scoped.address_active_to_block_number
-                WHEN scoped.address_active_to_block_number IS NULL THEN de.active_to_block_number
-                ELSE LEAST(de.active_to_block_number, scoped.address_active_to_block_number)
-            END AS active_to_block_number
-        FROM scoped_addresses scoped
-        JOIN discovery_edges de
-          ON de.chain_id = scoped.chain_id
-         AND de.to_contract_instance_id = scoped.contract_instance_id
-         AND de.deactivated_at IS NULL
-         AND de.edge_kind <> 'migration'
-        JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
-        LEFT JOIN manifest_versions target_mv
-          ON target_mv.rollout_status = 'active'
-         AND target_mv.namespace = mv.namespace
-         AND target_mv.chain = de.chain_id
-         AND target_mv.deployment_epoch = mv.deployment_epoch
-         AND target_mv.source_family = CASE
-             WHEN de.edge_kind = 'resolver' AND mv.source_family = 'ens_v1_registry_l1'
-                 THEN 'ens_v1_resolver_l1'
-             WHEN de.edge_kind = 'resolver' AND mv.source_family = 'basenames_base_registry'
-                 THEN 'basenames_base_resolver'
-             ELSE NULL
-         END
-        WHERE mv.rollout_status = 'active'
-          AND (
-              de.edge_kind <> 'resolver'
-              OR mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
-              OR target_mv.manifest_id IS NOT NULL
-          )
-          AND scoped.scoped_source_family = COALESCE(target_mv.source_family, mv.source_family)
-          AND (
-              de.active_from_block_number IS NULL
-              OR scoped.address_active_to_block_number IS NULL
-              OR de.active_from_block_number <= scoped.address_active_to_block_number
-          )
-          AND (
-              scoped.address_active_from_block_number IS NULL
-              OR de.active_to_block_number IS NULL
-              OR scoped.address_active_from_block_number <= de.active_to_block_number
-          )
-          AND scoped.effective_from_block <= COALESCE(
-              CASE
-                  WHEN de.active_to_block_number IS NULL THEN scoped.address_active_to_block_number
-                  WHEN scoped.address_active_to_block_number IS NULL THEN de.active_to_block_number
-                  ELSE LEAST(de.active_to_block_number, scoped.address_active_to_block_number)
-              END,
-              9223372036854775807
-          )
-          AND COALESCE(
-              CASE
-                  WHEN de.active_from_block_number IS NULL THEN scoped.address_active_from_block_number
-                  WHEN scoped.address_active_from_block_number IS NULL THEN de.active_from_block_number
-                  ELSE GREATEST(de.active_from_block_number, scoped.address_active_from_block_number)
-              END,
-              0
-          ) <= scoped.effective_to_block
+            chain,
+            source_family,
+            address,
+            contract_instance_id,
+            source_manifest_id,
+            active_from_block_number,
+            active_to_block_number
+        FROM direct_registry_discovery_scoped
+
+        UNION
+
+        SELECT
+            chain,
+            source_family,
+            address,
+            contract_instance_id,
+            source_manifest_id,
+            active_from_block_number,
+            active_to_block_number
+        FROM resolver_discovery_scoped
         ORDER BY chain, source_family, address, source_manifest_id, contract_instance_id
         "#,
-    )
-    .bind(chain)
-    .bind(&scoped_source_families)
-    .bind(&scoped_addresses)
-    .bind(&scoped_from_blocks)
-    .bind(&scoped_to_blocks)
-    .fetch_all(pool)
-    .await
+        )
+        .bind(chain)
+        .bind(&scoped_source_families)
+        .bind(&scoped_addresses)
+        .bind(&scoped_from_blocks)
+        .bind(&scoped_to_blocks)
+        .fetch_all(pool)
+        .await
+    }
     .with_context(|| {
         format!("failed to load scoped ENSv1 unwrapped authority discovery contracts for {chain}")
     })?;
@@ -324,27 +709,14 @@ async fn load_scoped_discovery_watched_contracts(
     rows.into_iter()
         .map(|row| {
             Ok(WatchedContract {
-                chain: row.try_get("chain").context("missing chain")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                address: row
-                    .try_get::<String, _>("address")
-                    .context("missing address")?
-                    .to_ascii_lowercase(),
-                contract_instance_id: row
-                    .try_get("contract_instance_id")
-                    .context("missing contract_instance_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                address: sql_row::get::<String>(&row, "address")?.to_ascii_lowercase(),
+                contract_instance_id: sql_row::get(&row, "contract_instance_id")?,
                 source: WatchedContractSource::DiscoveryEdge,
-                source_manifest_id: row
-                    .try_get("source_manifest_id")
-                    .context("missing source_manifest_id")?,
-                active_from_block_number: row
-                    .try_get("active_from_block_number")
-                    .context("missing active_from_block_number")?,
-                active_to_block_number: row
-                    .try_get("active_to_block_number")
-                    .context("missing active_to_block_number")?,
+                source_manifest_id: sql_row::get(&row, "source_manifest_id")?,
+                active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
+                active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
             })
         })
         .collect()
@@ -361,7 +733,7 @@ fn filter_watched_contracts_by_scope(
         .filter(|contract| {
             source_scope.iter().any(|target| {
                 target.source_family == contract.source_family
-                    && target.address == contract.address
+                    && target.address.eq_ignore_ascii_case(&contract.address)
                     && watched_contract_intersects_source_scope(contract, target)
             })
         })
@@ -375,10 +747,11 @@ fn source_scope_covered_by_watched_contracts(
     source_scope
         .iter()
         .filter(|target| is_unwrapped_authority_source_family(&target.source_family))
+        .filter(|target| !is_generic_resolver_event_source_scope_target(target))
         .all(|target| {
             watched_contracts.iter().any(|contract| {
                 target.source_family == contract.source_family
-                    && target.address == contract.address
+                    && target.address.eq_ignore_ascii_case(&contract.address)
                     && watched_contract_intersects_source_scope(contract, target)
             })
         })
@@ -423,18 +796,12 @@ async fn load_active_manifest_metadata(
     rows.into_iter()
         .map(|row| {
             let manifest = ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-                normalizer_version: row
-                    .try_get("normalizer_version")
-                    .context("missing normalizer_version")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
             };
             Ok((manifest.manifest_id, manifest))
         })
@@ -480,22 +847,17 @@ async fn load_manifest_contract_roles(
         .map(|row| {
             Ok((
                 (
-                    row.try_get("manifest_id").context("missing manifest_id")?,
-                    row.try_get("contract_instance_id")
-                        .context("missing contract_instance_id")?,
+                    sql_row::get(&row, "manifest_id")?,
+                    sql_row::get(&row, "contract_instance_id")?,
                 ),
-                row.try_get("role").context("missing role")?,
+                sql_row::get(&row, "role")?,
             ))
         })
         .collect()
 }
 
 fn source_rank(source: WatchedContractSource) -> i32 {
-    match source {
-        WatchedContractSource::ManifestRoot => 0,
-        WatchedContractSource::ManifestContract => 1,
-        WatchedContractSource::DiscoveryEdge => 2,
-    }
+    crate::adapter_manifest::source_rank(source)
 }
 
 async fn load_active_manifest_metadata_for_source_family(
@@ -524,18 +886,12 @@ async fn load_active_manifest_metadata_for_source_family(
     rows.into_iter()
         .map(|row| {
             Ok(ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-                normalizer_version: row
-                    .try_get("normalizer_version")
-                    .context("missing normalizer_version")?,
+                manifest_id: sql_row::get(&row, "manifest_id")?,
+                chain: sql_row::get(&row, "chain")?,
+                namespace: sql_row::get(&row, "namespace")?,
+                source_family: sql_row::get(&row, "source_family")?,
+                manifest_version: sql_row::get(&row, "manifest_version")?,
+                normalizer_version: sql_row::get(&row, "normalizer_version")?,
             })
         })
         .collect()

@@ -19,6 +19,8 @@ mod types;
 pub(crate) use adapter_sync::{
     sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
+    sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    sync_live_adapter_backlog_after_normalized_replay,
     sync_live_adapter_state_from_persisted_raw_payloads,
 };
 #[allow(unused_imports)]
@@ -38,24 +40,27 @@ pub(crate) use logging::{
 };
 #[allow(unused_imports)]
 pub(crate) use payload::{
-    canonical_raw_state, canonicality_rank, ensure_block_scoped_identity,
-    ensure_provider_bundle_matches_raw_block, hex_string, insert_raw_block_candidate,
-    keccak256_hex, parse_hex_bytes, parse_receipt_status, preferred_canonicality,
-    provider_block_to_raw_block, provider_block_to_raw_block_with_header_audit_mode,
-    provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
-    provider_logs_to_live_selected_raw_logs, provider_logs_to_selected_raw_logs,
-    provider_raw_payload_cache_metadata_to_upserts, provider_receipt_to_raw_receipt,
-    provider_receipts_to_selected_raw_receipts, provider_transaction_to_raw_transaction,
-    provider_transactions_to_selected_raw_transactions, raw_code_hash_candidate_hashes,
-    raw_payload_candidate_hashes, retained_transaction_keys_from_raw_logs, selected_address_set,
+    canonical_raw_state, ensure_block_scoped_identity, ensure_provider_bundle_matches_raw_block,
+    hex_string, insert_raw_block_candidate, keccak256_hex, parse_hex_bytes, parse_receipt_status,
+    preferred_canonicality, provider_block_to_raw_block,
+    provider_block_to_raw_block_with_header_audit_mode, provider_code_observation_to_raw_code_hash,
+    provider_log_to_raw_log, provider_logs_to_live_selected_raw_logs,
+    provider_logs_to_selected_raw_logs, provider_raw_payload_cache_metadata_to_upserts,
+    provider_receipt_to_raw_receipt, provider_receipts_to_selected_raw_receipts,
+    provider_transaction_to_raw_transaction, provider_transactions_to_selected_raw_transactions,
+    raw_code_hash_candidate_hashes, raw_payload_candidate_hashes,
+    retained_transaction_keys_from_raw_logs, selected_address_set,
 };
 #[allow(unused_imports)]
 pub(crate) use persistence::{
-    persist_reconciled_raw_blocks, persist_reconciled_raw_code_hashes,
-    persist_reconciled_raw_payloads,
+    ensure_losing_branch_raw_blocks_exist, persist_reconciled_raw_blocks,
+    persist_reconciled_raw_code_hashes, persist_reconciled_raw_payloads,
 };
 #[allow(unused_imports)]
-pub(crate) use replay::replay_raw_fact_normalized_events;
+pub(crate) use replay::{
+    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
+    replay_raw_fact_normalized_events, unsupported_closure_replay_adapters,
+};
 #[allow(unused_imports)]
 pub(crate) use types::{
     CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,

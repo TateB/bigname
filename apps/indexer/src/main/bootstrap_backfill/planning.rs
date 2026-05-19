@@ -6,9 +6,7 @@ use bigname_manifests::{
     WatchedSourceSelectorPlan,
 };
 
-use crate::backfill::BackfillBlockRange;
-
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+use crate::{backfill::BackfillBlockRange, ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BootstrapBackfillTargetRange {

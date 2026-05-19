@@ -3,93 +3,21 @@ use std::{
     time::Instant,
 };
 
+use crate::normalized_event_support::count_events_by_kind;
 use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
-    load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
-    upsert_name_surfaces, upsert_normalized_events_with_summary, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    TokenLineage, upsert_name_surfaces_without_snapshots, upsert_normalized_events_count_only,
+    upsert_resources_without_snapshots, upsert_surface_bindings_without_snapshots,
+    upsert_token_lineages_without_snapshots,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha3::{Digest, Keccak256};
 use sqlx::{
     PgPool, Row,
     types::{Uuid, time::OffsetDateTime},
 };
-
-const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
-const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
-const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
-const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
-const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
-const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
-
-const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
-const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
-const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
-const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
-const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
-const EVENT_KIND_PERMISSION_SCOPE_CHANGED: &str = "PermissionScopeChanged";
-const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
-const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
-const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
-const EVENT_KIND_REGISTRATION_RELEASED: &str = "RegistrationReleased";
-const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
-const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
-const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
-const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
-const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
-
-const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256,uint256)";
-const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
-    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
-const UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
-    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
-const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
-const UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
-    "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
-const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
-const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
-const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
-const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
-const ABI_CHANGED_SIGNATURE: &str = "ABIChanged(bytes32,uint256)";
-const TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
-const TEXT_CHANGED_WITH_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string,string)";
-const CONTENT_CHANGED_SIGNATURE: &str = "ContentChanged(bytes32,bytes32)";
-const CONTENTHASH_CHANGED_SIGNATURE: &str = "ContenthashChanged(bytes32,bytes)";
-const DNS_RECORD_CHANGED_SIGNATURE: &str = "DNSRecordChanged(bytes32,bytes,uint16,bytes)";
-const DNS_RECORD_DELETED_SIGNATURE: &str = "DNSRecordDeleted(bytes32,bytes,uint16)";
-const DNS_ZONEHASH_CHANGED_SIGNATURE: &str = "DNSZonehashChanged(bytes32,bytes,bytes)";
-const DATA_CHANGED_SIGNATURE: &str = "DataChanged(bytes32,string,string,bytes)";
-const INTERFACE_CHANGED_SIGNATURE: &str = "InterfaceChanged(bytes32,bytes4,address)";
-#[cfg(test)]
-const PUBKEY_CHANGED_SIGNATURE: &str = "PubkeyChanged(bytes32,bytes32,bytes32)";
-const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
-const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
-const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
-const NEW_TTL_SIGNATURE: &str = "NewTTL(bytes32,uint64)";
-const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
-const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
-const NAME_UNWRAPPED_SIGNATURE: &str = "NameUnwrapped(bytes32,address)";
-const FUSES_SET_SIGNATURE: &str = "FusesSet(bytes32,uint32)";
-const EXPIRY_EXTENDED_SIGNATURE: &str = "ExpiryExtended(bytes32,uint64)";
-const TRANSFER_SINGLE_SIGNATURE: &str = "TransferSingle(address,address,address,uint256,uint256)";
-
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
-const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
-const ENS_NATIVE_COIN_TYPE: &str = "60";
-const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
-const PERMISSION_POWER_RESOURCE_CONTROL: &str = "resource_control";
-const PERMISSION_POWER_RESOLVER_CONTROL: &str = "resolver_control";
-const PERMISSION_TRANSFER_BEHAVIOR: &str = "replace_on_authority_change";
-const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
-const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1UnwrappedAuthoritySyncSummary {
@@ -177,11 +105,12 @@ struct AuthorityRawLogRow {
     contract_role: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ObservationRef {
     chain_id: String,
     block_hash: String,
     block_number: i64,
+    #[serde(with = "time::serde::timestamp")]
     block_timestamp: OffsetDateTime,
     transaction_hash: Option<String>,
     transaction_index: Option<i64>,
@@ -193,31 +122,33 @@ struct ObservationRef {
     manifest_version: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RawLogPosition {
     block_hash: String,
     transaction_hash: String,
     log_index: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameRegistrationObservation {
     label: String,
     labelhash: String,
     registrant: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameRenewalObservation {
     label: String,
     labelhash: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct TokenTransferObservation {
     labelhash: String,
     from_address: String,
@@ -225,28 +156,28 @@ struct TokenTransferObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RegistryOwnerObservation {
     labelhash: String,
     owner: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ResolverObservation {
     namehash: String,
     resolver: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordSelector {
     record_key: String,
     record_family: String,
     selector_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordChangeObservation {
     namehash: String,
     resolver: String,
@@ -256,7 +187,7 @@ struct RecordChangeObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordVersionObservation {
     namehash: String,
     resolver: String,
@@ -264,37 +195,39 @@ struct RecordVersionObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperNameWrappedObservation {
     name: NameMetadata,
     owner: String,
     fuses: i64,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperNameUnwrappedObservation {
     namehash: String,
     owner: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperFusesObservation {
     namehash: String,
     fuses: i64,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperExpiryObservation {
     namehash: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperTokenTransferObservation {
     namehash: String,
     from_address: String,
@@ -303,7 +236,7 @@ struct WrapperTokenTransferObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum AuthorityObservation {
     RegistrationGranted(NameRegistrationObservation),
     RegistrationRenewed(NameRenewalObservation),
@@ -319,7 +252,7 @@ enum AuthorityObservation {
     WrapperTokenTransferred(WrapperTokenTransferObservation),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ReverseClaimProvenance {
     source_family: String,
     contract_role: String,
@@ -327,7 +260,7 @@ struct ReverseClaimProvenance {
     emitting_address: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ReverseClaimSource {
     address: String,
     namespace: String,
@@ -337,7 +270,7 @@ struct ReverseClaimSource {
     claim_provenance: ReverseClaimProvenance,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ReverseClaimSourceHistory {
     claim_source: ReverseClaimSource,
     current_resolver: Option<String>,
@@ -368,7 +301,7 @@ struct CanonicalBlockIndex {
     blocks: Vec<RawBlockSnapshot>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameMetadata {
     namespace: String,
     logical_name_id: String,
@@ -381,38 +314,41 @@ struct NameMetadata {
     normalizer_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct RegistrationLease {
     authority_key: String,
     labelhash: String,
     registrant: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     release_ref: Option<BoundaryRef>,
     start_ref: ObservationRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct WrapperAuthority {
     authority_key: String,
     node: String,
     owner: String,
     fuses: i64,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     start_ref: ObservationRef,
     end_ref: Option<ObservationRef>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct BoundaryRef {
     chain_id: String,
     block_hash: String,
     block_number: i64,
+    #[serde(with = "time::serde::timestamp")]
     block_timestamp: OffsetDateTime,
     canonicality_state: CanonicalityState,
     namespace: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum AuthorityKind {
     RegistryOnly,
     Registrar,
@@ -444,7 +380,7 @@ impl PermissionAction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AuthorityAnchor {
     kind: AuthorityKind,
     authority_key: String,
@@ -455,24 +391,27 @@ struct AuthorityAnchor {
     binding_manifest_id: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct OpenBinding {
     surface_binding_id: Uuid,
     authority: AuthorityAnchor,
+    #[serde(with = "time::serde::timestamp")]
     active_from: OffsetDateTime,
     anchor_ref: BoundaryRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BindingSegment {
     surface_binding_id: Uuid,
     authority: AuthorityAnchor,
+    #[serde(with = "time::serde::timestamp")]
     active_from: OffsetDateTime,
+    #[serde(with = "time::serde::timestamp::option")]
     active_to: Option<OffsetDateTime>,
     anchor_ref: BoundaryRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct NameHistory {
     name: Option<NameMetadata>,
     labelhash: String,
@@ -496,19 +435,17 @@ fn source_manifest_id_if_known(source_manifest_id: i64) -> Option<i64> {
     (source_manifest_id > 0).then_some(source_manifest_id)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AuthorityProfile {
-    Ens,
-    Basenames,
-}
 mod abi;
 mod apply;
 mod apply_registrar;
 mod apply_registry;
 mod apply_resolver;
 mod apply_wrapper;
+mod checkpoint;
+mod constants;
 mod event_builders;
 mod event_state;
+mod event_topics;
 mod finalization;
 mod ids;
 mod loading;
@@ -525,20 +462,48 @@ mod reverse_claims;
 mod scope;
 mod transition;
 
-pub use self::pipeline::sync_ens_v1_unwrapped_authority;
+pub use self::pipeline::{
+    sync_ens_v1_unwrapped_authority,
+    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
+};
+pub use checkpoint::clear_replay_adapter_checkpoints;
 
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
-    event_builders::*, event_state::*, finalization::*, ids::*, loading::*, materialization::*,
-    migration_guard::*, names::*, observation::*, permissions::*, preload::*, profiles::*,
-    release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
+    checkpoint::*, event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*,
+    loading::*, materialization::*, migration_guard::*, names::*, observation::*, permissions::*,
+    preload::*, profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*,
+    transition::*,
 };
+use constants::*;
 
 pub fn decode_ens_v1_text_record_change(
     topics: &[String],
     data: &[u8],
 ) -> Result<Option<EnsV1TextRecordChange>> {
-    observation::decode_text_record_change(topics, data)
+    let raw_log = AuthorityRawLogRow {
+        chain_id: String::new(),
+        block_hash: String::new(),
+        block_number: 0,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        transaction_hash: String::new(),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: String::new(),
+        topics: topics.to_vec(),
+        data: data.to_vec(),
+        canonicality_state: CanonicalityState::Observed,
+        source_manifest_id: 0,
+        namespace: String::new(),
+        source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+        manifest_version: 0,
+        normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+        contract_role: None,
+    };
+    observation::decode_text_record_change(
+        &raw_log,
+        &AuthorityEventTopics::for_ens_v1_text_decoding(),
+    )
 }
 
 mod pipeline;

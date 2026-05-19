@@ -7,9 +7,6 @@ use bigname_storage::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::decode::{
-    decode_current_binding_context, decode_name_surface_seed, decode_relevant_event,
-};
 use super::types::{CurrentBindingContext, HistoryHeads, NameSurfaceSeed, RelevantEvent};
 use super::{
     BASENAMES_NAMESPACE, CANONICAL_STATE_FILTER, ENS_V1_AUTHORITY_DERIVATION_KIND,
@@ -71,7 +68,7 @@ pub(super) async fn load_name_resource_ids(
 }
 
 pub(super) async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<NameSurfaceSeed>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query_as::<_, NameSurfaceSeed>(&format!(
         r#"
         SELECT
             ns.logical_name_id,
@@ -96,14 +93,14 @@ pub(super) async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<Na
     .await
     .context("failed to load canonical name_surfaces for name_current rebuild")?;
 
-    rows.into_iter().map(decode_name_surface_seed).collect()
+    Ok(rows)
 }
 
 pub(super) async fn load_canonical_name_surface(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameSurfaceSeed>> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query_as::<_, NameSurfaceSeed>(&format!(
         r#"
         SELECT
             ns.logical_name_id,
@@ -131,14 +128,14 @@ pub(super) async fn load_canonical_name_surface(
         format!("failed to load canonical name_surface {logical_name_id} for name_current rebuild")
     })?;
 
-    row.map(decode_name_surface_seed).transpose()
+    Ok(row)
 }
 
 pub(super) async fn load_current_binding_context(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<CurrentBindingContext>> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query_as::<_, CurrentBindingContext>(&format!(
         r#"
         SELECT
             sb.surface_binding_id,
@@ -176,7 +173,7 @@ pub(super) async fn load_current_binding_context(
         format!("failed to load current binding context for logical_name_id {logical_name_id}")
     })?;
 
-    row.map(decode_current_binding_context).transpose()
+    Ok(row)
 }
 
 pub(super) async fn load_relevant_events(
@@ -199,7 +196,7 @@ pub(super) async fn load_relevant_events(
             SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned(),
             SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
         ];
-        sqlx::query(&format!(
+        sqlx::query_as::<_, RelevantEvent>(&format!(
             r#"
             SELECT
                 ne.normalized_event_id,
@@ -239,6 +236,12 @@ pub(super) async fn load_relevant_events(
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
+                CASE
+                    WHEN ne.event_kind = 'ResolverChanged'
+                     AND ne.after_state ->> 'source_event' = 'AuthorityEpochChanged'
+                    THEN -1
+                    ELSE COALESCE(ne.log_index, 2147483647)
+                END,
                 COALESCE(ne.log_index, 2147483647),
                 ne.event_identity
             "#
@@ -251,7 +254,7 @@ pub(super) async fn load_relevant_events(
         .fetch_all(pool)
         .await
     } else {
-        sqlx::query(&format!(
+        sqlx::query_as::<_, RelevantEvent>(&format!(
             r#"
             SELECT
                 ne.normalized_event_id,
@@ -290,6 +293,12 @@ pub(super) async fn load_relevant_events(
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
+                CASE
+                    WHEN ne.event_kind = 'ResolverChanged'
+                     AND ne.after_state ->> 'source_event' = 'AuthorityEpochChanged'
+                    THEN -1
+                    ELSE COALESCE(ne.log_index, 2147483647)
+                END,
                 COALESCE(ne.log_index, 2147483647),
                 ne.event_identity
             "#
@@ -308,5 +317,5 @@ pub(super) async fn load_relevant_events(
         )
     })?;
 
-    rows.into_iter().map(decode_relevant_event).collect()
+    Ok(rows)
 }

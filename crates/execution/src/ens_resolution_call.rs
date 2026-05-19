@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, NameCurrentRow, RawCallSnapshot, SupportedVerifiedResolutionRecordKey,
     parse_supported_verified_resolution_record_key,
@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::ens_resolution::{EnsResolutionRecord, ExecutionBlock};
 use crate::ens_resolution_abi::{
-    decode_selector_result, decode_universal_resolver_result, digest_json, hex_string,
-    hex_to_bytes, resolver_calldata, selector_hex, universal_resolver_calldata,
+    decode_selector_result, decode_universal_resolver_result, digest_json, hex_to_bytes,
+    resolver_record_call, universal_resolver_call,
 };
 use crate::ens_resolution_ccip::{CcipReadSummary, follow_ccip_read};
 use crate::rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
@@ -71,14 +71,15 @@ pub(super) async fn execute_record_call(
     use_latest_block_tag: bool,
 ) -> Result<SelectorCall> {
     let selector = parse_supported_verified_resolution_record_key(&record.record_key)?;
-    let resolver_data = resolver_calldata(&selector, &record.record_key, node)?;
-    let universal_calldata = universal_resolver_calldata(dns_name, &resolver_data);
-    let universal_calldata_hex = hex_string(&universal_calldata);
-    let resolver_selector = selector_hex(first_selector(&resolver_data)?);
+    let resolver_call = resolver_record_call(&selector, &record.record_key, node)?;
+    let universal_call = universal_resolver_call(dns_name, resolver_call.calldata());
+    let universal_calldata_hex = universal_call.calldata_hex();
+    let universal_selector = universal_call.selector_hex();
+    let resolver_selector = resolver_call.selector_hex();
     let contract_call = json!({
         "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
         "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
-        "selector": "0x9061b923",
+        "selector": universal_selector,
         "record_key": record.record_key,
         "resolver_selector": resolver_selector,
     });
@@ -114,34 +115,49 @@ pub(super) async fn execute_record_call(
     } else {
         result
     };
-    selector_call_from_rpc_result(
+    selector_call_from_rpc_result(SelectorCallRpcContext {
         row,
         record,
-        &selector,
+        selector: &selector,
         result,
         block,
         contract_call,
         resolver_selector,
-        universal_calldata_hex,
+        universal_calldata: universal_calldata_hex,
         block_selector,
-        !use_latest_block_tag,
+        persist_raw_call_snapshot: !use_latest_block_tag,
         ccip_summary,
-    )
+    })
 }
 
-fn selector_call_from_rpc_result(
-    row: &NameCurrentRow,
-    record: &EnsResolutionRecord,
-    selector: &SupportedVerifiedResolutionRecordKey,
+struct SelectorCallRpcContext<'a> {
+    row: &'a NameCurrentRow,
+    record: &'a EnsResolutionRecord,
+    selector: &'a SupportedVerifiedResolutionRecordKey,
     result: JsonRpcCallResult,
-    block: &ExecutionBlock,
+    block: &'a ExecutionBlock,
     contract_call: Value,
     resolver_selector: String,
     universal_calldata: String,
     block_selector: Value,
     persist_raw_call_snapshot: bool,
     ccip_summary: Option<CcipReadSummary>,
-) -> Result<SelectorCall> {
+}
+
+fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<SelectorCall> {
+    let SelectorCallRpcContext {
+        row,
+        record,
+        selector,
+        result,
+        block,
+        contract_call,
+        resolver_selector,
+        universal_calldata,
+        block_selector,
+        persist_raw_call_snapshot,
+        ccip_summary,
+    } = context;
     let JsonRpcCallResult {
         request_payload,
         response_payload,
@@ -259,15 +275,6 @@ fn not_found_reason(selector: &SupportedVerifiedResolutionRecordKey) -> &'static
     }
 }
 
-fn first_selector(data: &[u8]) -> Result<[u8; 4]> {
-    if data.len() < 4 {
-        bail!("resolver calldata is shorter than a selector");
-    }
-    let mut selector = [0_u8; 4];
-    selector.copy_from_slice(&data[..4]);
-    Ok(selector)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,11 +291,11 @@ mod tests {
             block_number: 21_000_000,
             block_hash: "0xabc123".to_owned(),
         };
-        let selector_call = selector_call_from_rpc_result(
-            &row,
-            &record,
-            &selector,
-            JsonRpcCallResult {
+        let selector_call = selector_call_from_rpc_result(SelectorCallRpcContext {
+            row: &row,
+            record: &record,
+            selector: &selector,
+            result: JsonRpcCallResult {
                 request_payload: json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -308,20 +315,20 @@ mod tests {
                 }),
                 result: Ok(json!("0x")),
             },
-            &block,
-            json!({
+            block: &block,
+            contract_call: json!({
                 "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
                 "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
                 "selector": "0x9061b923",
                 "record_key": "avatar",
                 "resolver_selector": "0x59d1d43c"
             }),
-            "0x59d1d43c".to_owned(),
-            "0x9061b923".to_owned(),
-            json!("latest"),
-            false,
-            None,
-        )?;
+            resolver_selector: "0x59d1d43c".to_owned(),
+            universal_calldata: "0x9061b923".to_owned(),
+            block_selector: json!("latest"),
+            persist_raw_call_snapshot: false,
+            ccip_summary: None,
+        })?;
 
         assert_eq!(selector_call.block_selector, json!("latest"));
         assert!(selector_call.request_hash.is_some());

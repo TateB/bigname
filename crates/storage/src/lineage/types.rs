@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sqlx::types::time::OffsetDateTime;
 
 /// Persisted lineage snapshot for one chain block.
@@ -16,7 +17,7 @@ pub struct ChainLineageBlock {
 }
 
 /// Persisted canonicality marker for a lineage row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CanonicalityState {
     Observed,
     Canonical,

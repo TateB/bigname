@@ -83,14 +83,11 @@ fn build_compact_events_meta(
     meta: MetaMode,
     scope: HistoryScope,
 ) -> JsonValue {
-    let mut value = empty_object();
-    insert_string_field(&mut value, "support_status", "supported".to_owned());
-    insert_value_field(&mut value, "unsupported_filters", JsonValue::Array(Vec::new()));
-    insert_value_field(&mut value, "unsupported_fields", JsonValue::Array(Vec::new()));
-    insert_value_field(
-        &mut value,
-        "total_count",
-        JsonValue::Number((rows.len() as u64).into()),
+    let mut value = compact_meta_object(
+        "supported",
+        Some(rows.len() as u64),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
     );
 
     if meta == MetaMode::Full {

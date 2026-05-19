@@ -121,6 +121,35 @@ fn unsupported_section(unsupported_reason: &str) -> JsonValue {
     value
 }
 
+fn compact_meta_object(
+    support_status: &str,
+    total_count: Option<u64>,
+    unsupported_fields: impl IntoIterator<Item = String>,
+    unsupported_filters: impl IntoIterator<Item = String>,
+) -> JsonValue {
+    let mut meta = empty_object();
+    insert_string_field(&mut meta, "support_status", support_status.to_owned());
+    insert_value_field(
+        &mut meta,
+        "unsupported_filters",
+        JsonValue::Array(unsupported_filters.into_iter().map(JsonValue::String).collect()),
+    );
+    insert_value_field(
+        &mut meta,
+        "unsupported_fields",
+        JsonValue::Array(unsupported_fields.into_iter().map(JsonValue::String).collect()),
+    );
+    insert_value_field(
+        &mut meta,
+        "total_count",
+        total_count
+            .map(serde_json::Number::from)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+    );
+    meta
+}
+
 fn format_timestamp(value: OffsetDateTime) -> String {
     let value = value.to_offset(UtcOffset::UTC);
     format!(

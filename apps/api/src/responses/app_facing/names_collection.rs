@@ -38,46 +38,9 @@ pub(crate) fn build_address_names_count_response(
     insert_value_field(
         &mut response,
         "meta",
-        build_compact_meta(Some(count), Vec::new(), Vec::new()),
+        compact_meta_object("partial", Some(count), Vec::new(), Vec::new()),
     );
     response
-}
-
-pub(crate) fn build_compact_meta(
-    total_count: Option<u64>,
-    unsupported_fields: Vec<String>,
-    unsupported_filters: Vec<String>,
-) -> JsonValue {
-    let mut meta = empty_object();
-    insert_string_field(&mut meta, "support_status", "partial".to_owned());
-    insert_value_field(
-        &mut meta,
-        "unsupported_filters",
-        JsonValue::Array(
-            unsupported_filters
-                .into_iter()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut meta,
-        "unsupported_fields",
-        JsonValue::Array(
-            unsupported_fields
-                .into_iter()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut meta,
-        "total_count",
-        total_count
-            .map(|value| JsonValue::Number(value.into()))
-            .unwrap_or(JsonValue::Null),
-    );
-    meta
 }
 
 fn build_compact_domain_summary(row: &bigname_storage::NameCurrentListRow) -> JsonValue {

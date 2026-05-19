@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use bigname_storage::PermissionScope;
+use bigname_storage::{PermissionScope, normalize_evm_address};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use crate::projection_json::dedupe_json_values;
 
 use super::types::RelevantEvent;
 use super::{PERMISSIONS_CURRENT_DERIVATION_KIND, PERMISSIONS_ENUMERATION_BASIS};
@@ -28,11 +30,12 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("resolver scope must include chain_id")?
                 .to_owned(),
-            resolver_address: scope
-                .get("resolver_address")
-                .and_then(Value::as_str)
-                .context("resolver scope must include resolver_address")?
-                .to_ascii_lowercase(),
+            resolver_address: normalize_evm_address(
+                scope
+                    .get("resolver_address")
+                    .and_then(Value::as_str)
+                    .context("resolver scope must include resolver_address")?,
+            ),
         }),
         "record_manager" => Ok(PermissionScope::RecordManager {
             chain_id: scope
@@ -40,11 +43,12 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("record_manager scope must include chain_id")?
                 .to_owned(),
-            manager_address: scope
-                .get("manager_address")
-                .and_then(Value::as_str)
-                .context("record_manager scope must include manager_address")?
-                .to_ascii_lowercase(),
+            manager_address: normalize_evm_address(
+                scope
+                    .get("manager_address")
+                    .and_then(Value::as_str)
+                    .context("record_manager scope must include manager_address")?,
+            ),
         }),
         "migration_derived" => Ok(PermissionScope::MigrationDerived {
             predecessor_resource_id: Uuid::parse_str(
@@ -163,18 +167,4 @@ pub(super) fn build_coverage(events: &[&RelevantEvent]) -> Value {
         "unsupported_reason": Value::Null,
         "enumeration_basis": PERMISSIONS_ENUMERATION_BASIS,
     })
-}
-
-fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }

@@ -94,14 +94,6 @@ impl BackfillAdapterSyncMode {
             Self::Inline | Self::RawOnly => self,
         }
     }
-
-    pub(crate) fn syncs_before_startup_backfill(self) -> bool {
-        self == Self::Inline
-    }
-
-    pub(crate) fn syncs_after_startup_backfill(self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,8 +189,6 @@ mod tests {
             BackfillAdapterSyncMode::parse("auto")?.startup_hash_pinned_backfill_mode(),
             BackfillAdapterSyncMode::RawOnly
         );
-        assert!(!BackfillAdapterSyncMode::Auto.syncs_after_startup_backfill());
-        assert!(!BackfillAdapterSyncMode::Auto.syncs_before_startup_backfill());
         assert_eq!(
             BackfillAdapterSyncMode::Inline.hash_pinned_backfill_mode(),
             BackfillAdapterSyncMode::Inline

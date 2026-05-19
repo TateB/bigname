@@ -1,9 +1,11 @@
+use bigname_storage::sql_row;
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, PermissionsCurrentRow, SurfaceBindingKind,
     load_permissions_current_for_resolver_scope, load_permissions_current_resolver_targets,
+    normalize_evm_address,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
@@ -117,14 +119,10 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
 
     let mut targets = BTreeMap::<(String, String), BTreeSet<String>>::new();
     for row in rows {
-        let chain_id = row.try_get("chain_id").context("missing chain_id")?;
-        let resolver_address = normalize_resolver_address(
-            &row.try_get::<String, _>("resolver_address")
-                .context("missing resolver_address")?,
-        );
-        let source_family = row
-            .try_get::<String, _>("source_family")
-            .context("missing source_family")?;
+        let chain_id = sql_row::get(&row, "chain_id")?;
+        let resolver_address =
+            normalize_resolver_address(&sql_row::get::<String>(&row, "resolver_address")?);
+        let source_family = sql_row::get::<String>(&row, "source_family")?;
         insert_target(
             &mut targets,
             chain_id,
@@ -182,11 +180,11 @@ async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget
     rows.into_iter()
         .map(|row| {
             Ok(ResolverTarget {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                resolver_address: normalize_resolver_address(
-                    &row.try_get::<String, _>("resolver_address")
-                        .context("missing resolver_address")?,
-                ),
+                chain_id: sql_row::get(&row, "chain_id")?,
+                resolver_address: normalize_resolver_address(&sql_row::get::<String>(
+                    &row,
+                    "resolver_address",
+                )?),
                 profile_source_family: row
                     .try_get::<String, _>("source_family")
                     .context("missing source_family")
@@ -237,7 +235,21 @@ pub(super) async fn load_current_bindings(
 ) -> Result<Vec<CurrentBindingSeed>> {
     let rows = sqlx::query(&format!(
         r#"
-        WITH current_bindings AS (
+        WITH candidate_pairs AS (
+            SELECT DISTINCT
+                ne.logical_name_id,
+                ne.resource_id
+            FROM normalized_events ne
+            WHERE ne.event_kind = $1
+              AND ne.logical_name_id IS NOT NULL
+              AND ne.resource_id IS NOT NULL
+              AND ne.chain_id = $2
+              AND ne.after_state->>'resolver' IS NOT NULL
+              AND ne.after_state->>'resolver' <> ''
+              AND LOWER(ne.after_state->>'resolver') = $3
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ),
+        current_bindings AS (
             SELECT
                 sb.logical_name_id,
                 sb.resource_id,
@@ -247,6 +259,9 @@ pub(super) async fn load_current_bindings(
                 ns.normalized_name,
                 ns.namehash
             FROM surface_bindings sb
+            INNER JOIN candidate_pairs candidate
+              ON candidate.logical_name_id = sb.logical_name_id
+             AND candidate.resource_id = sb.resource_id
             INNER JOIN name_surfaces ns
               ON ns.logical_name_id = sb.logical_name_id
              AND ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -269,6 +284,9 @@ pub(super) async fn load_current_bindings(
                 ne.canonicality_state::TEXT AS canonicality_state,
                 LOWER(ne.after_state->>'resolver') AS resolver_address
             FROM normalized_events ne
+            INNER JOIN candidate_pairs candidate
+              ON candidate.logical_name_id = ne.logical_name_id
+             AND candidate.resource_id = ne.resource_id
             LEFT JOIN chain_lineage rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
@@ -445,17 +463,9 @@ pub(super) async fn load_alias_events(
 }
 
 pub(super) fn normalize_resolver_address(value: &str) -> String {
-    value.to_ascii_lowercase()
+    normalize_evm_address(value)
 }
 
 fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
+    SurfaceBindingKind::parse(value)
 }

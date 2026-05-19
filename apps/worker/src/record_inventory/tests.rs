@@ -89,6 +89,7 @@ async fn full_rebuild_projects_current_rows_for_all_target_resources() -> Result
     let database = TestDatabase::new().await?;
     let resource_a = Uuid::from_u128(0x9100);
     let resource_b = Uuid::from_u128(0x9200);
+    let missing_resource = Uuid::from_u128(0x9201);
 
     seed_resources(database.pool(), &[resource_a, resource_b]).await?;
     seed_raw_blocks(
@@ -125,6 +126,16 @@ async fn full_rebuild_projects_current_rows_for_all_target_resources() -> Result
                 Some("60"),
                 1003,
                 0,
+            ),
+            record_changed_event(
+                "missing-resource-text",
+                "ens:missing.eth",
+                missing_resource,
+                "text",
+                "text",
+                None,
+                1003,
+                1,
             ),
         ],
     )
@@ -2521,6 +2532,7 @@ async fn hydrate_text_values_fills_selectorized_ensv1_public_resolver_cache() ->
         ],
     )
     .await?;
+    seed_chain_checkpoint(database.pool(), "ethereum-mainnet", "0xrec1077", 1077).await?;
     seed_events(
         database.pool(),
         &[
@@ -2901,6 +2913,35 @@ async fn seed_basenames_resources(database: &PgPool, resource_ids: &[Uuid]) -> R
 
 async fn seed_raw_blocks(database: &PgPool, blocks: &[RawBlock]) -> Result<()> {
     upsert_raw_blocks(database, blocks).await?;
+    Ok(())
+}
+
+async fn seed_chain_checkpoint(
+    database: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id)
+        DO UPDATE SET
+            canonical_block_hash = EXCLUDED.canonical_block_hash,
+            canonical_block_number = EXCLUDED.canonical_block_number
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(database)
+    .await
+    .context("failed to seed chain checkpoint")?;
     Ok(())
 }
 

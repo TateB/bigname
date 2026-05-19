@@ -1,0 +1,7 @@
+interface:
+  display_name: "Consumer Slice"
+  short_description: "Scope one end-to-end capability"
+  default_prompt: "Use $consumer-slice to map this capability to routes, storage/projection/execution behavior, tests, and rollout evidence."
+
+policy:
+  allow_implicit_invocation: true

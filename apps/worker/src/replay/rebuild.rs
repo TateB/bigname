@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use tracing::info;
@@ -17,184 +19,116 @@ use super::{
 
 pub async fn rebuild_all_current_projections(
     pool: &PgPool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
-    rebuild_all_current_projections_inner(pool, None, false).await
+    rebuild_all_current_projections_inner(pool, None, false, text_hydration_config).await
 }
 
 pub async fn rebuild_pending_all_current_projections(
     pool: &PgPool,
     normalized_target_block: Option<i64>,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
-    rebuild_all_current_projections_inner(pool, normalized_target_block, true).await
+    rebuild_all_current_projections_inner(
+        pool,
+        normalized_target_block,
+        true,
+        text_hydration_config,
+    )
+    .await
 }
 
 async fn rebuild_all_current_projections_inner(
     pool: &PgPool,
     normalized_target_block: Option<i64>,
     skip_completed: bool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
     let mut steps = Vec::with_capacity(ALL_CURRENT_PROJECTION_ORDER.len());
 
-    if projection_should_replay(
-        pool,
+    macro_rules! replay_step {
+        ($projection:literal, $future:expr, $requested_field:ident) => {
+            replay_projection_step(
+                pool,
+                $projection,
+                normalized_target_block,
+                skip_completed,
+                async {
+                    let summary = $future
+                        .await
+                        .context(concat!("failed to replay ", $projection))?;
+                    Ok(CurrentProjectionReplayStepSummary {
+                        projection: $projection,
+                        requested_key_count: summary.$requested_field,
+                        upserted_row_count: summary.upserted_row_count,
+                        deleted_row_count: summary.deleted_row_count,
+                    })
+                },
+            )
+            .await?
+        };
+    }
+
+    steps.push(replay_step!(
         "name_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = name_current::rebuild_name_current(pool, None)
-            .await
-            .context("failed to replay name_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "name_current",
-            requested_key_count: summary.requested_name_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("name_current"));
-    }
-
-    if projection_should_replay(
-        pool,
+        name_current::rebuild_name_current(pool, None),
+        requested_name_count
+    ));
+    steps.push(replay_step!(
         "children_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = children::rebuild_children_current(pool, None)
-            .await
-            .context("failed to replay children_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "children_current",
-            requested_key_count: summary.requested_parent_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("children_current"));
-    }
-
-    if projection_should_replay(
-        pool,
+        children::rebuild_children_current(pool, None),
+        requested_parent_count
+    ));
+    steps.push(replay_step!(
         "permissions_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = permissions::rebuild_permissions_current(pool, None)
-            .await
-            .context("failed to replay permissions_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "permissions_current",
-            requested_key_count: summary.requested_resource_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("permissions_current"));
-    }
-
-    if projection_should_replay(
-        pool,
-        "record_inventory_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = record_inventory::rebuild_record_inventory_current(pool, None)
-            .await
-            .context("failed to replay record_inventory_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "record_inventory_current",
-            requested_key_count: summary.requested_resource_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("record_inventory_current"));
-    }
-
-    if projection_should_replay(
-        pool,
+        permissions::rebuild_permissions_current(pool, None),
+        requested_resource_count
+    ));
+    steps.push(
+        replay_projection_step(
+            pool,
+            "record_inventory_current",
+            normalized_target_block,
+            skip_completed,
+            async {
+                let summary = record_inventory::rebuild_record_inventory_current(pool, None)
+                    .await
+                    .context("failed to replay record_inventory_current")?;
+                if let Some(config) = text_hydration_config {
+                    let hydration_summary = record_inventory::hydrate_record_inventory_text_values(
+                        pool,
+                        None,
+                        config.clone(),
+                    )
+                    .await
+                    .context("failed to hydrate record_inventory_current text values")?;
+                    record_inventory::log_text_hydration_summary(None, &hydration_summary);
+                }
+                Ok(CurrentProjectionReplayStepSummary {
+                    projection: "record_inventory_current",
+                    requested_key_count: summary.requested_resource_count,
+                    upserted_row_count: summary.upserted_row_count,
+                    deleted_row_count: summary.deleted_row_count,
+                })
+            },
+        )
+        .await?,
+    );
+    steps.push(replay_step!(
         "resolver_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = resolver::rebuild_resolver_current(pool, None, None)
-            .await
-            .context("failed to replay resolver_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "resolver_current",
-            requested_key_count: summary.requested_resolver_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("resolver_current"));
-    }
-
-    if projection_should_replay(
-        pool,
+        resolver::rebuild_resolver_current(pool, None, None),
+        requested_resolver_count
+    ));
+    steps.push(replay_step!(
         "address_names_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = address_names::rebuild_address_names_current(pool, None)
-            .await
-            .context("failed to replay address_names_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "address_names_current",
-            requested_key_count: summary.requested_address_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("address_names_current"));
-    }
-
-    if projection_should_replay(
-        pool,
+        address_names::rebuild_address_names_current(pool, None),
+        requested_address_count
+    ));
+    steps.push(replay_step!(
         "primary_names_current",
-        skip_completed,
-        normalized_target_block,
-    )
-    .await?
-    {
-        let summary = primary_name::rebuild_primary_names_current(pool, None, None, None)
-            .await
-            .context("failed to replay primary_names_current")?;
-        let step = CurrentProjectionReplayStepSummary {
-            projection: "primary_names_current",
-            requested_key_count: summary.requested_tuple_count,
-            upserted_row_count: summary.upserted_row_count,
-            deleted_row_count: summary.deleted_row_count,
-        };
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        steps.push(step);
-    } else {
-        steps.push(skipped_step("primary_names_current"));
-    }
+        primary_name::rebuild_primary_names_current(pool, None, None, None),
+        requested_tuple_count
+    ));
 
     debug_assert_eq!(
         steps.iter().map(|step| step.projection).collect::<Vec<_>>(),
@@ -204,13 +138,34 @@ async fn rebuild_all_current_projections_inner(
     Ok(AllCurrentProjectionsReplaySummary { steps })
 }
 
+async fn replay_projection_step<Fut>(
+    pool: &PgPool,
+    projection: &'static str,
+    normalized_target_block: Option<i64>,
+    skip_completed: bool,
+    rebuild: Fut,
+) -> Result<CurrentProjectionReplayStepSummary>
+where
+    Fut: Future<Output = Result<CurrentProjectionReplayStepSummary>>,
+{
+    if projection_should_replay(pool, projection, skip_completed, normalized_target_block).await? {
+        let step = rebuild.await?;
+        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
+        Ok(step)
+    } else {
+        Ok(skipped_step(projection))
+    }
+}
+
 async fn projection_should_replay(
     pool: &PgPool,
     projection: &'static str,
     skip_completed: bool,
     normalized_target_block: Option<i64>,
 ) -> Result<bool> {
-    if skip_completed && projection_replay_completed(pool, projection).await? {
+    if skip_completed
+        && projection_replay_completed(pool, projection, normalized_target_block).await?
+    {
         info!(
             service = "worker",
             replay = "all_current_projections",

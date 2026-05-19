@@ -3,7 +3,9 @@ use super::*;
 const MAX_DNS_LABEL_OCTETS: usize = u8::MAX as usize;
 
 pub(super) fn can_observe_registrar_label(label: &str) -> bool {
-    !label.is_empty() && label.to_ascii_lowercase().len() <= MAX_DNS_LABEL_OCTETS
+    !label.is_empty()
+        && !label.contains('\0')
+        && label.to_ascii_lowercase().len() <= MAX_DNS_LABEL_OCTETS
 }
 
 pub(super) fn observe_registrar_name_with_reference(
@@ -30,7 +32,7 @@ pub(super) fn observe_registrar_name_with_version(
         bail!("registrar label must not be empty");
     }
     if !can_observe_registrar_label(label) {
-        bail!("registrar label exceeds DNS length");
+        bail!("registrar label is empty, contains a NUL byte, or exceeds DNS length");
     }
     let normalized_label = label.to_ascii_lowercase();
     let safe_label = postgres_text_safe(label);
@@ -98,6 +100,9 @@ pub(super) fn observe_dns_encoded_name_with_reference(
         .map(|label| String::from_utf8(label.clone()))
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("wrapper DNS name labels must be valid UTF-8")?;
+    if labels_contain_nul(&input_labels) {
+        bail!("wrapper DNS name labels must not contain NUL bytes");
+    }
     let normalized_labels = input_labels
         .iter()
         .map(|label| label.to_ascii_lowercase())
@@ -148,6 +153,9 @@ pub(super) fn observe_text_name_with_reference(
     if input_labels.is_empty() || input_labels.iter().any(|label| label.is_empty()) {
         bail!("text name preimage must contain non-empty labels");
     }
+    if labels_contain_nul(&input_labels) {
+        bail!("text name preimage labels must not contain NUL bytes");
+    }
     let normalized_labels = input_labels
         .iter()
         .map(|label| label.to_ascii_lowercase())
@@ -192,6 +200,10 @@ fn postgres_text_safe(text: &str) -> String {
     text.replace('\0', "\\u0000")
 }
 
+fn labels_contain_nul(labels: &[String]) -> bool {
+    labels.iter().any(|label| label.contains('\0'))
+}
+
 fn decode_dns_encoded_labels(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
     if bytes.is_empty() {
         bail!("dns-encoded name payload must not be empty");
@@ -226,4 +238,88 @@ pub(super) fn observe_registrar_eth_name_with_version(
     normalizer_version: &str,
 ) -> Result<NameMetadata> {
     observe_registrar_name_with_version(label, AuthorityProfile::Ens, normalizer_version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_reference() -> ObservationRef {
+        ObservationRef {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            transaction_hash: Some(
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ),
+            transaction_index: Some(0),
+            log_index: Some(0),
+            canonicality_state: CanonicalityState::Canonical,
+            namespace: "ens".to_owned(),
+            source_manifest_id: 1,
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            manifest_version: 1,
+        }
+    }
+
+    #[test]
+    fn registrar_labels_with_nul_are_not_observable_names() {
+        assert!(!can_observe_registrar_label("bad\0label"));
+        assert!(
+            observe_registrar_name_with_version(
+                "bad\0label",
+                AuthorityProfile::Ens,
+                ENS_NORMALIZER_VERSION,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_text_name_preimages_with_nul_are_not_observable_names() {
+        assert!(
+            observe_text_name_with_reference(
+                "bad\0label.eth",
+                &test_reference(),
+                ENS_NORMALIZER_VERSION,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wrapper_dns_labels_with_nul_are_not_observable_names() {
+        let dns_name = [3, b'b', 0, b'd', 3, b'e', b't', b'h', 0];
+
+        assert!(
+            observe_dns_encoded_name_with_reference(
+                &dns_name,
+                &test_reference(),
+                ENS_NORMALIZER_VERSION,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wrapper_dns_name_preserves_onchain_hash_and_normalizes_display() -> Result<()> {
+        let dns_name = [5, b'A', b'l', b'i', b'c', b'e', 3, b'e', b't', b'h', 0];
+
+        let wrapper_name = observe_dns_encoded_name_with_reference(
+            &dns_name,
+            &test_reference(),
+            ENS_NORMALIZER_VERSION,
+        )?;
+
+        assert_eq!(wrapper_name.input_name, "Alice.eth");
+        assert_eq!(wrapper_name.normalized_name, "alice.eth");
+        assert_eq!(
+            wrapper_name.namehash,
+            namehash_hex(&[b"Alice".to_vec(), b"eth".to_vec()])
+        );
+        assert_eq!(wrapper_name.labelhashes[0], keccak256_hex(b"Alice"));
+        Ok(())
+    }
 }

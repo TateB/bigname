@@ -155,7 +155,7 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     Ok(())
 }
 
-pub(super) async fn ensure_losing_branch_raw_blocks_exist(
+pub(crate) async fn ensure_losing_branch_raw_blocks_exist(
     pool: &sqlx::PgPool,
     chain: &str,
     from_hash: &str,

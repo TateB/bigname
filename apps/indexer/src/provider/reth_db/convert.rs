@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, str::FromStr};
+use std::collections::BTreeSet;
 
 use alloy_consensus::{Transaction as _, TxReceipt};
 use alloy_primitives::{Address, B256};
@@ -7,7 +7,11 @@ use anyhow::{Context, Result, bail};
 use crate::provider::{
     ProviderBlock, ProviderLog, ProviderReceipt, ProviderResolvedBlock, ProviderTransaction,
     ZERO_HASH,
-    decode::{normalize_address, normalize_hash},
+    decode::{
+        address_hex as provider_address_hex, bytes_hex as provider_bytes_hex,
+        hash_hex as provider_hash_hex, parse_address as parse_provider_address,
+        parse_b256 as parse_provider_b256,
+    },
 };
 
 pub(super) fn provider_block_from_header(
@@ -171,27 +175,19 @@ pub(super) fn normalized_contiguous_resolved_blocks(
 }
 
 pub(super) fn parse_b256(value: &str, label: &str) -> Result<B256> {
-    let value = normalize_hash(value);
-    if value.is_empty() {
-        bail!("{label} cannot be empty");
-    }
-    B256::from_str(&value).with_context(|| format!("failed to parse {label} {value}"))
+    parse_provider_b256(value, label)
 }
 
 pub(super) fn parse_address(value: &str) -> Result<Address> {
-    let value = normalize_address(value);
-    if value.is_empty() {
-        bail!("address cannot be empty");
-    }
-    Address::from_str(&value).with_context(|| format!("failed to parse address {value}"))
+    parse_provider_address(value)
 }
 
 pub(super) fn hash_hex(value: B256) -> String {
-    format!("{value:#x}")
+    provider_hash_hex(value)
 }
 
 pub(super) fn address_hex(value: Address) -> String {
-    format!("{value:#x}")
+    provider_address_hex(value)
 }
 
 pub(super) fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
@@ -211,11 +207,7 @@ fn optional_parent_hash(value: B256) -> Option<String> {
 }
 
 pub(super) fn bytes_hex(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    provider_bytes_hex(bytes)
 }
 
 fn u64_to_i64(value: u64, label: &str) -> Result<i64> {

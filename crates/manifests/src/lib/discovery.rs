@@ -14,7 +14,9 @@ mod types;
 pub use admission::DiscoveryAdmissionState;
 pub use loading::load_discovery_admission_state;
 pub use persistence::persist_discovery_observation;
-pub use reconciliation::reconcile_discovery_observations;
+pub use reconciliation::{
+    reconcile_discovery_observations, reconcile_scoped_discovery_observations,
+};
 pub use types::{
     AdmittedDiscoveryEdge, DiscoveryCandidate, DiscoveryObservation, DiscoveryPersistenceSummary,
     DiscoveryReconciliationSummary,

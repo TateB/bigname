@@ -1,6 +1,11 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
-use sqlx::types::time::OffsetDateTime;
+use sqlx::{
+    Decode, Postgres, Type,
+    error::BoxDynError,
+    postgres::{PgTypeInfo, PgValueRef},
+    types::time::OffsetDateTime,
+};
 use uuid::Uuid;
 
 use crate::CanonicalityState;
@@ -72,7 +77,7 @@ impl SurfaceBindingKind {
         }
     }
 
-    pub(super) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "declared_registry_path" => Ok(Self::DeclaredRegistryPath),
             "linked_subregistry_path" => Ok(Self::LinkedSubregistryPath),
@@ -82,6 +87,23 @@ impl SurfaceBindingKind {
             "observed_only" => Ok(Self::ObservedOnly),
             _ => bail!("unknown surface binding kind {value}"),
         }
+    }
+}
+
+impl Type<Postgres> for SurfaceBindingKind {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <String as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> Decode<'r, Postgres> for SurfaceBindingKind {
+    fn decode(value: PgValueRef<'r>) -> std::result::Result<Self, BoxDynError> {
+        let value = <String as Decode<Postgres>>::decode(value)?;
+        Self::parse(&value).map_err(Into::into)
     }
 }
 

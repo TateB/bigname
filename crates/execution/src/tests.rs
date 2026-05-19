@@ -1265,24 +1265,6 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    upsert_chain_lineage_blocks(
-        database.pool(),
-        &[
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xsource-record-version",
-                102,
-                1_717_171_702,
-            ),
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbinding-wildcard",
-                103,
-                1_717_171_703,
-            ),
-        ],
-    )
-    .await?;
     bigname_storage::upsert_name_surfaces(
         database.pool(),
         &[
@@ -1621,24 +1603,6 @@ async fn seed_basenames_name_current_rebuild_inputs(
         ETHEREUM_MAINNET_CHAIN_ID,
         "0xbasenamesl1",
         21_000_100,
-    )
-    .await?;
-    upsert_chain_lineage_blocks(
-        database.pool(),
-        &[
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1-compatible",
-                21_000_099,
-                1_717_171_704,
-            ),
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1",
-                21_000_100,
-                1_776_387_700,
-            ),
-        ],
     )
     .await?;
     bigname_storage::upsert_name_surfaces(

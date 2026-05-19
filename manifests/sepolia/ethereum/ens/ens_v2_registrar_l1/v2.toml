@@ -1,0 +1,55 @@
+# ENSv2 sepolia-dev ETHRegistrar exact-name profile promotion for the
+# alternate deployment profile only.
+# ETHRegistry and ETHRegistrar deployment addresses:
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309).
+# The promoted exact-name profile is backed by registry resource/token state,
+# registry label lifecycle events, and registrar registration lifecycle events:
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L22 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309).
+manifest_version = 2
+namespace = "ens"
+source_family = "ens_v2_registrar_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_dev"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+discovery_rules = []
+
+[capability_flags]
+exact_name_profile = { status = "supported", notes = "selected sepolia-dev exact-name profile reads are supported from admitted ETHRegistry and ETHRegistrar sources only" }
+name_history = { status = "shadow", notes = "sepolia-dev registrar history remains downstream work" }
+
+[[roots]]
+name = "ETHRegistrar"
+address = "0x68586418353b771cf2425ed14a07512aa880c532"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+start_block = 10462909
+
+[[contracts]]
+role = "registrar"
+address = "0x68586418353b771cf2425ed14a07512aa880c532"
+proxy_kind = "none"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+start_block = 10462909
+
+# Registrar event ABI fragments consumed by ENSv2 registrar adapters.
+# NameRegistered: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309).
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrarNameRegistered"]
+
+# NameRenewed: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309).
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed"]

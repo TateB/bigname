@@ -193,27 +193,6 @@ fn raw_fact_ref(raw_log: &PermissionsRawLogRow) -> Value {
     })
 }
 
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-pub(super) fn count_inserted_events_by_kind(
-    events: &[NormalizedEvent],
-    existing: &HashSet<String>,
-) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        if !existing.contains(&event.event_identity) {
-            *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
 fn role_bitmap_powers(bitmap: &str) -> Result<Vec<String>> {
     let bytes = decode_hex_32(bitmap)?;
     let role_bits = [

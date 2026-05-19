@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, types::Uuid};
+use bigname_storage::sql_row;
+use sqlx::{PgPool, types::Uuid};
 
 use super::REGISTRY_DERIVATION_KIND;
 
@@ -44,10 +45,8 @@ pub(super) async fn load_registry_resource_link(
 
     Ok(match row {
         Some(row) => ResourceLink {
-            logical_name_id: row
-                .try_get("logical_name_id")
-                .context("missing logical_name_id")?,
-            resource_id: row.try_get("resource_id").context("missing resource_id")?,
+            logical_name_id: sql_row::get(&row, "logical_name_id")?,
+            resource_id: sql_row::get(&row, "resource_id")?,
         },
         None => ResourceLink {
             logical_name_id: None,

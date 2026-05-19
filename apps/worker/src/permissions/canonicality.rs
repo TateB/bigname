@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+
+pub(super) use crate::projection_json::format_timestamp;
 
 use super::types::{ChainPositionCandidate, RelevantEvent};
 
@@ -92,28 +92,4 @@ fn canonicality_rank(state: CanonicalityState) -> u8 {
         CanonicalityState::Observed => 3,
         CanonicalityState::Orphaned => 4,
     }
-}
-
-pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "observed" => Ok(CanonicalityState::Observed),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
-}
-
-pub(super) fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

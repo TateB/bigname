@@ -51,7 +51,9 @@ impl TestDatabase {
             .max_connections(1)
             .connect_with(base_options.clone().database("postgres"))
             .await
-            .context("failed to connect admin pool for storage integration tests")?;
+            .context(
+                "failed to connect admin pool for storage integration tests. Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server.",
+            )?;
 
         sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
             .execute(&admin_pool)
@@ -438,6 +440,85 @@ async fn safe_and_finalized_checkpoint_updates_promote_stored_ancestry() -> Resu
             ("0x004".to_owned(), "canonical".to_owned()),
         ]
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpoint_promotion_rejects_partial_ancestry_path() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                "eth-mainnet",
+                "0x001",
+                None,
+                1,
+                timestamp(1_717_171_717),
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "eth-mainnet",
+                "0x003",
+                Some("0x002"),
+                3,
+                timestamp(1_717_171_741),
+                CanonicalityState::Observed,
+            ),
+        ],
+    )
+    .await?;
+
+    advance_chain_checkpoints(
+        database.pool(),
+        &ChainCheckpointUpdate {
+            chain_id: "eth-mainnet".to_owned(),
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+            safe: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+            finalized: None,
+        },
+    )
+    .await?;
+
+    let error = advance_chain_checkpoints(
+        database.pool(),
+        &ChainCheckpointUpdate {
+            chain_id: "eth-mainnet".to_owned(),
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x003".to_owned(),
+                block_number: 3,
+            }),
+            safe: Some(CheckpointBlockRef {
+                block_hash: "0x003".to_owned(),
+                block_number: 3,
+            }),
+            finalized: None,
+        },
+    )
+    .await
+    .expect_err("safe promotion without a complete path to the prior checkpoint must fail");
+
+    assert!(
+        error.to_string().contains("is not on the canonical branch")
+            || error
+                .to_string()
+                .contains("did not reach required ancestor"),
+        "unexpected error: {error:#}"
+    );
+
+    let snapshot = load_chain_checkpoint(database.pool(), "eth-mainnet")
+        .await?
+        .expect("checkpoint row must exist");
+    assert_eq!(snapshot.safe_block_hash, Some("0x001".to_owned()));
+    assert_eq!(snapshot.safe_block_number, Some(1));
 
     database.cleanup().await
 }

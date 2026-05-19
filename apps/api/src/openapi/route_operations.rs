@@ -1,37 +1,29 @@
-use serde_json::json;
+use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
 
+use crate::routes::{
+    ApiParameterLocation, ApiParameterSchema, ApiRouteContract, ApiRouteDefinition, ApiRouteId,
+    ApiRouteMethod, ApiRouteParameter,
+};
 use crate::{
-    ApiRouteDefinition, ApiRouteId, AppState, Router, address_history, address_names,
-    address_names_count, coverage_current, events, explain_authority_control_current,
-    explain_resolution_execution_current, explain_surface_binding_current, get, health,
-    name_children, name_current, name_history, name_records, name_roles, names,
-    namespace_manifests, namespace_metadata, primary_names, resolution_current, resolve_current,
-    resolve_records, resolver_current, resolver_overview, resource_history, resource_lookup,
-    resource_permissions, roles,
+    AppState, Router, address_history, address_names, address_names_count, coverage_current, events,
+    explain_authority_control_current, explain_resolution_execution_current,
+    explain_surface_binding_current, get, health, name_children, name_current, name_history,
+    name_records, name_roles, names, namespace_manifests, namespace_metadata, primary_names,
+    resolution_current, resolve_current, resolve_records, resolver_current, resolver_overview,
+    resource_history, resource_lookup, resource_permissions, roles,
 };
 
-use super::{
-    parameters::{
-        address_names_count_parameters, address_path_parameter, chain_id_path_parameter,
-        csv_query_parameter, cursor_query_parameter, dedupe_by_query_parameter, events_parameters,
-        exact_name_snapshot_parameters, history_meta_query_parameter,
-        history_scope_query_parameter, history_view_query_parameter, meta_query_parameter,
-        inferred_name_records_parameters, name_path_parameter, name_records_parameters,
-        name_roles_parameters, names_parameters, namespace_path_parameter, namespace_query_parameter,
-        page_size_query_parameter, primary_name_mode_query_parameter, query_parameter,
-        relation_query_parameter,
-        required_coin_type_query_parameter, required_csv_query_parameter,
-        required_namespace_query_parameter, resolution_current_parameters,
-        resolution_mode_query_parameter, resolver_address_path_parameter,
-        resolver_overview_parameters, resource_id_path_parameter, resource_lookup_parameters,
-        roles_parameters, view_query_parameter,
-    },
-    responses::{OpenApiOperationExt, openapi_json_get_operation},
-};
+use super::responses::{OpenApiOperationExt, openapi_json_get_operation};
 
 impl ApiRouteDefinition {
     pub(super) fn register(self, router: Router<AppState>) -> Router<AppState> {
+        match self.method {
+            ApiRouteMethod::Get => self.register_get(router),
+        }
+    }
+
+    fn register_get(self, router: Router<AppState>) -> Router<AppState> {
         match self.id {
             ApiRouteId::Health => router.route(self.path, get(health)),
             ApiRouteId::Names => router.route(self.path, get(names)),
@@ -70,411 +62,97 @@ impl ApiRouteDefinition {
     }
 
     pub(super) fn openapi_path_item(self) -> Option<JsonValue> {
-        self.published_in_contract
-            .then(|| json!({ "get": self.id.openapi_operation() }))
+        let contract = self.contract?;
+        let mut path_item = JsonMap::new();
+        path_item.insert(
+            self.method.openapi_key().to_owned(),
+            contract.openapi_operation(),
+        );
+        Some(JsonValue::Object(path_item))
     }
 }
 
-impl ApiRouteId {
-    fn operation_id(self) -> &'static str {
+impl ApiRouteMethod {
+    fn openapi_key(self) -> &'static str {
         match self {
-            Self::Health => "health",
-            Self::Names => "names",
-            Self::AddressNames => "address_names",
-            Self::AddressNamesCount => "address_names_count",
-            Self::AddressHistory => "address_history",
-            Self::PrimaryNames => "primary_names",
-            Self::Coverage => "coverage_current",
-            Self::ExplainSurfaceBinding => "explain_surface_binding_current",
-            Self::ExplainAuthorityControl => "explain_authority_control_current",
-            Self::ExplainResolutionExecution => "explain_resolution_execution_current",
-            Self::NamespaceMetadata => "namespace_metadata",
-            Self::NameChildren => "name_children",
-            Self::NameCurrent => "name_current",
-            Self::NameRecords => "name_records",
-            Self::NameRoles => "name_roles",
-            Self::Events => "events",
-            Self::Roles => "roles",
-            Self::ResourceLookup => "resource_lookup",
-            Self::ResolveCurrent => "resolve_current",
-            Self::ResolveRecords => "resolve_records",
-            Self::ResolutionCurrent => "resolution_current",
-            Self::ResolverCurrent => "resolver_current",
-            Self::ResolverOverview => "resolver_overview",
-            Self::NameHistory => "name_history",
-            Self::ResourceHistory => "resource_history",
-            Self::ResourcePermissions => "resource_permissions",
-            Self::NamespaceManifests => "namespace_manifests",
+            Self::Get => "get",
         }
     }
+}
 
+impl ApiRouteContract {
     fn openapi_operation(self) -> JsonValue {
+        let errors = self.errors;
+        let mut operation = openapi_json_get_operation(
+            self.operation_id,
+            self.summary,
+            self.tag,
+            self.parameters
+                .iter()
+                .copied()
+                .map(ApiRouteParameter::openapi_parameter)
+                .collect(),
+            self.success_schema,
+            errors.include_bad_request,
+            errors.include_not_found,
+        );
+        if let Some(description) = errors.bad_request_description {
+            operation = operation.with_bad_request_description(description);
+        }
+        if errors.include_conflict {
+            operation = operation.with_conflict_response();
+        }
+        operation
+    }
+}
+
+impl ApiRouteParameter {
+    fn openapi_parameter(self) -> JsonValue {
+        let mut parameter = JsonMap::new();
+        parameter.insert("name".to_owned(), JsonValue::String(self.name.to_owned()));
+        parameter.insert(
+            "in".to_owned(),
+            JsonValue::String(self.location.openapi_value().to_owned()),
+        );
+        parameter.insert("required".to_owned(), JsonValue::Bool(self.required));
+        parameter.insert(
+            "description".to_owned(),
+            JsonValue::String(self.description.to_owned()),
+        );
+        parameter.insert("schema".to_owned(), self.schema.openapi_schema());
+        if self.csv {
+            parameter.insert("style".to_owned(), JsonValue::String("form".to_owned()));
+            parameter.insert("explode".to_owned(), JsonValue::Bool(false));
+        }
+        JsonValue::Object(parameter)
+    }
+}
+
+impl ApiParameterLocation {
+    fn openapi_value(self) -> &'static str {
         match self {
-            Self::Health => openapi_json_get_operation(
-                self.operation_id(),
-                "Health check",
-                "Health",
-                Vec::new(),
-                "HealthResponse",
-                false,
-                false,
-            ),
-            Self::Names => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing compact name search and exact lookup",
-                "Names",
-                names_parameters(),
-                "CompactNamesResponse",
-                true,
-                false,
-            ),
-            Self::AddressNames => openapi_json_get_operation(
-                self.operation_id(),
-                "Address-to-surface collection",
-                "Collections",
-                vec![
-                    address_path_parameter(),
-                    namespace_query_parameter(),
-                    relation_query_parameter(),
-                    dedupe_by_query_parameter(),
-                    csv_query_parameter(
-                        "include",
-                        "Optional collection expansions. `role_summary` is the only shipped expansion.",
-                        json!({
-                            "type": "string",
-                            "enum": ["role_summary"],
-                        }),
-                    ),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                false,
-            ),
-            Self::AddressNamesCount => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing count for address relation filters",
-                "Collections",
-                address_names_count_parameters(),
-                "AddressNamesCountResponse",
-                true,
-                false,
-            ),
-            Self::AddressHistory => openapi_json_get_operation(
-                self.operation_id(),
-                "Address activity across related surfaces and resources",
-                "History",
-                vec![
-                    address_path_parameter(),
-                    namespace_query_parameter(),
-                    relation_query_parameter(),
-                    history_scope_query_parameter(),
-                    history_view_query_parameter(),
-                    history_meta_query_parameter(),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                false,
-            ),
-            Self::PrimaryNames => openapi_json_get_operation(
-                self.operation_id(),
-                "Claimed and verified primary-name answer",
-                "Resolution",
-                vec![
-                    address_path_parameter(),
-                    required_namespace_query_parameter(),
-                    required_coin_type_query_parameter(),
-                    primary_name_mode_query_parameter(),
-                ],
-                "PrimaryNameResponse",
-                true,
-                true,
-            ),
-            Self::Coverage => openapi_json_get_operation(
-                self.operation_id(),
-                "Single-name coverage and explain details",
-                "Coverage",
-                exact_name_snapshot_parameters(
-                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
-                ),
-                "ExactNameResponse",
-                true,
-                true,
-            )
-            .with_bad_request_description("Invalid snapshot selector")
-            .with_conflict_response(),
-            Self::ExplainSurfaceBinding => openapi_json_get_operation(
-                self.operation_id(),
-                "Current surface-binding explain view for one exact name",
-                "Explain",
-                exact_name_snapshot_parameters(
-                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
-                ),
-                "ExactNameResponse",
-                true,
-                true,
-            )
-            .with_bad_request_description("Invalid snapshot selector")
-            .with_conflict_response(),
-            Self::ExplainAuthorityControl => openapi_json_get_operation(
-                self.operation_id(),
-                "Current authority/control explain view for one exact name",
-                "Explain",
-                exact_name_snapshot_parameters(
-                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
-                ),
-                "ExactNameResponse",
-                true,
-                true,
-            )
-            .with_bad_request_description("Invalid snapshot selector")
-            .with_conflict_response(),
-            Self::ExplainResolutionExecution => openapi_json_get_operation(
-                self.operation_id(),
-                "Persisted verified execution explain for one exact-name resolution request",
-                "Explain",
-                vec![
-                    namespace_path_parameter(),
-                    name_path_parameter(),
-                    required_csv_query_parameter(
-                        "records",
-                        "Comma-separated record selectors. Required for the persisted execution explain lookup.",
-                        json!({
-                            "type": "string",
-                        }),
-                    ),
-                ],
-                "ResolutionResponse",
-                true,
-                true,
-            ),
-            Self::NamespaceMetadata => openapi_json_get_operation(
-                self.operation_id(),
-                "Namespace metadata and support status",
-                "Namespaces",
-                vec![namespace_path_parameter()],
-                "NamespaceMetadataResponse",
-                false,
-                true,
-            ),
-            Self::NameChildren => openapi_json_get_operation(
-                self.operation_id(),
-                "Declared child collection by default",
-                "Collections",
-                vec![
-                    namespace_path_parameter(),
-                    name_path_parameter(),
-                    csv_query_parameter(
-                        "surface_classes",
-                        "Requested child surface classes. Only `declared` is currently supported.",
-                        json!({
-                            "type": "string",
-                            "default": "declared",
-                        }),
-                    ),
-                    csv_query_parameter(
-                        "include",
-                        "Optional collection expansions. `counts` includes compact row `subname_count` or full-envelope `declared_state.subname_count`.",
-                        json!({
-                            "type": "string",
-                            "enum": ["counts"],
-                        }),
-                    ),
-                    view_query_parameter("compact"),
-                    meta_query_parameter("summary"),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                true,
-            ),
-            Self::NameCurrent => openapi_json_get_operation(
-                self.operation_id(),
-                "Exact name lookup",
-                "Names",
-                exact_name_snapshot_parameters(
-                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
-                ),
-                "ExactNameResponse",
-                true,
-                true,
-            )
-            .with_bad_request_description("Invalid snapshot selector")
-            .with_conflict_response(),
-            Self::NameRecords => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing compact resolver records",
-                "Resolution",
-                name_records_parameters(),
-                "CompactNameRecordsResponse",
-                true,
-                true,
-            ),
-            Self::NameRoles => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing role rows for a name's current resource",
-                "Collections",
-                name_roles_parameters(),
-                "CompactRolesResponse",
-                true,
-                true,
-            ),
-            Self::Events => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing compact event search",
-                "History",
-                events_parameters(),
-                "CompactEventsResponse",
-                true,
-                false,
-            ),
-            Self::Roles => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing role rows by account, resource, or name filters",
-                "Collections",
-                roles_parameters(),
-                "CompactRolesResponse",
-                true,
-                false,
-            ),
-            Self::ResourceLookup => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing lookup from name to current resource identity",
-                "Resources",
-                resource_lookup_parameters(),
-                "ResourceLookupResponse",
-                true,
-                true,
-            ),
-            Self::ResolveCurrent => openapi_json_get_operation(
-                self.operation_id(),
-                "Namespace-inferred resolution topology, inventory, and verified reads",
-                "Resolution",
-                vec![
-                    name_path_parameter(),
-                    resolution_mode_query_parameter(),
-                    csv_query_parameter(
-                        "records",
-                        "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-                        json!({
-                            "type": "string",
-                        }),
-                    ),
-                ],
-                "ResolutionResponse",
-                true,
-                true,
-            ),
-            Self::ResolveRecords => openapi_json_get_operation(
-                self.operation_id(),
-                "Namespace-inferred compact resolver records",
-                "Resolution",
-                inferred_name_records_parameters(),
-                "CompactNameRecordsResponse",
-                true,
-                true,
-            ),
-            Self::ResolutionCurrent => openapi_json_get_operation(
-                self.operation_id(),
-                "Resolution topology, inventory, and verified reads",
-                "Resolution",
-                resolution_current_parameters(),
-                "ResolutionResponse",
-                true,
-                true,
-            )
-            .with_conflict_response(),
-            Self::ResolverCurrent => openapi_json_get_operation(
-                self.operation_id(),
-                "Resolver overview",
-                "Resolvers",
-                vec![chain_id_path_parameter(), resolver_address_path_parameter()],
-                "ResolverResponse",
-                false,
-                true,
-            ),
-            Self::ResolverOverview => openapi_json_get_operation(
-                self.operation_id(),
-                "App-facing compact resolver overview",
-                "Resolvers",
-                resolver_overview_parameters(),
-                "CompactResolverOverviewResponse",
-                true,
-                true,
-            ),
-            Self::NameHistory => openapi_json_get_operation(
-                self.operation_id(),
-                "Surface or combined history",
-                "History",
-                vec![
-                    namespace_path_parameter(),
-                    name_path_parameter(),
-                    history_scope_query_parameter(),
-                    history_view_query_parameter(),
-                    history_meta_query_parameter(),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                true,
-            ),
-            Self::ResourceHistory => openapi_json_get_operation(
-                self.operation_id(),
-                "Resource history",
-                "History",
-                vec![
-                    resource_id_path_parameter(),
-                    history_scope_query_parameter(),
-                    history_view_query_parameter(),
-                    history_meta_query_parameter(),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                true,
-            ),
-            Self::ResourcePermissions => openapi_json_get_operation(
-                self.operation_id(),
-                "Resource-centric effective permissions",
-                "Collections",
-                vec![
-                    resource_id_path_parameter(),
-                    query_parameter(
-                        "subject",
-                        "Optional subject filter for the current effective permissions rows.",
-                        json!({
-                            "type": "string",
-                        }),
-                    ),
-                    query_parameter(
-                        "scope",
-                        "Optional scope filter. Accepts `root`, `registry`, `resource`, `resolver:{chain_id}:{resolver_address}`, `record_manager:{chain_id}:{manager_address}`, `migration_derived:{resource_id}`, or `transport_derived:{transport}`.",
-                        json!({
-                            "type": "string",
-                        }),
-                    ),
-                    cursor_query_parameter(),
-                    page_size_query_parameter(),
-                ],
-                "CollectionResponse",
-                true,
-                false,
-            ),
-            Self::NamespaceManifests => openapi_json_get_operation(
-                self.operation_id(),
-                "Active manifest versions and capabilities",
-                "Namespaces",
-                vec![namespace_path_parameter()],
-                "NamespaceManifestsResponse",
-                false,
-                true,
-            ),
+            Self::Path => "path",
+            Self::Query => "query",
+        }
+    }
+}
+
+impl ApiParameterSchema {
+    fn openapi_schema(self) -> JsonValue {
+        match self {
+            Self::String => json!({ "type": "string" }),
+            Self::Boolean => json!({ "type": "boolean" }),
+            Self::UuidString => json!({ "type": "string", "format": "uuid" }),
+            Self::StringPattern(pattern) => json!({ "type": "string", "pattern": pattern }),
+            Self::StringEnum(values) => json!({ "type": "string", "enum": values }),
+            Self::StringDefault(default) => json!({ "type": "string", "default": default }),
+            Self::StringEnumDefault { values, default } => {
+                json!({ "type": "string", "enum": values, "default": default })
+            }
+            Self::IntegerMin(minimum) => json!({ "type": "integer", "minimum": minimum }),
+            Self::IntegerRange { minimum, maximum } => {
+                json!({ "type": "integer", "minimum": minimum, "maximum": maximum })
+            }
         }
     }
 }

@@ -1,23 +1,23 @@
 use anyhow::{Context, Result};
-use bigname_storage::{AddressNameCurrentRow, delete_address_names_current};
+use bigname_storage::delete_address_names_current;
 use sqlx::PgPool;
 
-pub(super) async fn delete_stale_address_names_current_rows_for_address(
+pub(super) async fn delete_stale_address_names_current_rows_for_address_keys(
     pool: &PgPool,
     address: &str,
-    rows: &[AddressNameCurrentRow],
+    replacement_keys: &[(String, String)],
 ) -> Result<u64> {
-    if rows.is_empty() {
+    if replacement_keys.is_empty() {
         return delete_address_names_current(pool, address).await;
     }
 
-    let logical_name_ids = rows
+    let logical_name_ids = replacement_keys
         .iter()
-        .map(|row| row.logical_name_id.clone())
+        .map(|(logical_name_id, _)| logical_name_id.clone())
         .collect::<Vec<_>>();
-    let relations = rows
+    let relations = replacement_keys
         .iter()
-        .map(|row| row.relation.as_str().to_owned())
+        .map(|(_, relation)| relation.clone())
         .collect::<Vec<_>>();
 
     sqlx::query(

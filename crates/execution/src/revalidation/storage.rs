@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use bigname_storage::sql_row;
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SurfaceBindingKind};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
@@ -237,59 +238,27 @@ pub(super) async fn load_name_current_for_revalidation(
 
 fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow> {
     Ok(NameCurrentRow {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
+        logical_name_id: sql_row::get(&row, "logical_name_id")?,
+        namespace: sql_row::get(&row, "namespace")?,
+        canonical_display_name: sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: sql_row::get(&row, "normalized_name")?,
+        namehash: sql_row::get(&row, "namehash")?,
+        surface_binding_id: sql_row::get(&row, "surface_binding_id")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        token_lineage_id: sql_row::get(&row, "token_lineage_id")?,
         binding_kind: row
             .try_get::<Option<String>, _>("binding_kind")
             .context("missing binding_kind")?
-            .map(|value| parse_surface_binding_kind_for_revalidation(&value))
+            .map(|value| SurfaceBindingKind::parse(&value))
             .transpose()?,
-        declared_summary: row
-            .try_get("declared_summary")
-            .context("missing declared_summary")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        declared_summary: sql_row::get(&row, "declared_summary")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        coverage: sql_row::get(&row, "coverage")?,
+        chain_positions: sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: sql_row::get(&row, "last_recomputed_at")?,
     })
-}
-
-fn parse_surface_binding_kind_for_revalidation(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
 }
 
 async fn load_record_inventory_current_for_revalidation(
@@ -345,35 +314,19 @@ fn decode_record_inventory_current_row_for_revalidation(
     row: PgRow,
 ) -> Result<RecordInventoryCurrentRow> {
     Ok(RecordInventoryCurrentRow {
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        record_version_boundary: row
-            .try_get("record_version_boundary")
-            .context("missing record_version_boundary")?,
-        enumeration_basis: row
-            .try_get("enumeration_basis")
-            .context("missing enumeration_basis")?,
-        selectors: row.try_get("selectors").context("missing selectors")?,
-        explicit_gaps: row
-            .try_get("explicit_gaps")
-            .context("missing explicit_gaps")?,
-        unsupported_families: row
-            .try_get("unsupported_families")
-            .context("missing unsupported_families")?,
-        last_change: row.try_get("last_change").context("missing last_change")?,
-        entries: row.try_get("entries").context("missing entries")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        resource_id: sql_row::get(&row, "resource_id")?,
+        record_version_boundary: sql_row::get(&row, "record_version_boundary")?,
+        enumeration_basis: sql_row::get(&row, "enumeration_basis")?,
+        selectors: sql_row::get(&row, "selectors")?,
+        explicit_gaps: sql_row::get(&row, "explicit_gaps")?,
+        unsupported_families: sql_row::get(&row, "unsupported_families")?,
+        last_change: sql_row::get(&row, "last_change")?,
+        entries: sql_row::get(&row, "entries")?,
+        provenance: sql_row::get(&row, "provenance")?,
+        coverage: sql_row::get(&row, "coverage")?,
+        chain_positions: sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: sql_row::get(&row, "last_recomputed_at")?,
     })
 }

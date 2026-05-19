@@ -45,8 +45,7 @@ use self::{
     handler_namespaces::{namespace_manifests, namespace_metadata},
     handler_primary_names::primary_names,
     handler_resolution::{
-        explain_resolution_execution_current, infer_resolution_namespace, resolution_current,
-        resolve_current,
+        explain_resolution_execution_current, resolution_current, resolve_current,
     },
     handler_resolvers::resolver_current,
 };

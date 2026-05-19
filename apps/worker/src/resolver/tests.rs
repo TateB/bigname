@@ -442,12 +442,10 @@ async fn resolver_current_skips_known_ensv1_public_resolver_binding_enumeration(
     .await?;
     seed_raw_blocks(
         database.pool(),
-        &[raw_block(
-            "ethereum-mainnet",
-            "0xres0160",
-            160,
-            1_776_302_160,
-        )],
+        &[
+            raw_block("ethereum-mainnet", "0xres0160", 160, 1_776_302_160),
+            raw_block("ethereum-mainnet", "0xres0161", 161, 1_776_302_161),
+        ],
     )
     .await?;
     seed_resolver_events(
@@ -476,6 +474,22 @@ async fn resolver_current_skips_known_ensv1_public_resolver_binding_enumeration(
         ],
     )
     .await?;
+    seed_permission_events(
+        database.pool(),
+        &[resolver_permission_event(
+            "public-resolver-permission",
+            Some("ens:shared-alpha.eth"),
+            resource_id,
+            "0x0000000000000000000000000000000000000abc",
+            "ethereum-mainnet",
+            resolver_address,
+            json!(["set_resolver"]),
+            161,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_permissions_current(database.pool(), None).await?;
 
     let summary = rebuild_resolver_current(
         database.pool(),
@@ -489,7 +503,13 @@ async fn resolver_current_skips_known_ensv1_public_resolver_binding_enumeration(
     let row = load_resolver_current(database.pool(), "ethereum-mainnet", resolver_address)
         .await?
         .context("known public resolver_current row should exist")?;
-    for section in ["bindings", "aliases", "event_summary"] {
+    for section in [
+        "bindings",
+        "aliases",
+        "permissions",
+        "role_holders",
+        "event_summary",
+    ] {
         assert_eq!(
             row.declared_summary[section]["status"],
             json!("unsupported")
@@ -499,14 +519,6 @@ async fn resolver_current_skips_known_ensv1_public_resolver_binding_enumeration(
             json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
         );
     }
-    assert_eq!(
-        row.declared_summary["permissions"],
-        json!({"status": "supported", "count": 0, "items": []})
-    );
-    assert_eq!(
-        row.declared_summary["role_holders"],
-        json!({"status": "supported", "count": 0, "items": []})
-    );
     assert_eq!(row.coverage["status"], json!("partial"));
     assert_eq!(row.coverage["exhaustiveness"], json!("non_enumerable"));
     assert_eq!(

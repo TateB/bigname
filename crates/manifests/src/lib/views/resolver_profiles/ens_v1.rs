@@ -12,227 +12,23 @@ use super::super::{
         load_manifest_code_hash_observations_for_watched_contracts,
     },
     types::ManifestCodeHashObservation,
-    watched::{
-        load_watched_contracts_by_source_family,
-        load_watched_contracts_by_source_family_and_addresses,
-    },
+    watched::load_watched_contracts_by_source_family,
 };
 use super::{
     RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH, RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH,
     RESOLVER_PROFILE_BASIS_CODE_HASH_PENDING, RESOLVER_PROFILE_STATUS_PENDING,
     RESOLVER_PROFILE_STATUS_SUPPORTED, RESOLVER_PROFILE_STATUS_UNSUPPORTED,
-    latest_resolver_code_hashes_by_contract_id,
+    latest_resolver_code_hashes_by_contract_id, sort_resolver_profile_admissions,
 };
 
-const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
-const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compatible";
-const ENS_V1_PUBLIC_RESOLVER_WRAPPER_AWARE_PROFILE: &str = "public_resolver_wrapper_aware";
-const ENS_V1_PUBLIC_RESOLVER_MULTICOIN_DNS_PROFILE: &str = "public_resolver_legacy_multicoin_dns";
-const ENS_V1_PUBLIC_RESOLVER_MULTICOIN_PROFILE: &str = "public_resolver_legacy_multicoin";
-const ENS_V1_PUBLIC_RESOLVER_ETH_ADDR_TEXT_PROFILE: &str = "public_resolver_legacy_eth_addr_text";
-const ENS_V1_PUBLIC_RESOLVER_ETH_ADDR_PROFILE: &str = "public_resolver_legacy_eth_addr";
-const ENS_V1_PUBLIC_RESOLVER_ROLE: &str = "public_resolver";
-const RESOLVER_PROFILE_BASIS_MANIFEST_SEED: &str = "manifest_public_resolver_seed";
-const RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER: &str =
-    "first_party_known_resolver_admission";
+#[path = "ens_v1/profile_config.rs"]
+mod profile_config;
 
-const FACT_RESOLVER_RECORD: &str = "resolver_record";
-const FACT_RESOLVER_RECORD_ADDR: &str = "resolver_record:addr";
-const FACT_RESOLVER_RECORD_MULTICOIN_ADDR: &str = "resolver_record:multicoin_addr";
-const FACT_RESOLVER_RECORD_NAME: &str = "resolver_record:name";
-const FACT_RESOLVER_RECORD_TEXT: &str = "resolver_record:text";
-const FACT_RESOLVER_RECORD_ABI: &str = "resolver_record:abi";
-const FACT_RESOLVER_RECORD_CONTENTHASH: &str = "resolver_record:contenthash";
-const FACT_RESOLVER_RECORD_DNS: &str = "resolver_record:dns";
-const FACT_RESOLVER_RECORD_INTERFACE: &str = "resolver_record:interface";
-const FACT_RESOLVER_RECORD_DATA: &str = "resolver_record:data";
-const FACT_RESOLVER_RECORD_VERSION: &str = "resolver_record_version";
-const FACT_RESOLVER_AUTHORIZATION: &str = "resolver_authorization";
-const FACT_NAME_WRAPPER_AWARE: &str = "resolver_feature:name_wrapper_aware";
-const FACT_DEFAULT_COIN_TYPE: &str = "resolver_feature:default_coin_type";
-
-const DEFAULT_PENDING_FACT_FAMILIES: [&str; 3] = [
-    FACT_RESOLVER_RECORD,
-    FACT_RESOLVER_RECORD_VERSION,
-    FACT_RESOLVER_AUTHORIZATION,
-];
-
-#[derive(Clone, Copy, Debug)]
-struct ResolverProfileFact {
-    fact_family: &'static str,
-    status: &'static str,
-}
-
-impl ResolverProfileFact {
-    const fn supported(fact_family: &'static str) -> Self {
-        Self {
-            fact_family,
-            status: RESOLVER_PROFILE_STATUS_SUPPORTED,
-        }
-    }
-
-    const fn unsupported(fact_family: &'static str) -> Self {
-        Self {
-            fact_family,
-            status: RESOLVER_PROFILE_STATUS_UNSUPPORTED,
-        }
-    }
-}
-
-const LATEST_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::supported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::supported(FACT_DEFAULT_COIN_TYPE),
-];
-
-const WRAPPER_AWARE_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::supported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::unsupported(FACT_DEFAULT_COIN_TYPE),
-];
-
-const LEGACY_ADDR_TEXT_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::unsupported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::unsupported(FACT_DEFAULT_COIN_TYPE),
-];
-
-const LEGACY_ADDR_TEXT_NO_DNS_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::unsupported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::unsupported(FACT_DEFAULT_COIN_TYPE),
-];
-
-const LEGACY_ETH_ADDR_TEXT_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::unsupported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::unsupported(FACT_DEFAULT_COIN_TYPE),
-];
-
-const LEGACY_ADDR_ONLY_FACTS: &[ResolverProfileFact] = &[
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ADDR),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_MULTICOIN_ADDR),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_NAME),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_TEXT),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_ABI),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_CONTENTHASH),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DNS),
-    ResolverProfileFact::supported(FACT_RESOLVER_RECORD_INTERFACE),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_DATA),
-    ResolverProfileFact::unsupported(FACT_RESOLVER_RECORD_VERSION),
-    ResolverProfileFact::supported(FACT_RESOLVER_AUTHORIZATION),
-    ResolverProfileFact::unsupported(FACT_NAME_WRAPPER_AWARE),
-    ResolverProfileFact::unsupported(FACT_DEFAULT_COIN_TYPE),
-];
-
-#[derive(Clone, Copy, Debug)]
-struct EnsV1ResolverProfileConfig {
-    role: &'static str,
-    profile: &'static str,
-    fact_families: &'static [ResolverProfileFact],
-    manifest_seed_basis: &'static str,
-}
-
-const ENS_V1_RESOLVER_PROFILE_CONFIGS: &[EnsV1ResolverProfileConfig] = &[
-    EnsV1ResolverProfileConfig {
-        role: ENS_V1_PUBLIC_RESOLVER_ROLE,
-        profile: ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
-        fact_families: LATEST_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_MANIFEST_SEED,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_231b0ee",
-        profile: ENS_V1_PUBLIC_RESOLVER_WRAPPER_AWARE_PROFILE,
-        fact_families: WRAPPER_AWARE_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_4976fb03",
-        profile: ENS_V1_PUBLIC_RESOLVER_MULTICOIN_DNS_PROFILE,
-        fact_families: LEGACY_ADDR_TEXT_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_daaf96c3",
-        profile: ENS_V1_PUBLIC_RESOLVER_MULTICOIN_DNS_PROFILE,
-        fact_families: LEGACY_ADDR_TEXT_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_226159d5",
-        profile: ENS_V1_PUBLIC_RESOLVER_MULTICOIN_PROFILE,
-        fact_families: LEGACY_ADDR_TEXT_NO_DNS_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_5ffc0143",
-        profile: ENS_V1_PUBLIC_RESOLVER_ETH_ADDR_TEXT_PROFILE,
-        fact_families: LEGACY_ETH_ADDR_TEXT_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-    EnsV1ResolverProfileConfig {
-        role: "public_resolver_1da02271",
-        profile: ENS_V1_PUBLIC_RESOLVER_ETH_ADDR_PROFILE,
-        fact_families: LEGACY_ADDR_ONLY_FACTS,
-        manifest_seed_basis: RESOLVER_PROFILE_BASIS_FIRST_PARTY_KNOWN_RESOLVER,
-    },
-];
+use profile_config::{
+    DEFAULT_PENDING_FACT_FAMILIES, ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
+    ENS_V1_PUBLIC_RESOLVER_ROLE, ENS_V1_RESOLVER_PROFILE_CONFIGS, ENS_V1_RESOLVER_SOURCE_FAMILY,
+    EnsV1ResolverProfileConfig, profile_config_for_role,
+};
 
 #[derive(Clone, Debug)]
 struct EnsV1ResolverProfileSeed {
@@ -264,7 +60,7 @@ pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
     }
 
     let seed_contracts = load_ens_v1_resolver_profile_seed_watched_contracts(pool).await?;
-    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
+    let target_contracts = super::load_resolver_profile_target_watched_contracts(
         pool,
         ENS_V1_RESOLVER_SOURCE_FAMILY,
         targets,
@@ -399,12 +195,6 @@ async fn load_ens_v1_resolver_profile_seed_watched_contracts(
         .collect()
 }
 
-fn profile_config_for_role(role: &str) -> Option<&'static EnsV1ResolverProfileConfig> {
-    ENS_V1_RESOLVER_PROFILE_CONFIGS
-        .iter()
-        .find(|config| config.role == role)
-}
-
 fn derive_ens_v1_resolver_profile_admissions(
     watched_contracts: &[WatchedContract],
     code_hash_observations: &[ManifestCodeHashObservation],
@@ -445,7 +235,7 @@ fn derive_ens_v1_resolver_profile_admissions(
         push_profile_admissions(watched_contract, profile_match, &mut admissions);
     }
 
-    sort_admissions(&mut admissions);
+    sort_resolver_profile_admissions(&mut admissions);
     admissions
 }
 
@@ -573,30 +363,5 @@ fn push_admission(
         observed_code_hash: profile_match.observed_code_hash.clone(),
         matched_code_hash: profile_match.matched_code_hash.clone(),
         matched_contract_instance_id: profile_match.matched_contract_instance_id,
-    });
-}
-
-fn sort_admissions(admissions: &mut [ResolverProfileAdmission]) {
-    admissions.sort_by(|left, right| {
-        (
-            left.chain.as_str(),
-            left.source_family.as_str(),
-            left.address.as_str(),
-            left.contract_instance_id,
-            left.active_from_block_number,
-            left.active_to_block_number,
-            left.profile.as_str(),
-            left.fact_family.as_str(),
-        )
-            .cmp(&(
-                right.chain.as_str(),
-                right.source_family.as_str(),
-                right.address.as_str(),
-                right.contract_instance_id,
-                right.active_from_block_number,
-                right.active_to_block_number,
-                right.profile.as_str(),
-                right.fact_family.as_str(),
-            ))
     });
 }

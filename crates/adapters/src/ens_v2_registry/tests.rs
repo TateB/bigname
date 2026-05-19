@@ -33,7 +33,7 @@ impl TestDatabase {
             .as_nanos();
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let database_name = format!(
-            "bigname_adapters_ens_v2_registry_test_{}_{}_{}",
+            "bn_ad_ensv2_reg_{}_{}_{}",
             std::process::id(),
             unique,
             sequence
@@ -225,6 +225,8 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
         true,
         &[first_block_hash.to_owned(), second_block_hash.to_owned()],
         Some(&source_scope),
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
     )
     .await?;
 
@@ -246,6 +248,8 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
         true,
         &[first_block_hash.to_owned(), second_block_hash.to_owned()],
         Some(&source_scope[1..]),
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
     )
     .await?;
     assert_eq!(
@@ -254,6 +258,24 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
             .map(|row| (row.block_number, row.emitting_contract_instance_id))
             .collect::<Vec<_>>(),
         vec![(42, second_contract_instance_id)]
+    );
+    let target_bounded_rows = load_registry_raw_logs(
+        database.pool(),
+        chain,
+        &emitters,
+        true,
+        &[first_block_hash.to_owned(), second_block_hash.to_owned()],
+        Some(&source_scope),
+        RawLogCanonicalityFilter::IncludeObserved,
+        Some(40),
+    )
+    .await?;
+    assert_eq!(
+        target_bounded_rows
+            .iter()
+            .map(|row| (row.block_number, row.emitting_contract_instance_id))
+            .collect::<Vec<_>>(),
+        vec![(40, first_contract_instance_id)]
     );
 
     database.cleanup().await
@@ -972,7 +994,7 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
             'active',
             'uts46-v1',
             $3,
-            '{"contracts":[]}'::JSONB
+            $4::JSONB
         )
         RETURNING manifest_id
         "#,
@@ -984,9 +1006,72 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
         std::process::id(),
         NEXT_TEST_ID.load(Ordering::Relaxed)
     ))
+    .bind(serde_json::to_string(&test_registry_manifest_payload(
+        chain,
+    ))?)
     .fetch_one(pool)
     .await
     .context("failed to insert scoped registry test manifest")
+}
+
+fn test_registry_manifest_payload(chain: &str) -> Value {
+    json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        "chain": chain,
+        "deployment_epoch": "ens_v2_registry_scope_test",
+        "rollout_status": "active",
+        "normalizer_version": "uts46-v1",
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {
+            "events": [
+                {
+                    "name": "LabelRegistered",
+                    "fragment": "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+                },
+                {
+                    "name": "LabelReserved",
+                    "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
+                },
+                {
+                    "name": "LabelReserved",
+                    "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint256 expiry, address indexed sender)"
+                },
+                {
+                    "name": "LabelUnregistered",
+                    "fragment": "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
+                },
+                {
+                    "name": "ExpiryUpdated",
+                    "fragment": "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
+                },
+                {
+                    "name": "SubregistryUpdated",
+                    "fragment": "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+                },
+                {
+                    "name": "ResolverUpdated",
+                    "fragment": "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+                },
+                {
+                    "name": "TokenResource",
+                    "fragment": "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
+                },
+                {
+                    "name": "TokenRegenerated",
+                    "fragment": "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
+                },
+                {
+                    "name": "ParentUpdated",
+                    "fragment": "event ParentUpdated(address indexed parent, string label, address indexed sender)"
+                },
+            ]
+        }
+    })
 }
 
 async fn insert_test_registry_contract(
@@ -1120,7 +1205,7 @@ fn label_reserved_raw_log(
         log_index,
         emitting_address: normalize_address(emitting_address),
         topics: vec![
-            keccak_signature_hex(LABEL_RESERVED_SIGNATURE),
+            keccak_signature_hex("LabelReserved(uint256,bytes32,string,uint64,address)"),
             topic_word((log_index + 1) as u64),
             labelhash(label),
             topic_address("0x0000000000000000000000000000000000000dad"),

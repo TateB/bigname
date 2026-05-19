@@ -6,20 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-alloy-primitives = "1.5.7"
-alloy-sol-types = "1.5.7"
+alloy-json-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+alloy-transport-http.workspace = true
 anyhow.workspace = true
 bigname-storage.workspace = true
-bytes = "1.10.1"
 futures-util.workspace = true
-http-body-util = "0.1.3"
-hyper = { version = "1.9.0", features = ["client", "http1"] }
-hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 serde.workspace = true
 serde_json = "1.0.149"
-sha3 = "0.10.8"
 sqlx = { workspace = true, features = ["time"] }
+tower = { version = "0.5.2", default-features = false }
 uuid.workspace = true
 
 [dev-dependencies]

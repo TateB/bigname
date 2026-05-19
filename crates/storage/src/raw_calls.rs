@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
+use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 
-use crate::CanonicalityState;
+use crate::{CanonicalityState, evm_primitives::normalize_evm_b256};
 
 /// Persisted exact block-anchored call snapshot stored as an immutable raw fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,8 +60,12 @@ pub async fn upsert_raw_call_snapshots_in_transaction(
         return Ok(Vec::new());
     }
 
+    let snapshots = snapshots
+        .iter()
+        .map(normalize_raw_call_snapshot)
+        .collect::<Vec<_>>();
     let mut persisted = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
+    for snapshot in &snapshots {
         validate_raw_call_snapshot(snapshot)?;
         persisted.push(upsert_raw_call_snapshot(transaction, snapshot).await?);
     }
@@ -75,6 +79,7 @@ pub async fn load_raw_call_snapshots_by_block_hash(
     chain_id: &str,
     block_hash: &str,
 ) -> Result<Vec<RawCallSnapshot>> {
+    let block_hash = normalize_evm_b256(block_hash);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -93,7 +98,7 @@ pub async fn load_raw_call_snapshots_by_block_hash(
         "#,
     )
     .bind(chain_id)
-    .bind(block_hash)
+    .bind(&block_hash)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -101,6 +106,19 @@ pub async fn load_raw_call_snapshots_by_block_hash(
     })?;
 
     rows.into_iter().map(decode_raw_call_snapshot).collect()
+}
+
+fn normalize_raw_call_snapshot(snapshot: &RawCallSnapshot) -> RawCallSnapshot {
+    RawCallSnapshot {
+        chain_id: snapshot.chain_id.clone(),
+        block_hash: normalize_evm_b256(&snapshot.block_hash),
+        block_number: snapshot.block_number,
+        request_hash: normalize_evm_b256(&snapshot.request_hash),
+        request_payload: snapshot.request_payload.clone(),
+        response_hash: normalize_evm_b256(&snapshot.response_hash),
+        response_payload: snapshot.response_payload.clone(),
+        canonicality_state: snapshot.canonicality_state,
+    }
 }
 
 async fn upsert_raw_call_snapshot(
@@ -166,7 +184,9 @@ async fn upsert_raw_call_snapshot(
     })?;
 
     ensure_raw_call_snapshot_identity_matches(&existing, snapshot)?;
-    let next_state = merge_canonicality(existing.canonicality_state, snapshot.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(snapshot.canonicality_state);
 
     let persisted = sqlx::query(
         r#"
@@ -213,6 +233,8 @@ async fn load_raw_call_snapshot_internal<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let block_hash = normalize_evm_b256(block_hash);
+    let request_hash = normalize_evm_b256(request_hash);
     let row = sqlx::query(
         r#"
         SELECT
@@ -231,8 +253,8 @@ where
         "#,
     )
     .bind(chain_id)
-    .bind(block_hash)
-    .bind(request_hash)
+    .bind(&block_hash)
+    .bind(&request_hash)
     .fetch_optional(executor)
     .await
     .with_context(|| {
@@ -301,52 +323,16 @@ fn ensure_raw_call_snapshot_identity_matches(
     Ok(())
 }
 
-fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
-}
-
 fn decode_raw_call_snapshot(row: PgRow) -> Result<RawCallSnapshot> {
     Ok(RawCallSnapshot {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        request_hash: row
-            .try_get("request_hash")
-            .context("missing request_hash")?,
-        request_payload: row
-            .try_get("request_payload")
-            .context("missing request_payload")?,
-        response_hash: row
-            .try_get("response_hash")
-            .context("missing response_hash")?,
-        response_payload: row
-            .try_get("response_payload")
-            .context("missing response_payload")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        request_hash: crate::sql_row::get(&row, "request_hash")?,
+        request_payload: crate::sql_row::get(&row, "request_payload")?,
+        response_hash: crate::sql_row::get(&row, "response_hash")?,
+        response_payload: crate::sql_row::get(&row, "response_payload")?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 

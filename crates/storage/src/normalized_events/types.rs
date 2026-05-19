@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::CanonicalityState;
 
 /// Persisted adapter-owned normalized event used to rebuild projections.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NormalizedEvent {
     pub event_identity: String,
     pub namespace: String,

@@ -1,8 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContractSource, load_manifest_declared_watched_contracts};
-use sqlx::{PgPool, Row};
+use anyhow::{Context, Result};
+use bigname_manifests::load_manifest_declared_watched_contracts;
+use sqlx::PgPool;
+
+use crate::adapter_manifest::{
+    active_manifest_for_watched_contract, ensure_watched_contract_manifest_chain,
+    load_active_manifest_metadata, source_rank, watched_contract_manifest_ids,
+};
 
 use super::helpers::supports_reverse_claim_source_family;
 
@@ -15,15 +20,6 @@ pub(super) struct ActiveEmitter {
     pub(super) source_family: String,
     pub(super) manifest_version: i64,
     source_rank: i32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ActiveManifestMetadata {
-    manifest_id: i64,
-    chain: String,
-    namespace: String,
-    source_family: String,
-    manifest_version: i64,
 }
 
 pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
@@ -40,37 +36,15 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
         return Ok(Vec::new());
     }
 
-    let manifest_ids = watched_contracts
-        .iter()
-        .map(|contract| {
-            contract.source_manifest_id.with_context(|| {
-                format!(
-                    "watched contract {} on {} is missing source_manifest_id",
-                    contract.address, contract.chain
-                )
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
+    let active_manifests =
+        load_active_manifest_metadata(pool, &manifest_ids, "ENSv1 reverse").await?;
 
     let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
     for watched_contract in watched_contracts {
-        let source_manifest_id = watched_contract
-            .source_manifest_id
-            .context("watched contract missing source_manifest_id after validation")?;
-        let manifest = active_manifests.get(&source_manifest_id).with_context(|| {
-            format!("missing active manifest metadata for manifest_id {source_manifest_id}")
-        })?;
-        if manifest.chain != watched_contract.chain {
-            bail!(
-                "watched contract chain {} does not match active manifest chain {} for manifest_id {}",
-                watched_contract.chain,
-                manifest.chain,
-                source_manifest_id
-            );
-        }
+        let (source_manifest_id, manifest) =
+            active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
+        ensure_watched_contract_manifest_chain(&watched_contract, manifest, source_manifest_id)?;
         if !supports_reverse_claim_source_family(&manifest.source_family) {
             continue;
         }
@@ -102,49 +76,6 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
             .then(left.contract_instance_id.cmp(&right.contract_instance_id))
     });
     Ok(emitters)
-}
-
-async fn load_active_manifest_metadata(
-    pool: &PgPool,
-    manifest_ids: &[i64],
-) -> Result<HashMap<i64, ActiveManifestMetadata>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, chain, namespace, source_family, manifest_version
-        FROM manifest_versions
-        WHERE rollout_status = 'active'
-          AND manifest_id = ANY($1::BIGINT[])
-        "#,
-    )
-    .bind(manifest_ids)
-    .fetch_all(pool)
-    .await
-    .context("failed to load active manifest metadata for ENSv1 reverse")?;
-
-    rows.into_iter()
-        .map(|row| {
-            let manifest = ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-            };
-            Ok((manifest.manifest_id, manifest))
-        })
-        .collect()
-}
-
-fn source_rank(source: WatchedContractSource) -> i32 {
-    match source {
-        WatchedContractSource::ManifestRoot => 0,
-        WatchedContractSource::ManifestContract => 1,
-        WatchedContractSource::DiscoveryEdge => 2,
-    }
 }
 
 fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {

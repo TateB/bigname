@@ -9,12 +9,83 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  RUST_VERSION: 1.93.1
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  rust:
+  static:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy,rustfmt
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: Rust source size ratchet
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+            git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            ./scripts/check-rust-file-size --base-ref "refs/remotes/origin/${BASE_REF}"
+          else
+            ./scripts/check-rust-file-size
+          fi
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features
+
+  test_shard:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            packages: "-p bigname-api"
+          - name: indexer
+            packages: "-p bigname-indexer"
+          - name: worker
+            packages: "-p bigname-worker"
+          - name: core
+            packages: >-
+              -p bigname-domain
+              -p bigname-storage
+              -p bigname-manifests
+              -p bigname-adapters
+              -p bigname-execution
+              -p bigname-test-support
     services:
       postgres:
         image: postgres:16-alpine
@@ -35,64 +106,91 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect Rust workspace
-        id: workspace
-        run: |
-          if [ -f Cargo.toml ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No root Cargo.toml found; skipping Rust CI bootstrap checks."
-          fi
-
-      - name: Install stable Rust
-        if: steps.workspace.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: clippy,rustfmt
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo artifacts
-        if: steps.workspace.outputs.present == 'true'
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt
-        if: steps.workspace.outputs.present == 'true'
-        run: cargo fmt --check
+      - name: cargo test
+        run: cargo test ${{ matrix.packages }} --all-features
 
-      - name: Rust source size ratchet
-        if: steps.workspace.outputs.present == 'true'
-        env:
-          BASE_REF: ${{ github.base_ref }}
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: test_shard
+    if: always()
+    steps:
+      - name: Check test shards
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
-            git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-            ./scripts/check-rust-file-size --base-ref "refs/remotes/origin/${BASE_REF}"
-          else
-            ./scripts/check-rust-file-size
+          if [ "${{ needs.test_shard.result }}" != "success" ]; then
+            echo "test shards finished with result: ${{ needs.test_shard.result }}"
+            exit 1
           fi
 
-      - name: cargo clippy
-        if: steps.workspace.outputs.present == 'true'
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+  artifacts-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: cargo test
-        if: steps.workspace.outputs.present == 'true'
-        run: cargo test --workspace --all-features
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: verify OpenAPI artifact drift
-        if: steps.workspace.outputs.present == 'true'
         run: |
           cargo run -p bigname-api -- print-openapi > /tmp/api-v1.openapi.json
           diff -u docs/api-v1.openapi.json /tmp/api-v1.openapi.json
 
       - name: verify migrations
-        if: steps.workspace.outputs.present == 'true'
         run: cargo run -p bigname-worker -- migrate
 
+      - name: Fetch smoke dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path tests/conformance/Cargo.toml
+
+      - name: Sync upstream refs
+        run: scripts/sync-refs
+
       - name: release smoke gate (no network)
-        if: steps.workspace.outputs.present == 'true'
         run: ./scripts/release-smoke --no-network
 
       - name: rollback smoke gate (no network)
-        if: steps.workspace.outputs.present == 'true'
         run: ./scripts/rollback-smoke --no-network

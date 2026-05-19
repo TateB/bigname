@@ -3,3 +3,4 @@
 .DS_Store
 /.agents/state/
 /.refs/*/
+*.pdf

@@ -21,8 +21,8 @@ pub use ens_resolution::{
     OnDemandEnsResolutionRequest, execute_ens_universal_resolver_verified_resolution,
 };
 pub use ens_text_records::{
-    EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult, MULTICALL3_ADDRESS,
-    ens_namehash_hex, execute_ens_text_record_multicall,
+    EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult,
+    MULTICALL3_ADDRESS, ens_namehash_hex, execute_ens_text_record_multicall,
 };
 pub use persistence::{
     LoadedEnsVerifiedPrimaryName, PersistEnsExactNameVerifiedResolutionRequest,

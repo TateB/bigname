@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -9,6 +10,7 @@ use bigname_storage::{
     RawBlock, RawLog, default_database_url, load_normalized_event_counts_by_kind,
     load_normalized_events_by_namespace, upsert_raw_blocks, upsert_raw_logs,
 };
+use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -16,7 +18,20 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
+
 use super::*;
+
+const ABI_EVENT_NAME_WRAPPED: &str = "NameWrapped";
+const ABI_EVENT_LABEL_REGISTERED: &str = "LabelRegistered";
+const ABI_EVENT_LABEL_RESERVED: &str = "LabelReserved";
+const ABI_EVENT_PARENT_UPDATED: &str = "ParentUpdated";
+const ABI_EVENT_NAME_REGISTERED: &str = "NameRegistered";
+const ABI_EVENT_NAME_RENEWED: &str = "NameRenewed";
+const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
+const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
+const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
+const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
 
 // ENSv1's `NameWrapped` event declaration starts at this pinned source line.
 // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
@@ -138,10 +153,91 @@ async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -
     .bind(seed.rollout_status)
     .bind(seed.normalizer_version)
     .bind(seed.file_path)
-    .bind("{}")
+    .bind(manifest_payload(&seed))
     .fetch_one(pool)
     .await
     .context("failed to insert manifest version")
+}
+
+fn manifest_payload(seed: &ManifestVersionSeed<'_>) -> Value {
+    json!({
+        "manifest_version": seed.manifest_version,
+        "namespace": seed.namespace,
+        "source_family": seed.source_family,
+        "chain": seed.chain,
+        "deployment_epoch": seed.deployment_epoch,
+        "rollout_status": seed.rollout_status,
+        "normalizer_version": seed.normalizer_version,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {
+            "events": manifest_abi_events(seed.source_family),
+        },
+    })
+}
+
+fn manifest_abi_events(source_family: &str) -> Vec<Value> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => vec![
+            json!({
+                "name": ABI_EVENT_NAME_REGISTERED,
+                "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAME_RENEWED,
+                "fragment": "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
+            }),
+        ],
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => vec![json!({
+            "name": ABI_EVENT_NAME_WRAPPED,
+            "fragment": "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+        })],
+        SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => vec![
+            json!({
+                "name": ABI_EVENT_LABEL_REGISTERED,
+                "fragment": "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+            }),
+            json!({
+                "name": ABI_EVENT_LABEL_RESERVED,
+                "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+            }),
+            json!({
+                "name": ABI_EVENT_PARENT_UPDATED,
+                "fragment": "event ParentUpdated(address parent, string label, address indexed sender)",
+            }),
+        ],
+        SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => vec![
+            json!({
+                "name": ABI_EVENT_NAME_REGISTERED,
+                "fragment": "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAME_RENEWED,
+                "fragment": "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base)",
+            }),
+        ],
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => vec![
+            json!({
+                "name": ABI_EVENT_ALIAS_CHANGED,
+                "fragment": "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAMED_RESOURCE,
+                "fragment": "event NamedResource(uint256 indexed resource, bytes name)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAMED_TEXT_RESOURCE,
+                "fragment": "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAMED_ADDR_RESOURCE,
+                "fragment": "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)",
+            }),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 struct ManifestContractInstanceSeed<'a> {
@@ -399,8 +495,12 @@ enum RegistrarExplicitLabelEvent {
 impl RegistrarExplicitLabelEvent {
     fn topic0(self) -> String {
         match self {
-            Self::NameRegistered => registrar_name_registered_topic0(),
-            Self::NameRenewed => registrar_name_renewed_topic0(),
+            Self::NameRegistered => {
+                keccak_signature_hex("NameRegistered(string,bytes32,address,uint256,uint256)")
+            }
+            Self::NameRenewed => {
+                keccak_signature_hex("NameRenewed(string,bytes32,uint256,uint256)")
+            }
         }
     }
 
@@ -568,13 +668,21 @@ fn name_wrapped_topic0_matches_upstream_shape_and_not_old_swapped_shape() {
         keccak_signature_hex(UPSTREAM_NAME_WRAPPED_SIGNATURE),
         UPSTREAM_NAME_WRAPPED_TOPIC0
     );
-    assert_eq!(name_wrapped_topic0(), UPSTREAM_NAME_WRAPPED_TOPIC0);
+    assert!(
+        test_preimage_observed_event_topics()
+            .query_topic0s()
+            .contains(&UPSTREAM_NAME_WRAPPED_TOPIC0.to_owned())
+    );
 
     assert_eq!(
         keccak_signature_hex(OLD_SWAPPED_NAME_WRAPPED_SIGNATURE),
         OLD_SWAPPED_NAME_WRAPPED_TOPIC0
     );
-    assert_ne!(name_wrapped_topic0(), OLD_SWAPPED_NAME_WRAPPED_TOPIC0);
+    assert!(
+        !test_preimage_observed_event_topics()
+            .query_topic0s()
+            .contains(&OLD_SWAPPED_NAME_WRAPPED_TOPIC0.to_owned())
+    );
 }
 
 #[test]
@@ -589,7 +697,7 @@ fn name_wrapped_upstream_topic_emits_preimage_and_old_swapped_topic_is_ignored()
         ],
         encode_name_wrapped_log_data(&dns_name),
     );
-    let upstream_events = build_preimage_observed_events(&upstream_log)?;
+    let upstream_events = build_test_preimage_observed_events(&upstream_log)?;
     assert_eq!(upstream_events.len(), 1);
     assert_eq!(
         upstream_events[0].after_state["source_event"],
@@ -609,7 +717,7 @@ fn name_wrapped_upstream_topic_emits_preimage_and_old_swapped_topic_is_ignored()
         ],
         encode_name_wrapped_log_data(&dns_name),
     );
-    assert!(build_preimage_observed_events(&old_swapped_log)?.is_empty());
+    assert!(build_test_preimage_observed_events(&old_swapped_log)?.is_empty());
 
     Ok(())
 }
@@ -620,7 +728,7 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
         SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
         1,
         vec![
-            keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
             hex_string(&abi_word_u64(1)),
             keccak256_hex(b"alice"),
             hex_string(&abi_word_address(
@@ -633,7 +741,7 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
             2_000_000_000,
         ),
     );
-    let registry_events = build_preimage_observed_events(&registry_log)?;
+    let registry_events = build_test_preimage_observed_events(&registry_log)?;
     assert_eq!(registry_events.len(), 1);
     assert_eq!(
         registry_events[0].after_state["source_event"],
@@ -649,7 +757,7 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
         SOURCE_FAMILY_ENS_V2_ROOT_L1,
         2,
         vec![
-            keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE),
+            keccak_signature_hex("ParentUpdated(address,string,address)"),
             hex_string(&abi_word_address(
                 "0x00000000000000000000000000000000000000cc",
             )),
@@ -659,7 +767,7 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
         ],
         encode_single_dynamic_string("eth"),
     );
-    let parent_events = build_preimage_observed_events(&parent_log)?;
+    let parent_events = build_test_preimage_observed_events(&parent_log)?;
     assert_eq!(parent_events.len(), 1);
     assert_eq!(
         parent_events[0].after_state["source_event"],
@@ -671,12 +779,14 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
         SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
         3,
         vec![
-            keccak_signature_hex(ENS_V2_REGISTRAR_NAME_RENEWED_SIGNATURE),
+            keccak_signature_hex(
+                "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
+            ),
             hex_string(&abi_word_u64(1)),
         ],
         encode_ens_v2_registrar_name_renewed_data("renewed"),
     );
-    let registrar_events = build_preimage_observed_events(&registrar_log)?;
+    let registrar_events = build_test_preimage_observed_events(&registrar_log)?;
     assert_eq!(registrar_events.len(), 1);
     assert_eq!(
         registrar_events[0].after_state["source_event"],
@@ -699,13 +809,13 @@ fn oversized_label_logs_do_not_abort_preimage_observation() -> Result<()> {
         RegistrarExplicitLabelEvent::NameRegistered.topics(&oversized_label),
         encode_registrar_label_log_data(&oversized_label),
     );
-    assert!(build_preimage_observed_events(&registrar_log)?.is_empty());
+    assert!(build_test_preimage_observed_events(&registrar_log)?.is_empty());
 
     let registry_log = watched_log(
         SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
         5,
         vec![
-            keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
             hex_string(&abi_word_u64(1)),
             keccak256_hex(oversized_label.as_bytes()),
             hex_string(&abi_word_address(
@@ -718,7 +828,7 @@ fn oversized_label_logs_do_not_abort_preimage_observation() -> Result<()> {
             2_000_000_000,
         ),
     );
-    assert!(build_preimage_observed_events(&registry_log)?.is_empty());
+    assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
 
     Ok(())
 }
@@ -732,13 +842,13 @@ fn malformed_label_payloads_do_not_abort_preimage_observation() -> Result<()> {
         RegistrarExplicitLabelEvent::NameRegistered.topics("malformed"),
         malformed_dynamic_string.clone(),
     );
-    assert!(build_preimage_observed_events(&registrar_log)?.is_empty());
+    assert!(build_test_preimage_observed_events(&registrar_log)?.is_empty());
 
     let registry_log = watched_log(
         SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
         7,
         vec![
-            keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
             hex_string(&abi_word_u64(1)),
             keccak256_hex(b"malformed"),
             hex_string(&abi_word_address(
@@ -747,7 +857,7 @@ fn malformed_label_payloads_do_not_abort_preimage_observation() -> Result<()> {
         ],
         malformed_dynamic_string,
     );
-    assert!(build_preimage_observed_events(&registry_log)?.is_empty());
+    assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
 
     Ok(())
 }
@@ -760,13 +870,13 @@ fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> 
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         4,
         vec![
-            keccak_signature_hex(ENS_V2_ALIAS_CHANGED_SIGNATURE),
+            keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
             keccak256_hex(&alice_dns_name),
             keccak256_hex(&bob_dns_name),
         ],
         encode_two_dynamic_bytes(&alice_dns_name, &bob_dns_name),
     );
-    let alias_events = build_preimage_observed_events(&alias_log)?;
+    let alias_events = build_test_preimage_observed_events(&alias_log)?;
     let resolver_alias_events = resolver_preimage_events_for_watched_log(&alias_log)?;
     assert_eq!(resolver_alias_events, alias_events);
     assert_eq!(alias_events.len(), 2);
@@ -785,43 +895,40 @@ fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> 
 
     let named_cases = [
         (
-            ENS_V2_NAMED_RESOURCE_SIGNATURE,
             SOURCE_EVENT_NAMED_RESOURCE,
             encode_single_dynamic_bytes(&alice_dns_name),
             vec![
-                keccak_signature_hex(ENS_V2_NAMED_RESOURCE_SIGNATURE),
+                keccak_signature_hex("NamedResource(uint256,bytes)"),
                 hex_string(&abi_word_u64(42)),
             ],
         ),
         (
-            ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE,
             SOURCE_EVENT_NAMED_TEXT_RESOURCE,
             encode_dynamic_bytes_and_string(&alice_dns_name, "url"),
             vec![
-                keccak_signature_hex(ENS_V2_NAMED_TEXT_RESOURCE_SIGNATURE),
+                keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
                 hex_string(&abi_word_u64(43)),
                 keccak256_hex(b"url"),
             ],
         ),
         (
-            ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE,
             SOURCE_EVENT_NAMED_ADDR_RESOURCE,
             encode_single_dynamic_bytes(&alice_dns_name),
             vec![
-                keccak_signature_hex(ENS_V2_NAMED_ADDR_RESOURCE_SIGNATURE),
+                keccak_signature_hex("NamedAddrResource(uint256,bytes,uint256)"),
                 hex_string(&abi_word_u64(44)),
                 hex_string(&abi_word_u64(60)),
             ],
         ),
     ];
-    for (index, (_signature, source_event, data, topics)) in named_cases.into_iter().enumerate() {
+    for (index, (source_event, data, topics)) in named_cases.into_iter().enumerate() {
         let named_log = watched_log(
             SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
             10 + i64::try_from(index)?,
             topics,
             data,
         );
-        let events = build_preimage_observed_events(&named_log)?;
+        let events = build_test_preimage_observed_events(&named_log)?;
         let resolver_events = resolver_preimage_events_for_watched_log(&named_log)?;
         assert_eq!(resolver_events, events);
         assert_eq!(events.len(), 1);
@@ -830,6 +937,104 @@ fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> 
     }
 
     Ok(())
+}
+
+fn build_test_preimage_observed_events(raw_log: &WatchedRawLogRow) -> Result<Vec<NormalizedEvent>> {
+    let event_topics = test_preimage_observed_event_topics();
+    build_preimage_observed_events(raw_log, &event_topics)
+}
+
+fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventTopics {
+    event_topics::PreimageObservedEventTopics::from_manifest_topic0s(HashMap::from([
+        (
+            test_source_manifest_id(SOURCE_FAMILY_ENS_V1_REGISTRAR_L1),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    ENS_V1_NAME_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex("NameRegistered(string,bytes32,address,uint256,uint256)"),
+                ),
+                (
+                    ENS_V1_NAME_RENEWED_SIGNATURE.to_owned(),
+                    keccak_signature_hex("NameRenewed(string,bytes32,uint256,uint256)"),
+                ),
+            ])),
+        ),
+        (
+            test_source_manifest_id(SOURCE_FAMILY_ENS_V1_WRAPPER_L1),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([(
+                NAME_WRAPPED_SIGNATURE.to_owned(),
+                keccak_signature_hex(UPSTREAM_NAME_WRAPPED_SIGNATURE),
+            )])),
+        ),
+        (
+            test_source_manifest_id(SOURCE_FAMILY_ENS_V2_REGISTRY_L1),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    LABEL_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(
+                        "LabelRegistered(uint256,bytes32,string,address,uint64,address)",
+                    ),
+                ),
+                (
+                    LABEL_RESERVED_SIGNATURE.to_owned(),
+                    keccak_signature_hex("LabelReserved(uint256,bytes32,string,uint64,address)"),
+                ),
+                (
+                    PARENT_UPDATED_SIGNATURE.to_owned(),
+                    keccak_signature_hex("ParentUpdated(address,string,address)"),
+                ),
+            ])),
+        ),
+        (
+            test_source_manifest_id(SOURCE_FAMILY_ENS_V2_REGISTRAR_L1),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    ENS_V2_NAME_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(
+                        "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)",
+                    ),
+                ),
+                (
+                    ENS_V2_NAME_RENEWED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(
+                        "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
+                    ),
+                ),
+            ])),
+        ),
+        (
+            test_source_manifest_id(SOURCE_FAMILY_ENS_V2_RESOLVER_L1),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    ALIAS_CHANGED_SIGNATURE.to_owned(),
+                    keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
+                ),
+                (
+                    NAMED_RESOURCE_SIGNATURE.to_owned(),
+                    keccak_signature_hex("NamedResource(uint256,bytes)"),
+                ),
+                (
+                    NAMED_TEXT_RESOURCE_SIGNATURE.to_owned(),
+                    keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
+                ),
+                (
+                    NAMED_ADDR_RESOURCE_SIGNATURE.to_owned(),
+                    keccak_signature_hex("NamedAddrResource(uint256,bytes,uint256)"),
+                ),
+            ])),
+        ),
+    ]))
+}
+
+fn test_source_manifest_id(source_family: &str) -> i64 {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => 1,
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => 2,
+        SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => 3,
+        SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => 4,
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => 5,
+        _ => 1,
+    }
 }
 
 fn watched_log(
@@ -849,7 +1054,7 @@ fn watched_log(
         topics,
         data,
         canonicality_state: CanonicalityState::Finalized,
-        source_manifest_id: 1,
+        source_manifest_id: test_source_manifest_id(source_family),
         namespace: "ens".to_owned(),
         source_family: source_family.to_owned(),
         manifest_version: 1,
@@ -986,12 +1191,12 @@ async fn sync_block_derived_normalized_events_is_idempotent() -> Result<()> {
         ManifestVersionSeed {
             manifest_version: 1,
             namespace: "ens",
-            source_family: "ens_v1_name_wrapper",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v1_name_wrapper/1.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
     .await?;
@@ -1000,12 +1205,12 @@ async fn sync_block_derived_normalized_events_is_idempotent() -> Result<()> {
         ManifestVersionSeed {
             manifest_version: 1,
             namespace: "ens",
-            source_family: "ens_v1_name_wrapper",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1_shadow",
             rollout_status: "draft",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v1_name_wrapper/2.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/2.toml",
         },
     )
     .await?;
@@ -1316,12 +1521,12 @@ async fn sync_block_derived_normalized_events_uses_active_manifest_after_reactiv
         ManifestVersionSeed {
             manifest_version: 1,
             namespace: "ens",
-            source_family: "ens_v1_name_wrapper",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v0",
             rollout_status: "deprecated",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v1_name_wrapper/0.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/0.toml",
         },
     )
     .await?;
@@ -1330,12 +1535,12 @@ async fn sync_block_derived_normalized_events_uses_active_manifest_after_reactiv
         ManifestVersionSeed {
             manifest_version: 2,
             namespace: "ens",
-            source_family: "ens_v1_name_wrapper",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v1_name_wrapper/1.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
     .await?;
@@ -1424,12 +1629,12 @@ async fn sync_block_derived_normalized_events_watches_proxy_implementations_but_
         ManifestVersionSeed {
             manifest_version: 1,
             namespace: "ens",
-            source_family: "ens_v2_registry_l1",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
-            deployment_epoch: "ens_v2",
+            deployment_epoch: "ens_v1",
             rollout_status: "active",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v2_registry_l1/1.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
     .await?;
@@ -1463,10 +1668,10 @@ async fn sync_block_derived_normalized_events_watches_proxy_implementations_but_
         ManifestContractInstanceSeed {
             manifest_id,
             declaration_kind: "contract",
-            declaration_name: "registry",
+            declaration_name: "wrapper",
             contract_instance_id: proxy_contract_instance_id,
             declared_address: "0x00000000000000000000000000000000000000aa",
-            role: Some("registry"),
+            role: Some("name_wrapper"),
             proxy_kind: Some("erc1967"),
             implementation_contract_instance_id: Some(implementation_contract_instance_id),
             declared_implementation_address: Some("0x00000000000000000000000000000000000000dd"),
@@ -1571,12 +1776,12 @@ async fn sync_block_derived_normalized_events_skips_inactive_manifests() -> Resu
         ManifestVersionSeed {
             manifest_version: 1,
             namespace: "ens",
-            source_family: "ens_v1_name_wrapper",
+            source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "deprecated",
             normalizer_version: "uts46-v1",
-            file_path: "manifests/ens/ens_v1_name_wrapper/1.toml",
+            file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
     .await?;

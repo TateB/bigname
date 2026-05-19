@@ -3,6 +3,21 @@ use uuid::Uuid;
 
 use crate::WatchedContractSource;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveManifestAbiEvent {
+    pub manifest_id: i64,
+    pub manifest_version: u64,
+    pub namespace: String,
+    pub source_family: String,
+    pub chain: String,
+    pub deployment_epoch: String,
+    pub name: String,
+    pub canonical_signature: String,
+    pub topic0: Option<String>,
+    pub emitter_roles: Vec<String>,
+    pub normalized_events: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ManifestBootstrapSkippedTarget {
     pub source_family: String,

@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
+use crate::ens_v2_common::ActiveEmitter;
+use crate::normalized_event_support::upsert_normalized_events_with_counts;
 use anyhow::{Context, Result};
-use bigname_storage::{Resource, upsert_normalized_events, upsert_resources};
+use bigname_storage::{Resource, upsert_resources};
 use sqlx::{PgPool, types::Uuid};
 
 mod constants;
@@ -16,12 +19,9 @@ mod util;
 
 use decode::build_permissions_observation;
 use hints::{fallback_resource_hint, resolver_resource_hint};
-use load::{load_active_emitters, load_existing_event_identities, load_permissions_raw_logs};
-use normalized::{
-    build_resource, count_events_by_kind, count_inserted_events_by_kind, permission_changed_event,
-    remember_hint_and_resource,
-};
-use types::{ActiveEmitter, PermissionsObservation, ResolverResourceHint};
+use load::{load_active_emitters, load_permissions_raw_logs};
+use normalized::{build_resource, permission_changed_event, remember_hint_and_resource};
+use types::{PermissionsObservation, ResolverResourceHint};
 use util::resource_is_root;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,7 +46,7 @@ impl EnsV2PermissionsSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes, None).await
+        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes, None, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -55,8 +55,15 @@ impl EnsV2PermissionsSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v2_permissions_with_scope(pool, chain, true, block_hashes, Some(source_scope))
-            .await
+        sync_ens_v2_permissions_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            None,
+        )
+        .await
     }
 }
 
@@ -64,7 +71,16 @@ pub async fn sync_ens_v2_permissions(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2PermissionsSyncSummary> {
-    sync_ens_v2_permissions_with_scope(pool, chain, false, &[], None).await
+    sync_ens_v2_permissions_with_scope(pool, chain, false, &[], None, None).await
+}
+
+pub async fn sync_ens_v2_permissions_through_block(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: i64,
+) -> Result<EnsV2PermissionsSyncSummary> {
+    sync_ens_v2_permissions_with_scope(pool, chain, false, &[], None, Some(target_block_number))
+        .await
 }
 
 async fn sync_ens_v2_permissions_with_scope(
@@ -73,6 +89,7 @@ async fn sync_ens_v2_permissions_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    max_block_number: Option<i64>,
 ) -> Result<EnsV2PermissionsSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
@@ -81,6 +98,17 @@ async fn sync_ens_v2_permissions_with_scope(
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
+    let manifest_ids = active_emitters
+        .iter()
+        .map(|emitter| emitter.source_manifest_id)
+        .collect::<Vec<_>>();
+    let event_topics = load_required_active_manifest_event_topic0s_by_signature(
+        pool,
+        &manifest_ids,
+        &constants::ABI_EVENT_SIGNATURES,
+        "ENSv2 permissions",
+    )
+    .await?;
 
     let raw_logs = load_permissions_raw_logs(
         pool,
@@ -89,6 +117,7 @@ async fn sync_ens_v2_permissions_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
+        max_block_number,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -102,7 +131,7 @@ async fn sync_ens_v2_permissions_with_scope(
     let mut events = Vec::new();
 
     for raw_log in &raw_logs {
-        let Some(observation) = build_permissions_observation(raw_log)? else {
+        let Some(observation) = build_permissions_observation(raw_log, &event_topics)? else {
             continue;
         };
         matched_log_count += 1;
@@ -175,32 +204,21 @@ async fn sync_ens_v2_permissions_with_scope(
         .into_values()
         .map(|(resource, _)| resource)
         .collect::<Vec<_>>();
-    let existing = load_existing_event_identities(pool, &events).await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
-    let synced_by_kind = count_events_by_kind(&events);
     upsert_resources(pool, &resources).await?;
-    upsert_normalized_events(pool, &events).await?;
-
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                EnsV2PermissionsKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let counts = upsert_normalized_events_with_counts(pool, &events, "ENSv2 permissions").await?;
+    let (total_synced_count, total_inserted_count, by_kind) = counts.into_parts_by_kind(
+        |synced_count, inserted_count| EnsV2PermissionsKindSyncSummary {
+            synced_count,
+            inserted_count,
+        },
+    );
 
     Ok(EnsV2PermissionsSyncSummary {
         scanned_log_count,
         matched_log_count,
         total_resource_count: resources.len(),
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     })
 }

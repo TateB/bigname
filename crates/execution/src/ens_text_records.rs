@@ -44,6 +44,12 @@ pub struct EnsTextRecordMulticallRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnsTextRecordMulticallBlock {
+    pub block_number: i64,
+    pub block_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnsTextRecordMulticallResult {
     Success { value: String },
     NotFound,
@@ -58,10 +64,14 @@ pub async fn execute_ens_text_record_multicall(
     rpc_urls: &ChainRpcUrls,
     chain_id: &str,
     multicall3_address: &str,
+    block: &EnsTextRecordMulticallBlock,
     requests: &[EnsTextRecordMulticallRequest],
 ) -> Result<Vec<EnsTextRecordMulticallResult>> {
     if requests.is_empty() {
         return Ok(Vec::new());
+    }
+    if block.block_hash.trim().is_empty() {
+        bail!("ENS text record Multicall3 block hash must not be empty");
     }
 
     let rpc_url = rpc_urls
@@ -78,12 +88,15 @@ pub async fn execute_ens_text_record_multicall(
         "to": format_address(multicall3),
         "data": hex_string(&calldata),
     });
+    let block_selector = block_selector(block);
     let call_result = rpc
-        .call("eth_call", vec![call, Value::String("latest".to_owned())])
+        .call("eth_call", vec![call, block_selector])
         .await
         .with_context(|| {
             format!(
-                "failed to execute ENS text record Multicall3 batch on {chain_id} with {} calls",
+                "failed to execute ENS text record Multicall3 batch on {chain_id} block {} ({}) with {} calls",
+                block.block_number,
+                block.block_hash,
                 requests.len()
             )
         })?;
@@ -129,11 +142,17 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsTextRecordMulti
                 });
             }
 
-            let value = decode_selector_result(
+            let value = match decode_selector_result(
                 &SupportedVerifiedResolutionRecordKey::Text,
                 result.returnData.as_ref(),
-            )
-            .context("resolver text call return data is malformed")?;
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(EnsTextRecordMulticallResult::Failed {
+                        message: format!("resolver text call return data is malformed: {error:#}"),
+                    });
+                }
+            };
             Ok(match value {
                 Some(value) => EnsTextRecordMulticallResult::Success { value },
                 None => EnsTextRecordMulticallResult::NotFound,
@@ -148,6 +167,13 @@ fn parse_address(value: &str, context: &str) -> Result<Address> {
 
 fn format_address(address: Address) -> String {
     hex_string(address.as_slice())
+}
+
+fn block_selector(block: &EnsTextRecordMulticallBlock) -> Value {
+    json!({
+        "blockHash": block.block_hash,
+        "requireCanonical": true,
+    })
 }
 
 #[cfg(test)]
@@ -169,6 +195,7 @@ mod tests {
     fn decodes_multicall_text_results() -> Result<()> {
         let text_return = ("ipfs://avatar".to_owned(),).abi_encode_params();
         let empty_return = ("".to_owned(),).abi_encode_params();
+        let malformed_return = [0xab, 0xcd];
         let encoded = (vec![
             abi::Result3 {
                 success: true,
@@ -182,12 +209,17 @@ mod tests {
                 success: false,
                 returnData: Bytes::new(),
             },
+            abi::Result3 {
+                success: true,
+                returnData: Bytes::copy_from_slice(&malformed_return),
+            },
         ],)
             .abi_encode_params();
 
+        let results = decode_multicall_results(&encoded)?;
         assert_eq!(
-            decode_multicall_results(&encoded)?,
-            vec![
+            &results[..3],
+            [
                 EnsTextRecordMulticallResult::Success {
                     value: "ipfs://avatar".to_owned()
                 },
@@ -196,6 +228,13 @@ mod tests {
                     message: "resolver text call returned failure from Multicall3".to_owned()
                 },
             ]
+        );
+        let EnsTextRecordMulticallResult::Failed { message } = &results[3] else {
+            panic!("malformed resolver return data must be reported as a per-call failure");
+        };
+        assert!(
+            message.starts_with("resolver text call return data is malformed:"),
+            "{message}"
         );
         Ok(())
     }
@@ -215,5 +254,21 @@ mod tests {
         assert_eq!(&call.callData[..4], [0x59, 0xd1, 0xd4, 0x3c]);
         assert!(!call.callData.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn text_multicall_block_selector_is_hash_pinned() {
+        let block = EnsTextRecordMulticallBlock {
+            block_number: 12_345,
+            block_hash: "0xabc".to_owned(),
+        };
+
+        assert_eq!(
+            block_selector(&block),
+            json!({
+                "blockHash": "0xabc",
+                "requireCanonical": true,
+            })
+        );
     }
 }

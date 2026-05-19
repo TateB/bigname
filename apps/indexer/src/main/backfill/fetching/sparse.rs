@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Instant,
-};
+use std::{collections::BTreeMap, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
@@ -13,10 +10,7 @@ use bigname_storage::{
 use tracing::info;
 
 use crate::{
-    provider::{
-        ChainProviderOps, ProviderBlockCodeObservationRequest, ProviderLog, ProviderResolvedBlock,
-        ProviderTransactionReceiptRequest,
-    },
+    provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock},
     reconciliation::{
         HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
@@ -31,6 +25,11 @@ use super::{
 };
 use crate::backfill::selection::SelectedTargetIntervalIndex;
 use crate::backfill::{BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome};
+
+#[path = "sparse/plan.rs"]
+mod plan;
+
+use plan::{SparseCodeObservationPlan, transaction_receipt_requests_from_raw_logs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RawOnlySparseMaterialization {
@@ -157,7 +156,7 @@ pub(super) async fn run_split_hash_pinned_raw_only_sparse_backfill_range(
             selected_target_index,
             provider,
             materialization.range,
-            canonicality_evidence,
+            canonicality_evidence.clone(),
             materialization.resolved_blocks,
             materialization.logs_by_block,
             RawOnlySparseBackfillTiming {
@@ -233,6 +232,9 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut code_observation_plan = SparseCodeObservationPlan::default();
+    let canonicality_states = canonicality_evidence
+        .states_for_blocks(pool, &watched_chain.chain, provider, &blocks)
+        .await?;
 
     for (resolved_block, block) in resolved_blocks.iter().zip(blocks.iter()) {
         if block.block_hash != resolved_block.block_hash {
@@ -252,7 +254,10 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
             );
         }
 
-        let canonicality_state = canonicality_evidence.state_for_block(block);
+        let canonicality_state = canonicality_states
+            .get(&block.block_hash)
+            .copied()
+            .unwrap_or(bigname_storage::CanonicalityState::Observed);
         let raw_block = provider_block_to_raw_block_with_header_audit_mode(
             &watched_chain.chain,
             block,
@@ -447,63 +452,6 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     );
 
     Ok(outcome)
-}
-
-fn transaction_receipt_requests_from_raw_logs(
-    logs: &[RawLog],
-) -> Vec<ProviderTransactionReceiptRequest> {
-    let mut seen = BTreeMap::<(String, String, i64), ProviderTransactionReceiptRequest>::new();
-    for log in logs {
-        seen.entry((
-            log.block_hash.clone(),
-            log.transaction_hash.clone(),
-            log.transaction_index,
-        ))
-        .or_insert_with(|| ProviderTransactionReceiptRequest {
-            transaction_hash: log.transaction_hash.clone(),
-            block_hash: log.block_hash.clone(),
-            block_number: log.block_number,
-            transaction_index: log.transaction_index,
-        });
-    }
-
-    seen.into_values().collect()
-}
-
-#[derive(Default)]
-struct SparseCodeObservationPlan {
-    latest_by_address: BTreeMap<String, (i64, String)>,
-}
-
-impl SparseCodeObservationPlan {
-    fn record(&mut self, raw_block: &bigname_storage::RawBlock, addresses: &BTreeSet<String>) {
-        for address in addresses {
-            self.latest_by_address.insert(
-                address.clone(),
-                (raw_block.block_number, raw_block.block_hash.clone()),
-            );
-        }
-    }
-
-    fn requests(&self) -> Vec<ProviderBlockCodeObservationRequest> {
-        let mut addresses_by_block = BTreeMap::<(i64, String), BTreeSet<String>>::new();
-        for (address, (block_number, block_hash)) in &self.latest_by_address {
-            addresses_by_block
-                .entry((*block_number, block_hash.clone()))
-                .or_default()
-                .insert(address.clone());
-        }
-
-        addresses_by_block
-            .into_iter()
-            .map(
-                |((_block_number, block_hash), addresses)| ProviderBlockCodeObservationRequest {
-                    block_hash,
-                    addresses: addresses.into_iter().collect(),
-                },
-            )
-            .collect()
-    }
 }
 
 #[cfg(test)]
