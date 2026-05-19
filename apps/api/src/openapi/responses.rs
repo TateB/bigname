@@ -124,6 +124,7 @@ pub(super) fn openapi_json_get_operation(
     summary: &'static str,
     tag: &'static str,
     parameters: Vec<JsonValue>,
+    request_schema: Option<&'static str>,
     success_schema: &'static str,
     include_bad_request: bool,
     include_not_found: bool,
@@ -150,13 +151,30 @@ pub(super) fn openapi_json_get_operation(
         json_response("Internal error", "ErrorResponse"),
     );
 
-    json!({
+    let mut operation = json!({
         "operationId": operation_id,
         "summary": summary,
         "tags": [tag],
         "parameters": parameters,
         "responses": JsonValue::Object(responses),
-    })
+    });
+    if let Some(request_schema) = request_schema {
+        operation
+            .as_object_mut()
+            .expect("OpenAPI operation must be an object")
+            .insert(
+                "requestBody".to_owned(),
+                json!({
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": schema_ref(request_schema),
+                        },
+                    },
+                }),
+            );
+    }
+    operation
 }
 
 fn json_response(description: &'static str, schema_name: &'static str) -> JsonValue {

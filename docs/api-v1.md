@@ -148,6 +148,21 @@ Rules:
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
+## Identity Façade
+
+The `/v1/identity/*` routes are an app-facing compatibility façade for partner-style indexed identity reads. They flatten existing current projections into `NameRecord` and `ReverseNameRecord` DTOs; they do not replace the canonical name, resolution, address-name, primary-name, or permission contracts.
+
+Namespace inference matches `GET /v1/resolve/{name}`: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Façade reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this façade does not widen the documented ENSv2 `sepolia-dev` support boundary.
+
+Façade not-found behavior is adapter-compatible rather than core-route `404` behavior:
+
+- `GET /v1/identity/names/{name}` returns `200` with `{ "status": "not_found", "record": null }` for a forward miss.
+- Reverse misses return `records: []`.
+- Batch routes preserve input order and return per-input status objects.
+- Batch limits default to `250` inputs and may be configured with `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+
+`NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
+
 ## Shared objects
 
 ### `NameRef`

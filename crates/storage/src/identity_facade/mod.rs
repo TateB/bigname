@@ -1,0 +1,57 @@
+mod forward;
+mod reverse;
+mod status;
+mod types;
+
+use std::collections::BTreeSet;
+
+pub use forward::load_identity_records_by_names;
+pub use reverse::load_reverse_identity_records;
+pub use status::load_indexing_status;
+pub use types::{
+    IdentityAddressRelationRow, IdentityNameRecordRow, IdentityPrimaryNameSnapshot,
+    IndexingStatusChainRow, IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup,
+    ReverseIdentityRecordRow, ReverseIdentityRoles, ReverseIdentityStorageInput,
+};
+
+const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
+  AND surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND resource.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND binding.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      anc.token_lineage_id IS NULL
+      OR token_lineage.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+  )
+"#;
+
+const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
+  AND resource.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+"#;
+
+fn dedupe_in_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}

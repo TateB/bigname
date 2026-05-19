@@ -785,6 +785,66 @@
         ],
         "type": "object"
       },
+      "ForwardIdentityBatchInput": {
+        "additionalProperties": false,
+        "properties": {
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "names"
+        ],
+        "type": "object"
+      },
+      "ForwardIdentityBatchResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "properties": {
+                "input": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "record": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/NameRecord"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NullValue"
+                    }
+                  ]
+                },
+                "status": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              },
+              "required": [
+                "input",
+                "record",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "phase": {
@@ -834,8 +894,241 @@
         ],
         "type": "object"
       },
+      "IdentityAsOf": {
+        "properties": {
+          "as_of_timestamp": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chain_positions": {}
+        },
+        "required": [
+          "chain_positions",
+          "as_of_timestamp"
+        ],
+        "type": "object"
+      },
+      "IdentityNameResponse": {
+        "properties": {
+          "record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NameRecord"
+              },
+              {
+                "$ref": "#/components/schemas/NullValue"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/IdentityStatus"
+          }
+        },
+        "required": [
+          "status",
+          "record"
+        ],
+        "type": "object"
+      },
+      "IdentityPagination": {
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_page_cursor": {
+            "type": "string"
+          },
+          "total_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "IdentityStatus": {
+        "enum": [
+          "success",
+          "not_found",
+          "unsupported",
+          "stale"
+        ],
+        "type": "string"
+      },
+      "IndexingStatusResponse": {
+        "properties": {
+          "chains": {
+            "additionalProperties": {
+              "properties": {
+                "canonical_block": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "finalized_block": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "latest_projected_block": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "latest_projected_timestamp": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "projection_lag_blocks": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "projection_lag_seconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "safe_block": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "canonical_block",
+                "safe_block",
+                "finalized_block",
+                "latest_projected_block",
+                "latest_projected_timestamp",
+                "projection_lag_blocks",
+                "projection_lag_seconds"
+              ],
+              "type": "object"
+            },
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "degraded",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "chains"
+        ],
+        "type": "object"
+      },
       "JsonObject": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "NameRecord": {
+        "properties": {
+          "as_of": {
+            "$ref": "#/components/schemas/IdentityAsOf"
+          },
+          "coin_type_addresses": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "expiration": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "manager_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "owner_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "primary_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolver_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/IdentityStatus"
+          },
+          "text_records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "token_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unsupported_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "namehash",
+          "owner_address",
+          "manager_address",
+          "primary_address",
+          "coin_type_addresses",
+          "text_records",
+          "resolver_address",
+          "expiration",
+          "token_id",
+          "network",
+          "as_of",
+          "status",
+          "unsupported_fields"
+        ],
         "type": "object"
       },
       "NamespaceData": {
@@ -1550,6 +1843,167 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "ReverseIdentityBatchInput": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "coin_type": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "page_cursor": {
+                  "type": "string"
+                },
+                "page_size": {
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "roles": {
+                  "default": "BOTH",
+                  "enum": [
+                    "OWNED",
+                    "MANAGED",
+                    "BOTH"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "address",
+                "coin_type"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "ReverseIdentityBatchResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "properties": {
+                "input": {
+                  "$ref": "#/components/schemas/ReverseNamesInput"
+                },
+                "pagination": {
+                  "$ref": "#/components/schemas/IdentityPagination"
+                },
+                "records": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReverseNameRecord"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              },
+              "required": [
+                "input",
+                "records",
+                "pagination",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "type": "object"
+      },
+      "ReverseNameRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/NameRecord"
+          },
+          {
+            "properties": {
+              "is_primary": {
+                "type": "boolean"
+              },
+              "relation_facets": {
+                "items": {
+                  "enum": [
+                    "OWNED",
+                    "MANAGED",
+                    "REGISTRANT",
+                    "EFFECTIVE_CONTROLLER"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "is_primary",
+              "relation_facets"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReverseNamesInput": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "coin_type": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "roles": {
+            "enum": [
+              "OWNED",
+              "MANAGED",
+              "BOTH"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "coin_type",
+          "roles"
+        ],
+        "type": "object"
+      },
+      "ReverseNamesResponse": {
+        "properties": {
+          "input": {
+            "$ref": "#/components/schemas/ReverseNamesInput"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/IdentityPagination"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/ReverseNameRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "input",
+          "records",
+          "pagination"
         ],
         "type": "object"
       },
@@ -2907,6 +3361,259 @@
         "summary": "Resource history",
         "tags": [
           "History"
+        ]
+      }
+    },
+    "/v1/identity/addresses/{address}/names": {
+      "get": {
+        "operationId": "identity_address_names",
+        "parameters": [
+          {
+            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required decimal SLIP-44 / ENSIP-11 coin type.",
+            "in": "query",
+            "name": "coin_type",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Reverse identity relation filter.",
+            "in": "query",
+            "name": "roles",
+            "required": false,
+            "schema": {
+              "default": "BOTH",
+              "enum": [
+                "OWNED",
+                "MANAGED",
+                "BOTH"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Identity façade pagination cursor.",
+            "in": "query",
+            "name": "page_cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseNamesResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Partner-compatible reverse identity lookup",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/identity/addresses:names:batch": {
+      "post": {
+        "operationId": "identity_address_names_batch",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReverseIdentityBatchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseIdentityBatchResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Partner-compatible batched reverse identity lookup",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/identity/names/{name}": {
+      "get": {
+        "operationId": "identity_name",
+        "parameters": [
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Partner-compatible forward identity lookup",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/identity/names:batch": {
+      "post": {
+        "operationId": "identity_names_batch",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForwardIdentityBatchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwardIdentityBatchResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Partner-compatible batched forward identity lookup",
+        "tags": [
+          "Identity"
         ]
       }
     },
@@ -4880,6 +5587,38 @@
         "summary": "App-facing role rows by account, resource, or name filters",
         "tags": [
           "Collections"
+        ]
+      }
+    },
+    "/v1/status/indexing": {
+      "get": {
+        "operationId": "indexing_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Projection indexing status by chain",
+        "tags": [
+          "Status"
         ]
       }
     }

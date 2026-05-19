@@ -40,6 +40,7 @@ History reads consume canonical normalized events plus thin cursor support. Ther
 | `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
 | `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
 | `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
+| `/v1/identity/*` | app-facing façade over `name_current`, `address_names_current`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata |
 | `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
 | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`; `name_current` only for name-to-resource lookup |
 | `GET /v1/resources/lookup` | `name_current` |
@@ -243,6 +244,8 @@ Indexes that match the public contract:
 
 - `name_current(logical_name_id)`
 - `address_names_current(address, namespace, canonical_display_name, logical_name_id)`
+- `address_names_current(logical_name_id, relation, address)` for identity forward relation hydration
+- `address_names_current(address, relation, normalized_name, namespace, namehash, logical_name_id)` for identity reverse pagination
 - `children_current(parent_logical_name_id, surface_class, canonical_display_name, child_logical_name_id)`
 - `permissions_current(resource_id, subject, scope)`
 - `resolver_current(chain_id, resolver_address)`

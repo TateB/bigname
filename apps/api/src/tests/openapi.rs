@@ -210,6 +210,10 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/history/addresses/{address}".to_owned(),
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
+            "/v1/identity/addresses/{address}/names".to_owned(),
+            "/v1/identity/addresses:names:batch".to_owned(),
+            "/v1/identity/names/{name}".to_owned(),
+            "/v1/identity/names:batch".to_owned(),
             "/v1/manifests/{namespace}".to_owned(),
             "/v1/names".to_owned(),
             "/v1/names/{namespace}/{name}".to_owned(),
@@ -226,6 +230,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/resources/lookup".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
             "/v1/roles".to_owned(),
+            "/v1/status/indexing".to_owned(),
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));

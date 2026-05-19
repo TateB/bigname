@@ -100,6 +100,175 @@ Compact routes advertise only the knobs they own:
 
 `GET /v1/names` keeps its compatibility bridge: omitting `namespace` spans supported public namespaces. First-party app replacement code should pass an explicit namespace when it knows one. `GET /v1/names?name=...` is a compact collection filter that returns zero or one `CompactDomainSummary`; the canonical exact-name profile remains `GET /v1/names/{namespace}/{name}`.
 
+## Identity Façade Routes
+
+These routes are app-facing compatibility routes for the immutable partner-1 requirements in [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). They assemble flat DTOs from existing current projections and persisted projection metadata. They do not run live verified execution by default, do not create partner-specific identity composition, and do not add production ENSv2 manifests.
+
+`NameRecord`:
+
+- `name`, `namehash`
+- `owner_address`, `manager_address`, `primary_address`
+- `coin_type_addresses`, `text_records`
+- `resolver_address`, `expiration`, `token_id`, `network`
+- `as_of.chain_positions`, `as_of.as_of_timestamp`
+- `status`, `unsupported_fields`
+
+`ReverseNameRecord` is `NameRecord` plus `is_primary` and `relation_facets`.
+
+## `GET /v1/identity/names/{name}`
+
+Forward identity lookup. Namespace inference follows `GET /v1/resolve/{name}`.
+
+Response:
+
+```json
+{
+  "status": "success",
+  "record": {}
+}
+```
+
+Rules:
+
+- A miss returns `200` with `status=not_found` and `record=null`.
+- The route reads `name_current`, `record_inventory_current`, and address relation projections where available.
+- `primary_address` is the declared `addr:60` value when retained; other retained `addr:<coin_type>` records appear in `coin_type_addresses`.
+- `manager_address` is populated only when current relation rows identify one unambiguous effective controller. Ambiguous or unbacked manager values stay `null` and add `manager_address` to `unsupported_fields`.
+- Production ENSv2/L2 record coverage remains deferred to a separate manifest/admission workstream.
+
+## `POST /v1/identity/names:batch`
+
+Request:
+
+```json
+{
+  "names": ["alice.eth", "someone.base.eth"]
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "input": { "name": "alice.eth" },
+      "record": {},
+      "status": "success"
+    }
+  ]
+}
+```
+
+Rules:
+
+- Preserves input order.
+- Deduplicates internally by inferred logical name.
+- Batch limit defaults to `250` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- Over-limit or malformed request bodies return `400 invalid_input`; per-name misses are returned as `status=not_found`.
+
+## `GET /v1/identity/addresses/{address}/names`
+
+Reverse identity lookup.
+
+Query: `coin_type` (required), `roles=OWNED|MANAGED|BOTH`, `page_size`, `page_cursor`.
+
+Response:
+
+```json
+{
+  "input": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "coin_type": 60,
+    "roles": "BOTH"
+  },
+  "records": [],
+  "pagination": {
+    "has_more": false
+  }
+}
+```
+
+Rules:
+
+- `coin_type` is required and scopes primary-name marking.
+- `roles` defaults to `BOTH`; `OWNED` maps to token-holder and registrant current relations, while `MANAGED` maps to effective-controller current relations.
+- `is_primary=true` only when `primary_names_current(address, coin_type, namespace)` has a successful normalized claim matching the record's normalized name.
+- Empty result sets are valid.
+- Stable ordering is `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
+
+## `POST /v1/identity/addresses:names:batch`
+
+Request:
+
+```json
+{
+  "inputs": [
+    {
+      "address": "0x0000000000000000000000000000000000000000",
+      "coin_type": 60,
+      "roles": "BOTH",
+      "page_size": 100,
+      "page_cursor": null
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "input": {
+        "address": "0x0000000000000000000000000000000000000000",
+        "coin_type": 60,
+        "roles": "BOTH"
+      },
+      "records": [],
+      "pagination": {
+        "has_more": false
+      },
+      "status": "success"
+    }
+  ]
+}
+```
+
+Rules:
+
+- Preserves one result group per input.
+- Requires `coin_type` per input.
+- Deduplicates identical storage reads internally while preserving requested pagination per input.
+- Empty result sets are successful.
+- Batch limit defaults to `250` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+
+## `GET /v1/status/indexing`
+
+Projection/indexing status by chain. This is not `/healthz`; `/healthz` remains process and database liveness.
+
+Response:
+
+```json
+{
+  "status": "ready",
+  "chains": {
+    "ethereum-mainnet": {
+      "canonical_block": 0,
+      "safe_block": 0,
+      "finalized_block": 0,
+      "latest_projected_block": 0,
+      "latest_projected_timestamp": null,
+      "projection_lag_blocks": 0,
+      "projection_lag_seconds": null
+    }
+  }
+}
+```
+
+Uses `chain_checkpoints`, retained `chain_lineage`, and `current_projection_replay_status` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata.
+
 ## `GET /v1/names`
 
 Compact app-facing collection: exact lookup, address-owned lists, owner/registrant/effective-controller relations, name search, suggestions.

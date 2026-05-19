@@ -30,6 +30,133 @@ pub(crate) struct HealthDatabaseResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ForwardIdentityBatchInput {
+    pub(crate) names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityBatchInput {
+    pub(crate) inputs: Vec<ReverseIdentityBatchInputItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityBatchInputItem {
+    pub(crate) address: String,
+    pub(crate) coin_type: Option<u64>,
+    pub(crate) roles: Option<String>,
+    pub(crate) page_size: Option<u64>,
+    pub(crate) page_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityNameResponse {
+    pub(crate) status: String,
+    pub(crate) record: Option<NameRecordResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ForwardIdentityBatchResponse {
+    pub(crate) results: Vec<ForwardIdentityBatchResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ForwardIdentityBatchResult {
+    pub(crate) input: ForwardIdentityBatchResultInput,
+    pub(crate) record: Option<NameRecordResponse>,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ForwardIdentityBatchResultInput {
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseNamesResponse {
+    pub(crate) input: ReverseNamesInputResponse,
+    pub(crate) records: Vec<ReverseNameRecordResponse>,
+    pub(crate) pagination: IdentityPaginationResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityBatchResponse {
+    pub(crate) results: Vec<ReverseIdentityBatchResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityBatchResult {
+    pub(crate) input: ReverseNamesInputResponse,
+    pub(crate) records: Vec<ReverseNameRecordResponse>,
+    pub(crate) pagination: IdentityPaginationResponse,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseNamesInputResponse {
+    pub(crate) address: String,
+    pub(crate) coin_type: u64,
+    pub(crate) roles: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityPaginationResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_page_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total_count: Option<u64>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct NameRecordResponse {
+    pub(crate) name: String,
+    pub(crate) namehash: String,
+    pub(crate) owner_address: Option<String>,
+    pub(crate) manager_address: Option<String>,
+    pub(crate) primary_address: Option<String>,
+    pub(crate) coin_type_addresses: BTreeMap<String, String>,
+    pub(crate) text_records: BTreeMap<String, String>,
+    pub(crate) resolver_address: Option<String>,
+    pub(crate) expiration: Option<i64>,
+    pub(crate) token_id: Option<String>,
+    pub(crate) network: String,
+    pub(crate) as_of: IdentityAsOfResponse,
+    pub(crate) status: String,
+    pub(crate) unsupported_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseNameRecordResponse {
+    #[serde(flatten)]
+    pub(crate) record: NameRecordResponse,
+    pub(crate) is_primary: bool,
+    pub(crate) relation_facets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityAsOfResponse {
+    pub(crate) chain_positions: JsonValue,
+    pub(crate) as_of_timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IndexingStatusResponse {
+    pub(crate) status: String,
+    pub(crate) chains: BTreeMap<String, IndexingStatusChainResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IndexingStatusChainResponse {
+    pub(crate) canonical_block: Option<i64>,
+    pub(crate) safe_block: Option<i64>,
+    pub(crate) finalized_block: Option<i64>,
+    pub(crate) latest_projected_block: Option<i64>,
+    pub(crate) latest_projected_timestamp: Option<String>,
+    pub(crate) projection_lag_blocks: Option<i64>,
+    pub(crate) projection_lag_seconds: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct NamespaceMetadataResponse {
     pub(crate) data: NamespaceMetadataData,
     pub(crate) declared_state: NamespaceMetadataDeclaredState,

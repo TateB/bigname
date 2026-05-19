@@ -2,6 +2,8 @@
 mod handler_collections;
 #[path = "handlers/app_facing/events.rs"]
 mod handler_app_facing_events;
+#[path = "handlers/app_facing/identity/mod.rs"]
+mod handler_app_facing_identity;
 #[path = "handlers/app_facing/names_collection.rs"]
 mod handler_app_facing_names_collection;
 #[path = "handlers/app_facing/records.rs"]
@@ -29,6 +31,10 @@ mod handler_resolvers;
 
 use self::{
     handler_app_facing_events::events,
+    handler_app_facing_identity::{
+        identity_address_names, identity_address_names_batch, identity_name, identity_names_batch,
+        indexing_status,
+    },
     handler_app_facing_names_collection::{address_names_count, names},
     handler_app_facing_records::{
         name_records, resolve_records, warm_compact_records_route_sql_path,
