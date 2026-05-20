@@ -255,32 +255,8 @@ async fn load_reverse_identity_page_rows(
                                       AND anc.relation = 'effective_controller'
                                   )
                               )
-                              AND (
-                                  requested.cursor_is_primary IS NULL
-                                  OR (
-                                      (
-                                          FALSE,
-                                          CASE
-                                              WHEN anc.relation IN ('registrant', 'token_holder') THEN 0::SMALLINT
-                                              ELSE 1::SMALLINT
-                                          END,
-                                          anc.normalized_name,
-                                          anc.namespace,
-                                          anc.namehash
-                                      )
-                                      >
-                                      (
-                                          NOT requested.cursor_is_primary,
-                                          requested.cursor_role_rank,
-                                          requested.cursor_normalized_name,
-                                          requested.cursor_namespace,
-                                          requested.cursor_namehash
-                                      )
-                                  )
-                              )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
                             {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
-                            ORDER BY role_rank ASC, anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC
                         )
                         UNION ALL
                         (
@@ -319,24 +295,8 @@ async fn load_reverse_identity_page_rows(
                               AND anc.address = requested.address
                               AND anc.relation = 'registrant'
                               AND pnc.normalized_claim_name IS DISTINCT FROM anc.normalized_name
-                              AND (
-                                  requested.cursor_is_primary IS NULL
-                                  OR (
-                                      (TRUE, 0::SMALLINT, anc.normalized_name, anc.namespace, anc.namehash)
-                                      >
-                                      (
-                                          NOT requested.cursor_is_primary,
-                                          requested.cursor_role_rank,
-                                          requested.cursor_normalized_name,
-                                          requested.cursor_namespace,
-                                          requested.cursor_namehash
-                                      )
-                                  )
-                              )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
                             {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
-                            ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
-                            LIMIT requested.page_size + 1
                         )
                         UNION ALL
                         (
@@ -375,24 +335,8 @@ async fn load_reverse_identity_page_rows(
                               AND anc.address = requested.address
                               AND anc.relation = 'token_holder'
                               AND pnc.normalized_claim_name IS DISTINCT FROM anc.normalized_name
-                              AND (
-                                  requested.cursor_is_primary IS NULL
-                                  OR (
-                                      (TRUE, 0::SMALLINT, anc.normalized_name, anc.namespace, anc.namehash)
-                                      >
-                                      (
-                                          NOT requested.cursor_is_primary,
-                                          requested.cursor_role_rank,
-                                          requested.cursor_normalized_name,
-                                          requested.cursor_namespace,
-                                          requested.cursor_namehash
-                                      )
-                                  )
-                              )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
                             {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
-                            ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
-                            LIMIT requested.page_size + 1
                         )
                         UNION ALL
                         (
@@ -431,24 +375,8 @@ async fn load_reverse_identity_page_rows(
                               AND anc.address = requested.address
                               AND anc.relation = 'effective_controller'
                               AND pnc.normalized_claim_name IS DISTINCT FROM anc.normalized_name
-                              AND (
-                                  requested.cursor_is_primary IS NULL
-                                  OR (
-                                      (TRUE, 1::SMALLINT, anc.normalized_name, anc.namespace, anc.namehash)
-                                      >
-                                      (
-                                          NOT requested.cursor_is_primary,
-                                          requested.cursor_role_rank,
-                                          requested.cursor_normalized_name,
-                                          requested.cursor_namespace,
-                                          requested.cursor_namehash
-                                      )
-                                  )
-                              )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
                             {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
-                            ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
-                            LIMIT requested.page_size + 1
                         )
                     ) candidate
                     ORDER BY
@@ -456,6 +384,25 @@ async fn load_reverse_identity_page_rows(
                         candidate.is_primary DESC,
                         candidate.role_rank ASC
                 ) deduped
+                WHERE
+                    requested.cursor_is_primary IS NULL
+                    OR (
+                        (
+                            NOT deduped.is_primary,
+                            deduped.role_rank,
+                            deduped.normalized_name,
+                            deduped.namespace,
+                            deduped.namehash
+                        )
+                        >
+                        (
+                            NOT requested.cursor_is_primary,
+                            requested.cursor_role_rank,
+                            requested.cursor_normalized_name,
+                            requested.cursor_namespace,
+                            requested.cursor_namehash
+                        )
+                    )
                 ORDER BY
                     deduped.is_primary DESC,
                     deduped.role_rank ASC,

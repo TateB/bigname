@@ -22,6 +22,12 @@ pub(super) struct ReverseIdentityStorageKey {
     page_cursor: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct IdentityNameLookup {
+    pub(super) logical_name_id: String,
+    pub(super) corrected_input_normalization: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum IdentityRoles {
     Owned,
@@ -392,10 +398,14 @@ fn canonical_reverse_identity_cursor(
     Ok(Some(encode_cursor(&decoded)))
 }
 
-pub(super) fn identity_logical_name_id(name: &str) -> String {
-    let name = name.trim();
-    let namespace = infer_resolution_namespace(name);
-    format!("{namespace}:{name}")
+pub(super) fn parse_identity_name_lookup(
+    name: &str,
+) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
+    let parsed = normalize_inferred_route_name(name)?;
+    Ok(IdentityNameLookup {
+        logical_name_id: format!("{}:{}", parsed.namespace, parsed.normalized_name),
+        corrected_input_normalization: parsed.corrected_input_normalization,
+    })
 }
 
 pub(super) fn reverse_batch_status(records: &[ReverseNameRecordResponse]) -> String {

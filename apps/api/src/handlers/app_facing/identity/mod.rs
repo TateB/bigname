@@ -9,24 +9,41 @@ pub(super) async fn identity_name(
     Path(name): Path<String>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<IdentityNameResponse>> {
-    let logical_name_id = identity_logical_name_id(&name);
+    let lookup = match parse_identity_name_lookup(&name) {
+        Ok(lookup) => lookup,
+        Err(error) => {
+            tracing::debug!(
+                service = "api",
+                name = %name,
+                error = %error.message,
+                "identity forward input could not be normalized"
+            );
+            return Ok(Json(IdentityNameResponse {
+                status: "unnormalizable_input".to_owned(),
+                record: None,
+            }));
+        }
+    };
     let records = bigname_storage::load_identity_records_by_names(
         &state.pool,
-        std::slice::from_ref(&logical_name_id),
+        std::slice::from_ref(&lookup.logical_name_id),
     )
     .await
     .map_err(|load_error| {
         error!(
             service = "api",
             name = %name,
-            logical_name_id = %logical_name_id,
+            logical_name_id = %lookup.logical_name_id,
             error = ?load_error,
             "failed to load identity forward record"
         );
         ApiError::internal_error("failed to load identity name record")
     })?;
 
-    Ok(Json(build_identity_name_response(records.first())))
+    Ok(Json(build_identity_name_response_with_normalization(
+        records.first(),
+        lookup.corrected_input_normalization,
+    )))
 }
 
 pub(super) async fn identity_names_batch(
@@ -36,12 +53,14 @@ pub(super) async fn identity_names_batch(
     let body = parse_identity_json_body(body)?;
     ensure_identity_batch_limit(body.names.len())?;
 
-    let logical_name_ids = body
+    let lookups = body
         .names
         .iter()
-        .filter_map(|name| {
-            (!name.trim().is_empty()).then(|| identity_logical_name_id(name))
-        })
+        .map(|name| parse_identity_name_lookup(name))
+        .collect::<Vec<_>>();
+    let logical_name_ids = lookups
+        .iter()
+        .filter_map(|lookup| lookup.as_ref().ok().map(|lookup| lookup.logical_name_id.clone()))
         .collect::<Vec<_>>();
     let records = bigname_storage::load_identity_records_by_names(&state.pool, &logical_name_ids)
         .await
@@ -61,19 +80,26 @@ pub(super) async fn identity_names_batch(
     let results = body
         .names
         .iter()
-        .map(|name| {
+        .zip(lookups.iter())
+        .map(|(name, lookup)| {
             let input = ForwardIdentityBatchResultInput { name: name.clone() };
-            if name.trim().is_empty() {
-                return ForwardIdentityBatchResult {
-                    input,
-                    record: None,
-                    status: "unsupported".to_owned(),
-                };
-            }
+            let lookup = match lookup {
+                Ok(lookup) => lookup,
+                Err(_) => {
+                    return ForwardIdentityBatchResult {
+                        input,
+                        record: None,
+                        status: "unnormalizable_input".to_owned(),
+                    };
+                }
+            };
 
-            match records.get(&identity_logical_name_id(name)) {
+            match records.get(&lookup.logical_name_id) {
                 Some(record) => {
-                    let record = build_name_record_response(record);
+                    let record = build_name_record_response_with_normalization(
+                        record,
+                        lookup.corrected_input_normalization,
+                    );
                     ForwardIdentityBatchResult {
                         input,
                         status: record.status.clone(),

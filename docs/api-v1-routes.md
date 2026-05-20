@@ -106,7 +106,7 @@ These routes are app-facing compatibility routes for the immutable partner-1 req
 
 `NameRecord`:
 
-- `name`, `namehash`
+- `name`, `normalized_name`, `corrected_input_normalization`, `namehash`
 - `owner_address`, `manager_address`, `primary_address`
 - `coin_type_addresses`, `text_records`
 - `resolver_address`, `expiration`, `token_id`, `network`
@@ -117,7 +117,7 @@ These routes are app-facing compatibility routes for the immutable partner-1 req
 
 ## `GET /v1/identity/names/{name}`
 
-Forward identity lookup. Namespace inference follows `GET /v1/resolve/{name}`.
+Forward identity lookup. The route normalizes the input name before namespace inference, then follows `GET /v1/resolve/{name}` inference.
 
 Response:
 
@@ -131,10 +131,13 @@ Response:
 Rules:
 
 - A miss returns `200` with `status=not_found` and `record=null`.
+- An input that cannot be normalized returns `200` with `status=unnormalizable_input` and `record=null`.
 - The route reads `name_current`, `record_inventory_current`, and address relation projections where available.
+- Successful records include `normalized_name` and set `corrected_input_normalization=true` when the route corrected the supplied name before lookup.
 - `primary_address` is the declared `addr:60` value when retained; other retained `addr:<coin_type>` records appear in `coin_type_addresses`.
 - `manager_address` is populated only when current relation rows identify one unambiguous effective controller. Ambiguous or unbacked manager values stay `null` and add `manager_address` to `unsupported_fields`.
 - `token_id` is read from projected authority/registration/control summaries first, then falls back to the current surface labelhash as a uint256 string only for ENS second-level `.eth` names with namespace-local ERC-721 identity.
+- `network` is profile-aware from stored chain positions: mainnet ENS/Basenames return `ethereum`/`base`; Sepolia profiles return `ethereum-sepolia`/`base-sepolia` when those chains are the stored runtime inputs.
 - Production ENSv2/L2 record coverage remains deferred to a separate manifest/admission workstream.
 
 ## `POST /v1/identity/names:batch`
@@ -166,7 +169,7 @@ Rules:
 - Preserves input order.
 - Deduplicates internally by inferred logical name.
 - Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
-- Over-limit or malformed request bodies return `400 invalid_input`; per-name misses are returned as `status=not_found`.
+- Over-limit or malformed request bodies return `400 invalid_input`; per-name misses are returned as `status=not_found`; per-name unnormalizable inputs are returned as `status=unnormalizable_input`.
 
 ## `GET /v1/identity/addresses/{address}/names`
 
@@ -199,7 +202,7 @@ Rules:
 - For reverse responses, nested `NameRecord.primary_address` is selected from the requested `addr:<coin_type>` when that retained address record is available. Forward responses keep `addr:60` as the default `primary_address`.
 - `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page, and does not run a count scan on the request path.
 - Empty result sets are valid.
-- Stable ordering is `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
+- Stable ordering and keyset cursors are applied after logical-name relation facets are deduplicated: `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
 
 ## `POST /v1/identity/addresses:names:batch`
 
@@ -588,6 +591,8 @@ Namespace-inferred convenience for `GET /v1/resolutions/{namespace}/{name}`.
 Query: `mode=declared|verified|both`, `records`.
 
 Returns the same envelope as the canonical route after inference.
+
+The route normalizes `{name}` before inference. Inputs that cannot be normalized return `400 invalid_input`.
 
 Inference on the normalized `{name}`:
 

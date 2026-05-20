@@ -30,6 +30,11 @@ async fn identity_forward_single_and_batch_use_partner_not_found_shape() -> Resu
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["status"], json!("success"));
     assert_eq!(payload["record"]["name"], json!("Alice.eth"));
+    assert_eq!(payload["record"]["normalized_name"], json!("alice.eth"));
+    assert_eq!(
+        payload["record"]["corrected_input_normalization"],
+        json!(false)
+    );
     assert_eq!(payload["record"]["namehash"], json!("namehash:alice.eth"));
     assert_eq!(payload["record"]["owner_address"], json!(address));
     assert_eq!(
@@ -86,6 +91,10 @@ async fn identity_forward_single_and_batch_use_partner_not_found_shape() -> Resu
     assert_eq!(payload["results"][0]["record"], Value::Null);
     assert_eq!(payload["results"][1]["input"]["name"], json!("alice.eth"));
     assert_eq!(payload["results"][1]["status"], json!("success"));
+    assert_eq!(
+        payload["results"][1]["record"]["corrected_input_normalization"],
+        json!(false)
+    );
     assert_eq!(payload["results"][2]["record"]["name"], json!("Alice.eth"));
 
     database
@@ -133,6 +142,187 @@ async fn identity_forward_single_and_batch_use_partner_not_found_shape() -> Resu
     assert!(unsupported_fields.contains(&json!("coin_type_addresses")));
     assert!(unsupported_fields.contains(&json!("primary_address")));
     assert!(unsupported_fields.contains(&json!("text_records")));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_identity_name(
+        &database,
+        "ens:case.eth",
+        "case.eth",
+        "case.eth",
+        "namehash:case.eth",
+        Uuid::from_u128(0x1d0301),
+        Uuid::from_u128(0x1d0302),
+        Uuid::from_u128(0x1d0303),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        35,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "basenames:someone.base.eth",
+        "someone.base.eth",
+        "someone.base.eth",
+        "namehash:someone.base.eth",
+        Uuid::from_u128(0x1d0311),
+        Uuid::from_u128(0x1d0312),
+        Uuid::from_u128(0x1d0313),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        36,
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/Case.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward mixed-case ENS request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("success"));
+    assert_eq!(payload["record"]["normalized_name"], json!("case.eth"));
+    assert_eq!(
+        payload["record"]["corrected_input_normalization"],
+        json!(true)
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/Someone.Base.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward mixed-case Basenames request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("success"));
+    assert_eq!(payload["record"]["normalized_name"], json!("someone.base.eth"));
+    assert_eq!(payload["record"]["network"], json!("base"));
+    assert_eq!(
+        payload["record"]["corrected_input_normalization"],
+        json!(true)
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/bad%20name.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward unnormalizable request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload,
+        json!({"status": "unnormalizable_input", "record": null})
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity/names:batch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "names": ["Case.eth", "bad name.eth", "Someone.Base.eth", "case.eth "]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward normalization batch request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["results"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["results"][0]["record"]["corrected_input_normalization"],
+        json!(true)
+    );
+    assert_eq!(payload["results"][1]["status"], json!("unnormalizable_input"));
+    assert_eq!(payload["results"][1]["record"], Value::Null);
+    assert_eq!(
+        payload["results"][2]["record"]["normalized_name"],
+        json!("someone.base.eth")
+    );
+    assert_eq!(
+        payload["results"][3]["record"]["corrected_input_normalization"],
+        json!(true)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_network_uses_runtime_chain_positions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_identity_name(
+        &database,
+        "ens:sepolia.eth",
+        "sepolia.eth",
+        "sepolia.eth",
+        "namehash:sepolia.eth",
+        Uuid::from_u128(0x1d0401),
+        Uuid::from_u128(0x1d0402),
+        Uuid::from_u128(0x1d0403),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        37,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET chain_positions = $2::JSONB
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind("ens:sepolia.eth")
+    .bind(
+        serde_json::to_string(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 37,
+                "block_hash": "0xsepolia37",
+                "timestamp": "2026-04-17T00:00:37Z"
+            }
+        }))
+        .expect("chain positions JSON must serialize"),
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/sepolia.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward Sepolia-network request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["record"]["network"], json!("ethereum-sepolia"));
 
     database.cleanup().await?;
     Ok(())
@@ -505,6 +695,100 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
     );
     assert_eq!(payload["results"][1]["pagination"]["total_count"], json!(0));
     assert_eq!(payload["results"][1]["status"], json!("success"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_reverse_cursor_applies_after_relation_deduplication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    seed_identity_name(
+        &database,
+        "ens:dual.eth",
+        "Dual.eth",
+        "dual.eth",
+        "namehash:dual.eth",
+        Uuid::from_u128(0x2d0301),
+        Uuid::from_u128(0x2d0302),
+        Uuid::from_u128(0x2d0303),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        61,
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            "ens:dual.eth",
+            bigname_storage::AddressNameRelation::EffectiveController,
+            "Dual.eth",
+            "dual.eth",
+            "namehash:dual.eth",
+            Uuid::from_u128(0x2d0303),
+            Uuid::from_u128(0x2d0301),
+            Some(Uuid::from_u128(0x2d0302)),
+            62,
+        )],
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:zulu.eth",
+        "Zulu.eth",
+        "zulu.eth",
+        "namehash:zulu.eth",
+        Uuid::from_u128(0x2d0311),
+        Uuid::from_u128(0x2d0312),
+        Uuid::from_u128(0x2d0313),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        63,
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=BOTH&page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse dedupe first page request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["records"][0]["name"], json!("Dual.eth"));
+    assert_eq!(
+        payload["records"][0]["relation_facets"],
+        json!(["OWNED", "MANAGED", "EFFECTIVE_CONTROLLER"])
+    );
+    assert_eq!(payload["pagination"]["has_more"], json!(true));
+    let cursor = payload["pagination"]["next_page_cursor"]
+        .as_str()
+        .expect("first page must include cursor");
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=BOTH&page_size=1&page_cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse dedupe second page request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["records"][0]["name"], json!("Zulu.eth"));
+    assert_eq!(payload["pagination"]["has_more"], json!(false));
+    assert_eq!(payload["pagination"]["total_count"], json!(2));
 
     database.cleanup().await?;
     Ok(())

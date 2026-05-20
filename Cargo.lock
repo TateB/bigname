@@ -1563,6 +1563,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "idna",
  "serde",
  "serde_json",
  "sqlx",

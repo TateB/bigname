@@ -19,6 +19,18 @@ pub(super) struct CompactRecordsRead {
     pub(super) verified_outcome: Option<ExecutionOutcome>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct NormalizedRouteNameInput {
+    pub(super) namespace: &'static str,
+    pub(super) normalized_name: String,
+    pub(super) corrected_input_normalization: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RouteNameNormalizationError {
+    pub(super) message: String,
+}
+
 pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
     if name == "base.eth" {
         return bigname_storage::ENS_NAMESPACE;
@@ -31,6 +43,51 @@ pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
         bigname_storage::BASENAMES_NAMESPACE
     } else {
         bigname_storage::ENS_NAMESPACE
+    }
+}
+
+pub(super) fn normalize_inferred_route_name(
+    name: &str,
+) -> Result<NormalizedRouteNameInput, RouteNameNormalizationError> {
+    let input = name.trim();
+    if input.is_empty() {
+        return Err(RouteNameNormalizationError {
+            message: "name must not be empty".to_owned(),
+        });
+    }
+
+    let (normalized, result) = idna::uts46::Uts46::new().to_unicode(
+        input.as_bytes(),
+        idna::AsciiDenyList::URL,
+        idna::uts46::Hyphens::Allow,
+    );
+    result.map_err(|_| RouteNameNormalizationError {
+        message: "name could not be normalized".to_owned(),
+    })?;
+    let normalized_name = normalized.into_owned();
+
+    if normalized_name.is_empty()
+        || normalized_name.starts_with('.')
+        || normalized_name.ends_with('.')
+        || normalized_name.split('.').any(str::is_empty)
+    {
+        return Err(RouteNameNormalizationError {
+            message: "name must contain non-empty dot-separated labels".to_owned(),
+        });
+    }
+
+    Ok(NormalizedRouteNameInput {
+        namespace: infer_resolution_namespace(&normalized_name),
+        corrected_input_normalization: name != normalized_name,
+        normalized_name,
+    })
+}
+
+pub(super) fn route_name_normalization_api_error(error: RouteNameNormalizationError) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: error.message,
     }
 }
 

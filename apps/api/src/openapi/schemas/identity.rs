@@ -6,6 +6,13 @@ use super::{nullable_ref_schema, schema_ref};
 pub(super) fn identity_status_schema() -> JsonValue {
     json!({
         "type": "string",
+        "enum": ["success", "not_found", "unsupported", "stale", "unnormalizable_input"],
+    })
+}
+
+pub(super) fn name_record_status_schema() -> JsonValue {
+    json!({
+        "type": "string",
         "enum": ["success", "not_found", "unsupported", "stale"],
     })
 }
@@ -29,6 +36,8 @@ pub(super) fn name_record_schema() -> JsonValue {
         "type": "object",
         "required": [
             "name",
+            "normalized_name",
+            "corrected_input_normalization",
             "namehash",
             "owner_address",
             "manager_address",
@@ -45,6 +54,8 @@ pub(super) fn name_record_schema() -> JsonValue {
         ],
         "properties": {
             "name": { "type": "string" },
+            "normalized_name": { "type": "string" },
+            "corrected_input_normalization": { "type": "boolean" },
             "namehash": { "type": "string" },
             "owner_address": { "type": ["string", "null"] },
             "manager_address": { "type": ["string", "null"] },
@@ -62,7 +73,7 @@ pub(super) fn name_record_schema() -> JsonValue {
             "token_id": { "type": ["string", "null"] },
             "network": { "type": "string" },
             "as_of": schema_ref("IdentityAsOf"),
-            "status": schema_ref("IdentityStatus"),
+            "status": schema_ref("NameRecordStatus"),
             "unsupported_fields": {
                 "type": "array",
                 "items": { "type": "string" },

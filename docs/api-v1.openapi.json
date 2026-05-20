@@ -958,7 +958,8 @@
           "success",
           "not_found",
           "unsupported",
-          "stale"
+          "stale",
+          "unnormalizable_input"
         ],
         "type": "string"
       },
@@ -1054,6 +1055,9 @@
             },
             "type": "object"
           },
+          "corrected_input_normalization": {
+            "type": "boolean"
+          },
           "expiration": {
             "type": [
               "integer",
@@ -1075,6 +1079,9 @@
           "network": {
             "type": "string"
           },
+          "normalized_name": {
+            "type": "string"
+          },
           "owner_address": {
             "type": [
               "string",
@@ -1094,7 +1101,7 @@
             ]
           },
           "status": {
-            "$ref": "#/components/schemas/IdentityStatus"
+            "$ref": "#/components/schemas/NameRecordStatus"
           },
           "text_records": {
             "additionalProperties": {
@@ -1117,6 +1124,8 @@
         },
         "required": [
           "name",
+          "normalized_name",
+          "corrected_input_normalization",
           "namehash",
           "owner_address",
           "manager_address",
@@ -1132,6 +1141,15 @@
           "unsupported_fields"
         ],
         "type": "object"
+      },
+      "NameRecordStatus": {
+        "enum": [
+          "success",
+          "not_found",
+          "unsupported",
+          "stale"
+        ],
+        "type": "string"
       },
       "NamespaceData": {
         "properties": {
@@ -3526,7 +3544,7 @@
         "operationId": "identity_name",
         "parameters": [
           {
-            "description": "Normalized name within the namespace.",
+            "description": "Name input normalized before namespace inference.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -4827,7 +4845,7 @@
         "operationId": "resolve_current",
         "parameters": [
           {
-            "description": "Normalized name within the namespace.",
+            "description": "Name input normalized before namespace inference.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -4915,7 +4933,7 @@
         "operationId": "resolve_records",
         "parameters": [
           {
-            "description": "Normalized name within the namespace.",
+            "description": "Name input normalized before namespace inference.",
             "in": "path",
             "name": "name",
             "required": true,

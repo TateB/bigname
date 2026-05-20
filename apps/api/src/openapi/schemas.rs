@@ -16,8 +16,9 @@ use identity::{
     forward_identity_batch_input_schema, forward_identity_batch_response_schema,
     identity_as_of_schema, identity_name_response_schema, identity_pagination_schema,
     identity_status_schema, indexing_status_response_schema, name_record_schema,
-    reverse_identity_batch_input_schema, reverse_identity_batch_response_schema,
-    reverse_name_record_schema, reverse_names_input_schema, reverse_names_response_schema,
+    name_record_status_schema, reverse_identity_batch_input_schema,
+    reverse_identity_batch_response_schema, reverse_name_record_schema, reverse_names_input_schema,
+    reverse_names_response_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
@@ -167,6 +168,7 @@ pub(super) fn openapi_components() -> JsonValue {
                 },
             }),
             "IdentityStatus": identity_status_schema(),
+            "NameRecordStatus": name_record_status_schema(),
             "IdentityAsOf": identity_as_of_schema(),
             "NameRecord": name_record_schema(),
             "ReverseNameRecord": reverse_name_record_schema(),

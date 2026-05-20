@@ -110,6 +110,8 @@ pub(crate) struct IdentityPaginationResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct NameRecordResponse {
     pub(crate) name: String,
+    pub(crate) normalized_name: String,
+    pub(crate) corrected_input_normalization: bool,
     pub(crate) namehash: String,
     pub(crate) owner_address: Option<String>,
     pub(crate) manager_address: Option<String>,

@@ -22,7 +22,7 @@ pub(super) async fn resolve_current(
     Query(query): Query<InferredResolutionQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<ResolutionResponse>> {
-    let namespace = infer_resolution_namespace(&name);
+    let parsed = normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
     let query = ResolutionQuery {
         mode: query.mode,
         records: query.records,
@@ -30,7 +30,8 @@ pub(super) async fn resolve_current(
     };
 
     Ok(Json(
-        resolution_response_for_name(&state, namespace, &name, query).await?,
+        resolution_response_for_name(&state, parsed.namespace, &parsed.normalized_name, query)
+            .await?,
     ))
 }
 

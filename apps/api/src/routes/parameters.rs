@@ -125,6 +125,11 @@ const NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "Normalized name within the namespace.",
     ApiParameterSchema::String,
 );
+const INFERRED_NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
+    "name",
+    "Name input normalized before namespace inference.",
+    ApiParameterSchema::String,
+);
 const ADDRESS_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "address",
     "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
@@ -342,7 +347,7 @@ pub(crate) const NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     PAGE_SIZE_QUERY,
 ];
 
-pub(crate) const IDENTITY_NAME_PARAMETERS: &[ApiRouteParameter] = &[NAME_PATH];
+pub(crate) const IDENTITY_NAME_PARAMETERS: &[ApiRouteParameter] = &[INFERRED_NAME_PATH];
 
 pub(crate) const IDENTITY_ADDRESS_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ADDRESS_PATH,
