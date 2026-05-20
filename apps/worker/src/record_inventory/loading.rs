@@ -63,7 +63,17 @@ pub(super) async fn load_relevant_events(
         .into_iter()
         .collect::<Vec<_>>();
     if !logical_name_ids.is_empty() {
-        rows.extend(load_logical_name_resolver_events(pool, &logical_name_ids).await?);
+        let latest_target_event_sort_key = rows.iter().map(event_sort_key).max();
+        rows.extend(
+            load_logical_name_resolver_events(pool, &logical_name_ids)
+                .await?
+                .into_iter()
+                .filter(|event| {
+                    event.resource_id == resource_id
+                        || latest_target_event_sort_key
+                            .is_some_and(|sort_key| event_sort_key(event) <= sort_key)
+                }),
+        );
         rows.sort_by(|left, right| {
             left.block_number
                 .cmp(&right.block_number)
@@ -74,6 +84,14 @@ pub(super) async fn load_relevant_events(
     }
 
     Ok(rows)
+}
+
+fn event_sort_key(event: &RelevantEvent) -> (i64, i64, i64) {
+    (
+        event.block_number,
+        event.log_index.unwrap_or(i64::MIN),
+        event.normalized_event_id,
+    )
 }
 
 async fn load_resource_relevant_events(
