@@ -21,6 +21,7 @@ pub struct IdentityNameCurrentRow {
     pub labelhash: Option<String>,
     pub labelhash_count: Option<i32>,
     pub resource_id: Option<Uuid>,
+    pub record_inventory_boundary_key: Option<String>,
     pub declared_summary: Value,
     pub coverage: Value,
     pub chain_positions: Value,

@@ -148,6 +148,142 @@ async fn identity_forward_single_and_batch_use_partner_not_found_shape() -> Resu
 }
 
 #[tokio::test]
+async fn identity_forward_matches_record_inventory_to_active_boundary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:boundary.eth";
+    let resource_id = Uuid::from_u128(0x1d0201);
+    let token_lineage_id = Uuid::from_u128(0x1d0202);
+    let surface_binding_id = Uuid::from_u128(0x1d0203);
+    let stale_address = "0x0000000000000000000000000000000000000abc";
+    let active_address = "0x0000000000000000000000000000000000000def";
+    let active_boundary = record_inventory_boundary_with_pointer(
+        logical_name_id,
+        resource_id,
+        Some(1201),
+        Some("RecordVersionChanged"),
+    );
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut declared_summary = compact_name_declared_summary(
+        stale_address,
+        stale_address,
+        stale_address,
+        1_900_000_000,
+        "2026-04-17T00:00:21Z",
+        "2026-04-17T00:00:11Z",
+    );
+    declared_summary["topology"] = json!({
+        "version_boundaries": {
+            "topology_version_boundary": active_boundary.clone(),
+            "record_version_boundary": active_boundary.clone(),
+        }
+    });
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            logical_name_id,
+            "Boundary.eth",
+            "boundary.eth",
+            "namehash:boundary.eth",
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            33,
+            declared_summary,
+        ))
+        .await?;
+
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+    let mut active_inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    active_inventory.record_version_boundary = active_boundary;
+    active_inventory.entries = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "status": "not_found",
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": active_address,
+            },
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://active-avatar",
+            },
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://active-content",
+            },
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "status": "success",
+            "value": {
+                "key": "com.twitter",
+                "value": "@boundary-active",
+            },
+        },
+    ]);
+    database
+        .insert_record_inventory_current_row(active_inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/boundary.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward active-boundary request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("success"));
+    assert_eq!(
+        payload["record"]["coin_type_addresses"]["60"],
+        json!(active_address)
+    );
+    assert_eq!(payload["record"]["primary_address"], json!(active_address));
+    assert_eq!(
+        payload["record"]["text_records"]["com.twitter"],
+        json!("@boundary-active")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
