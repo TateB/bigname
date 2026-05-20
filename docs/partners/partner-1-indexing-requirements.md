@@ -1,8 +1,8 @@
 # ENS Indexing Requirements for partner-1
 
-**Source date:** 2026-05-06  
-**Partner alias:** `partner-1`  
-**Audience:** engineering agent or implementation planner  
+**Source date:** 2026-05-06
+**Partner alias:** `partner-1`
+**Audience:** engineering agent or implementation planner
 **Purpose:** scope whether an ENS Labs hosted indexer can satisfy partner-1's indexed name-data requirements across L1 ENS, ENSv2, and Basenames.
 
 ## Agent task

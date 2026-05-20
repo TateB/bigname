@@ -19,6 +19,7 @@ pub struct IdentityNameCurrentRow {
     pub normalized_name: String,
     pub namehash: String,
     pub labelhash: Option<String>,
+    pub labelhash_count: Option<i32>,
     pub resource_id: Option<Uuid>,
     pub declared_summary: Value,
     pub coverage: Value,

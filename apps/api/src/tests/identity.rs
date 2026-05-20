@@ -139,6 +139,99 @@ async fn identity_forward_single_and_batch_use_partner_not_found_shape() -> Resu
 }
 
 #[tokio::test]
+async fn identity_forward_labelhash_token_id_fallback_stays_ens_erc721_only() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let eth_labelhash = "0x00000000000000000000000000000000000000000000000000000000000000ee";
+
+    seed_identity_name(
+        &database,
+        "ens:fallback.eth",
+        "fallback.eth",
+        "fallback.eth",
+        "namehash:fallback.eth",
+        Uuid::from_u128(0x1d0201),
+        Uuid::from_u128(0x1d0202),
+        Uuid::from_u128(0x1d0203),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        33,
+    )
+    .await?;
+    set_name_surface_labelhashes(
+        &database,
+        "ens:fallback.eth",
+        &[
+            "0x000000000000000000000000000000000000000000000000000000000000000a",
+            eth_labelhash,
+        ],
+    )
+    .await?;
+
+    seed_identity_name(
+        &database,
+        "ens:child.parent.eth",
+        "child.parent.eth",
+        "child.parent.eth",
+        "namehash:child.parent.eth",
+        Uuid::from_u128(0x1d0211),
+        Uuid::from_u128(0x1d0212),
+        Uuid::from_u128(0x1d0213),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        34,
+    )
+    .await?;
+    set_name_surface_labelhashes(
+        &database,
+        "ens:child.parent.eth",
+        &[
+            "0x000000000000000000000000000000000000000000000000000000000000000b",
+            "0x000000000000000000000000000000000000000000000000000000000000000c",
+            eth_labelhash,
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/fallback.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward ENS ERC-721 fallback request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["record"]["token_id"], json!("10"));
+    assert!(!payload["record"]["unsupported_fields"]
+        .as_array()
+        .expect("unsupported_fields must be array")
+        .contains(&json!("token_id")));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/identity/names/child.parent.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity forward subname token-id fallback request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["record"]["token_id"], Value::Null);
+    assert!(payload["record"]["unsupported_fields"]
+        .as_array()
+        .expect("unsupported_fields must be array")
+        .contains(&json!("token_id")));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_batch_routes_map_json_rejections_to_invalid_input() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
@@ -311,6 +404,50 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
     );
     assert_eq!(payload["pagination"]["has_more"], json!(false));
     assert_eq!(payload["pagination"]["total_count"], json!(2));
+
+    let mixed_case_cursor = cursor
+        .chars()
+        .enumerate()
+        .map(|(index, value)| {
+            if index % 2 == 0 {
+                value.to_ascii_uppercase()
+            } else {
+                value
+            }
+        })
+        .collect::<String>();
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity/addresses:names:batch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [
+                            {
+                                "address": address,
+                                "coin_type": 60,
+                                "roles": "BOTH",
+                                "page_size": 1,
+                                "page_cursor": mixed_case_cursor,
+                            }
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse batch mixed-case cursor request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["results"][0]["records"][0]["name"], json!("Bob.eth"));
+    assert_eq!(
+        payload["results"][0]["records"][0]["relation_facets"],
+        json!(["MANAGED", "EFFECTIVE_CONTROLLER"])
+    );
+    assert_eq!(payload["results"][0]["pagination"]["total_count"], json!(2));
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -569,6 +706,83 @@ async fn identity_reverse_total_count_tracks_visible_rows_and_relation_updates()
 }
 
 #[tokio::test]
+async fn indexing_status_degrades_without_chain_readiness_data() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status/indexing")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("empty indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(
+        payload["chains"]
+            .as_object()
+            .expect("chains must be an object")
+            .len(),
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet',
+            '0xstatus-missing-checkpoint',
+            10,
+            '2026-04-17T00:00:10Z',
+            'canonical'
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status/indexing")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing checkpoint indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(
+        payload["chains"]["ethereum-mainnet"]["canonical_block"],
+        Value::Null
+    );
+    assert_eq!(
+        payload["chains"]["ethereum-mainnet"]["latest_projected_block"],
+        Value::Null
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
@@ -753,6 +967,29 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+async fn set_name_surface_labelhashes(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    labelhashes: &[&str],
+) -> Result<()> {
+    let labelhashes = labelhashes
+        .iter()
+        .map(|labelhash| (*labelhash).to_owned())
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        UPDATE name_surfaces
+        SET labelhashes = $2
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(labelhashes)
+    .execute(&database.pool)
+    .await?;
     Ok(())
 }
 

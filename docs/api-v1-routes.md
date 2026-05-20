@@ -134,7 +134,7 @@ Rules:
 - The route reads `name_current`, `record_inventory_current`, and address relation projections where available.
 - `primary_address` is the declared `addr:60` value when retained; other retained `addr:<coin_type>` records appear in `coin_type_addresses`.
 - `manager_address` is populated only when current relation rows identify one unambiguous effective controller. Ambiguous or unbacked manager values stay `null` and add `manager_address` to `unsupported_fields`.
-- `token_id` is read from projected authority/registration/control summaries first, then falls back to the current surface labelhash as a uint256 string for ENS names with namespace-local ERC-721 identity.
+- `token_id` is read from projected authority/registration/control summaries first, then falls back to the current surface labelhash as a uint256 string only for ENS second-level `.eth` names with namespace-local ERC-721 identity.
 - Production ENSv2/L2 record coverage remains deferred to a separate manifest/admission workstream.
 
 ## `POST /v1/identity/names:batch`
@@ -274,7 +274,7 @@ Response:
 }
 ```
 
-Uses `chain_checkpoints`, retained `chain_lineage`, and `current_projection_replay_status` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata.
+Uses `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists, `status` is `degraded`.
 
 ## `GET /v1/names`
 

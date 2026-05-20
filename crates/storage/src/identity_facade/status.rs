@@ -6,7 +6,18 @@ use super::{IndexingStatusChainRow, IndexingStatusRead};
 pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
     let rows = sqlx::query(
         r#"
-        WITH apply_cursor AS (
+        WITH known_chains AS (
+            SELECT chain_id
+            FROM chain_checkpoints
+            UNION
+            SELECT chain_id
+            FROM chain_lineage
+            UNION
+            SELECT chain_id
+            FROM normalized_events
+            WHERE chain_id IS NOT NULL
+        ),
+        apply_cursor AS (
             SELECT COALESCE((
                 SELECT last_change_id
                 FROM projection_apply_cursors
@@ -34,7 +45,7 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
         ),
         projected AS (
             SELECT
-                cc.chain_id,
+                known_chains.chain_id,
                 CASE
                     WHEN cc.canonical_block_number IS NOT NULL
                       AND pending_projection.pending_count IS NULL
@@ -47,11 +58,13 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
                     THEN GREATEST(pending_projection.first_pending_block - 1, 0)
                     ELSE latest_applied_event.block_number
                 END AS latest_projected_block
-            FROM chain_checkpoints cc
+            FROM known_chains
             CROSS JOIN apply_cursor
             CROSS JOIN change_progress
+            LEFT JOIN chain_checkpoints cc
+              ON cc.chain_id = known_chains.chain_id
             LEFT JOIN pending_projection
-              ON pending_projection.chain_id = cc.chain_id
+              ON pending_projection.chain_id = known_chains.chain_id
             LEFT JOIN LATERAL (
                 SELECT event.block_number
                 FROM normalized_events event
@@ -62,7 +75,7 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
                       change_progress.max_change_id,
                       apply_cursor.last_change_id
                   )
-                  AND event.chain_id = cc.chain_id
+                  AND event.chain_id = known_chains.chain_id
                   AND event.block_number IS NOT NULL
                   AND change.change_id <= apply_cursor.last_change_id
                 ORDER BY event.block_number DESC, event.normalized_event_id DESC
@@ -70,24 +83,26 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             ) latest_applied_event ON TRUE
         )
         SELECT
-            cc.chain_id,
+            known_chains.chain_id,
             cc.canonical_block_number,
             cc.safe_block_number,
             cc.finalized_block_number,
             canonical_lineage.block_timestamp AS canonical_timestamp,
             projected.latest_projected_block,
             projected_lineage.block_timestamp AS latest_projected_timestamp
-        FROM chain_checkpoints cc
+        FROM known_chains
+        LEFT JOIN chain_checkpoints cc
+          ON cc.chain_id = known_chains.chain_id
         LEFT JOIN projected
-          ON projected.chain_id = cc.chain_id
+          ON projected.chain_id = known_chains.chain_id
         LEFT JOIN chain_lineage canonical_lineage
-          ON canonical_lineage.chain_id = cc.chain_id
+          ON canonical_lineage.chain_id = known_chains.chain_id
          AND canonical_lineage.block_number = cc.canonical_block_number
          AND canonical_lineage.block_hash = cc.canonical_block_hash
         LEFT JOIN LATERAL (
             SELECT chain_lineage.block_timestamp
             FROM chain_lineage
-            WHERE chain_lineage.chain_id = cc.chain_id
+            WHERE chain_lineage.chain_id = known_chains.chain_id
               AND projected.latest_projected_block IS NOT NULL
               AND chain_lineage.block_number <= projected.latest_projected_block
               AND chain_lineage.canonicality_state IN (
@@ -98,7 +113,7 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             ORDER BY chain_lineage.block_number DESC
             LIMIT 1
         ) projected_lineage ON TRUE
-        ORDER BY cc.chain_id
+        ORDER BY known_chains.chain_id
         "#,
     )
     .fetch_all(pool)

@@ -55,7 +55,7 @@ fn build_name_record_response_for_coin_type(
         &["registration", "upstream_resource"],
         &["control", "token_id"],
     ])
-    .or_else(|| identity_labelhash_token_id(record.row.labelhash.as_deref()));
+    .or_else(|| identity_labelhash_token_id(&record.row));
 
     if owner_address.is_none() {
         unsupported_fields.insert("owner_address".to_owned());
@@ -215,12 +215,23 @@ fn identity_record_value_string(entry: &JsonValue) -> Option<String> {
         .or_else(|| value_to_string(value))
 }
 
-fn identity_labelhash_token_id(labelhash: Option<&str>) -> Option<String> {
-    let labelhash = labelhash?;
+fn identity_labelhash_token_id(row: &bigname_storage::IdentityNameCurrentRow) -> Option<String> {
+    if !identity_supports_labelhash_token_id(row) {
+        return None;
+    }
+
+    let labelhash = row.labelhash.as_deref()?;
     let hex = labelhash.strip_prefix("0x").unwrap_or(labelhash);
     alloy_primitives::U256::from_str_radix(hex, 16)
         .ok()
         .map(|value| value.to_string())
+}
+
+fn identity_supports_labelhash_token_id(row: &bigname_storage::IdentityNameCurrentRow) -> bool {
+    row.namespace == "ens"
+        && row.labelhash_count == Some(2)
+        && row.normalized_name.ends_with(".eth")
+        && row.normalized_name.split('.').count() == 2
 }
 
 fn identity_unsupported_fields(
@@ -373,7 +384,9 @@ fn indexing_status_label<'a>(
     chains: impl Iterator<Item = &'a IndexingStatusChainResponse>,
 ) -> String {
     let mut saw_degraded = false;
+    let mut saw_chain = false;
     for chain in chains {
+        saw_chain = true;
         if chain.canonical_block.is_none() || chain.latest_projected_block.is_none() {
             saw_degraded = true;
             continue;
@@ -383,7 +396,7 @@ fn indexing_status_label<'a>(
         }
     }
 
-    if saw_degraded {
+    if saw_degraded || !saw_chain {
         "degraded".to_owned()
     } else {
         "ready".to_owned()

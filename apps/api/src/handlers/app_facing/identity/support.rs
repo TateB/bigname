@@ -259,13 +259,15 @@ pub(super) fn parse_reverse_batch_item(
     let roles = parse_identity_roles(item.roles.as_deref())?;
     let pagination =
         parse_identity_pagination_with_default(item.page_cursor.as_deref(), item.page_size, DEFAULT_IDENTITY_BATCH_PAGE_SIZE)?;
+    let cursor_spec = reverse_identity_cursor_spec(&address, coin_type, roles);
+    let page_cursor = canonical_reverse_identity_cursor(&pagination, &cursor_spec)?;
 
     Ok(ReverseIdentityRequestKey {
         address,
         coin_type,
         roles,
         page_size: pagination.page_size,
-        page_cursor: pagination.cursor,
+        page_cursor,
     })
 }
 
@@ -375,6 +377,19 @@ pub(super) fn reverse_identity_storage_cursor(
         namespace: required_cursor_item_field(&item, "namespace")?.to_owned(),
         namehash: required_cursor_item_field(&item, "namehash")?.to_owned(),
     }))
+}
+
+fn canonical_reverse_identity_cursor(
+    pagination: &PaginationRequest,
+    cursor_spec: &CursorSpec,
+) -> ApiResult<Option<String>> {
+    let Some(cursor) = pagination.cursor.as_deref() else {
+        return Ok(None);
+    };
+
+    let decoded = decode_cursor(cursor)?;
+    validate_cursor(cursor_spec, &decoded)?;
+    Ok(Some(encode_cursor(&decoded)))
 }
 
 pub(super) fn identity_logical_name_id(name: &str) -> String {

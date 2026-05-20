@@ -14,7 +14,7 @@ Environment:
 - Forward and reverse identity record loading no longer reads large `name_current.provenance` or unused record-inventory JSON fields.
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
 - Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current`, rather than counted on the request path.
-- ENS token IDs fall back to the current surface labelhash as a uint256 string when projected authority/registration/control summaries do not carry a token ID.
+- ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
 
 ## Before / After
 
