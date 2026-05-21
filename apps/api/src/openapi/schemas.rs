@@ -5,10 +5,20 @@ use crate::PUBLIC_NAMESPACES;
 
 #[path = "schemas/primary_name.rs"]
 mod primary_name;
+#[path = "schemas/identity.rs"]
+mod identity;
 
 use super::responses::{
     declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
     primary_name_response_schema,
+};
+use identity::{
+    forward_identity_batch_input_schema, forward_identity_batch_response_schema,
+    identity_as_of_schema, identity_name_response_schema, identity_pagination_schema,
+    identity_status_schema, indexing_status_response_schema, name_record_schema,
+    name_record_status_schema, reverse_identity_batch_input_schema,
+    reverse_identity_batch_response_schema, reverse_name_record_schema, reverse_names_input_schema,
+    reverse_names_response_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
@@ -157,6 +167,20 @@ pub(super) fn openapi_components() -> JsonValue {
                     "coin_type": { "type": "string" },
                 },
             }),
+            "IdentityStatus": identity_status_schema(),
+            "NameRecordStatus": name_record_status_schema(),
+            "IdentityAsOf": identity_as_of_schema(),
+            "NameRecord": name_record_schema(),
+            "ReverseNameRecord": reverse_name_record_schema(),
+            "IdentityPagination": identity_pagination_schema(),
+            "IdentityNameResponse": identity_name_response_schema(),
+            "ForwardIdentityBatchInput": forward_identity_batch_input_schema(),
+            "ForwardIdentityBatchResponse": forward_identity_batch_response_schema(),
+            "ReverseNamesInput": reverse_names_input_schema(),
+            "ReverseNamesResponse": reverse_names_response_schema(),
+            "ReverseIdentityBatchInput": reverse_identity_batch_input_schema(),
+            "ReverseIdentityBatchResponse": reverse_identity_batch_response_schema(),
+            "IndexingStatusResponse": indexing_status_response_schema(),
             "PrimaryNameClaimedResult": primary_name_claimed_result_schema(),
             "PrimaryNameDeclaredState": json!({
                 "type": "object",

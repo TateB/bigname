@@ -88,6 +88,8 @@ include!("tests/names_collection.rs");
 
 include!("tests/records.rs");
 
+include!("tests/identity.rs");
+
 include!("tests/events.rs");
 
 include!("tests/roles.rs");

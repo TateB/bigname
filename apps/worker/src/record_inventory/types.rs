@@ -33,6 +33,7 @@ pub(super) struct RelevantEvent {
     pub(super) chain_id: String,
     pub(super) block_number: i64,
     pub(super) block_hash: String,
+    pub(super) log_index: Option<i64>,
     pub(super) block_timestamp: Option<OffsetDateTime>,
     pub(super) raw_fact_ref: Value,
     pub(super) canonicality_state: CanonicalityState,

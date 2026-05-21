@@ -22,7 +22,7 @@ pub use write::{
     upsert_name_current_rows,
 };
 
-const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
+pub(crate) const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
   AND surface.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,

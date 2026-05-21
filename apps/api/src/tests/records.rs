@@ -297,7 +297,7 @@ async fn get_resolve_records_infers_basenames_namespace() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.base.eth/records?texts=com.twitter&known_text_keys=true&mode=declared")
+                .uri("/v1/resolve/Alice.Base.eth/records?texts=com.twitter&known_text_keys=true&mode=declared")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -315,6 +315,28 @@ async fn get_resolve_records_infers_basenames_namespace() -> Result<()> {
         payload.pointer("/data/known_text_keys/keys"),
         Some(&json!(["com.twitter"]))
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_rejects_unnormalizable_name() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/bad%20name.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("inferred compact records invalid-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
     database.cleanup().await?;
     Ok(())

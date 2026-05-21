@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use bigname_manifests::{NamespaceManifestSnapshot, load_namespace_manifest_snapshot};
 use bigname_storage::{
@@ -60,7 +60,7 @@ use crate::{
         ChildrenQuery, EventsQuery, ExactNameSnapshotQuery, HistoryQuery, InferredResolutionQuery,
         MetaMode, NameRecordsQuery, NameRolesQuery, NamesQuery, PermissionsQuery, PrimaryNameQuery,
         ResolutionExecutionExplainQuery, ResolutionMode, ResolutionQuery, ResolutionRecordKey,
-        ResolverOverviewQuery, ResourceLookupQuery, ResponseView, RolesQuery,
+        ResolverOverviewQuery, ResourceLookupQuery, ResponseView, ReverseIdentityQuery, RolesQuery,
     },
     routes::API_ROUTE_DEFINITIONS,
     state::AppState,

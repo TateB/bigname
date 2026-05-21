@@ -23,6 +23,7 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 | compact events | activity tables | `GET /v1/events` and history routes with `view=compact` |
 | roles by account/resource/name | resolver and role pages | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` |
 | compact resolver overview | resolver overview pages | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` |
+| partner-compatible identity façade | feed identity, shadow comparison, migration shims | Flat `NameRecord` and `ReverseNameRecord` compatibility DTOs over current projections |
 
 ## Route mapping by capability
 
@@ -43,12 +44,15 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 | compact name search | `GET /v1/names?namespace=...&prefix=...` or `contains=...` | Search only — no availability, pricing, or registration workflow semantics. |
 | compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
 | compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, projected `role_bitmap`, and effective powers. |
+| partner identity façade | `GET /v1/identity/names/{name}`, `POST /v1/identity/names:batch`, `GET /v1/identity/addresses/{address}/names`, `POST /v1/identity/addresses:names:batch`, `GET /v1/status/indexing` | App-facing compatibility surface for partner-1 style indexed reads. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen source-family admission. |
 
 Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` compatibility-reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
 
 `GET /v1/names` keeps the compatibility bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
+
+The `/v1/identity/*` façade uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is a compatibility read surface for partner-style migration and shadow comparison, not a replacement core model. Production ENSv2 source-family manifests remain outside this façade slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
 
 ## Coverage notes
 

@@ -24,13 +24,13 @@ pub(super) async fn resolve_records(
     Query(query): Query<NameRecordsQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<CompactNameRecordsResponse>> {
-    let namespace = infer_resolution_namespace(&name);
+    let parsed = normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
 
     Ok(Json(
         compact_name_records_response_for_name(
             &state,
-            namespace,
-            &name,
+            parsed.namespace,
+            &parsed.normalized_name,
             query,
             CompactNameRecordsDefaultMode::Auto,
         )

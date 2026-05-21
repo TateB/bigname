@@ -210,6 +210,10 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/history/addresses/{address}".to_owned(),
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
+            "/v1/identity/addresses/{address}/names".to_owned(),
+            "/v1/identity/addresses:names:batch".to_owned(),
+            "/v1/identity/names/{name}".to_owned(),
+            "/v1/identity/names:batch".to_owned(),
             "/v1/manifests/{namespace}".to_owned(),
             "/v1/names".to_owned(),
             "/v1/names/{namespace}/{name}".to_owned(),
@@ -226,6 +230,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/resources/lookup".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
             "/v1/roles".to_owned(),
+            "/v1/status/indexing".to_owned(),
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));
@@ -500,6 +505,12 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(|content| content.get("application/json"))
             .and_then(|content_type| content_type.get("schema")),
         Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
+    );
+
+    let reverse_identity_batch_input = openapi_schema(&document, "ReverseIdentityBatchInput");
+    assert_eq!(
+        reverse_identity_batch_input.pointer("/properties/inputs/items/properties/page_cursor/type"),
+        Some(&json!(["string", "null"]))
     );
 
     let events = openapi_operation(&document, "/v1/events");
@@ -1128,6 +1139,11 @@ async fn openapi_docs_route_serves_viewer() -> Result<()> {
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("bigname API docs"));
     assert!(body.contains("/openapi.json"));
+    assert!(body.contains("Try request"));
+    assert!(body.contains("Response headers"));
+    assert!(body.contains("performance.now()"));
+    assert!(body.contains("0x8e8Db5CcEF88cca9d624701Db544989C996E3216"));
+    assert!(body.contains("taytems.eth"));
 
     Ok(())
 }

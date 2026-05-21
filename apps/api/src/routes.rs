@@ -15,6 +15,7 @@ pub(crate) struct ApiRouteDefinition {
 #[derive(Clone, Copy)]
 pub(crate) enum ApiRouteMethod {
     Get,
+    Post,
 }
 
 #[derive(Clone, Copy)]
@@ -23,6 +24,7 @@ pub(crate) struct ApiRouteContract {
     pub(crate) summary: &'static str,
     pub(crate) tag: &'static str,
     pub(crate) parameters: &'static [ApiRouteParameter],
+    pub(crate) request_schema: Option<&'static str>,
     pub(crate) success_schema: &'static str,
     pub(crate) errors: ApiRouteErrorResponses,
 }
@@ -53,6 +55,15 @@ impl ApiRouteDefinition {
             contract: Some(contract),
         }
     }
+
+    const fn public_post(id: ApiRouteId, path: &'static str, contract: ApiRouteContract) -> Self {
+        Self {
+            id,
+            method: ApiRouteMethod::Post,
+            path,
+            contract: Some(contract),
+        }
+    }
 }
 
 impl ApiRouteContract {
@@ -69,9 +80,15 @@ impl ApiRouteContract {
             summary,
             tag,
             parameters,
+            request_schema: None,
             success_schema,
             errors,
         }
+    }
+
+    const fn with_request_schema(mut self, request_schema: &'static str) -> Self {
+        self.request_schema = Some(request_schema);
+        self
     }
 }
 
@@ -107,6 +124,11 @@ impl ApiRouteErrorResponses {
 #[derive(Clone, Copy)]
 pub(crate) enum ApiRouteId {
     Health,
+    IndexingStatus,
+    IdentityName,
+    IdentityNamesBatch,
+    IdentityAddressNames,
+    IdentityAddressNamesBatch,
     Names,
     AddressNames,
     AddressNamesCount,
@@ -137,6 +159,68 @@ pub(crate) enum ApiRouteId {
 
 pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition::private_get(ApiRouteId::Health, "/healthz"),
+    ApiRouteDefinition::public_get(
+        ApiRouteId::IndexingStatus,
+        "/v1/status/indexing",
+        ApiRouteContract::new(
+            "indexing_status",
+            "Projection indexing status by chain",
+            "Status",
+            &[],
+            "IndexingStatusResponse",
+            ApiRouteErrorResponses::new(false, false),
+        ),
+    ),
+    ApiRouteDefinition::public_get(
+        ApiRouteId::IdentityName,
+        "/v1/identity/names/{name}",
+        ApiRouteContract::new(
+            "identity_name",
+            "Partner-compatible forward identity lookup",
+            "Identity",
+            IDENTITY_NAME_PARAMETERS,
+            "IdentityNameResponse",
+            ApiRouteErrorResponses::new(true, false),
+        ),
+    ),
+    ApiRouteDefinition::public_post(
+        ApiRouteId::IdentityNamesBatch,
+        "/v1/identity/names:batch",
+        ApiRouteContract::new(
+            "identity_names_batch",
+            "Partner-compatible batched forward identity lookup",
+            "Identity",
+            &[],
+            "ForwardIdentityBatchResponse",
+            ApiRouteErrorResponses::new(true, false),
+        )
+        .with_request_schema("ForwardIdentityBatchInput"),
+    ),
+    ApiRouteDefinition::public_get(
+        ApiRouteId::IdentityAddressNames,
+        "/v1/identity/addresses/{address}/names",
+        ApiRouteContract::new(
+            "identity_address_names",
+            "Partner-compatible reverse identity lookup",
+            "Identity",
+            IDENTITY_ADDRESS_NAMES_PARAMETERS,
+            "ReverseNamesResponse",
+            ApiRouteErrorResponses::new(true, false),
+        ),
+    ),
+    ApiRouteDefinition::public_post(
+        ApiRouteId::IdentityAddressNamesBatch,
+        "/v1/identity/addresses:names:batch",
+        ApiRouteContract::new(
+            "identity_address_names_batch",
+            "Partner-compatible batched reverse identity lookup",
+            "Identity",
+            &[],
+            "ReverseIdentityBatchResponse",
+            ApiRouteErrorResponses::new(true, false),
+        )
+        .with_request_schema("ReverseIdentityBatchInput"),
+    ),
     ApiRouteDefinition::public_get(
         ApiRouteId::Names,
         "/v1/names",

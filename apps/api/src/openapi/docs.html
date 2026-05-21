@@ -15,7 +15,11 @@
         --soft: #eef2f6;
         --accent: #0f766e;
         --accent-soft: #ccfbf1;
+        --danger: #b42318;
+        --ok: #067647;
         --warn: #b54708;
+        --code-bg: #111827;
+        --code-text: #f9fafb;
       }
 
       @media (prefers-color-scheme: dark) {
@@ -28,7 +32,11 @@
           --soft: #202939;
           --accent: #5eead4;
           --accent-soft: #134e4a;
+          --danger: #f97066;
+          --ok: #47cd89;
           --warn: #fdb022;
+          --code-bg: #0b1220;
+          --code-text: #f9fafb;
         }
       }
 
@@ -53,7 +61,7 @@
 
       main,
       .topbar {
-        width: min(1120px, calc(100vw - 32px));
+        width: min(1180px, calc(100vw - 32px));
         margin: 0 auto;
       }
 
@@ -74,7 +82,9 @@
       .summary,
       .empty,
       .error,
-      .description {
+      .description,
+      .hint,
+      .metric-label {
         color: var(--muted);
       }
 
@@ -85,23 +95,65 @@
         align-items: center;
       }
 
-      input[type="search"] {
+      input,
+      select,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input[type="search"],
+      .field-input,
+      .field-select,
+      .body-input {
         width: 100%;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--panel);
         color: var(--text);
-        font: inherit;
         padding: 10px 12px;
       }
 
-      .json-link {
+      .field-input,
+      .field-select {
+        min-height: 42px;
+      }
+
+      .body-input {
+        min-height: 180px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .json-link,
+      .send-button,
+      .clear-button {
         border: 1px solid var(--line);
         border-radius: 8px;
         color: var(--text);
+        background: var(--panel);
         padding: 10px 12px;
         text-decoration: none;
         white-space: nowrap;
+      }
+
+      .send-button {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #ffffff;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .send-button:disabled {
+        cursor: wait;
+        opacity: 0.72;
+      }
+
+      .clear-button {
+        cursor: pointer;
       }
 
       main {
@@ -136,9 +188,25 @@
         text-transform: uppercase;
       }
 
-      .path {
+      .method.post {
+        background: #ecfdf3;
+        color: #067647;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .method.post {
+          background: #053321;
+          color: #75e0a7;
+        }
+      }
+
+      .path,
+      .url-preview {
         overflow-wrap: anywhere;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .path {
         font-size: 15px;
         font-weight: 650;
       }
@@ -156,7 +224,7 @@
 
       .tag {
         border: 1px solid var(--line);
-        border-radius: 999px;
+        border-radius: 6px;
         color: var(--muted);
         font-size: 12px;
         padding: 2px 8px;
@@ -200,6 +268,18 @@
         font-size: 0.92em;
       }
 
+      pre {
+        margin: 0;
+        overflow: auto;
+        border-radius: 8px;
+        background: var(--code-bg);
+        color: var(--code-text);
+        padding: 14px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
       .response-list {
         display: grid;
         gap: 8px;
@@ -220,6 +300,91 @@
         font-weight: 700;
       }
 
+      .try-grid {
+        display: grid;
+        gap: 14px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field-label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 20px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .field-label span {
+        color: var(--muted);
+        font-weight: 500;
+      }
+
+      .hint {
+        min-height: 18px;
+        font-size: 12px;
+      }
+
+      .request-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .url-preview {
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: var(--soft);
+        color: var(--text);
+        padding: 10px 12px;
+        font-size: 13px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric {
+        border-top: 1px solid var(--line);
+        padding-top: 8px;
+      }
+
+      .metric-value {
+        display: block;
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-weight: 700;
+      }
+
+      .metric-value.ok {
+        color: var(--ok);
+      }
+
+      .metric-value.error {
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--danger);
+      }
+
+      .response-shell {
+        display: grid;
+        gap: 12px;
+      }
+
       .empty,
       .error {
         border: 1px solid var(--line);
@@ -228,15 +393,21 @@
         padding: 18px;
       }
 
-      @media (max-width: 640px) {
+      .error {
+        color: var(--danger);
+      }
+
+      @media (max-width: 760px) {
         main,
         .topbar {
-          width: min(100vw - 20px, 1120px);
+          width: min(100vw - 20px, 1180px);
         }
 
         .toolbar,
         .operation-header,
-        .response-list li {
+        .response-list li,
+        .field-grid,
+        .metrics {
           grid-template-columns: 1fr;
         }
 
@@ -281,6 +452,21 @@
         trace: 7
       };
 
+      const sampleValues = {
+        address: "0x8e8Db5CcEF88cca9d624701Db544989C996E3216",
+        coin_type: "60",
+        consistency: "canonical",
+        include: "values",
+        mode: "declared",
+        name: "taytems.eth",
+        namespace: "ens",
+        page_size: "10",
+        records: "addr:60",
+        relation: "both",
+        roles: "BOTH",
+        view: "compact"
+      };
+
       function text(value) {
         return value === undefined || value === null ? "" : String(value);
       }
@@ -297,6 +483,52 @@
         if (schema.type === "array") return `${schemaLabel(schema.items) || "value"}[]`;
         if (Array.isArray(schema.type)) return schema.type.join(" | ");
         return schema.type || "";
+      }
+
+      function resolveRef(schema, seen = new Set()) {
+        if (!schema || !schema.$ref) return schema;
+        if (seen.has(schema.$ref)) return {};
+        seen.add(schema.$ref);
+        const name = schema.$ref.replace("#/components/schemas/", "");
+        return resolveRef(spec?.components?.schemas?.[name] || {}, seen);
+      }
+
+      function sampleForSchema(schema, propertyName = "value") {
+        const resolved = resolveRef(schema);
+        if (!resolved) return "";
+        if (resolved.example !== undefined) return resolved.example;
+        if (resolved.default !== undefined) return resolved.default;
+        if (resolved.enum?.length) return resolved.enum[resolved.enum.length - 1];
+        if (sampleValues[propertyName] !== undefined) {
+          const kind = Array.isArray(resolved.type) ? resolved.type[0] : resolved.type;
+          if (kind === "integer" || kind === "number") return Number(sampleValues[propertyName]);
+          return sampleValues[propertyName];
+        }
+        if (resolved.type === "object" || resolved.properties) {
+          const result = {};
+          const required = new Set(resolved.required || []);
+          Object.entries(resolved.properties || {}).forEach(([key, value]) => {
+            const resolvedValue = resolveRef(value);
+            if (required.has(key) || resolvedValue.default !== undefined || sampleValues[key] !== undefined) {
+              result[key] = sampleForSchema(value, key);
+            }
+          });
+          if (Object.keys(result).length === 0) {
+            const [firstKey, firstValue] = Object.entries(resolved.properties || {})[0] || [];
+            if (firstKey) result[firstKey] = sampleForSchema(firstValue, firstKey);
+          }
+          return result;
+        }
+        if (resolved.type === "array") {
+          return [sampleForSchema(resolved.items || {}, propertyName.replace(/s$/, ""))];
+        }
+        if (resolved.type === "boolean") return false;
+        if (resolved.type === "integer" || resolved.type === "number") return resolved.minimum || 1;
+        return sampleValues[propertyName] || "";
+      }
+
+      function requestBodySchema(operation) {
+        return operation.requestBody?.content?.["application/json"]?.schema || null;
       }
 
       function operationEntries(paths) {
@@ -372,6 +604,255 @@
         return list;
       }
 
+      function renderField(parameter, state) {
+        const schema = parameter.schema || {};
+        const resolved = resolveRef(schema);
+        const field = document.createElement("label");
+        field.className = "field";
+        const label = document.createElement("div");
+        label.className = "field-label";
+        label.appendChild(appendText(document.createElement("strong"), parameter.name));
+        label.appendChild(appendText(document.createElement("span"), `${parameter.in}${parameter.required ? " required" : ""}`));
+        field.appendChild(label);
+
+        let input;
+        if (resolved.enum?.length) {
+          input = document.createElement("select");
+          input.className = "field-select";
+          if (!parameter.required) {
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "";
+            input.appendChild(empty);
+          }
+          resolved.enum.forEach((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement("input");
+          input.className = "field-input";
+          input.type = resolved.type === "integer" || resolved.type === "number" ? "number" : "text";
+          if (resolved.minimum !== undefined) input.min = String(resolved.minimum);
+          if (resolved.maximum !== undefined) input.max = String(resolved.maximum);
+        }
+
+        input.value = parameter.example || parameter.schema?.default || sampleValues[parameter.name] || "";
+        input.dataset.name = parameter.name;
+        input.dataset.location = parameter.in;
+        input.dataset.required = parameter.required ? "true" : "false";
+        input.addEventListener("input", () => updatePreview(state));
+        input.addEventListener("change", () => updatePreview(state));
+        state.inputs.push(input);
+        field.appendChild(input);
+
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = schemaLabel(schema);
+        field.appendChild(hint);
+        return field;
+      }
+
+      function buildUrl(entry, inputs) {
+        let path = entry.path;
+        const query = new URLSearchParams();
+        inputs.forEach((input) => {
+          const value = input.value.trim();
+          if (!value) return;
+          if (input.dataset.location === "path") {
+            path = path.replace(`{${input.dataset.name}}`, encodeURIComponent(value));
+          } else if (input.dataset.location === "query") {
+            query.set(input.dataset.name, value);
+          }
+        });
+        const queryText = query.toString();
+        return queryText ? `${path}?${queryText}` : path;
+      }
+
+      function missingRequired(inputs) {
+        return inputs
+          .filter((input) => input.dataset.required === "true" && !input.value.trim())
+          .map((input) => input.dataset.name);
+      }
+
+      function updatePreview(state) {
+        state.preview.textContent = `${state.entry.method.toUpperCase()} ${buildUrl(state.entry, state.inputs)}`;
+      }
+
+      function setMetric(container, label, value, kind = "") {
+        const metric = document.createElement("div");
+        metric.className = "metric";
+        const valueNode = appendText(document.createElement("span"), value);
+        valueNode.className = `metric-value ${kind}`.trim();
+        metric.appendChild(valueNode);
+        const labelNode = appendText(document.createElement("span"), label);
+        labelNode.className = "metric-label";
+        metric.appendChild(labelNode);
+        container.appendChild(metric);
+      }
+
+      function formatHeaders(headers) {
+        const result = {};
+        headers.forEach((value, key) => {
+          result[key] = value;
+        });
+        return JSON.stringify(result, null, 2);
+      }
+
+      async function sendRequest(state) {
+        const missing = missingRequired(state.inputs);
+        if (missing.length > 0) {
+          showError(state, `Missing required parameter: ${missing.join(", ")}`);
+          return;
+        }
+
+        let body;
+        const headers = { accept: "application/json" };
+        if (state.bodyInput) {
+          const rawBody = state.bodyInput.value.trim();
+          if (rawBody) {
+            try {
+              body = JSON.stringify(JSON.parse(rawBody));
+              headers["content-type"] = "application/json";
+            } catch (error) {
+              showError(state, error.message || "Request body is not valid JSON.");
+              return;
+            }
+          }
+        }
+
+        const url = buildUrl(state.entry, state.inputs);
+        state.button.disabled = true;
+        state.button.textContent = "Sending";
+        state.result.replaceChildren();
+        state.result.appendChild(appendText(document.createElement("div"), "Sending request..."));
+        state.result.lastChild.className = "empty";
+
+        const started = performance.now();
+        try {
+          const response = await fetch(url, {
+            method: state.entry.method.toUpperCase(),
+            headers,
+            body
+          });
+          const elapsed = performance.now() - started;
+          const responseText = await response.text();
+          renderResult(state, response, responseText, elapsed);
+        } catch (error) {
+          showError(state, error.message || "Request failed.");
+        } finally {
+          state.button.disabled = false;
+          state.button.textContent = "Send";
+        }
+      }
+
+      function showError(state, message) {
+        state.result.replaceChildren();
+        const failure = appendText(document.createElement("div"), message);
+        failure.className = "error";
+        state.result.appendChild(failure);
+      }
+
+      function renderResult(state, response, responseText, elapsed) {
+        state.result.replaceChildren();
+        const shell = document.createElement("div");
+        shell.className = "response-shell";
+
+        const metrics = document.createElement("div");
+        metrics.className = "metrics";
+        setMetric(metrics, "status", response.status, response.ok ? "ok" : "error");
+        setMetric(metrics, "time", `${elapsed.toFixed(1)} ms`);
+        setMetric(metrics, "bytes", new Blob([responseText]).size);
+        setMetric(metrics, "type", response.headers.get("content-type") || "unknown");
+        shell.appendChild(metrics);
+
+        const headers = document.createElement("details");
+        headers.appendChild(appendText(document.createElement("summary"), "Response headers"));
+        const headersText = document.createElement("pre");
+        headersText.textContent = formatHeaders(response.headers);
+        headers.appendChild(headersText);
+        shell.appendChild(headers);
+
+        const body = document.createElement("pre");
+        try {
+          body.textContent = JSON.stringify(JSON.parse(responseText), null, 2);
+        } catch (_) {
+          body.textContent = responseText || "(empty body)";
+        }
+        shell.appendChild(body);
+        state.result.appendChild(shell);
+      }
+
+      function renderTryConsole(entry) {
+        const operation = entry.operation || {};
+        const state = {
+          entry,
+          inputs: [],
+          bodyInput: null,
+          button: null,
+          preview: document.createElement("div"),
+          result: document.createElement("div")
+        };
+
+        const details = document.createElement("details");
+        details.open = operation.parameters?.length > 0 || requestBodySchema(operation);
+        details.appendChild(appendText(document.createElement("summary"), "Try request"));
+
+        const grid = document.createElement("div");
+        grid.className = "try-grid";
+
+        const parameters = operation.parameters || [];
+        if (parameters.length > 0) {
+          const fields = document.createElement("div");
+          fields.className = "field-grid";
+          parameters.forEach((parameter) => fields.appendChild(renderField(parameter, state)));
+          grid.appendChild(fields);
+        }
+
+        const bodySchema = requestBodySchema(operation);
+        if (bodySchema) {
+          const field = document.createElement("label");
+          field.className = "field";
+          const label = document.createElement("div");
+          label.className = "field-label";
+          label.appendChild(appendText(document.createElement("strong"), "Body"));
+          label.appendChild(appendText(document.createElement("span"), "application/json"));
+          field.appendChild(label);
+          const textarea = document.createElement("textarea");
+          textarea.className = "body-input";
+          textarea.spellcheck = false;
+          textarea.value = JSON.stringify(sampleForSchema(bodySchema), null, 2);
+          state.bodyInput = textarea;
+          field.appendChild(textarea);
+          grid.appendChild(field);
+        }
+
+        state.preview.className = "url-preview";
+        grid.appendChild(state.preview);
+
+        const actions = document.createElement("div");
+        actions.className = "request-actions";
+        state.button = appendText(document.createElement("button"), "Send");
+        state.button.type = "button";
+        state.button.className = "send-button";
+        state.button.addEventListener("click", () => sendRequest(state));
+        actions.appendChild(state.button);
+        const clear = appendText(document.createElement("button"), "Clear response");
+        clear.type = "button";
+        clear.className = "clear-button";
+        clear.addEventListener("click", () => state.result.replaceChildren());
+        actions.appendChild(clear);
+        grid.appendChild(actions);
+
+        state.result.className = "response-shell";
+        grid.appendChild(state.result);
+        details.appendChild(grid);
+        updatePreview(state);
+        return details;
+      }
+
       function renderOperation(entry) {
         const operation = entry.operation || {};
         const section = document.createElement("section");
@@ -379,8 +860,9 @@
 
         const header = document.createElement("div");
         header.className = "operation-header";
-        header.appendChild(appendText(document.createElement("span"), entry.method));
-        header.lastChild.className = "method";
+        const method = appendText(document.createElement("span"), entry.method);
+        method.className = `method ${entry.method}`;
+        header.appendChild(method);
 
         const identity = document.createElement("div");
         identity.appendChild(appendText(document.createElement("div"), entry.path));
@@ -402,10 +884,11 @@
         header.appendChild(identity);
         section.appendChild(header);
 
+        section.appendChild(renderTryConsole(entry));
+
         const parameters = operation.parameters || [];
         if (parameters.length > 0) {
           const details = document.createElement("details");
-          details.open = true;
           details.appendChild(appendText(document.createElement("summary"), "Parameters"));
           details.appendChild(renderTable(parameters));
           section.appendChild(details);

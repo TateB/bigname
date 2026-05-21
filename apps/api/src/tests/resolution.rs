@@ -1128,7 +1128,13 @@ async fn seed_supported_basenames_rebuild_inputs(
         .insert_capability_flag(manifest_id, "verified_resolution", "supported", None)
         .await?;
     insert_basenames_execution_manifest_contract(database, manifest_id).await?;
-    database.rebuild_name_current(logical_name_id).await
+    database.rebuild_name_current(logical_name_id).await?;
+    let row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("supported Basenames rebuild input must create name_current row")?;
+    database
+        .seed_snapshot_selector_chain_positions(&row.chain_positions)
+        .await
 }
 
 async fn insert_chain_checkpoint(
@@ -1671,7 +1677,7 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth")
+                .uri("/v1/resolve/Alice.eth")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1698,6 +1704,28 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
         inferred_payload.data.get("logical_name_id"),
         Some(&json!("ens:alice.eth"))
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_route_rejects_unnormalizable_name() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/bad%20name.eth")
+                .body(Body::empty())
+                .expect("inferred invalid-name request must build"),
+        )
+        .await
+        .context("inferred invalid-name resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
     database.cleanup().await?;
     Ok(())
@@ -2986,7 +3014,8 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
                     "record_key": "text:com.twitter",
                     "record_family": "text",
                     "selector_key": "com.twitter",
-                    "status": "not_found",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
                 },
                 {
                     "record_key": "addr:60",

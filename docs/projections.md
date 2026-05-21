@@ -8,7 +8,9 @@ This document defines the shipped projection set, replay semantics, invalidation
 
 - Projections rebuild from canonical facts and normalized events.
 - Every row carries provenance, manifest version, and chain-position context.
-- Only projection workers write projection tables. Adapters never do.
+- Only projection workers write projection tables. Adapters never do. The partner identity
+  reverse count sidecar is a bounded storage-trigger exception documented in
+  [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md).
 - Exact-name reads resolve `at`, `chain_positions`, `consistency` first; the selected positions then key one coherent join across `name_current`, `address_names_current`, `permissions_current`, `record_inventory_current`, `resolver_current`.
 - A reader fails closed when the selected positions can't be served from current rows. It does not patch a missing snapshot from raw facts, adapter internals, or a newer projection row.
 - A row with an older stored chain-position context may serve a later snapshot only when the reader can prove no newer canonical input exists for the row's keys through those positions. Otherwise the worker rebuilds it.
@@ -40,6 +42,7 @@ History reads consume canonical normalized events plus thin cursor support. Ther
 | `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
 | `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
 | `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
+| `/v1/identity/*` | app-facing façade over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages and counts share the same readable `name_current` eligibility |
 | `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
 | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`; `name_current` only for name-to-resource lookup |
 | `GET /v1/resources/lookup` | `name_current` |
@@ -191,6 +194,8 @@ Projection invalidation fires on:
 
 Invalidation is deterministic and key-scoped. `projection_invalidations` is the shared worker queue for affected projection families plus family-local keys (`logical_name_id`, `resource_id`, address, resolver tuple, or primary-name tuple). `projection_normalized_event_changes` is the append-only normalized-event input to that queue, populated by the normalized-event storage trigger for normalized-event inserts and canonicality-state updates. `projection_apply_cursors` records the worker's consumed `change_id` watermark for that input. Manifest, execution, and other non-normalized-event producers enqueue directly into `projection_invalidations` under the same generation rule. A new invalidation for a key increments that row's generation; an in-flight apply may delete only the generation it claimed, so a newer change cannot be lost by an older rebuild finishing late.
 
+`record_inventory_current` is still keyed by `resource_id`, but a point rebuild may read retained resolver-local record facts and resolver-boundary events from earlier resources for the same logical name when those inputs are needed to bound the target resource's current resolver tenure. Normalized-event invalidation for record inventory therefore fans out changed resolver and record events to later canonical resources with the same logical name. Cross-resource `ResolverChanged` rows are rebuild inputs only as tenure boundaries; they do not replace the target resource's latest resolver.
+
 Workers derive invalidations from normalized events and apply them in projection dependency order: `name_current`, `children_current`, `permissions_current`, `record_inventory_current`, `resolver_current`, `address_names_current`, `primary_names_current`. `resolver_current` follows `permissions_current` because resolver-scoped permission summaries are projection inputs. Durable claims are leases, not ownership transfers: if a worker exits mid-apply, another worker may reclaim a claimed invalidation after the retry delay and apply the same generation. No projection refreshes from broad time-based polling.
 
 ## Rebuild
@@ -243,6 +248,8 @@ Indexes that match the public contract:
 
 - `name_current(logical_name_id)`
 - `address_names_current(address, namespace, canonical_display_name, logical_name_id)`
+- `address_names_current(logical_name_id, relation, address)` for identity forward relation hydration
+- `address_names_current(address, relation, normalized_name, namespace, namehash, logical_name_id)` for identity reverse pagination
 - `children_current(parent_logical_name_id, surface_class, canonical_display_name, child_logical_name_id)`
 - `permissions_current(resource_id, subject, scope)`
 - `resolver_current(chain_id, resolver_address)`

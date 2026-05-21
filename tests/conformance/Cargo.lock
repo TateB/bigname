@@ -630,6 +630,7 @@ dependencies = [
  "bigname-storage",
  "clap",
  "hex",
+ "idna",
  "serde",
  "serde_json",
  "sqlx",

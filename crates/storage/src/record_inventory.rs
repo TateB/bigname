@@ -4,6 +4,8 @@ mod row_decode;
 mod snapshot_reads;
 mod validation;
 
+pub(crate) use boundary_key::record_version_boundary_storage_key;
+
 pub use batch_upsert::upsert_record_inventory_current_rows;
 pub use row_decode::RecordInventoryCurrentRow;
 pub use snapshot_reads::{

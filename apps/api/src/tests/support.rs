@@ -2460,14 +2460,14 @@ fn resource(resource_id: Uuid) -> Resource {
 }
 
 fn name_surface(logical_name_id: &str) -> NameSurface {
-    let normalized_name = logical_name_id
+    let (namespace, normalized_name) = logical_name_id
         .split_once(':')
-        .map(|(_, normalized_name)| normalized_name)
         .expect("logical_name_id must include namespace");
+    let chain_id = chain_id_for_namespace(namespace);
 
     NameSurface {
         logical_name_id: logical_name_id.to_owned(),
-        namespace: "ens".to_owned(),
+        namespace: namespace.to_owned(),
         input_name: normalized_name.to_owned(),
         canonical_display_name: "Alice.eth".to_owned(),
         normalized_name: normalized_name.to_owned(),
@@ -2477,7 +2477,7 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
         normalizer_version: "uts46-v1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
-        chain_id: "ethereum-mainnet".to_owned(),
+        chain_id: chain_id.to_owned(),
         block_hash: "0xsurface".to_owned(),
         block_number: 98,
         provenance: json!({"seed": "surface"}),

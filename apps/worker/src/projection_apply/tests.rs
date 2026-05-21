@@ -207,6 +207,179 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn derives_record_inventory_cross_resource_invalidations_for_logical_name_dependencies()
+-> Result<()> {
+    let database = test_database().await?;
+    let predecessor_resource_id = Uuid::new_v4();
+    let current_resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+
+    insert_resource(&database, predecessor_resource_id).await?;
+    insert_resource(&database, current_resource_id).await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:current-resolver",
+            namespace: "ens",
+            logical_name_id: Some("ens:carry.eth"),
+            resource_id: Some(current_resource_id),
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(21),
+            block_hash: Some("0xcarry21"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000aaa"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear initial projection invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:predecessor-resolver-boundary",
+            namespace: "ens",
+            logical_name_id: Some("ens:carry.eth"),
+            resource_id: Some(predecessor_resource_id),
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(19),
+            block_hash: Some("0xcarry19"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000bbb"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:predecessor-record",
+            namespace: "ens",
+            logical_name_id: Some("ens:carry.eth"),
+            resource_id: Some(predecessor_resource_id),
+            event_kind: "RecordChanged",
+            source_family: "ens_v1_resolver_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(20),
+            block_hash: Some("0xcarry20"),
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 2);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &predecessor_resource_id.to_string()
+    ));
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &current_resource_id.to_string()
+    ));
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear cross-resource projection invalidations")?;
+    sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET resource_id = NULL
+        WHERE event_identity = $1
+        "#,
+    )
+    .bind("projection-apply:predecessor-resolver-boundary")
+    .execute(database.pool())
+    .await
+    .context("failed to unbind predecessor resolver event")?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_normalized_event_changes (
+            normalized_event_id,
+            changed_at,
+            change_kind,
+            canonicality_state
+        )
+        SELECT
+            normalized_event_id,
+            $2,
+            'canonicality_update',
+            canonicality_state
+        FROM normalized_events
+        WHERE event_identity = $1
+        "#,
+    )
+    .bind("projection-apply:predecessor-resolver-boundary")
+    .bind(timestamp(1_800_000_100))
+    .execute(database.pool())
+    .await
+    .context("failed to log predecessor resolver repair change")?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &current_resource_id.to_string()
+    ));
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear repaired resolver invalidations")?;
+    sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET canonicality_state = 'orphaned'::canonicality_state,
+            observed_at = $2
+        WHERE event_identity = $1
+        "#,
+    )
+    .bind("projection-apply:predecessor-record")
+    .bind(timestamp(1_800_000_200))
+    .execute(database.pool())
+    .await
+    .context("failed to orphan predecessor record event")?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &current_resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
 fn has_key(invalidations: &[(String, String)], projection: &str, projection_key: &str) -> bool {
     invalidations
         .iter()
@@ -250,6 +423,33 @@ async fn invalidation_generation(
     .fetch_one(database.pool())
     .await
     .context("failed to load projection invalidation generation")
+}
+
+async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ethereum-mainnet',
+            $2,
+            1,
+            'finalized'
+        )
+        "#,
+    )
+    .bind(resource_id)
+    .bind(format!("0x{}", resource_id.simple()))
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test resource")?;
+    Ok(())
 }
 
 struct EventSeed<'a> {
