@@ -64,17 +64,27 @@ fn build_resolution_response(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     persisted_verified_outcome: Option<&ExecutionOutcome>,
     selected_snapshot: &SelectedSnapshot,
-    include_provenance: bool,
+    include_full_metadata: bool,
 ) -> Result<ResolutionResponse> {
     let data = build_name_data(&row);
-    let declared_state = mode
-        .includes_declared()
-        .then(|| build_resolution_declared_state(&row, record_inventory_row, records));
+    let declared_state = mode.includes_declared().then(|| {
+        if include_full_metadata {
+            build_resolution_declared_state(&row, record_inventory_row, records)
+        } else {
+            build_compact_resolution_declared_state(&row, record_inventory_row, records)
+        }
+    });
     let verified_state = mode
         .includes_verified()
-        .then(|| build_resolution_verified_state(&row, records, persisted_verified_outcome))
+        .then(|| {
+            if include_full_metadata {
+                build_resolution_verified_state(&row, records, persisted_verified_outcome)
+            } else {
+                build_compact_resolution_verified_state(&row, records, persisted_verified_outcome)
+            }
+        })
         .transpose()?;
-    let provenance = if include_provenance {
+    let provenance = if include_full_metadata {
         build_name_provenance_with_execution_trace(
             &row.provenance,
             persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
@@ -82,10 +92,22 @@ fn build_resolution_response(
     } else {
         JsonValue::Null
     };
-    let coverage = build_name_coverage(&row.coverage);
-    let chain_positions = selected_snapshot.chain_positions_value();
-    let consistency = selected_snapshot.consistency.as_str().to_owned();
-    let last_updated = format_timestamp(row.last_recomputed_at);
+    let coverage = if include_full_metadata {
+        build_name_coverage(&row.coverage)
+    } else {
+        JsonValue::Null
+    };
+    let chain_positions = if include_full_metadata {
+        selected_snapshot.chain_positions_value()
+    } else {
+        JsonValue::Null
+    };
+    let consistency = include_full_metadata
+        .then(|| selected_snapshot.consistency.as_str().to_owned())
+        .unwrap_or_default();
+    let last_updated = include_full_metadata
+        .then(|| format_timestamp(row.last_recomputed_at))
+        .unwrap_or_default();
 
     Ok(ResolutionResponse {
         data,
@@ -97,6 +119,108 @@ fn build_resolution_response(
         consistency,
         last_updated,
     })
+}
+
+fn build_compact_resolution_declared_state(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
+    let full = build_resolution_declared_state(row, record_inventory_row, records);
+    let mut declared_state = empty_object();
+    if let Some(topology) = provenance_field(&full, "topology") {
+        insert_value_field(&mut declared_state, "topology", compact_resolution_topology(topology));
+    }
+    if let Some(inventory) = provenance_field(&full, "record_inventory") {
+        insert_value_field(
+            &mut declared_state,
+            "record_inventory",
+            compact_resolution_record_inventory(inventory),
+        );
+    }
+    if let Some(cache) = provenance_field(&full, "record_cache") {
+        insert_value_field(
+            &mut declared_state,
+            "record_cache",
+            compact_resolution_record_cache(cache),
+        );
+    }
+    declared_state
+}
+
+fn compact_resolution_topology(topology: &JsonValue) -> JsonValue {
+    let mut compact = topology.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("version_boundaries");
+    }
+    compact
+}
+
+fn compact_resolution_record_inventory(inventory: &JsonValue) -> JsonValue {
+    let mut compact = empty_object();
+    if summary_is_unsupported(Some(inventory)) {
+        if let Some(status) = provenance_field(inventory, "status").cloned() {
+            insert_value_field(&mut compact, "status", status);
+        }
+        if let Some(unsupported_reason) = provenance_field(inventory, "unsupported_reason").cloned()
+        {
+            insert_value_field(&mut compact, "unsupported_reason", unsupported_reason);
+        }
+        return compact;
+    }
+    if let Some(selectors) = provenance_field(inventory, "selectors").cloned() {
+        insert_value_field(&mut compact, "selectors", selectors);
+    }
+    if let Some(explicit_gaps) = provenance_field(inventory, "explicit_gaps").cloned() {
+        insert_value_field(&mut compact, "explicit_gaps", explicit_gaps);
+    }
+    if let Some(unsupported_families) = provenance_field(inventory, "unsupported_families").cloned()
+        && unsupported_families.as_array().is_some_and(|items| !items.is_empty())
+    {
+        insert_value_field(&mut compact, "unsupported_families", unsupported_families);
+    }
+    compact
+}
+
+fn compact_resolution_record_cache(cache: &JsonValue) -> JsonValue {
+    let mut compact = empty_object();
+    if summary_is_unsupported(Some(cache)) {
+        if let Some(status) = provenance_field(cache, "status").cloned() {
+            insert_value_field(&mut compact, "status", status);
+        }
+        if let Some(unsupported_reason) = provenance_field(cache, "unsupported_reason").cloned() {
+            insert_value_field(&mut compact, "unsupported_reason", unsupported_reason);
+        }
+        return compact;
+    }
+    insert_value_field(
+        &mut compact,
+        "entries",
+        provenance_field(cache, "entries")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new())),
+    );
+    compact
+}
+
+fn build_compact_resolution_verified_state(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    persisted_outcome: Option<&ExecutionOutcome>,
+) -> Result<JsonValue> {
+    let mut verified_state = build_resolution_verified_state(row, records, persisted_outcome)?;
+    if let Some(queries) = verified_state
+        .as_object_mut()
+        .and_then(|object| object.get_mut("verified_queries"))
+        .and_then(JsonValue::as_array_mut)
+    {
+        for query in queries {
+            if let Some(object) = query.as_object_mut() {
+                object.remove("provenance");
+            }
+        }
+    }
+    Ok(verified_state)
 }
 
 fn build_resolution_execution_explain_response(

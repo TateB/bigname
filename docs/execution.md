@@ -27,7 +27,7 @@ For Basenames on the shipped mainnet profile, the entrypoint is active `basename
 
 ### On-demand execution
 
-`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`, and `GET /v1/names/{namespace}/{name}/records` with verified selectors, are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
+`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`, and `GET /v1/names/{namespace}/{name}/records` with verified selectors, are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The profile route does not accept a selector query; it executes against the server-derived declared profile selector set, falling back to the bounded app profile set only when a supported declared inventory exists but has no declared selector/gap/cache records. The compact records route is the selector-specific app path. Each route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
 
 Live-execution rules:
 

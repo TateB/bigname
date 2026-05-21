@@ -46,6 +46,20 @@ Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-a
 | `POST /v1/identity:lookup` `profile=feed`, 250 inputs | 116.03 KB | 4.45 ms |
 | `POST /v1/identity:lookup` `profile=feed`, 1000 inputs | 465.99 KB | 15.98 ms |
 
+### Random 10k Validation
+
+After the API image was rebuilt from this branch, the latency check was repeated from fresh random samples instead of warm named fixtures. The benchmark sampled 10,000 random distinct reverse-address inputs from `address_names_current`, used one keep-alive local HTTP connection, warmed each batch size, and measured the native feed profile:
+
+| Case | Response size | p95 |
+| --- | ---: | ---: |
+| `POST /v1/identity:lookup` `profile=feed`, 1 random address input | 0.49 KB | 0.72 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 10 random address inputs | 4.71 KB | 2.82 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 100 random address inputs | 47.02 KB | 8.25 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 250 random address inputs | 117.73 KB | 6.90 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 1000 random address inputs | 470.99 KB | 21.06 ms |
+
+The 100-input row is from a 400-request measured rerun after a 50-request warmup. Worker/indexer replay was paused for the benchmark and restarted afterward; measuring while a full projection replay is actively scanning/writing `name_current` can push p95 above the feed SLO and is not the steady-state API-path measurement.
+
 ## Interpretation
 
 The compact feed route meets an under-10 ms p95 local/server-side proxy for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. The native `POST /v1/identity:lookup` feed profile is the product route for that target. These measurements use the readable-row-safe `address_names_current_identity_feed` sidecar, not the earlier live first-row shortcut. They are not a substitute for a final AWS `us-east` vantage measurement in the deployed environment, but they demonstrate that the API and database path are under the budget on the running Docker stack. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the native compact response is already about 466 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full reverse profile/detail batches remain intentionally outside the feed latency contract.

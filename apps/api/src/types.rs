@@ -283,9 +283,13 @@ pub(crate) struct ResolutionResponse {
     pub(crate) verified_state: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) coverage: JsonValue,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) chain_positions: JsonValue,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) consistency: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) last_updated: String,
 }
 

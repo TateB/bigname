@@ -47,7 +47,7 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route selects its records server-side from declared state and falls back to the bounded app profile set only when a supported declared inventory exists but has no declared selectors, gaps, or cache entries; missing or explicitly unsupported inventory does not use fallback records.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
 - Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
@@ -71,7 +71,7 @@ These routes share the exact-name snapshot:
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
-- `GET /v1/profiles/names/{name}` (data, declared topology, inventory/cache, verified support, execution target)
+- `GET /v1/profiles/names/{name}` (data, declared topology, inventory/cache, server-selected verified profile records, execution target)
 
 Rules:
 
@@ -145,6 +145,7 @@ Rules:
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is optional and reserved for explicit diagnostic/full metadata paths. Product routes omit it by default; mixed declared+verified routes may add section-local `provenance` where derivations differ.
 - `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
+- `GET /v1/profiles/names/{name}` is the app full-profile exception to the ordinary full-envelope default: `meta=summary` and `meta=none` return a compact profile envelope without top-level coverage/chain/provenance fields, and `meta=full` is required for diagnostic envelope metadata.
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
@@ -360,7 +361,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/names` | Compact name search, exact-name filter, address relations, suggestions. |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup without routine deep provenance. |
-| `GET /v1/profiles/names/{name}` | App-facing full profile path with declared topology/cache and verified record results. |
+| `GET /v1/profiles/names/{name}` | App-facing full profile path with declared topology/cache and server-selected verified profile record results. |
 | `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
 | `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
 | `GET /v1/addresses/{address}/names` | Address-to-surface collection. |

@@ -1672,11 +1672,7 @@
         "required": [
           "data",
           "declared_state",
-          "verified_state",
-          "coverage",
-          "chain_positions",
-          "consistency",
-          "last_updated"
+          "verified_state"
         ],
         "type": "object"
       },
@@ -4257,17 +4253,6 @@
               ],
               "type": "string"
             }
-          },
-          {
-            "description": "Comma-separated record selectors. When omitted, the route uses the projected cacheable selector set for this name.",
-            "explode": false,
-            "in": "query",
-            "name": "records",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "style": "form"
           },
           {
             "description": "Compact response metadata selector.",

@@ -21,11 +21,6 @@ const NAME_PROFILE_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
         default: "both",
     },
 );
-const PROFILE_RECORDS_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
-    "records",
-    "Comma-separated record selectors. When omitted, the route uses the projected cacheable selector set for this name.",
-    ApiParameterSchema::String,
-);
 const TEXTS_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
     "texts",
     "Requested text record keys.",
@@ -100,7 +95,6 @@ pub(crate) const NAME_PROFILE_PARAMETERS: &[ApiRouteParameter] = &[
         },
     ),
     NAME_PROFILE_MODE_QUERY,
-    PROFILE_RECORDS_QUERY,
     SUMMARY_META_QUERY,
 ];
 

@@ -99,7 +99,13 @@ pub(super) async fn load_name_profile_records_read(
 ) -> ApiResult<ResolutionRecordsRead> {
     let pool = &state.pool;
     let mode = parse_resolution_mode(query.mode.as_deref().or(Some("both")))?;
-    let mut records = parse_optional_resolution_record_keys(query.records.as_deref(), mode)?;
+    if query.records.is_some() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "records is not supported on /v1/profiles/names/{name}; use /v1/names/{namespace}/{name}/records for selector-specific reads".to_owned(),
+        });
+    }
     let ExactNameRead {
         row,
         selected_snapshot,
@@ -118,9 +124,11 @@ pub(super) async fn load_name_profile_records_read(
         None
     };
 
-    if records.is_empty() && (mode.includes_declared() || mode.includes_verified()) {
-        records = profile_default_record_keys(record_inventory_current.as_ref());
-    }
+    let records = if mode.includes_declared() || mode.includes_verified() {
+        profile_record_keys(record_inventory_current.as_ref())
+    } else {
+        Vec::new()
+    };
 
     let persisted_verified_outcome = if mode.includes_verified() {
         load_or_execute_resolution_verified_outcome(
@@ -148,24 +156,78 @@ pub(super) async fn load_name_profile_records_read(
     })
 }
 
-fn profile_default_record_keys(
+fn profile_default_record_keys() -> Vec<ResolutionRecordKey> {
+    profile_record_keys_from_names(PROFILE_FALLBACK_RECORD_KEYS.iter().copied())
+}
+
+const PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
+    "addr:60",
+    "avatar",
+    "contenthash",
+    "text:description",
+    "text:url",
+    "text:email",
+];
+
+fn profile_record_keys(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Vec<ResolutionRecordKey> {
     let mut seen = BTreeSet::new();
-    record_inventory_row
-        .and_then(|row| row.selectors.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|selector| {
-            provenance_field(selector, "cacheable").and_then(JsonValue::as_bool) == Some(true)
-        })
-        .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
-        .filter_map(|record_key| {
-            if seen.insert(record_key.clone()) {
-                parse_resolution_record_key(&record_key)
-            } else {
-                None
-            }
+    let mut records = Vec::new();
+    let Some(row) = record_inventory_row else {
+        return records;
+    };
+
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.selectors.as_array().into_iter().flatten(),
+    );
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.explicit_gaps.as_array().into_iter().flatten(),
+    );
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.entries.as_array().into_iter().flatten(),
+    );
+
+    if records.is_empty() && !record_inventory_current_is_explicitly_unsupported(row) {
+        profile_default_record_keys()
+    } else {
+        records
+    }
+}
+
+fn record_inventory_current_is_explicitly_unsupported(row: &RecordInventoryCurrentRow) -> bool {
+    string_field(provenance_field(&row.coverage, "status"))
+        .is_some_and(|status| status == "unsupported")
+}
+
+fn profile_push_record_keys_from_section<'a>(
+    records: &mut Vec<ResolutionRecordKey>,
+    seen: &mut BTreeSet<String>,
+    values: impl Iterator<Item = &'a JsonValue>,
+) {
+    for record_key in values.filter_map(|value| string_field(provenance_field(value, "record_key")))
+    {
+        if seen.insert(record_key.clone())
+            && let Some(record) = parse_resolution_record_key(&record_key)
+        {
+            records.push(record);
+        }
+    }
+}
+
+fn profile_record_keys_from_names<'a>(
+    record_keys: impl Iterator<Item = &'a str>,
+) -> Vec<ResolutionRecordKey> {
+    record_keys
+        .map(|record_key| {
+            parse_resolution_record_key(record_key)
+                .expect("profile fallback record selector must be valid")
         })
         .collect()
 }

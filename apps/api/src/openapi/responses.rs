@@ -41,10 +41,6 @@ pub(super) fn mixed_response_schema(data_schema: JsonValue) -> JsonValue {
             "data",
             "declared_state",
             "verified_state",
-            "coverage",
-            "chain_positions",
-            "consistency",
-            "last_updated",
         ],
         "properties": {
             "data": data_schema,

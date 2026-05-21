@@ -388,7 +388,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "chain_positions",
             "consistency",
             "mode",
-            "records",
             "meta",
         ],
         "Point-in-time selector for the exact-name snapshot used by the profile read. Mutually exclusive with `chain_positions`.",
@@ -406,9 +405,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "both",
         }))
     );
-    let records = openapi_parameter(name_profile, "records");
-    assert_eq!(records.get("style"), Some(&json!("form")));
-    assert_eq!(records.get("explode"), Some(&json!(false)));
     let meta = openapi_parameter(name_profile, "meta");
     assert_eq!(
         meta.get("schema"),

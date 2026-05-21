@@ -67,17 +67,19 @@ Rules:
 
 App-facing full profile path for callers that need name identity, declared topology/inventory/cache, and verified record results in one request without specifying a namespace.
 
-Query: `at`, `chain_positions`, `consistency`, `mode=declared|verified|both` (default `both`), `records`, `meta=none|summary|full`.
+Query: `at`, `chain_positions`, `consistency`, `mode=declared|verified|both` (default `both`), `meta=none|summary|full`.
 
 Rules:
 
 - The path `name` is normalized before lookup. Namespace inference matches native identity lookup: `base.eth` is ENS, any non-empty `*.base.eth` suffix is Basenames, and other names are ENS. The inferred namespace is returned on `data.namespace`.
 - `data` matches `GET /v1/names/{namespace}/{name}` for the inferred namespace, normalized name, and selected snapshot.
-- `declared_state` is present for `mode=declared|both` and contains `topology`, `record_inventory`, and `record_cache`.
-- `verified_state` is present for `mode=verified|both` and contains `verified_queries`.
-- When `records` is omitted, the route uses the projected cacheable selector set from `record_inventory` for the selected snapshot. This is the app fast path for "give me the full known profile plus execution-backed values".
+- `declared_state` is present for `mode=declared|both` and contains compact `topology`, `record_inventory`, and `record_cache` by default.
+- `verified_state` is present for `mode=verified|both` and contains compact `verified_queries` by default.
+- The route does not accept caller-selected `records`. It derives the profile selector set from the selected snapshot's declared state: every `record_inventory.selectors[*].record_key`, every `record_inventory.explicit_gaps[*].record_key`, and every `record_cache.entries[*].record_key`, deduped in that order. If a supported declared inventory exists but that declared set is empty, it falls back to the bounded app profile set `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and `text:email`. Missing or explicitly unsupported declared inventory does not use the fallback set.
+- Supplying `records` on this route returns `400 invalid_input`; selector-specific reads belong on the compact records route.
+- Use `GET /v1/names/{namespace}/{name}/records` for selector-specific app reads. Use `GET /v1/explain/resolutions/{namespace}/{name}/execution` for persisted execution diagnostics of an explicit selector set.
 - Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it. On-demand execution never targets provider `latest` independently of the selected stored snapshot.
-- `meta=full` includes route-level provenance. Default `meta=summary` does not inline deep provenance, raw facts, or normalized-event IDs.
+- Default `meta=summary` omits top-level `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance`. It also strips diagnostic topology version boundaries and per-query execution provenance. `meta=full` restores the full route envelope and diagnostic topology/cache/execution metadata.
 - Deeper execution explanation lives on `GET /v1/explain/resolutions/{namespace}/{name}/execution`; profile responses do not inline raw traces or step dumps.
 
 ## `GET /v1/coverage/{namespace}/{name}`
@@ -117,7 +119,7 @@ Compact routes advertise only the knobs they own:
 | Route | `view` | `mode` | `meta` |
 | --- | --- | --- | --- |
 | `GET /v1/names` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
-| `GET /v1/profiles/names/{name}` | full profile | `declared`, `verified`, `both` | `none`, `summary`, `full` |
+| `GET /v1/profiles/names/{name}` | full profile; selector set is server-derived from declared state, with bounded defaults when none exist | `declared`, `verified`, `both` | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/children` | `compact`, `full` | none | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/records` | `compact` only; `full` is reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/roles` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
@@ -657,7 +659,7 @@ Full profile with verified records:
 
 ```
 GET /v1/profiles/names/alice.eth
-GET /v1/profiles/names/alice.eth?mode=both&records=addr:60,text:avatar,contenthash
+GET /v1/profiles/names/alice.eth?mode=both
 ```
 
 Name history:

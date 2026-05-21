@@ -165,17 +165,6 @@ pub(super) fn parse_resolution_record_keys(
     Ok(parsed)
 }
 
-pub(super) fn parse_optional_resolution_record_keys(
-    records: Option<&str>,
-    mode: ResolutionMode,
-) -> ApiResult<Vec<ResolutionRecordKey>> {
-    let Some(records) = records.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(Vec::new());
-    };
-
-    parse_resolution_record_keys(Some(records), mode)
-}
-
 pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<ResolutionRecordKey> {
     if record_key.is_empty()
         || record_key
