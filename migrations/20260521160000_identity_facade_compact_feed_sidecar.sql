@@ -373,6 +373,7 @@ BEGIN
         SELECT DISTINCT anc.address
         FROM public.address_names_current anc
         WHERE anc.logical_name_id = ANY(target_logical_name_ids)
+        ORDER BY anc.address
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
@@ -394,6 +395,7 @@ BEGIN
           ON nc.logical_name_id = anc.logical_name_id
         WHERE anc.resource_id = ANY(target_resource_ids)
            OR nc.resource_id = ANY(target_resource_ids)
+        ORDER BY anc.address
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
@@ -415,6 +417,7 @@ BEGIN
           ON nc.logical_name_id = anc.logical_name_id
         WHERE anc.surface_binding_id = ANY(target_surface_binding_ids)
            OR nc.surface_binding_id = ANY(target_surface_binding_ids)
+        ORDER BY anc.address
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
@@ -436,6 +439,7 @@ BEGIN
           ON nc.logical_name_id = anc.logical_name_id
         WHERE anc.token_lineage_id = ANY(target_token_lineage_ids)
            OR nc.token_lineage_id = ANY(target_token_lineage_ids)
+        ORDER BY anc.address
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
@@ -455,9 +459,14 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
-    IF NEW.address IS DISTINCT FROM OLD.address THEN
+    IF OLD.address <= NEW.address THEN
+        PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
+        IF NEW.address IS DISTINCT FROM OLD.address THEN
+            PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
+        END IF;
+    ELSE
         PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
+        PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
     END IF;
     RETURN NEW;
 END;
@@ -484,9 +493,14 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
-    IF NEW.address IS DISTINCT FROM OLD.address THEN
+    IF OLD.address <= NEW.address THEN
+        PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
+        IF NEW.address IS DISTINCT FROM OLD.address THEN
+            PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
+        END IF;
+    ELSE
         PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
+        PERFORM public.address_names_current_identity_feed_recompute_address(OLD.address);
     END IF;
     RETURN NEW;
 END;
