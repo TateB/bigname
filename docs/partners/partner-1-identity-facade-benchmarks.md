@@ -40,13 +40,13 @@ Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-a
 
 | Case | Response size | p95 |
 | --- | ---: | ---: |
-| `POST /v1/identity/addresses:feed`, 1 input | 0.41 KB | 1.01 ms |
-| `POST /v1/identity/addresses:feed`, 10 inputs | 4.11 KB | 1.34 ms |
-| `POST /v1/identity/addresses:feed`, 25 inputs | 10.12 KB | 1.03 ms |
-| `POST /v1/identity/addresses:feed`, 50 inputs | 20.29 KB | 1.63 ms |
-| `POST /v1/identity/addresses:feed`, 100 inputs | 40.58 KB | 2.63 ms |
-| `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 5.83 ms |
-| `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 21.02 ms |
+| `POST /v1/identity/addresses:feed`, 1 input | 0.41 KB | 1.12 ms |
+| `POST /v1/identity/addresses:feed`, 10 inputs | 4.11 KB | 1.28 ms |
+| `POST /v1/identity/addresses:feed`, 25 inputs | 10.12 KB | 0.89 ms |
+| `POST /v1/identity/addresses:feed`, 50 inputs | 20.29 KB | 1.29 ms |
+| `POST /v1/identity/addresses:feed`, 100 inputs | 40.58 KB | 2.21 ms |
+| `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 5.03 ms |
+| `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 18.79 ms |
 
 ## Interpretation
 
