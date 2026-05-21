@@ -455,7 +455,7 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "ethereum-sepolia".to_owned(),
@@ -719,7 +719,7 @@ async fn rebuild_ignores_deprecated_ens_v2_registrar_shadow_events_after_support
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
@@ -911,7 +911,7 @@ async fn rebuild_keeps_ens_v2_registry_only_exact_name_coverage_shadow() -> Resu
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "ethereum-sepolia".to_owned(),
@@ -1883,7 +1883,7 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
@@ -3083,7 +3083,7 @@ async fn seed_basenames_identity(
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -3214,7 +3214,7 @@ async fn insert_manifest_version(
     .bind(ETHEREUM_SEPOLIA_CHAIN_ID)
     .bind(SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH)
     .bind(rollout_status)
-    .bind("ensip15@ens-normalize-0.1.0")
+    .bind("ensip15@ens-normalize-0.1.1")
     .bind(format!(
         "tests/{source_family}/ens-v2-sepolia-dev-v{manifest_version}.toml"
     ))
@@ -3254,7 +3254,7 @@ async fn insert_basenames_execution_manifest_version(
     .bind(ETHEREUM_MAINNET_CHAIN_ID)
     .bind(BASENAMES_V1_DEPLOYMENT_EPOCH)
     .bind(rollout_status)
-    .bind("ensip15@ens-normalize-0.1.0")
+    .bind("ensip15@ens-normalize-0.1.1")
     .bind(format!(
         "tests/{}/{}-v{manifest_version}.toml",
         SOURCE_FAMILY_BASENAMES_EXECUTION, BASENAMES_V1_DEPLOYMENT_EPOCH
@@ -3458,7 +3458,7 @@ fn name_surface(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: "ethereum-mainnet".to_owned(),

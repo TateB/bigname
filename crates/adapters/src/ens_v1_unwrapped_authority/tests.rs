@@ -577,7 +577,7 @@ async fn insert_active_contract_fixture_with_manifest(
             chain: seed.chain,
             deployment_epoch: seed.deployment_epoch,
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: seed.file_path,
         },
     )
@@ -622,7 +622,7 @@ async fn insert_ens_registry_current_and_old_fixture(
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v3.toml",
         },
     )
@@ -2743,7 +2743,7 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -5538,7 +5538,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -5582,7 +5582,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -6893,7 +6893,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
         },
     )
@@ -6907,7 +6907,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -6921,7 +6921,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
         },
     )
@@ -7236,7 +7236,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -7250,7 +7250,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -7264,7 +7264,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
         },
     )
@@ -8137,7 +8137,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_registrar/v1.toml",
         },
     )
@@ -8151,7 +8151,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_registry/v1.toml",
         },
     )
@@ -8165,7 +8165,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_resolver/v1.toml",
         },
     )
@@ -8895,7 +8895,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -8939,7 +8939,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "ensip15@ens-normalize-0.1.0",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )

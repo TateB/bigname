@@ -98,7 +98,7 @@ This separation captures: one resource under multiple public names, alias-resolv
 
 ## Normalization and preimage observation
 
-Normalization is version-pinned via `normalizer_version`. The active normalizer is `ensip15@ens-normalize-0.1.0`, backed by the Rust `ens-normalize` crate and its embedded ENSIP-15 data. API input normalization, adapter name-surface admission, reverse-claim claim-name normalization, resolver alias target normalization, DNS-encoded name handling, `namehash`, `labelhashes`, and DNS wire-name derivation all use that one boundary. IDNA/UTS-46 conversion, ASCII lowercasing, trimming, or route-local normalization are not fallback normalizers.
+Normalization is version-pinned via `normalizer_version`. The active normalizer is `ensip15@ens-normalize-0.1.1`, backed by the Rust `ens-normalize` crate and its embedded ENSIP-15 data. API input normalization, adapter name-surface admission, reverse-claim claim-name normalization, resolver alias target normalization, DNS-encoded name handling, `namehash`, `labelhashes`, and DNS wire-name derivation all use that one boundary. IDNA/UTS-46 conversion, ASCII lowercasing, trimming, or route-local normalization are not fallback normalizers. Blank or whitespace-only reverse-claim source values are classified as no claim before name normalization; every nonblank reverse-claim source value must pass this ENSIP-15 boundary or surface as `invalid_name`.
 
 The canonical `NameSurface` carries one representative result; alternate spellings persist as immutable preimage observation facts.
 

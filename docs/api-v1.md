@@ -9,7 +9,7 @@ The bigname public read contract. Wire format for the model defined in [`archite
 - Timestamps are RFC 3339 UTC.
 - Semantic identities are strings; opaque internal IDs (UUIDs) are returned as-is and are never derived by clients.
 - `namespace` is explicit on canonical name routes. Convenience routes that infer namespace still echo it back in identity fields.
-- Path-segment names are ENSIP-15-normalized names, URL-encoded. Convenience routes that accept unnormalized names normalize them with the same `ensip15@ens-normalize-0.1.0` boundary used by adapters before namespace inference. Unnormalizable names reject as `invalid_input` or, on the identity façade, return `unnormalizable_input` where documented.
+- Path-segment names are ENSIP-15-normalized names, URL-encoded. Convenience routes that accept unnormalized names normalize them with the same `ensip15@ens-normalize-0.1.1` boundary used by adapters before namespace inference. Unnormalizable names reject as `invalid_input` or, on the identity façade, return `unnormalizable_input` where documented.
 
 ### Common query parameters
 

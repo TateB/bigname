@@ -1015,7 +1015,7 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
             $2,
             'ens_v2_registry_scope_test',
             'active',
-            'ensip15@ens-normalize-0.1.0',
+            'ensip15@ens-normalize-0.1.1',
             $3,
             $4::JSONB
         )
@@ -1045,7 +1045,7 @@ fn test_registry_manifest_payload(chain: &str) -> Value {
         "chain": chain,
         "deployment_epoch": "ens_v2_registry_scope_test",
         "rollout_status": "active",
-        "normalizer_version": "ensip15@ens-normalize-0.1.0",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
         "capability_flags": {},
         "roots": [],
         "contracts": [],
@@ -1202,7 +1202,7 @@ fn test_active_emitter(
         namespace: "ens".to_owned(),
         source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
         manifest_version: 1,
-        normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         role: Some("registry".to_owned()),
         source: WatchedContractSource::ManifestContract,
         source_rank: source_rank(WatchedContractSource::ManifestContract),

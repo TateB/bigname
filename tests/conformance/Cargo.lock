@@ -1099,9 +1099,9 @@ dependencies = [
 
 [[package]]
 name = "ens-normalize"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b9734ccd910ef940124405adc88788d038fda74d95b82b309d5f42cee5ac4b4"
+checksum = "b0122eb65f97557f03a51c5c02ab80f0d8143a96db469b13007f34dd21398c06"
 dependencies = [
  "serde",
  "serde_json",

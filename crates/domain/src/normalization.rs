@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-pub const ENS_NORMALIZER_VERSION: &str = "ensip15@ens-normalize-0.1.0";
+pub const ENS_NORMALIZER_VERSION: &str = "ensip15@ens-normalize-0.1.1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedEnsName {

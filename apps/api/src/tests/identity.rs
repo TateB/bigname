@@ -398,10 +398,8 @@ async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
         payload["results"][2]["record"]["normalized_name"],
         json!("someone.base.eth")
     );
-    assert_eq!(
-        payload["results"][3]["record"]["corrected_input_normalization"],
-        json!(true)
-    );
+    assert_eq!(payload["results"][3]["status"], json!("unnormalizable_input"));
+    assert_eq!(payload["results"][3]["record"], Value::Null);
 
     database.cleanup().await?;
     Ok(())
@@ -1376,7 +1374,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_v1",
             1,
             "active",
-            "ensip15@ens-normalize-0.1.0",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -1387,7 +1385,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_shadow",
             1,
             "shadow",
-            "ensip15@ens-normalize-0.1.0",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
 

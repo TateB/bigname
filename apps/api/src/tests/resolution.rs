@@ -751,7 +751,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
                 dns_encoded_name: vec![3, b'e', b't', b'h'],
                 namehash: "namehash:eth".to_owned(),
                 labelhashes: vec!["labelhash:eth".to_owned()],
-                normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "ethereum-mainnet".to_owned(),
@@ -912,7 +912,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             dns_encoded_name: b"alice.base.eth".to_vec(),
             namehash: "namehash:alice.base.eth".to_owned(),
             labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-            normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -1121,7 +1121,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             "basenames_v1",
             2,
             "active",
-            "ensip15@ens-normalize-0.1.0",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database

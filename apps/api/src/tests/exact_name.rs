@@ -1202,7 +1202,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens_v2_sepolia_dev",
             11,
             "active",
-            "ensip15@ens-normalize-0.1.0",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registrar_manifest_id = database
@@ -1213,7 +1213,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens_v2_sepolia_dev",
             11,
             "active",
-            "ensip15@ens-normalize-0.1.0",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database

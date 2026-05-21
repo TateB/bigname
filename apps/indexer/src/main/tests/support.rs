@@ -289,7 +289,7 @@ impl TestDatabase {
                     chain TEXT NOT NULL,
                     deployment_epoch TEXT NOT NULL DEFAULT 'bootstrap',
                     rollout_status manifest_rollout_status NOT NULL,
-                    normalizer_version TEXT NOT NULL DEFAULT 'ensip15@ens-normalize-0.1.0',
+                    normalizer_version TEXT NOT NULL DEFAULT 'ensip15@ens-normalize-0.1.1',
                     file_path TEXT NOT NULL DEFAULT 'tests/v1.toml',
                     manifest_payload JSONB NOT NULL DEFAULT '{default_manifest_payload}'::jsonb,
                     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1064,7 +1064,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "ensip15@ens-normalize-0.1.0"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 exact_lookup = "{capability_status}"
@@ -1097,7 +1097,7 @@ source_family = "ens_v1_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "active"
-normalizer_version = "ensip15@ens-normalize-0.1.0"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"
@@ -1131,7 +1131,7 @@ source_family = "basenames_base_registry"
 chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
 rollout_status = "active"
-normalizer_version = "ensip15@ens-normalize-0.1.0"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"

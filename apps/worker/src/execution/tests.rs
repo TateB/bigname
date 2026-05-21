@@ -130,7 +130,7 @@ fn execution_trace(
         failure_payload: None,
         request_metadata: json!({
             "surface": request_key,
-            "normalizer_version": "ensip15@ens-normalize-0.1.0"
+            "normalizer_version": "ensip15@ens-normalize-0.1.1"
         }),
         finished_at: Some(timestamp(finished_at)),
         steps: vec![ExecutionTraceStep {

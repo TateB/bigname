@@ -10,7 +10,7 @@
                     "ens_v2",
                     1,
                     "active",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             database
@@ -24,7 +24,7 @@
                     "ens_shadow",
                     2,
                     "shadow",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
 
@@ -66,7 +66,7 @@
                     "ens_v2",
                     1,
                     "active",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             database
@@ -89,7 +89,7 @@
                     "ens_v2_base",
                     2,
                     "active",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             database
@@ -104,7 +104,7 @@
                     "ens_shadow",
                     3,
                     "shadow",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
 

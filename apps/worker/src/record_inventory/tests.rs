@@ -3906,7 +3906,7 @@ async fn insert_basenames_dynamic_resolver_profile_fixture(
             'base-mainnet',
             'basenames_v1',
             'active',
-            'ensip15@ens-normalize-0.1.0',
+            'ensip15@ens-normalize-0.1.1',
             'manifests/basenames/basenames_base_registry/v1.toml',
             '{}'::jsonb
         )
@@ -4031,7 +4031,7 @@ async fn insert_basenames_resolver_profile_seed(
             'base-mainnet',
             'basenames_v1',
             'active',
-            'ensip15@ens-normalize-0.1.0',
+            'ensip15@ens-normalize-0.1.1',
             'manifests/basenames/basenames_base_resolver/v1.toml',
             '{}'::jsonb
         )
@@ -4120,7 +4120,7 @@ async fn insert_basenames_execution_manifest(pool: &PgPool) -> Result<i64> {
             'ethereum-mainnet',
             'basenames_v1',
             'active',
-            'ensip15@ens-normalize-0.1.0',
+            'ensip15@ens-normalize-0.1.1',
             'manifests/basenames/basenames_execution/v1.toml',
             '{}'::jsonb
         )
@@ -4205,7 +4205,7 @@ async fn insert_manifest_version(
             file_path,
             manifest_payload
         )
-        VALUES (1, 'ens', $1, 'ethereum-mainnet', 'ens_v1', 'active', 'ensip15@ens-normalize-0.1.0', $2, '{}'::jsonb)
+        VALUES (1, 'ens', $1, 'ethereum-mainnet', 'ens_v1', 'active', 'ensip15@ens-normalize-0.1.1', $2, '{}'::jsonb)
         RETURNING manifest_id
         "#,
     )

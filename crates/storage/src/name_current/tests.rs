@@ -63,7 +63,7 @@ fn name_surface(logical_name_id: &str, display_name: &str) -> NameSurface {
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: "ethereum-mainnet".to_owned(),

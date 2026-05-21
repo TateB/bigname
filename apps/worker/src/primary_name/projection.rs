@@ -142,10 +142,12 @@ fn primary_name_row(
 ) -> Result<PrimaryNameCurrentSnapshot> {
     let raw_claim = claim_observation.and_then(|observation| observation.raw_name.as_deref());
     let normalized_claim = raw_claim
-        .filter(|raw_name| !raw_name.is_empty())
+        .filter(|raw_name| !raw_claim_name_source_is_blank(raw_name))
         .and_then(|raw_name| bigname_domain::normalization::normalize_name(raw_name).ok());
     let (claim_status, raw_claim_name) = match raw_claim {
-        Some(raw_name) if raw_name.is_empty() => (PrimaryNameClaimStatus::NotFound, None),
+        Some(raw_name) if raw_claim_name_source_is_blank(raw_name) => {
+            (PrimaryNameClaimStatus::NotFound, None)
+        }
         Some(raw_name) if normalized_claim.is_some() => (PrimaryNameClaimStatus::Success, None),
         Some(raw_name) => (
             PrimaryNameClaimStatus::InvalidName,
@@ -166,6 +168,10 @@ fn primary_name_row(
         },
         normalized_claim_name,
     })
+}
+
+fn raw_claim_name_source_is_blank(raw_name: &str) -> bool {
+    raw_name.is_empty() || raw_name.chars().all(char::is_whitespace)
 }
 
 fn build_claim_provenance(

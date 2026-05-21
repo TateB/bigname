@@ -538,7 +538,7 @@
                     "ens_v2_sepolia_dev",
                     11,
                     "active",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             let registrar_manifest_id = database
@@ -549,7 +549,7 @@
                     "ens_v2_sepolia_dev",
                     11,
                     "active",
-                    "ensip15@ens-normalize-0.1.0",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             database
@@ -1490,7 +1490,7 @@
                     dns_encoded_name: route_name.as_bytes().to_vec(),
                     namehash: format!("namehash:{route_name}"),
                     labelhashes: vec![format!("labelhash:{route_name}")],
-                    normalizer_version: "ensip15@ens-normalize-0.1.0".to_owned(),
+                    normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                     normalization_warnings: json!([]),
                     normalization_errors: json!([]),
                     chain_id: "base-mainnet".to_owned(),

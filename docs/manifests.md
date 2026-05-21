@@ -80,7 +80,7 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
-`normalizer_version` is currently `ensip15@ens-normalize-0.1.0` for all admitted ENS, ENSv2, and Basenames source families. Runtime code treats this as one shared normalization boundary, not a per-source-family choice.
+`normalizer_version` is currently `ensip15@ens-normalize-0.1.1` for all admitted ENS, ENSv2, and Basenames source families. Runtime code treats this as one shared normalization boundary, not a per-source-family choice.
 
 ## Example shape
 
@@ -91,7 +91,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "ensip15@ens-normalize-0.1.0"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [[roots]]
 name = "RootRegistry"
