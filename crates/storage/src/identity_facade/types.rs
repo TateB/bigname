@@ -109,7 +109,7 @@ pub struct ReverseIdentityFeedInput {
 pub struct ReverseIdentityFeedGroup {
     pub input: ReverseIdentityFeedInput,
     pub record: Option<ReverseIdentityFeedRecordRow>,
-    pub total_count: Option<u64>,
+    pub total_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

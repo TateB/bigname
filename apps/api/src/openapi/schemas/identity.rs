@@ -336,7 +336,7 @@ pub(super) fn reverse_identity_feed_response_schema() -> JsonValue {
                         "input": schema_ref("ReverseNamesInput"),
                         "record": nullable_ref_schema("IdentityFeedRecord"),
                         "total_count": {
-                            "type": ["integer", "null"],
+                            "type": "integer",
                             "minimum": 0,
                         },
                         "status": schema_ref("IdentityStatus"),

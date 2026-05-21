@@ -112,7 +112,7 @@ pub(crate) struct ReverseIdentityBatchResult {
 pub(crate) struct ReverseIdentityFeedResult {
     pub(crate) input: ReverseNamesInputResponse,
     pub(crate) record: Option<IdentityFeedRecordResponse>,
-    pub(crate) total_count: Option<u64>,
+    pub(crate) total_count: u64,
     pub(crate) status: String,
 }
 

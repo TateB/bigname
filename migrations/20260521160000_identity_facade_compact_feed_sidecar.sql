@@ -311,6 +311,8 @@ BEGIN
         RETURN;
     END IF;
 
+    PERFORM public.address_names_current_identity_counts_lock_address(target_address);
+
     DELETE FROM public.address_names_current_identity_feed
     WHERE address = target_address;
 
@@ -356,7 +358,7 @@ BEGIN
         is_primary = EXCLUDED.is_primary,
         relation_facets = EXCLUDED.relation_facets,
         last_recomputed_at = EXCLUDED.last_recomputed_at;
-END
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_recompute_for_logical_names(
@@ -374,7 +376,7 @@ BEGIN
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
-END
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_recompute_for_resources(
@@ -395,7 +397,7 @@ BEGIN
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
-END
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_recompute_for_bindings(
@@ -416,10 +418,10 @@ BEGIN
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
-END
+END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_recompute_for_token_lineages(
+CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_recompute_for_token_lineage(
     target_token_lineage_ids uuid[]
 ) RETURNS void
 LANGUAGE plpgsql
@@ -437,7 +439,7 @@ BEGIN
     LOOP
         PERFORM public.address_names_current_identity_feed_recompute_address(target_address);
     END LOOP;
-END
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_address_trigger()
@@ -458,7 +460,7 @@ BEGIN
         PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
     END IF;
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS address_names_current_identity_feed_after_change
@@ -487,7 +489,7 @@ BEGIN
         PERFORM public.address_names_current_identity_feed_recompute_address(NEW.address);
     END IF;
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS primary_names_current_identity_feed_after_change
@@ -519,7 +521,7 @@ BEGIN
         ARRAY[OLD.logical_name_id, NEW.logical_name_id]::text[]
     );
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS name_current_identity_feed_after_change
@@ -559,7 +561,7 @@ BEGIN
         ARRAY[OLD.resource_id, NEW.resource_id]::uuid[]
     );
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS resources_identity_feed_after_change
@@ -591,7 +593,7 @@ BEGIN
         ARRAY[OLD.surface_binding_id, NEW.surface_binding_id]::uuid[]
     );
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS surface_bindings_identity_feed_after_change
@@ -608,22 +610,22 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        PERFORM public.address_names_current_identity_feed_recompute_for_token_lineages(
+        PERFORM public.address_names_current_identity_feed_recompute_for_token_lineage(
             ARRAY[OLD.token_lineage_id]::uuid[]
         );
         RETURN OLD;
     ELSIF TG_OP = 'INSERT' THEN
-        PERFORM public.address_names_current_identity_feed_recompute_for_token_lineages(
+        PERFORM public.address_names_current_identity_feed_recompute_for_token_lineage(
             ARRAY[NEW.token_lineage_id]::uuid[]
         );
         RETURN NEW;
     END IF;
 
-    PERFORM public.address_names_current_identity_feed_recompute_for_token_lineages(
+    PERFORM public.address_names_current_identity_feed_recompute_for_token_lineage(
         ARRAY[OLD.token_lineage_id, NEW.token_lineage_id]::uuid[]
     );
     RETURN NEW;
-END
+END;
 $$;
 
 DROP TRIGGER IF EXISTS token_lineages_identity_feed_after_change

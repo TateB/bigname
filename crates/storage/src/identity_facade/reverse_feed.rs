@@ -115,7 +115,7 @@ pub async fn load_reverse_identity_feed_records(
             Ok(ReverseIdentityFeedGroup {
                 input,
                 record,
-                total_count: Some(u64::try_from(total_count).unwrap_or(0)),
+                total_count: u64::try_from(total_count).unwrap_or(0),
             })
         })
         .collect()

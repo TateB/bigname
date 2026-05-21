@@ -9,7 +9,7 @@ This document defines the shipped projection set, replay semantics, invalidation
 - Projections rebuild from canonical facts and normalized events.
 - Every row carries provenance, manifest version, and chain-position context.
 - Only projection workers write projection tables. Adapters never do. The partner identity
-  reverse count sidecar is a bounded storage-trigger exception documented in
+  reverse count/display sidecars are a bounded storage-trigger exception documented in
   [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md).
 - Exact-name reads resolve `at`, `chain_positions`, `consistency` first; the selected positions then key one coherent join across `name_current`, `address_names_current`, `permissions_current`, `record_inventory_current`, `resolver_current`.
 - A reader fails closed when the selected positions can't be served from current rows. It does not patch a missing snapshot from raw facts, adapter internals, or a newer projection row.
@@ -42,7 +42,7 @@ History reads consume canonical normalized events plus thin cursor support. Ther
 | `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
 | `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
 | `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
-| `/v1/identity/*` | app-facing façade over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages and counts share the same readable `name_current` eligibility |
+| `/v1/identity/*` | app-facing façade over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `address_names_current_identity_feed`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages, counts, and compact feed display rows share the same readable `name_current` eligibility |
 | `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
 | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`; `name_current` only for name-to-resource lookup |
 | `GET /v1/resources/lookup` | `name_current` |

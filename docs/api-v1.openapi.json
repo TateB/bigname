@@ -2065,10 +2065,7 @@
                 },
                 "total_count": {
                   "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
+                  "type": "integer"
                 }
               },
               "required": [
