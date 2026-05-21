@@ -1,11 +1,16 @@
 use alloy_primitives::{Address, B256};
 use alloy_sol_types::{SolCall, sol};
 use anyhow::{Context, Result, bail};
+use bigname_storage::SupportedVerifiedResolutionRecordKey;
 use serde_json::{Value, json};
 
-use crate::ens_resolution_abi::{hex_string, hex_to_bytes, namehash};
-use crate::rpc::{ChainRpcUrls, JsonRpcHttpClient};
-use crate::{ENS_REGISTRY_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
+use crate::ens_resolution_abi::{
+    decode_selector_result, decode_universal_resolver_result, dns_encode_name, hex_string,
+    hex_to_bytes, namehash, resolver_record_call, universal_resolver_call,
+};
+use crate::ens_resolution_ccip::follow_ccip_read;
+use crate::rpc::{ChainRpcUrls, JsonRpcCallResult, JsonRpcHttpClient};
+use crate::{ENS_REGISTRY_ADDRESS, ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
 
 mod abi {
     use super::*;
@@ -26,6 +31,18 @@ pub struct OnDemandEnsPrimaryNameRequest<'a> {
 pub struct OnDemandEnsPrimaryName {
     pub name: String,
     pub resolver_address: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OnDemandEnsPrimaryNameVerificationRequest<'a> {
+    pub normalized_address: &'a str,
+    pub normalized_name: &'a str,
+    pub chain_rpc_urls: &'a ChainRpcUrls,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OnDemandEnsPrimaryNameVerification {
+    pub resolved_address: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,18 +92,37 @@ impl std::error::Error for OnDemandEnsPrimaryNameError {}
 pub async fn lookup_ens_reverse_primary_name(
     request: OnDemandEnsPrimaryNameRequest<'_>,
 ) -> std::result::Result<Option<OnDemandEnsPrimaryName>, OnDemandEnsPrimaryNameError> {
-    let Some(provider_url) = request.chain_rpc_urls.url_for(ETHEREUM_MAINNET_CHAIN_ID) else {
+    let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+
+    lookup_ens_reverse_primary_name_with_rpc(&rpc, request.normalized_address).await
+}
+
+pub async fn verify_ens_primary_name_forward_address(
+    request: OnDemandEnsPrimaryNameVerificationRequest<'_>,
+) -> std::result::Result<OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameError> {
+    let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+
+    verify_ens_primary_name_forward_address_with_rpc(
+        &rpc,
+        request.normalized_address,
+        request.normalized_name,
+    )
+    .await
+}
+
+fn primary_name_rpc(
+    chain_rpc_urls: &ChainRpcUrls,
+) -> std::result::Result<JsonRpcHttpClient, OnDemandEnsPrimaryNameError> {
+    let Some(provider_url) = chain_rpc_urls.url_for(ETHEREUM_MAINNET_CHAIN_ID) else {
         return Err(OnDemandEnsPrimaryNameError::configuration(format!(
             "primary-name RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is not configured; set BIGNAME_API_CHAIN_RPC_URLS={ETHEREUM_MAINNET_CHAIN_ID}=<url>"
         )));
     };
-    let rpc = JsonRpcHttpClient::new(provider_url).map_err(|error| {
+    JsonRpcHttpClient::new(provider_url).map_err(|error| {
         OnDemandEnsPrimaryNameError::configuration(format!(
             "primary-name RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is invalid: {error}"
         ))
-    })?;
-
-    lookup_ens_reverse_primary_name_with_rpc(&rpc, request.normalized_address).await
+    })
 }
 
 async fn lookup_ens_reverse_primary_name_with_rpc(
@@ -113,6 +149,57 @@ async fn lookup_ens_reverse_primary_name_with_rpc(
         name: trimmed.to_owned(),
         resolver_address: hex_string(resolver_address.as_slice()),
     }))
+}
+
+async fn verify_ens_primary_name_forward_address_with_rpc(
+    rpc: &JsonRpcHttpClient,
+    normalized_address: &str,
+    normalized_name: &str,
+) -> std::result::Result<OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameError> {
+    reverse_node(normalized_address).map_err(|error| {
+        OnDemandEnsPrimaryNameError::configuration(format!(
+            "failed to validate ENS primary-name verification address {normalized_address}: {error}"
+        ))
+    })?;
+
+    let dns_name = dns_encode_name(normalized_name).map_err(|error| {
+        OnDemandEnsPrimaryNameError::configuration(format!(
+            "failed to DNS-encode ENS primary-name {normalized_name}: {error}"
+        ))
+    })?;
+    let node = namehash(normalized_name).map_err(|error| {
+        OnDemandEnsPrimaryNameError::configuration(format!(
+            "failed to build ENS primary-name node for {normalized_name}: {error}"
+        ))
+    })?;
+    let selector = SupportedVerifiedResolutionRecordKey::Addr {
+        coin_type: "60".to_owned(),
+    };
+    let resolver_call = resolver_record_call(&selector, "addr:60", node).map_err(|error| {
+        OnDemandEnsPrimaryNameError::configuration(format!(
+            "failed to build ENS primary-name forward addr:60 call for {normalized_name}: {error}"
+        ))
+    })?;
+    let universal_call = universal_resolver_call(&dns_name, resolver_call.calldata());
+    let return_data = eth_call_following_ccip(
+        rpc,
+        ENS_UNIVERSAL_RESOLVER_ADDRESS,
+        universal_call.calldata(),
+    )
+    .await?;
+    let selector_return = decode_universal_resolver_result(&return_data).map_err(|error| {
+        OnDemandEnsPrimaryNameError::execution(format!(
+            "ENS Universal Resolver return data is malformed for {normalized_name}: {error}"
+        ))
+    })?;
+    let resolved_address =
+        decode_selector_result(&selector, &selector_return).map_err(|error| {
+            OnDemandEnsPrimaryNameError::execution(format!(
+                "ENS primary-name addr:60 return data is malformed for {normalized_name}: {error}"
+            ))
+        })?;
+
+    Ok(OnDemandEnsPrimaryNameVerification { resolved_address })
 }
 
 fn reverse_node(normalized_address: &str) -> Result<[u8; 32]> {
@@ -163,38 +250,75 @@ async fn eth_call(
     to: &str,
     calldata: &[u8],
 ) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
-    let result = rpc
-        .call(
-            "eth_call",
-            vec![
-                json!({
-                    "to": to,
-                    "data": hex_string(calldata),
-                }),
-                Value::String("latest".to_owned()),
-            ],
-        )
-        .await
-        .map_err(|error| {
-            OnDemandEnsPrimaryNameError::execution(format!(
-                "failed to execute ENS reverse primary-name RPC call: {error}"
-            ))
-        })?;
+    let result = eth_call_result(rpc, to, calldata).await?;
+    decode_eth_call_result(result)
+}
 
+async fn eth_call_following_ccip(
+    rpc: &JsonRpcHttpClient,
+    to: &str,
+    calldata: &[u8],
+) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
+    let block_selector = Value::String("latest".to_owned());
+    let result =
+        eth_call_result_with_block_selector(rpc, to, calldata, block_selector.clone()).await?;
+    let result = match &result.result {
+        Err(error) => match follow_ccip_read(rpc, error, &block_selector).await {
+            Ok(Some(outcome)) => outcome.result,
+            Ok(None) | Err(_) => result,
+        },
+        Ok(_) => result,
+    };
+    decode_eth_call_result(result)
+}
+
+async fn eth_call_result(
+    rpc: &JsonRpcHttpClient,
+    to: &str,
+    calldata: &[u8],
+) -> std::result::Result<JsonRpcCallResult, OnDemandEnsPrimaryNameError> {
+    eth_call_result_with_block_selector(rpc, to, calldata, Value::String("latest".to_owned())).await
+}
+
+async fn eth_call_result_with_block_selector(
+    rpc: &JsonRpcHttpClient,
+    to: &str,
+    calldata: &[u8],
+    block_selector: Value,
+) -> std::result::Result<JsonRpcCallResult, OnDemandEnsPrimaryNameError> {
+    rpc.call(
+        "eth_call",
+        vec![
+            json!({
+                "to": to,
+                "data": hex_string(calldata),
+            }),
+            block_selector,
+        ],
+    )
+    .await
+    .map_err(|error| {
+        OnDemandEnsPrimaryNameError::execution(format!(
+            "failed to execute ENS primary-name RPC call: {error}"
+        ))
+    })
+}
+
+fn decode_eth_call_result(
+    result: JsonRpcCallResult,
+) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
     let value = result.result.map_err(|error| {
         OnDemandEnsPrimaryNameError::execution(format!(
-            "ENS reverse primary-name RPC call failed: {}",
+            "ENS primary-name RPC call failed: {}",
             error.message
         ))
     })?;
     let hex_value = value.as_str().ok_or_else(|| {
-        OnDemandEnsPrimaryNameError::execution(
-            "ENS reverse primary-name RPC result was not a hex string",
-        )
+        OnDemandEnsPrimaryNameError::execution("ENS primary-name RPC result was not a hex string")
     })?;
     hex_to_bytes(hex_value).map_err(|error| {
         OnDemandEnsPrimaryNameError::execution(format!(
-            "ENS reverse primary-name RPC result is malformed: {error}"
+            "ENS primary-name RPC result is malformed: {error}"
         ))
     })
 }
@@ -316,6 +440,25 @@ mod tests {
             .context("mock RPC task panicked or was cancelled")?
     }
 
+    fn encode_universal_resolver_return(result: Vec<u8>, resolver_address: Address) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&abi_word_usize(64));
+        let mut resolver_word = [0_u8; 32];
+        resolver_word[12..].copy_from_slice(resolver_address.as_slice());
+        encoded.extend_from_slice(&resolver_word);
+        encoded.extend_from_slice(&abi_word_usize(result.len()));
+        encoded.extend_from_slice(&result);
+        let padding = (32 - (result.len() % 32)) % 32;
+        encoded.extend(std::iter::repeat_n(0_u8, padding));
+        encoded
+    }
+
+    fn abi_word_usize(value: usize) -> [u8; 32] {
+        let mut word = [0_u8; 32];
+        word[24..].copy_from_slice(&(value as u64).to_be_bytes());
+        word
+    }
+
     #[test]
     fn builds_expected_reverse_node() {
         let node = reverse_node("0x8e8db5ccef88cca9d624701db544989c996e3216")
@@ -426,6 +569,91 @@ mod tests {
         .expect_err("malformed RPC return must fail");
 
         assert_eq!(error.kind(), OnDemandEnsPrimaryNameErrorKind::Execution);
+        assert_eq!(join_requests(handle).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_ens_primary_name_forward_address_executes_universal_resolver_call() -> Result<()>
+    {
+        let resolver_address = "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
+            .parse::<Address>()
+            .context("resolver address must parse")?;
+        let requested_address = "0x8e8db5ccef88cca9d624701db544989c996e3216"
+            .parse::<Address>()
+            .context("requested address must parse")?;
+        let universal_return =
+            encode_universal_resolver_return(requested_address.abi_encode(), resolver_address);
+        let (rpc_url, handle) =
+            spawn_mock_rpc(vec![Value::String(hex_string(&universal_return))]).await?;
+        let chain_rpc_urls =
+            ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+        let result =
+            verify_ens_primary_name_forward_address(OnDemandEnsPrimaryNameVerificationRequest {
+                normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
+                normalized_name: "taytems.eth",
+                chain_rpc_urls: &chain_rpc_urls,
+            })
+            .await
+            .expect("mock RPC verification must succeed");
+
+        assert_eq!(
+            result,
+            OnDemandEnsPrimaryNameVerification {
+                resolved_address: Some("0x8e8db5ccef88cca9d624701db544989c996e3216".to_owned()),
+            }
+        );
+
+        let node = namehash("taytems.eth")?;
+        let selector = SupportedVerifiedResolutionRecordKey::Addr {
+            coin_type: "60".to_owned(),
+        };
+        let resolver_call = resolver_record_call(&selector, "addr:60", node)?;
+        let universal_call =
+            universal_resolver_call(&dns_encode_name("taytems.eth")?, resolver_call.calldata());
+        let requests = join_requests(handle).await?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], "eth_call");
+        assert_eq!(
+            requests[0]["params"][0]["to"],
+            ENS_UNIVERSAL_RESOLVER_ADDRESS
+        );
+        assert_eq!(
+            requests[0]["params"][0]["data"],
+            universal_call.calldata_hex()
+        );
+        assert_eq!(requests[0]["params"][1], "latest");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_ens_primary_name_forward_address_returns_none_for_zero_addr() -> Result<()> {
+        let resolver_address = "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
+            .parse::<Address>()
+            .context("resolver address must parse")?;
+        let universal_return =
+            encode_universal_resolver_return(Address::ZERO.abi_encode(), resolver_address);
+        let (rpc_url, handle) =
+            spawn_mock_rpc(vec![Value::String(hex_string(&universal_return))]).await?;
+        let chain_rpc_urls =
+            ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+        let result =
+            verify_ens_primary_name_forward_address(OnDemandEnsPrimaryNameVerificationRequest {
+                normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
+                normalized_name: "taytems.eth",
+                chain_rpc_urls: &chain_rpc_urls,
+            })
+            .await
+            .expect("mock RPC verification must succeed");
+
+        assert_eq!(
+            result,
+            OnDemandEnsPrimaryNameVerification {
+                resolved_address: None,
+            }
+        );
         assert_eq!(join_requests(handle).await?.len(), 1);
         Ok(())
     }

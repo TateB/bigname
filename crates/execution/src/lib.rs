@@ -19,7 +19,9 @@ pub use bigname_storage::{
 };
 pub use ens_primary_name::{
     OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError, OnDemandEnsPrimaryNameErrorKind,
-    OnDemandEnsPrimaryNameRequest, lookup_ens_reverse_primary_name,
+    OnDemandEnsPrimaryNameRequest, OnDemandEnsPrimaryNameVerification,
+    OnDemandEnsPrimaryNameVerificationRequest, lookup_ens_reverse_primary_name,
+    verify_ens_primary_name_forward_address,
 };
 pub use ens_resolution::{
     EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,

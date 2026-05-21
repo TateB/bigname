@@ -49,7 +49,7 @@ manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
 The API service also needs its own Ethereum JSON-RPC provider for live ENS
-verified resolution and the ENS/60 primary-name reverse RPC fallback, configured as
+verified resolution and the ENS/60 primary-name on-demand reverse/forward RPC fallback, configured as
 `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/profiles/names/{name}`
 in `mode=verified|both`, and `GET /v1/names/{namespace}/{name}/records` when it
 needs verified values, first use matching persisted execution output; when
@@ -66,11 +66,14 @@ not satisfy this API live-execution provider requirement by themselves.
 The primary-name fallback is deliberately softer than verified resolution: when
 `GET /v1/primary-names/{address}` defaults to `namespace=ens&coin_type=60` and
 the persisted tuple is missing, a configured API provider lets the route read
-the current Ethereum Mainnet reverse resolver. A zero resolver, empty name,
-wrong namespace, or unnormalizable reverse name is a supported fallback miss.
-Missing provider configuration or provider failure is logged and suppresses the
-fallback, leaving the route to return the persisted/no-fallback response instead
-of failing the request.
+the current Ethereum Mainnet reverse resolver and, in verified modes, validate
+the claimed name's current `addr:60` value through the ENS Universal Resolver.
+A zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
+empty forward `addr` is a supported fallback miss. Missing provider configuration
+or reverse-provider failure is logged and suppresses the fallback, leaving the
+route to return the persisted/no-fallback response instead of failing the
+request. Forward-verification provider failure after a reverse claim returns
+`verified_primary_name.status=execution_failed`.
 
 The worker may use the same provider shape for projection-owned ENSv1 text
 hydration, configured as

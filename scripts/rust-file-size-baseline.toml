@@ -48,6 +48,11 @@ loc = 629
 justification = "ENSv1 unwrapped-authority full-closure replay orchestration owns checkpointed streaming and target-bounded replay wiring; future changes should split replay orchestration further."
 
 [[files]]
+path = "crates/execution/src/ens_primary_name.rs"
+loc = 660
+justification = "ENS primary-name route-local execution keeps reverse lookup, forward addr:60 verification, CCIP-following RPC handling, and focused unit coverage together for the app fast path; split the tests or forward-verification helper before adding more behavior."
+
+[[files]]
 path = "crates/manifests/src/lib/discovery/reconciliation.rs"
 loc = 627
 justification = "Discovery reconciliation owns manifest/source-family diff classification and emitted reconciliation actions together; split diff collection from action rendering after manifest drift flows settle."

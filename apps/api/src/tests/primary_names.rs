@@ -24,6 +24,31 @@ fn primary_name_unsupported_coverage() -> Value {
     })
 }
 
+fn primary_name_universal_resolver_addr60_response(address: &str) -> Value {
+    json!(format!(
+        "0x{}{}{}{}",
+        primary_name_left_pad_hex("40", 64),
+        primary_name_padded_address_hex(
+            "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
+        ),
+        primary_name_left_pad_hex("20", 64),
+        primary_name_padded_address_hex(address),
+    ))
+}
+
+fn primary_name_padded_address_hex(address: &str) -> String {
+    let stripped = address
+        .strip_prefix("0x")
+        .expect("test address must be 0x-prefixed");
+    assert_eq!(stripped.len(), 40, "test address must be 20 bytes");
+    primary_name_left_pad_hex(stripped, 64)
+}
+
+fn primary_name_left_pad_hex(value: &str, width: usize) -> String {
+    assert!(value.len() <= width, "test hex value must fit padded width");
+    format!("{value:0>width$}")
+}
+
 async fn spawn_primary_name_mock_rpc(
     responses: Vec<Value>,
 ) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
@@ -137,7 +162,8 @@ async fn join_primary_name_mock_rpc_requests(
 }
 
 #[test]
-fn primary_name_response_uses_on_demand_claim_for_default_tuple_miss() {
+fn primary_name_response_uses_on_demand_claim_and_verification_for_default_tuple_miss() -> Result<()>
+{
     let lookup_state = PrimaryNameLookupState {
         tuple_state: PrimaryNameTupleState::TupleMissing,
         normalized_claim_name: None,
@@ -145,6 +171,16 @@ fn primary_name_response_uses_on_demand_claim_for_default_tuple_miss() {
             normalized_name: "taytems.eth".to_owned(),
             resolver_address: "0xa2c122be93b0074270ebee7f6b7292c7deb45047".to_owned(),
         }),
+        on_demand_verified: OnDemandPrimaryNameVerificationState::Verified(json!({
+            "status": "success",
+            "name": {
+                "logical_name_id": "ens:taytems.eth",
+                "namespace": "ens",
+                "normalized_name": "taytems.eth",
+                "canonical_display_name": "taytems.eth",
+                "namehash": bigname_execution::ens_namehash_hex("taytems.eth")?,
+            },
+        })),
         persisted_verified: None,
     };
 
@@ -173,8 +209,14 @@ fn primary_name_response_uses_on_demand_claim_for_default_tuple_miss() {
         payload.verified_state,
         Some(json!({
             "verified_primary_name": {
-                "status": "unsupported",
-                "unsupported_reason": "verified primary-name readback is not available for on-demand reverse lookup",
+                "status": "success",
+                "name": {
+                    "logical_name_id": "ens:taytems.eth",
+                    "namespace": "ens",
+                    "normalized_name": "taytems.eth",
+                    "canonical_display_name": "taytems.eth",
+                    "namehash": bigname_execution::ens_namehash_hex("taytems.eth")?,
+                },
             }
         }))
     );
@@ -183,11 +225,12 @@ fn primary_name_response_uses_on_demand_claim_for_default_tuple_miss() {
         json!({
             "status": "partial",
             "exhaustiveness": "non_enumerable",
-            "source_classes_considered": ["ens_reverse_rpc"],
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
             "enumeration_basis": "primary_name_lookup",
             "unsupported_reason": null,
         })
     );
+    Ok(())
 }
 
 #[tokio::test]
@@ -255,6 +298,137 @@ async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss(
     );
     assert_eq!(rpc_requests[1]["params"][1], "latest");
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        json!(
+            "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000b74617974656d732e657468000000000000000000000000000000000000000000"
+        ),
+        primary_name_universal_resolver_addr60_response(
+            "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        ),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name on-demand verified tuple miss request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "taytems.eth",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": {
+                    "logical_name_id": "ens:taytems.eth",
+                    "namespace": "ens",
+                    "normalized_name": "taytems.eth",
+                    "canonical_display_name": "taytems.eth",
+                    "namehash": bigname_execution::ens_namehash_hex("taytems.eth")?,
+                },
+            }
+        }))
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 3);
+    assert_eq!(
+        rpc_requests[2]["params"][0]["to"],
+        bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS
+    );
+    assert_eq!(rpc_requests[2]["params"][1], "latest");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reports_on_demand_forward_addr_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        json!(
+            "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000b74617974656d732e657468000000000000000000000000000000000000000000"
+        ),
+        primary_name_universal_resolver_addr60_response(
+            "0x0000000000000000000000000000000000000000",
+        ),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name on-demand forward miss request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
     database.cleanup().await?;
     Ok(())
 }

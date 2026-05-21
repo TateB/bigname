@@ -367,17 +367,14 @@ fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonVa
     }
 
     match lookup_state.tuple_state {
-        PrimaryNameTupleState::TupleMissing
-            if matches!(
-                lookup_state.on_demand_claim,
-                OnDemandPrimaryNameClaimState::Found(_) | OnDemandPrimaryNameClaimState::NotFound
-            ) =>
-        {
-            primary_name_unsupported_result(
-                "verified primary-name readback is not available for on-demand reverse lookup",
-            )
+        PrimaryNameTupleState::TupleMissing => {
+            if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
+                &lookup_state.on_demand_verified
+            {
+                return on_demand_verified.clone();
+            }
+            primary_name_not_found_result()
         }
-        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
         PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
@@ -488,6 +485,14 @@ fn primary_name_route_coverage(
             }
             _ => {}
         }
+    }
+
+    if matches!(
+        lookup_state.on_demand_verified,
+        OnDemandPrimaryNameVerificationState::Verified(_)
+    ) && namespace == "ens"
+    {
+        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc", "ens_execution_rpc"]);
     }
 
     if matches!(
