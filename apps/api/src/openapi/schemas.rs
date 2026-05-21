@@ -149,6 +149,20 @@ pub(super) fn openapi_components() -> JsonValue {
                     },
                 },
             }),
+            "ProfileNameData": json!({
+                "type": "object",
+                "required": ["name", "namespace", "namehash", "resource_id"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "namespace": { "type": "string" },
+                    "namehash": { "type": "string" },
+                    "resource_id": {
+                        "type": ["string", "null"],
+                        "format": "uuid",
+                    },
+                },
+                "additionalProperties": false,
+            }),
             "ResolverData": json!({
                 "type": "object",
                 "required": ["chain_id", "resolver_address"],
@@ -202,6 +216,12 @@ pub(super) fn openapi_components() -> JsonValue {
                 schema_ref("JsonObject"),
             ),
             "ResolutionResponse": mixed_response_schema(schema_ref("ExactNameData")),
+            "NameProfileResponse": mixed_response_schema(json!({
+                "oneOf": [
+                    schema_ref("ProfileNameData"),
+                    schema_ref("ExactNameData"),
+                ],
+            })),
             "PrimaryNameResponse": primary_name_response_schema(),
             "CollectionResponse": paginated_declared_response_schema(
                 json!({

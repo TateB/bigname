@@ -1056,6 +1056,56 @@
         "additionalProperties": true,
         "type": "object"
       },
+      "NameProfileResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProfileNameData"
+              },
+              {
+                "$ref": "#/components/schemas/ExactNameData"
+              }
+            ]
+          },
+          "declared_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state"
+        ],
+        "type": "object"
+      },
       "NameRecordStatus": {
         "enum": [
           "success",
@@ -1583,6 +1633,34 @@
         },
         "required": [
           "verified_primary_name"
+        ],
+        "type": "object"
+      },
+      "ProfileNameData": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "resource_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namehash",
+          "resource_id"
         ],
         "type": "object"
       },
@@ -4275,7 +4353,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ResolutionResponse"
+                  "$ref": "#/components/schemas/NameProfileResponse"
                 }
               }
             },

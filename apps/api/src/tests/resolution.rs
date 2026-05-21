@@ -6552,6 +6552,23 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
     assert_eq!(compact_response.status(), StatusCode::OK);
 
     let compact_payload: ResolutionResponse = read_json(compact_response).await?;
+    assert_eq!(
+        compact_payload.data,
+        json!({
+            "name": "alice.eth",
+            "namespace": "ens",
+            "namehash": "namehash:alice.eth",
+            "resource_id": resource_id.to_string(),
+        })
+    );
+    assert!(
+        compact_payload.data.get("normalized_name").is_none(),
+        "compact profile data omits routine normalized_name"
+    );
+    assert!(
+        compact_payload.data.get("logical_name_id").is_none(),
+        "compact profile data omits internal logical_name_id"
+    );
     assert_eq!(compact_payload.provenance, Value::Null);
     assert_eq!(compact_payload.coverage, Value::Null);
     assert_eq!(compact_payload.chain_positions, Value::Null);
@@ -8706,7 +8723,16 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let name_payload: NameResponse = read_json(name_response).await?;
 
-    assert_eq!(resolution_payload.data, name_payload.data);
+    assert_eq!(
+        resolution_payload.data,
+        json!({
+            "name": "alice.eth",
+            "namespace": "ens",
+            "namehash": "namehash:alice.eth",
+            "resource_id": resource_id.to_string(),
+        })
+    );
+    assert_ne!(resolution_payload.data, name_payload.data);
     assert_eq!(resolution_payload.provenance, Value::Null);
     assert_eq!(resolution_payload.coverage, Value::Null);
     assert_eq!(resolution_payload.chain_positions, Value::Null);

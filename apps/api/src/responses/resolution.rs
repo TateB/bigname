@@ -66,7 +66,11 @@ fn build_resolution_response(
     selected_snapshot: &SelectedSnapshot,
     include_full_metadata: bool,
 ) -> Result<ResolutionResponse> {
-    let data = build_name_data(&row);
+    let data = if include_full_metadata {
+        build_name_data(&row)
+    } else {
+        build_profile_name_data(&row)
+    };
     let declared_state = mode.includes_declared().then(|| {
         if include_full_metadata {
             build_resolution_declared_state(&row, record_inventory_row, records)
@@ -119,6 +123,19 @@ fn build_resolution_response(
         consistency,
         last_updated,
     })
+}
+
+fn build_profile_name_data(row: &NameCurrentRow) -> JsonValue {
+    let mut data = empty_object();
+    insert_string_field(&mut data, "name", row.normalized_name.clone());
+    insert_string_field(&mut data, "namespace", row.namespace.clone());
+    insert_string_field(&mut data, "namehash", row.namehash.clone());
+    insert_optional_string_field(
+        &mut data,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    data
 }
 
 fn build_compact_resolution_declared_state(

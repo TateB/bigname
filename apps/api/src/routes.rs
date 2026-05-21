@@ -341,7 +341,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "App-facing inferred-name full profile with declared and verified record results",
             "Names",
             NAME_PROFILE_PARAMETERS,
-            "ResolutionResponse",
+            "NameProfileResponse",
             ApiRouteErrorResponses::conflict(true),
         ),
     ),

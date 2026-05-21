@@ -72,7 +72,7 @@ Query: `at`, `chain_positions`, `consistency`, `mode=declared|verified|both` (de
 Rules:
 
 - The path `name` is normalized before lookup. Namespace inference matches native identity lookup: `base.eth` is ENS, any non-empty `*.base.eth` suffix is Basenames, and other names are ENS. The inferred namespace is returned on `data.namespace`.
-- `data` matches `GET /v1/names/{namespace}/{name}` for the inferred namespace, normalized name, and selected snapshot.
+- Default `data` is the compact app identity tuple: `name`, `namespace`, `namehash`, and `resource_id`. It does not include `logical_name_id`, `normalized_name`, `canonical_display_name`, `token_lineage_id`, or `binding_kind`. `meta=full` may return the diagnostic exact-name data shape used by `GET /v1/names/{namespace}/{name}` for the inferred namespace, normalized name, and selected snapshot.
 - `declared_state` is present for `mode=declared|both` and contains compact `topology`, `record_inventory`, and `record_cache` by default.
 - `verified_state` is present for `mode=verified|both` and contains compact `verified_queries` by default.
 - Record selection is server-owned. The route does not accept caller-selected `records`, and `mode=verified|both` executes every selected profile record rather than a caller-supplied subset. The selector set is derived from the selected snapshot's declared state: every `record_inventory.selectors[*].record_key`, every `record_inventory.explicit_gaps[*].record_key`, and every `record_cache.entries[*].record_key`, deduped in that order. If that derived set is non-empty, it is the complete profile record set for this route.
