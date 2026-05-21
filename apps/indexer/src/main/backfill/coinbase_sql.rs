@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
+#[path = "coinbase_sql/auth.rs"]
+mod auth;
 #[path = "coinbase_sql/client.rs"]
 mod client;
 #[path = "coinbase_sql/pagination.rs"]
@@ -27,21 +29,24 @@ pub(crate) use planner::load_backfill_topic_plan;
 #[path = "coinbase_sql/tests.rs"]
 mod tests;
 
-pub(crate) const DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV: &str = "COINBASE_CDP_SQL_BEARER_TOKEN";
+pub(crate) const DEFAULT_COINBASE_SQL_API_KEY_ID_ENV: &str = "COINBASE_CDP_SQL_API_KEY_ID";
+pub(crate) const DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV: &str = "COINBASE_CDP_SQL_API_KEY_SECRET";
 const COINBASE_SQL_DEFAULT_RUN_URL: &str =
     "https://api.cdp.coinbase.com/platform/v2/data/query/run";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoinbaseSqlSourceRegistry {
     urls_by_chain: BTreeMap<String, String>,
-    bearer_token_env: String,
+    api_key_id_env: String,
+    api_key_secret_env: String,
     config: CoinbaseSqlBackfillConfig,
 }
 
 impl CoinbaseSqlSourceRegistry {
     pub(crate) fn from_entries(
         entries: &[String],
-        bearer_token_env: String,
+        api_key_id_env: String,
+        api_key_secret_env: String,
         config: CoinbaseSqlBackfillConfig,
     ) -> Result<Self> {
         let mut urls_by_chain = BTreeMap::new();
@@ -58,7 +63,8 @@ impl CoinbaseSqlSourceRegistry {
 
         Ok(Self {
             urls_by_chain,
-            bearer_token_env,
+            api_key_id_env,
+            api_key_secret_env,
             config,
         })
     }
@@ -75,7 +81,8 @@ impl CoinbaseSqlSourceRegistry {
         CoinbaseSqlBackfillSource::new(
             chain.to_owned(),
             url.clone(),
-            self.bearer_token_env.clone(),
+            self.api_key_id_env.clone(),
+            self.api_key_secret_env.clone(),
             self.config.clone(),
         )
         .map(Some)
@@ -110,7 +117,8 @@ impl CoinbaseSqlBackfillSource {
     fn new(
         chain: String,
         url: String,
-        bearer_token_env: String,
+        api_key_id_env: String,
+        api_key_secret_env: String,
         config: CoinbaseSqlBackfillConfig,
     ) -> Result<Self> {
         config.validate()?;
@@ -119,7 +127,8 @@ impl CoinbaseSqlBackfillSource {
         } else {
             url
         };
-        let client = client::CoinbaseSqlClient::new(&url, &bearer_token_env, &config)?;
+        let client =
+            client::CoinbaseSqlClient::new(&url, &api_key_id_env, &api_key_secret_env, &config)?;
         Ok(Self {
             chain,
             config,

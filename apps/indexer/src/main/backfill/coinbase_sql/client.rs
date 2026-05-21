@@ -1,11 +1,11 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::{StatusCode, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{rate_limit::CoinbaseSqlRateLimiter, rows::CoinbaseSqlLogRow};
+use super::{auth::CoinbaseSqlAuth, rate_limit::CoinbaseSqlRateLimiter, rows::CoinbaseSqlLogRow};
 use crate::backfill::CoinbaseSqlBackfillConfig;
 
 const MAX_SQL_ATTEMPTS: usize = 5;
@@ -13,7 +13,7 @@ const MAX_SQL_ATTEMPTS: usize = 5;
 #[derive(Clone)]
 pub(super) struct CoinbaseSqlClient {
     url: String,
-    bearer_token: String,
+    auth: CoinbaseSqlAuth,
     http: reqwest::Client,
     rate_limiter: CoinbaseSqlRateLimiter,
 }
@@ -21,23 +21,24 @@ pub(super) struct CoinbaseSqlClient {
 impl CoinbaseSqlClient {
     pub(super) fn new(
         url: &str,
-        bearer_token_env: &str,
+        api_key_id_env: &str,
+        api_key_secret_env: &str,
         config: &CoinbaseSqlBackfillConfig,
     ) -> Result<Self> {
-        validate_coinbase_sql_url(url)?;
-        let bearer_token = env::var(bearer_token_env).with_context(|| {
-            format!("missing Coinbase SQL bearer token env var {bearer_token_env}")
-        })?;
-        if bearer_token.trim().is_empty() {
-            bail!("Coinbase SQL bearer token env var {bearer_token_env} is empty");
-        }
+        let parsed_url = validate_coinbase_sql_url(url)?;
+        let auth = CoinbaseSqlAuth::from_env(
+            api_key_id_env,
+            api_key_secret_env,
+            request_host_for_url(&parsed_url)?,
+            request_path_for_url(&parsed_url),
+        )?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.query_timeout_secs))
             .build()
             .context("failed to build Coinbase SQL HTTP client")?;
         Ok(Self {
             url: url.to_owned(),
-            bearer_token,
+            auth,
             http,
             rate_limiter: CoinbaseSqlRateLimiter::new(config.rate_limit_qps),
         })
@@ -47,10 +48,11 @@ impl CoinbaseSqlClient {
         let mut retry_count = 0usize;
         for attempt in 0..MAX_SQL_ATTEMPTS {
             self.rate_limiter.wait().await;
+            let bearer_token = self.auth.bearer_token()?;
             let response = self
                 .http
                 .post(&self.url)
-                .bearer_auth(&self.bearer_token)
+                .bearer_auth(bearer_token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .json(&json!({ "sql": sql }))
                 .send()
@@ -94,14 +96,36 @@ impl CoinbaseSqlClient {
     }
 }
 
-fn validate_coinbase_sql_url(url: &str) -> Result<()> {
+fn validate_coinbase_sql_url(url: &str) -> Result<reqwest::Url> {
     let parsed = reqwest::Url::parse(url)
         .with_context(|| format!("failed to parse Coinbase SQL URL {url}"))?;
     if parsed.scheme() != "https" {
         bail!("Coinbase SQL URL must use https://; refusing to send bearer token to {url}");
     }
 
-    Ok(())
+    Ok(parsed)
+}
+
+fn request_host_for_url(url: &reqwest::Url) -> Result<String> {
+    let host = url
+        .host_str()
+        .with_context(|| format!("Coinbase SQL URL is missing a host: {url}"))?;
+    Ok(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+fn request_path_for_url(url: &reqwest::Url) -> String {
+    let mut path = url.path().to_owned();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    path
 }
 
 pub(super) struct CoinbaseSqlQueryResponse {
@@ -159,10 +183,11 @@ mod tests {
     };
 
     #[test]
-    fn client_rejects_non_https_url_before_reading_bearer_token() {
+    fn client_rejects_non_https_url_before_reading_secret_key() {
         let error = match CoinbaseSqlClient::new(
             "http://127.0.0.1:8080/sql",
-            "BIGNAME_TEST_MISSING_COINBASE_TOKEN",
+            "BIGNAME_TEST_MISSING_COINBASE_KEY_ID",
+            "BIGNAME_TEST_MISSING_COINBASE_KEY_SECRET",
             &test_config(),
         ) {
             Ok(_) => panic!("Coinbase SQL client must reject non-HTTPS URLs"),

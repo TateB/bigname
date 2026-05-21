@@ -168,8 +168,14 @@ Manual Base historical backfills can select Coinbase CDP SQL with
 selection with `BIGNAME_INDEXER_BACKFILL_SOURCE=auto` plus
 `BIGNAME_INDEXER_COINBASE_SQL_URLS=base-mainnet=default`. The `default` URL is
 the CDP SQL `/run` endpoint; custom URLs must use `https://` because the runner
-sends a bearer token. This source is backfill-only and finite-range-only:
-it is unavailable to `run` live following, `ops-catchup`, repair, chain-head
+sends generated bearer JWTs. Configure `COINBASE_CDP_SQL_API_KEY_ID` and
+`COINBASE_CDP_SQL_API_KEY_SECRET`, or override the env var names with
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV` and
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV`. The runner keeps the Secret
+API Key material in env and generates a fresh CDP REST bearer JWT for each SQL
+request, so operators should not paste a short-lived JWT into the server
+configuration. This source is backfill-only and finite-range-only: it is
+unavailable to `run` live following, `ops-catchup`, repair, chain-head
 promotion, and checkpoint promotion. Operators must still configure
 `BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
 the same Base chain so the validation provider owns block hashes, headers,

@@ -22,7 +22,10 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::HeaderAuditMode;
 
-pub(crate) use coinbase_sql::{CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV};
+pub(crate) use coinbase_sql::{
+    CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
+    DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,
+};
 pub(crate) use concurrent_execution::run_resumable_hash_pinned_backfill_job_concurrently;
 #[allow(unused_imports)]
 pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_backfill_range};

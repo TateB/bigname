@@ -4,11 +4,11 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
 use crate::backfill::{
-    BackfillSourceKind, CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV,
-    DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
-    DEFAULT_COINBASE_SQL_PAGE_LIMIT, DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
-    DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS, DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
-    DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+    BackfillSourceKind, CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
+    DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV, DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+    DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+    DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+    DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS, DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
 };
 use crate::bootstrap_backfill::{
     DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS, DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
@@ -173,11 +173,17 @@ pub(crate) struct BackfillArgs {
     )]
     pub(crate) coinbase_sql_urls: Vec<String>,
     #[arg(
-        long = "coinbase-sql-bearer-token-env",
-        env = "BIGNAME_INDEXER_COINBASE_SQL_BEARER_TOKEN_ENV",
-        default_value = DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV
+        long = "coinbase-sql-api-key-id-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_ID_ENV
     )]
-    pub(crate) coinbase_sql_bearer_token_env: String,
+    pub(crate) coinbase_sql_api_key_id_env: String,
+    #[arg(
+        long = "coinbase-sql-api-key-secret-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV
+    )]
+    pub(crate) coinbase_sql_api_key_secret_env: String,
     #[arg(
         long = "coinbase-sql-initial-window-blocks",
         env = "BIGNAME_INDEXER_COINBASE_SQL_INITIAL_WINDOW_BLOCKS",

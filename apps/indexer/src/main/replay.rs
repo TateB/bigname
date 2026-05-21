@@ -128,8 +128,10 @@ mod tests {
             chain_reth_db_sources: Vec::new(),
             backfill_source: crate::backfill::BackfillSourceKind::HashPinned,
             coinbase_sql_urls: Vec::new(),
-            coinbase_sql_bearer_token_env: crate::backfill::DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV
+            coinbase_sql_api_key_id_env: crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_ID_ENV
                 .to_owned(),
+            coinbase_sql_api_key_secret_env:
+                crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV.to_owned(),
             coinbase_sql_initial_window_blocks:
                 crate::backfill::DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
             coinbase_sql_max_window_blocks: crate::backfill::DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,

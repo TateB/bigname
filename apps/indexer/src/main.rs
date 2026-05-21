@@ -135,7 +135,8 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     coinbase_sql_config.validate()?;
     let coinbase_sql_registry = CoinbaseSqlSourceRegistry::from_entries(
         &args.coinbase_sql_urls,
-        args.coinbase_sql_bearer_token_env.clone(),
+        args.coinbase_sql_api_key_id_env.clone(),
+        args.coinbase_sql_api_key_secret_env.clone(),
         coinbase_sql_config.clone(),
     )?;
     provider_registry.ensure_configured_chains_admitted(
