@@ -540,7 +540,10 @@ DROP TRIGGER IF EXISTS name_current_identity_feed_after_change
     ON public.name_current;
 
 CREATE TRIGGER name_current_identity_feed_after_change
-    AFTER INSERT OR UPDATE OR DELETE ON public.name_current
+    AFTER INSERT
+        OR UPDATE OF logical_name_id, resource_id, surface_binding_id, token_lineage_id
+        OR DELETE
+    ON public.name_current
     FOR EACH ROW
     EXECUTE FUNCTION public.address_names_current_identity_feed_name_current_trigger();
 
