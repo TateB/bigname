@@ -197,6 +197,59 @@ mod tests {
         assert!(format!("{error:#}").contains("must use https://"));
     }
 
+    #[tokio::test]
+    #[ignore = "requires live Coinbase CDP SQL credentials and consumes two read-only SQL API queries"]
+    async fn live_query_authenticates_and_decodes_one_base_event() -> Result<()> {
+        let client = CoinbaseSqlClient::new(
+            "https://api.cdp.coinbase.com/platform/v2/data/query/run",
+            "COINBASE_CDP_SQL_API_KEY_ID",
+            "COINBASE_CDP_SQL_API_KEY_SECRET",
+            &test_config(),
+        )?;
+
+        let seed_response = client
+            .run_query(
+                r#"SELECT
+  block_number,
+  block_hash,
+  transaction_hash,
+  0 AS transaction_index,
+  log_index,
+  address AS emitting_address,
+  topics
+FROM base.events
+LIMIT 1"#,
+            )
+            .await?;
+        assert_eq!(seed_response.rows.len(), 1);
+        let seed = &seed_response.rows[0];
+        let planned_sql = super::super::query::build_query(
+            &super::super::query::CoinbaseSqlFilterPack {
+                chain: "base-mainnet".to_owned(),
+                from_block: seed.block_number,
+                to_block: seed.block_number,
+                addresses: vec![seed.emitting_address.clone()],
+                topic0s: seed.topics.first().cloned().into_iter().collect(),
+                scan_all_emitters: false,
+                source_families: vec!["live_smoke".to_owned()],
+            },
+            None,
+            10,
+        )?;
+        let response = client.run_query(&planned_sql).await?;
+
+        assert!(
+            response
+                .rows
+                .iter()
+                .any(|row| row.block_number == seed.block_number
+                    && row.block_hash == seed.block_hash
+                    && row.transaction_hash == seed.transaction_hash
+                    && row.emitting_address == seed.emitting_address)
+        );
+        Ok(())
+    }
+
     fn test_config() -> CoinbaseSqlBackfillConfig {
         CoinbaseSqlBackfillConfig {
             initial_window_blocks: DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,

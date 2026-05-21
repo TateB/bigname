@@ -33,23 +33,33 @@ pub(super) fn build_query(
         bail!("Coinbase SQL filter pack must include addresses unless scan_all_emitters is true");
     }
 
-    let mut selection_predicates = Vec::new();
+    let mut final_selection_predicates = Vec::new();
+    let mut source_selection_predicates = Vec::new();
     if !pack.scan_all_emitters {
-        selection_predicates.push(format!(
+        let address_predicate = format!(
             "l.emitting_address IN ({})",
+            sql_string_literals(&pack.addresses)
+        );
+        final_selection_predicates.push(address_predicate);
+        source_selection_predicates.push(format!(
+            "l.address IN ({})",
             sql_string_literals(&pack.addresses)
         ));
     }
     if !pack.topic0s.is_empty() {
-        selection_predicates.push(format!(
-            "l.topics[1] IN ({})",
-            sql_string_literals(&pack.topic0s)
-        ));
+        let topic_predicate = format!("l.topics[1] IN ({})", sql_string_literals(&pack.topic0s));
+        final_selection_predicates.push(topic_predicate.clone());
+        source_selection_predicates.push(topic_predicate);
     }
-    let selection_predicates = if selection_predicates.is_empty() {
+    let final_selection_predicates = if final_selection_predicates.is_empty() {
         "1 = 1".to_owned()
     } else {
-        selection_predicates.join("\n  AND ")
+        final_selection_predicates.join("\n  AND ")
+    };
+    let source_selection_predicates = if source_selection_predicates.is_empty() {
+        "1 = 1".to_owned()
+    } else {
+        source_selection_predicates.join("\n  AND ")
     };
     let mut output_predicates = vec![format!(
         "l.block_number BETWEEN {} AND {}",
@@ -90,13 +100,18 @@ all_log_rows AS (
     l.block_number AS block_number,
     l.block_hash AS block_hash,
     l.transaction_hash AS transaction_hash,
-    l.transaction_index AS transaction_index,
+    t.transaction_index AS transaction_index,
     l.log_index AS transaction_log_index,
     l.address AS emitting_address,
     l.topics AS topics,
     {log_action_expr} AS action
   FROM {network}.events l
+  JOIN active_transactions t
+    ON t.block_number = l.block_number
+   AND t.block_hash = l.block_hash
+   AND t.transaction_hash = l.transaction_hash
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
+    AND {source_selection_predicates}
   UNION ALL
   SELECT
     l.block_number AS block_number,
@@ -113,6 +128,7 @@ all_log_rows AS (
    AND t.block_hash = l.block_hash
    AND t.transaction_hash = l.transaction_hash
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
+    AND {source_selection_predicates}
 ),
 active_logs AS (
   SELECT
@@ -158,7 +174,7 @@ SELECT
   l.topics AS topics
 FROM indexed_logs l
 WHERE {output_predicates}
-  AND {selection_predicates}
+  AND {final_selection_predicates}
 ORDER BY l.block_number, l.transaction_index, l.log_index
 LIMIT {limit}"#,
         from_block = pack.from_block,
@@ -166,7 +182,8 @@ LIMIT {limit}"#,
         tx_action_expr = tx_action_expr,
         log_action_expr = log_action_expr,
         output_predicates = output_predicates.join("\n  AND "),
-        selection_predicates = selection_predicates
+        source_selection_predicates = source_selection_predicates,
+        final_selection_predicates = final_selection_predicates
     ))
 }
 

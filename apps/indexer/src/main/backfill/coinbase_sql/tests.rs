@@ -52,6 +52,10 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     assert!(sql.contains("FROM base.events l"));
     assert!(sql.contains("FROM base.encoded_logs l"));
     assert!(sql.contains("JOIN active_transactions t"));
+    assert!(sql.contains("t.transaction_index AS transaction_index"));
+    assert!(!sql.contains(
+        "l.transaction_index AS transaction_index,\n    l.log_index AS transaction_log_index"
+    ));
     assert!(sql.contains("l.emitting_address IN ('0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222')"));
     assert!(sql.contains("l.topics[1] IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')"));
     assert!(sql.contains("toString(action) IN ('1', 'added')"));
