@@ -15,7 +15,7 @@ Environment:
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
 - Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
 - ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
-- `POST /v1/identity/addresses:feed` is the compact feed DTO for latency-sensitive identity rendering. It returns one display record per address plus `total_count`, skips full `NameRecord` hydration, and is backed by covering compact-feed indexes.
+- `POST /v1/identity/addresses:feed` is the compact feed DTO for latency-sensitive identity rendering. It returns one display record per address plus `total_count`, skips full `NameRecord` hydration, and is backed by indexed count/display sidecars.
 
 ## Before / After
 
@@ -40,17 +40,17 @@ Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-a
 
 | Case | Response size | p95 |
 | --- | ---: | ---: |
-| `POST /v1/identity/addresses:feed`, 1 input | 0.41 KB | 1.74 ms |
-| `POST /v1/identity/addresses:feed`, 10 inputs | 4.11 KB | 2.07 ms |
-| `POST /v1/identity/addresses:feed`, 25 inputs | 10.12 KB | 3.22 ms |
-| `POST /v1/identity/addresses:feed`, 50 inputs | 20.29 KB | 2.88 ms |
-| `POST /v1/identity/addresses:feed`, 100 inputs | 40.58 KB | 5.23 ms |
-| `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 8.22 ms |
-| `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 25.16 ms |
+| `POST /v1/identity/addresses:feed`, 1 input | 0.41 KB | 1.01 ms |
+| `POST /v1/identity/addresses:feed`, 10 inputs | 4.11 KB | 1.34 ms |
+| `POST /v1/identity/addresses:feed`, 25 inputs | 10.12 KB | 1.03 ms |
+| `POST /v1/identity/addresses:feed`, 50 inputs | 20.29 KB | 1.63 ms |
+| `POST /v1/identity/addresses:feed`, 100 inputs | 40.58 KB | 2.63 ms |
+| `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 5.83 ms |
+| `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 21.02 ms |
 
 ## Interpretation
 
-The compact feed route meets the under-10 ms p95 target for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the compact response is already about 407 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full shared-record reverse batches remain the profile/detail path and are intentionally not the feed latency contract.
+The compact feed route meets an under-10 ms p95 local/server-side proxy for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. This measurement uses the readable-row-safe `address_names_current_identity_feed` sidecar, not the earlier live first-row shortcut. It is not a substitute for a final AWS `us-east` vantage measurement in the deployed environment, but it demonstrates that the API and database path are under the budget on the running Docker stack. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the compact response is already about 407 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full shared-record reverse batches remain the profile/detail path and are intentionally not the feed latency contract.
 
 ## Unsupported Fields Sample
 

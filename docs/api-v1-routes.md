@@ -2,6 +2,18 @@
 
 Per-route reference. Conventions, snapshot selection, the response envelope, shared objects, and the error model live in [`api-v1.md`](api-v1.md).
 
+## Route Set Guide
+
+Use the route groups as integration guidance, not just documentation order:
+
+| Set | Routes | Use for |
+| --- | --- | --- |
+| Partner/feed identity | `/v1/identity/*`, `/v1/status/indexing` | Partner-1 feed/profile compatibility, migration shims, and shadow comparison. |
+| Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | New app, explorer, and public API integrations that want bigname-native semantics. |
+| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | Namespace, manifest, and process/database liveness introspection. |
+| Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
+| Compatibility/explorer adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | Supported surfaces for existing clients and explorer-specific workflows; prefer canonical product reads for new integrations when they fit. |
+
 ## `GET /v1/namespaces/{namespace}`
 
 Manifest-backed metadata for one public namespace.
@@ -246,7 +258,7 @@ Response:
         "namespace": "ens",
         "network": "ethereum",
         "is_primary": true,
-        "relation_facets": ["token_holder"],
+        "relation_facets": ["OWNED"],
         "status": "success"
       },
       "total_count": 1,
@@ -264,6 +276,7 @@ Rules:
 - Returns at most one compact `record` per input, ordered by the same primary-first and role-priority rules as reverse pagination.
 - A miss returns `record=null`, `status=not_found`, and `total_count=0`.
 - `total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar.
+- The compact display row is read from the indexed `address_names_current_identity_feed` sidecar. That sidecar is maintained from `address_names_current`, `primary_names_current`, canonicality dependencies, and readable `name_current` eligibility so feed requests do not run live first-row/provenance joins.
 - The compact `record` intentionally omits `NameRecord` fields that require record-inventory hydration: `owner_address`, `manager_address`, `primary_address`, `coin_type_addresses`, `text_records`, `resolver_address`, `expiration`, `token_id`, and `as_of`.
 - Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 

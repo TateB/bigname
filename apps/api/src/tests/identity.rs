@@ -446,6 +446,34 @@ async fn identity_network_uses_runtime_chain_positions() -> Result<()> {
     )
     .execute(&database.pool)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE address_names_current
+        SET chain_positions = $2::JSONB,
+            coverage = $3::JSONB
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind("ens:sepolia.eth")
+    .bind(
+        serde_json::to_string(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 37,
+                "block_hash": "0xsepolia37",
+                "timestamp": "2026-04-17T00:00:37Z"
+            }
+        }))
+        .expect("chain positions JSON must serialize"),
+    )
+    .bind(
+        serde_json::to_string(&json!({
+            "status": "stale"
+        }))
+        .expect("coverage JSON must serialize"),
+    )
+    .execute(&database.pool)
+    .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -459,6 +487,32 @@ async fn identity_network_uses_runtime_chain_positions() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["record"]["network"], json!("ethereum-sepolia"));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity/addresses:feed")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [
+                            {"address": address, "coin_type": 60, "roles": "BOTH"}
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("identity feed Sepolia-network request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["results"][0]["record"]["network"],
+        json!("ethereum-sepolia")
+    );
+    assert_eq!(payload["results"][0]["record"]["status"], json!("stale"));
 
     database.cleanup().await?;
     Ok(())
@@ -1217,6 +1271,29 @@ async fn identity_reverse_paginates_only_reachable_name_records() -> Result<()> 
     assert_eq!(payload["pagination"]["has_more"], json!(false));
     assert_eq!(payload["pagination"]["next_page_cursor"], Value::Null);
     assert_eq!(payload["pagination"]["total_count"], json!(1));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity/addresses:feed")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [
+                            {"address": address, "coin_type": 60, "roles": "OWNED"}
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("identity feed readable-universe request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["results"][0]["record"]["name"], json!("Reachable.eth"));
+    assert_eq!(payload["results"][0]["total_count"], json!(1));
 
     database.cleanup().await?;
     Ok(())

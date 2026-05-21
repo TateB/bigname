@@ -170,7 +170,7 @@ Façade not-found behavior is adapter-compatible rather than core-route `404` be
 
 `NameRecord` includes the projected display `name`, the canonical `normalized_name`, and `corrected_input_normalization` for forward reads. Reverse records set correction metadata to `false` because the input is an address tuple rather than a name string. Forward response and batch-result statuses can use `unnormalizable_input` before a record exists; nested `NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
 
-Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe.
+Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe. The compact feed display row is read from `address_names_current_identity_feed`, a sidecar that materializes the same readable first-row ordering per address, role set, and primary-name coin type.
 
 ## Shared objects
 

@@ -8,7 +8,7 @@ Use these sets when choosing a public route:
 
 | Set | Routes | Intended consumers |
 | --- | --- | --- |
-| Partner/feed identity | `/v1/identity/*`, `/v1/status/indexing` | partner-1 style feeds, migration shims, and shadow comparison. Feed rendering should use `POST /v1/identity/addresses:feed`; profile aggregation uses the full reverse identity routes. |
+| Partner/feed identity | `/v1/identity/*`, `/v1/status/indexing` | partner-1 style feeds, migration shims, and shadow comparison. Feed rendering should use `POST /v1/identity/addresses:feed`, which is backed by compact count/display sidecars; profile aggregation uses the full reverse identity routes. |
 | Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract rather than partner-shaped DTOs. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
@@ -64,7 +64,7 @@ Compact defaults suppress full provenance, full coverage, internal projection id
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
 
-The `/v1/identity/*` façade uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is a compatibility read surface for partner-style migration and shadow comparison, not a replacement core model. `POST /v1/identity/addresses:feed` intentionally narrows the reverse response to one compact identity row per input address so feed rendering does not pay for full `NameRecord` hydration or deep provenance. Production ENSv2 source-family manifests remain outside this façade slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
+The `/v1/identity/*` façade uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is a compatibility read surface for partner-style migration and shadow comparison, not a replacement core model. `POST /v1/identity/addresses:feed` intentionally narrows the reverse response to one compact identity row per input address and reads precomputed count/display sidecars, so feed rendering does not pay for full `NameRecord` hydration, live first-row joins, or deep provenance. Production ENSv2 source-family manifests remain outside this façade slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
 
 ## Coverage notes
 
