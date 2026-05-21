@@ -125,13 +125,7 @@ impl ApiRouteErrorResponses {
 pub(crate) enum ApiRouteId {
     Health,
     PublicStatus,
-    IndexingStatus,
     IdentityLookup,
-    IdentityName,
-    IdentityNamesBatch,
-    IdentityAddressNames,
-    IdentityAddressNamesBatch,
-    IdentityAddressFeed,
     Names,
     AddressNames,
     AddressNamesCount,
@@ -174,18 +168,6 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             ApiRouteErrorResponses::new(false, false),
         ),
     ),
-    ApiRouteDefinition::public_get(
-        ApiRouteId::IndexingStatus,
-        "/v1/status/indexing",
-        ApiRouteContract::new(
-            "indexing_status",
-            "Projection indexing status by chain",
-            "Status",
-            &[],
-            "IndexingStatusResponse",
-            ApiRouteErrorResponses::new(false, false),
-        ),
-    ),
     ApiRouteDefinition::public_post(
         ApiRouteId::IdentityLookup,
         "/v1/identity:lookup",
@@ -198,69 +180,6 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             ApiRouteErrorResponses::new(true, false),
         )
         .with_request_schema("IdentityLookupInput"),
-    ),
-    ApiRouteDefinition::public_get(
-        ApiRouteId::IdentityName,
-        "/v1/identity/names/{name}",
-        ApiRouteContract::new(
-            "identity_name",
-            "Partner-compatible forward identity lookup",
-            "Identity",
-            IDENTITY_NAME_PARAMETERS,
-            "IdentityNameResponse",
-            ApiRouteErrorResponses::new(true, false),
-        ),
-    ),
-    ApiRouteDefinition::public_post(
-        ApiRouteId::IdentityNamesBatch,
-        "/v1/identity/names:batch",
-        ApiRouteContract::new(
-            "identity_names_batch",
-            "Partner-compatible batched forward identity lookup",
-            "Identity",
-            &[],
-            "ForwardIdentityBatchResponse",
-            ApiRouteErrorResponses::new(true, false),
-        )
-        .with_request_schema("ForwardIdentityBatchInput"),
-    ),
-    ApiRouteDefinition::public_get(
-        ApiRouteId::IdentityAddressNames,
-        "/v1/identity/addresses/{address}/names",
-        ApiRouteContract::new(
-            "identity_address_names",
-            "Partner-compatible reverse identity lookup",
-            "Identity",
-            IDENTITY_ADDRESS_NAMES_PARAMETERS,
-            "ReverseNamesResponse",
-            ApiRouteErrorResponses::new(true, false),
-        ),
-    ),
-    ApiRouteDefinition::public_post(
-        ApiRouteId::IdentityAddressNamesBatch,
-        "/v1/identity/addresses:names:batch",
-        ApiRouteContract::new(
-            "identity_address_names_batch",
-            "Partner-compatible batched reverse identity lookup",
-            "Identity",
-            &[],
-            "ReverseIdentityBatchResponse",
-            ApiRouteErrorResponses::new(true, false),
-        )
-        .with_request_schema("ReverseIdentityBatchInput"),
-    ),
-    ApiRouteDefinition::public_post(
-        ApiRouteId::IdentityAddressFeed,
-        "/v1/identity/addresses:feed",
-        ApiRouteContract::new(
-            "identity_address_feed",
-            "Latency-optimized reverse identity feed lookup",
-            "Identity",
-            &[],
-            "ReverseIdentityFeedResponse",
-            ApiRouteErrorResponses::new(true, false),
-        )
-        .with_request_schema("ReverseIdentityFeedInput"),
     ),
     ApiRouteDefinition::public_get(
         ApiRouteId::Names,

@@ -1,8 +1,9 @@
+use axum::extract::rejection::JsonRejection;
+
 use super::*;
 
 const DEFAULT_IDENTITY_BATCH_LIMIT: usize = 1000;
 const DEFAULT_IDENTITY_PAGE_SIZE: u64 = 100;
-const DEFAULT_IDENTITY_BATCH_PAGE_SIZE: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct ReverseIdentityRequestKey {
@@ -111,56 +112,6 @@ pub(super) fn reverse_identity_group_key(
     }
 }
 
-pub(super) fn empty_reverse_identity_group(
-    request: &ReverseIdentityRequestKey,
-) -> bigname_storage::ReverseIdentityGroup {
-    bigname_storage::ReverseIdentityGroup {
-        input: bigname_storage::ReverseIdentityStorageInput {
-            address: request.address.clone(),
-            coin_type: request.coin_type.to_string(),
-            roles: request.roles.storage_roles(),
-            page_size: request.page_size as i64,
-            cursor: None,
-        },
-        entries: Vec::new(),
-        total_count: Some(0),
-        has_more: false,
-    }
-}
-
-pub(super) fn render_reverse_identity_page(
-    mut entries: Vec<bigname_storage::ReverseIdentityRecordRow>,
-    address: &str,
-    coin_type: u64,
-    roles: IdentityRoles,
-    total_count: Option<u64>,
-    has_more: bool,
-) -> ApiResult<(Vec<ReverseNameRecordResponse>, IdentityPaginationResponse)> {
-    entries.sort_by(reverse_identity_sort);
-    let cursor_spec = reverse_identity_cursor_spec(address, coin_type, roles);
-    let next_page_cursor = if has_more {
-        entries
-            .last()
-            .map(reverse_identity_cursor_item)
-            .map(|item| encode_cursor(&cursor_spec.envelope(item)))
-    } else {
-        None
-    };
-    let records = entries
-        .iter()
-        .map(build_reverse_name_record_response)
-        .collect::<Vec<_>>();
-
-    Ok((
-        records,
-        IdentityPaginationResponse {
-            next_page_cursor,
-            total_count,
-            has_more,
-        },
-    ))
-}
-
 pub(super) fn reverse_identity_sort(
     left: &bigname_storage::ReverseIdentityRecordRow,
     right: &bigname_storage::ReverseIdentityRecordRow,
@@ -216,7 +167,7 @@ pub(super) fn reverse_identity_cursor_spec(
     filters.insert("coin_type".to_owned(), coin_type.to_string());
     filters.insert("roles".to_owned(), roles.as_str().to_owned());
     CursorSpec {
-        route: "/v1/identity/addresses/{address}/names",
+        route: "/v1/identity:lookup",
         anchor: address.to_owned(),
         sort: "primary_role_name_namespace_namehash_asc",
         filters,
@@ -260,48 +211,6 @@ pub(super) fn reverse_identity_storage_cursor_item(
     item.insert("namespace".to_owned(), cursor.namespace.clone());
     item.insert("namehash".to_owned(), cursor.namehash.clone());
     item
-}
-
-pub(super) fn parse_reverse_batch_item(
-    item: &ReverseIdentityBatchInputItem,
-) -> ApiResult<ReverseIdentityRequestKey> {
-    let address = parse_primary_name_address(&item.address)?;
-    let coin_type = item.coin_type.ok_or_else(|| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_input",
-        message: "coin_type is required for every reverse identity batch input".to_owned(),
-    })?;
-    let roles = parse_identity_roles(item.roles.as_deref())?;
-    let pagination =
-        parse_identity_pagination_with_default(item.page_cursor.as_deref(), item.page_size, DEFAULT_IDENTITY_BATCH_PAGE_SIZE)?;
-    let cursor_spec = reverse_identity_cursor_spec(&address, coin_type, roles);
-    let page_cursor = canonical_reverse_identity_cursor(&pagination, &cursor_spec)?;
-
-    Ok(ReverseIdentityRequestKey {
-        address,
-        coin_type,
-        roles,
-        page_size: pagination.page_size,
-        page_cursor,
-    })
-}
-
-pub(super) fn parse_reverse_feed_item(
-    item: &ReverseIdentityFeedInputItem,
-) -> ApiResult<bigname_storage::ReverseIdentityFeedInput> {
-    let address = parse_primary_name_address(&item.address)?;
-    let coin_type = item.coin_type.ok_or_else(|| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_input",
-        message: "coin_type is required for every reverse identity feed input".to_owned(),
-    })?;
-    let roles = parse_identity_roles(item.roles.as_deref())?;
-
-    Ok(bigname_storage::ReverseIdentityFeedInput {
-        address,
-        coin_type: coin_type.to_string(),
-        roles: roles.storage_roles(),
-    })
 }
 
 pub(super) fn parse_identity_lookup_profile(
@@ -376,35 +285,6 @@ pub(super) fn native_identity_roles(values: IdentityRoles) -> Vec<String> {
         IdentityRoles::Managed => vec!["managed".to_owned()],
         IdentityRoles::Both => vec!["owned".to_owned(), "managed".to_owned()],
     }
-}
-
-pub(super) fn parse_identity_coin_type(value: Option<&str>) -> ApiResult<u64> {
-    let parsed = parse_primary_name_coin_type(value)?;
-    parsed.parse::<u64>().map_err(|_| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_input",
-        message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
-    })
-}
-
-pub(super) fn parse_identity_roles(value: Option<&str>) -> ApiResult<IdentityRoles> {
-    match value.unwrap_or("BOTH").trim() {
-        "" | "BOTH" => Ok(IdentityRoles::Both),
-        "OWNED" => Ok(IdentityRoles::Owned),
-        "MANAGED" => Ok(IdentityRoles::Managed),
-        _ => Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_input",
-            message: "roles must be one of: OWNED, MANAGED, BOTH".to_owned(),
-        }),
-    }
-}
-
-pub(super) fn parse_identity_pagination(
-    cursor: Option<&str>,
-    page_size: Option<u64>,
-) -> ApiResult<PaginationRequest> {
-    parse_identity_pagination_with_default(cursor, page_size, DEFAULT_IDENTITY_PAGE_SIZE)
 }
 
 pub(super) fn parse_identity_pagination_with_default(
@@ -486,25 +366,6 @@ pub(super) fn reverse_identity_storage_cursor(
     }))
 }
 
-fn canonical_reverse_identity_cursor(
-    pagination: &PaginationRequest,
-    cursor_spec: &CursorSpec,
-) -> ApiResult<Option<String>> {
-    let Some(cursor) = pagination.cursor.as_deref() else {
-        return Ok(None);
-    };
-
-    let decoded = decode_cursor(cursor)?;
-    validate_cursor(cursor_spec, &decoded)?;
-    Ok(Some(encode_cursor(&decoded)))
-}
-
-pub(super) fn parse_identity_name_lookup(
-    name: &str,
-) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
-    parse_identity_name_lookup_with_namespace(name, None)
-}
-
 pub(super) fn parse_identity_name_lookup_with_namespace(
     name: &str,
     namespace: Option<&str>,
@@ -517,20 +378,6 @@ pub(super) fn parse_identity_name_lookup_with_namespace(
         normalized_name: parsed.normalized_name,
         corrected_input_normalization: parsed.corrected_input_normalization,
     })
-}
-
-pub(super) fn reverse_batch_status(records: &[ReverseNameRecordResponse]) -> String {
-    if records.iter().any(|record| record.record.status == "stale") {
-        return "stale".to_owned();
-    }
-    if !records.is_empty()
-        && records
-            .iter()
-            .all(|record| record.record.status == "unsupported")
-    {
-        return "unsupported".to_owned();
-    }
-    "success".to_owned()
 }
 
 pub(super) fn ensure_identity_batch_limit(input_count: usize) -> ApiResult<()> {

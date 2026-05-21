@@ -217,11 +217,6 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/history/addresses/{address}".to_owned(),
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
-            "/v1/identity/addresses/{address}/names".to_owned(),
-            "/v1/identity/addresses:feed".to_owned(),
-            "/v1/identity/addresses:names:batch".to_owned(),
-            "/v1/identity/names/{name}".to_owned(),
-            "/v1/identity/names:batch".to_owned(),
             "/v1/identity:lookup".to_owned(),
             "/v1/manifests/{namespace}".to_owned(),
             "/v1/names".to_owned(),
@@ -240,7 +235,6 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/resources/{resource_id}/permissions".to_owned(),
             "/v1/roles".to_owned(),
             "/v1/status".to_owned(),
-            "/v1/status/indexing".to_owned(),
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));
@@ -517,26 +511,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
     );
 
-    let reverse_identity_batch_input = openapi_schema(&document, "ReverseIdentityBatchInput");
-    assert_eq!(
-        reverse_identity_batch_input.pointer("/properties/inputs/items/properties/page_cursor/type"),
-        Some(&json!(["string", "null"]))
-    );
-    let reverse_identity_feed_input = openapi_schema(&document, "ReverseIdentityFeedInput");
-    assert_eq!(
-        reverse_identity_feed_input.pointer("/properties/inputs/items/properties/page_size"),
-        None
-    );
-    let reverse_identity_feed = openapi_post_operation(&document, "/v1/identity/addresses:feed");
-    assert_eq!(
-        reverse_identity_feed
-            .get("responses")
-            .and_then(|responses| responses.get("200"))
-            .and_then(|response| response.get("content"))
-            .and_then(|content| content.get("application/json"))
-            .and_then(|content_type| content_type.get("schema")),
-        Some(&json!({ "$ref": "#/components/schemas/ReverseIdentityFeedResponse" }))
-    );
     let identity_lookup = openapi_post_operation(&document, "/v1/identity:lookup");
     assert_eq!(
         identity_lookup

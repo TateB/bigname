@@ -19,7 +19,7 @@ Projection workers remain the only writers of current projection families. The s
 
 If a supporting row is invalidated, orphaned, repaired, or deleted, triggers recompute affected addresses. Recomputes are serialized with the same address-level advisory lock so counts and compact display rows cannot interleave stale delete/insert windows for one address. If trigger state is suspected stale after manual repair, operators may rebuild only the sidecars without replaying protocol facts because they are disposable derived state.
 
-`/v1/status/indexing` continues to report readiness from chain checkpoints, active/shadow manifest chains, projection apply cursors, and pending invalidations. The sidecars themselves are not readiness sources; stale projections or pending invalidations keep the route degraded or stale before sidecar results are trusted.
+`/v1/status` continues to report readiness from chain checkpoints, active/shadow manifest chains, projection apply cursors, and pending invalidations. The sidecars themselves are not readiness sources; stale projections or pending invalidations keep the route degraded or stale before sidecar results are trusted.
 
 ## Consequences
 

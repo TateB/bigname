@@ -50,14 +50,6 @@ pub(crate) struct AddressNamesQuery {
     pub(crate) page_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct ReverseIdentityQuery {
-    pub(crate) coin_type: Option<String>,
-    pub(crate) roles: Option<String>,
-    pub(crate) page_size: Option<u64>,
-    pub(crate) page_cursor: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AddressNamesIncludeOptions {
     pub(crate) role_summary: bool,

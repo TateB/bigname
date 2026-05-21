@@ -60,7 +60,7 @@ use crate::{
         ChildrenQuery, EventsQuery, ExactNameSnapshotQuery, HistoryQuery, InferredResolutionQuery,
         MetaMode, NameRecordsQuery, NameRolesQuery, NamesQuery, PermissionsQuery, PrimaryNameQuery,
         ResolutionExecutionExplainQuery, ResolutionMode, ResolutionQuery, ResolutionRecordKey,
-        ResolverOverviewQuery, ResourceLookupQuery, ResponseView, ReverseIdentityQuery, RolesQuery,
+        ResolverOverviewQuery, ResourceLookupQuery, ResponseView, RolesQuery,
     },
     routes::API_ROUTE_DEFINITIONS,
     state::AppState,

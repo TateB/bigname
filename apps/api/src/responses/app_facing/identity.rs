@@ -1,30 +1,3 @@
-pub(crate) fn build_identity_name_response_with_normalization(
-    record: Option<&bigname_storage::IdentityNameRecordRow>,
-    corrected_input_normalization: bool,
-) -> IdentityNameResponse {
-    match record {
-        Some(record) => {
-            let record =
-                build_name_record_response_with_normalization(record, corrected_input_normalization);
-            IdentityNameResponse {
-                status: record.status.clone(),
-                record: Some(record),
-            }
-        }
-        None => IdentityNameResponse {
-            status: "not_found".to_owned(),
-            record: None,
-        },
-    }
-}
-
-pub(crate) fn build_name_record_response_with_normalization(
-    record: &bigname_storage::IdentityNameRecordRow,
-    corrected_input_normalization: bool,
-) -> NameRecordResponse {
-    build_name_record_response_for_coin_type(record, "60", corrected_input_normalization)
-}
-
 fn build_name_record_response_for_coin_type(
     record: &bigname_storage::IdentityNameRecordRow,
     primary_coin_type: &str,
@@ -101,41 +74,6 @@ fn build_name_record_response_for_coin_type(
         },
         status: identity_record_status(&record.row),
         unsupported_fields: unsupported_fields.into_iter().collect(),
-    }
-}
-
-pub(crate) fn build_reverse_name_record_response(
-    record: &bigname_storage::ReverseIdentityRecordRow,
-) -> ReverseNameRecordResponse {
-    let is_primary = record.primary_name.as_ref().is_some_and(|primary| {
-        primary.claim_status == bigname_storage::PrimaryNameClaimStatus::Success
-            && primary.normalized_claim_name.as_deref()
-                == Some(record.name_record.row.normalized_name.as_str())
-    });
-
-    ReverseNameRecordResponse {
-        record: build_name_record_response_for_coin_type(
-            &record.name_record,
-            &record.requested_coin_type,
-            false,
-        ),
-        is_primary,
-        relation_facets: identity_relation_facets(&record.relation_facets),
-    }
-}
-
-pub(crate) fn build_identity_feed_record_response(
-    record: &bigname_storage::ReverseIdentityFeedRecordRow,
-) -> IdentityFeedRecordResponse {
-    IdentityFeedRecordResponse {
-        name: record.canonical_display_name.clone(),
-        normalized_name: record.normalized_name.clone(),
-        namehash: record.namehash.clone(),
-        namespace: record.namespace.clone(),
-        network: identity_network_from_parts(&record.namespace, &record.chain_positions),
-        is_primary: record.is_primary,
-        relation_facets: identity_relation_facets(&record.relation_facets),
-        status: identity_record_status_from_coverage(&record.coverage),
     }
 }
 
@@ -396,35 +334,6 @@ fn identity_as_of_timestamp(record: &bigname_storage::IdentityNameRecordRow) -> 
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
-}
-
-fn identity_relation_facets(relations: &[bigname_storage::AddressNameRelation]) -> Vec<String> {
-    let has_owned = relations.iter().any(|relation| {
-        matches!(
-            relation,
-            bigname_storage::AddressNameRelation::Registrant
-                | bigname_storage::AddressNameRelation::TokenHolder
-        )
-    });
-    let has_managed = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::EffectiveController));
-    let has_registrant = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::Registrant));
-    let has_effective_controller = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::EffectiveController));
-
-    [
-        (has_owned, "OWNED"),
-        (has_managed, "MANAGED"),
-        (has_registrant, "REGISTRANT"),
-        (has_effective_controller, "EFFECTIVE_CONTROLLER"),
-    ]
-    .into_iter()
-    .filter_map(|(present, label)| present.then(|| label.to_owned()))
-    .collect()
 }
 
 fn indexing_status_label<'a>(

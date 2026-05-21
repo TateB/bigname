@@ -155,7 +155,7 @@ Rules:
 The identity route has three read profiles:
 
 - Feed profile: `POST /v1/identity:lookup` with `profile=feed` returns at most one compact identity row per input address, plus `total_count`. It is the partner-1 latency path for feeds and timelines and intentionally excludes full `IdentityRecord` fields, record inventory, text records, coin-address maps, and deep provenance.
-- Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation, account switchers, and compatibility shims. It may carry larger payloads and pagination.
+- Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation and account switchers. It may carry larger payloads and pagination.
 - Shadow profile: `POST /v1/identity:lookup` with `profile=shadow` follows the detail response shape for deterministic migration comparison.
 
 Namespace inference matches `GET /v1/resolve/{name}` after route-name normalization: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 `sepolia-dev` support boundary.
@@ -173,8 +173,6 @@ Identity not-found behavior is adapter-compatible rather than core-route `404` b
 `IdentityRecord` includes canonical `name`, `namespace`, `namehash`, optional owner/manager/primary/record fields where projected, `network`, optional primary/relation facets for reverse reads, `status`, and `unsupported_fields`. Name result statuses can use `unnormalizable_input` before a record exists; nested `IdentityRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Optional fields are omitted when no backed value is available. `unsupported_fields` lists fields that the identity route could not prove from the current projections without inventing a value.
 
 Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe. The compact feed identity row is read from `address_names_current_identity_feed`, a sidecar that materializes the same readable first-row ordering per address, role set, and primary-name coin type.
-
-The older `/v1/identity/*` routes and `/v1/status/indexing` remain compatibility aliases. They may temporarily expose partner-shaped `normalized_name` and `corrected_input_normalization` fields during migration; native clients should not depend on those aliases.
 
 ## Shared objects
 
@@ -402,12 +400,6 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
-| `GET /v1/identity/names/{name}` | Partner-shaped forward identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
-| `POST /v1/identity/names:batch` | Partner-shaped batched forward identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
-| `POST /v1/identity/addresses:feed` | Partner-shaped feed compatibility alias. Prefer `POST /v1/identity:lookup` with `profile=feed`. |
-| `GET /v1/identity/addresses/{address}/names` | Partner-shaped reverse identity compatibility alias. Prefer `POST /v1/identity:lookup` with `profile=detail`. |
-| `POST /v1/identity/addresses:names:batch` | Partner-shaped batched reverse identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
-| `GET /v1/status/indexing` | Partner-shaped status compatibility alias. Prefer `GET /v1/status`. |
 
 The running API also serves `GET /openapi.json` and `GET /docs` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 

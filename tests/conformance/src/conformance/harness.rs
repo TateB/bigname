@@ -121,36 +121,6 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/identity/addresses/{address}/names",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/addresses:feed",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input, identity_reverse_paginates_only_reachable_name_records, and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 latency facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/addresses:names:batch",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/names/{name}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_forward_single_and_batch_use_partner_not_found_shape; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/names:batch",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_forward_single_and_batch_use_partner_not_found_shape and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
                 path: "/v1/identity:lookup",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "apps/api tests::identity_lookup_returns_native_slim_shape; native partner-1 slim identity and latency feed surface",
@@ -256,12 +226,6 @@
                 path: "/v1/roles",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "apps/api tests::roles; full first-party cutover still needs app call-site mapping",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/status/indexing",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::indexing_status_reports_projection_lag_by_chain; partner-1 facade readiness surface",
                 ),
             },
             OpenApiConformanceCoverage {

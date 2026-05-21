@@ -8,9 +8,8 @@ Use these sets when choosing a public route:
 
 | Set | Routes | Intended consumers |
 | --- | --- | --- |
-| Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | partner-1 style feeds, profile aggregation, migration shims, and shadow comparison. Feed rendering should use `profile=feed`, which is backed by compact count/identity sidecars. |
-| Identity compatibility aliases | `/v1/identity/*`, `/v1/status/indexing` | temporary partner-shaped DTOs for compatibility. New native clients should prefer `POST /v1/identity:lookup` and should not depend on routine `normalized_name` aliases. |
-| Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract rather than partner-shaped DTOs. |
+| Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | partner-1 style feeds, profile aggregation, and shadow comparison. Feed rendering should use `profile=feed`, which is backed by compact count/identity sidecars. |
+| Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
 | Compatibility/explorer adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | supported routes for existing clients, explorer views, and narrow adjuncts. Prefer the canonical product routes above for new integrations when they satisfy the use case. |
@@ -36,7 +35,7 @@ Use these sets when choosing a public route:
 | compact events | activity tables | `GET /v1/events` and history routes with `view=compact` |
 | roles by account/resource/name | resolver and role pages | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` |
 | compact resolver overview | resolver overview pages | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` |
-| native slim identity | feed identity, shadow comparison, migration shims | `POST /v1/identity:lookup` native DTOs over current projections, with result-level input/normalization and no routine `normalized_name` peer field |
+| native slim identity | feed identity, profile aggregation, shadow comparison | `POST /v1/identity:lookup` native DTOs over current projections, with result-level input/normalization and no routine `normalized_name` peer field |
 
 ## Route mapping by capability
 
@@ -58,7 +57,6 @@ Use these sets when choosing a public route:
 | compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
 | compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, projected `role_bitmap`, and effective powers. |
 | native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | App-facing native surface for partner-1 style indexed reads. `profile=feed` is the compact latency path for feeds and timelines; `profile=detail` preserves full native identity rows. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen source-family admission. |
-| partner identity compatibility aliases | `GET /v1/identity/names/{name}`, `POST /v1/identity/names:batch`, `POST /v1/identity/addresses:feed`, `GET /v1/identity/addresses/{address}/names`, `POST /v1/identity/addresses:names:batch`, `GET /v1/status/indexing` | Temporary partner-shaped compatibility surface. These routes may expose `normalized_name` and `corrected_input_normalization`; native clients should use `POST /v1/identity:lookup` and result-level `input`/`normalization`. |
 
 Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` compatibility-reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
 
@@ -66,7 +64,7 @@ Compact defaults suppress full provenance, full coverage, internal projection id
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
 
-`POST /v1/identity:lookup` uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is the native slim read surface for partner-style migration and shadow comparison, not a replacement core model. `profile=feed` intentionally narrows reverse responses to one compact identity row per input address and reads precomputed count/identity sidecars, so feed rendering does not pay for full `IdentityRecord` hydration, live first-row joins, or deep provenance. Production ENSv2 source-family manifests remain outside this slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
+`POST /v1/identity:lookup` uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is the native slim read surface for partner-style feeds, profile aggregation, and shadow comparison, not a replacement core model. `profile=feed` intentionally narrows reverse responses to one compact identity row per input address and reads precomputed count/identity sidecars, so feed rendering does not pay for full `IdentityRecord` hydration, live first-row joins, or deep provenance. Production ENSv2 source-family manifests remain outside this slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
 
 ## Coverage notes
 
