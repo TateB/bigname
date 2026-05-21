@@ -124,6 +124,21 @@ pub(crate) fn build_reverse_name_record_response(
     }
 }
 
+pub(crate) fn build_identity_feed_record_response(
+    record: &bigname_storage::ReverseIdentityFeedRecordRow,
+) -> IdentityFeedRecordResponse {
+    IdentityFeedRecordResponse {
+        name: record.canonical_display_name.clone(),
+        normalized_name: record.normalized_name.clone(),
+        namehash: record.namehash.clone(),
+        namespace: record.namespace.clone(),
+        network: identity_network_from_parts(&record.namespace, &record.chain_positions),
+        is_primary: record.is_primary,
+        relation_facets: identity_relation_facets(&record.relation_facets),
+        status: identity_record_status_from_coverage(&record.coverage),
+    }
+}
+
 pub(crate) fn build_indexing_status_response(
     read: &bigname_storage::IndexingStatusRead,
 ) -> IndexingStatusResponse {
@@ -330,12 +345,16 @@ fn json_path<'a>(mut value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValu
 }
 
 fn identity_network(row: &bigname_storage::IdentityNameCurrentRow) -> String {
-    match row.namespace.as_str() {
-        "basenames" if identity_has_chain_position(row, "base-sepolia") => {
+    identity_network_from_parts(&row.namespace, &row.chain_positions)
+}
+
+fn identity_network_from_parts(namespace: &str, chain_positions: &JsonValue) -> String {
+    match namespace {
+        "basenames" if identity_has_chain_position(chain_positions, "base-sepolia") => {
             "base-sepolia".to_owned()
         }
         "basenames" => "base".to_owned(),
-        "ens" if identity_has_chain_position(row, "ethereum-sepolia") => {
+        "ens" if identity_has_chain_position(chain_positions, "ethereum-sepolia") => {
             "ethereum-sepolia".to_owned()
         }
         "ens" => "ethereum".to_owned(),
@@ -343,8 +362,8 @@ fn identity_network(row: &bigname_storage::IdentityNameCurrentRow) -> String {
     }
 }
 
-fn identity_has_chain_position(row: &bigname_storage::IdentityNameCurrentRow, chain_id: &str) -> bool {
-    row.chain_positions
+fn identity_has_chain_position(chain_positions: &JsonValue, chain_id: &str) -> bool {
+    chain_positions
         .as_object()
         .into_iter()
         .flatten()
@@ -355,7 +374,11 @@ fn identity_has_chain_position(row: &bigname_storage::IdentityNameCurrentRow, ch
 }
 
 fn identity_record_status(row: &bigname_storage::IdentityNameCurrentRow) -> String {
-    match string_field(provenance_field(&row.coverage, "status")).as_deref() {
+    identity_record_status_from_coverage(&row.coverage)
+}
+
+fn identity_record_status_from_coverage(coverage: &JsonValue) -> String {
+    match string_field(provenance_field(coverage, "status")).as_deref() {
         Some("stale") => "stale".to_owned(),
         Some("unsupported") => "unsupported".to_owned(),
         _ => "success".to_owned(),

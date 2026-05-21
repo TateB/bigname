@@ -564,8 +564,10 @@ async fn identity_batch_routes_map_json_rejections_to_invalid_input() -> Result<
     for (uri, body) in [
         ("/v1/identity/names:batch", r#"{"names":"not array"}"#),
         ("/v1/identity/addresses:names:batch", r#"{"inputs":"not array"}"#),
+        ("/v1/identity/addresses:feed", r#"{"inputs":"not array"}"#),
         ("/v1/identity/names:batch", r#"{"names":"#),
         ("/v1/identity/addresses:names:batch", r#"{"inputs":"#),
+        ("/v1/identity/addresses:feed", r#"{"inputs":"#),
     ] {
         let response = app_router(database.app_state())
             .oneshot(
@@ -831,6 +833,41 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
     );
     assert_eq!(payload["results"][1]["pagination"]["total_count"], json!(0));
     assert_eq!(payload["results"][1]["status"], json!("success"));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity/addresses:feed")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [
+                            {"address": address, "coin_type": 60, "roles": "BOTH"},
+                            {"address": managed, "coin_type": 60, "roles": "BOTH"}
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse feed request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["results"][0]["input"]["address"], json!(address));
+    assert_eq!(payload["results"][0]["record"]["name"], json!("Alice.eth"));
+    assert_eq!(payload["results"][0]["record"]["is_primary"], json!(true));
+    assert_eq!(
+        payload["results"][0]["record"]["relation_facets"],
+        json!(["OWNED"])
+    );
+    assert_eq!(payload["results"][0]["total_count"], json!(2));
+    assert_eq!(payload["results"][0]["status"], json!("success"));
+    assert_eq!(payload["results"][1]["input"]["address"], json!(managed));
+    assert_eq!(payload["results"][1]["record"], Value::Null);
+    assert_eq!(payload["results"][1]["total_count"], json!(0));
+    assert_eq!(payload["results"][1]["status"], json!("not_found"));
 
     database.cleanup().await?;
     Ok(())

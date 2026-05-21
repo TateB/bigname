@@ -230,6 +230,59 @@ pub(super) async fn identity_address_names_batch(
     Ok(Json(ReverseIdentityBatchResponse { results }))
 }
 
+pub(super) async fn identity_address_feed(
+    State(state): State<AppState>,
+    body: std::result::Result<Json<ReverseIdentityFeedInput>, JsonRejection>,
+) -> ApiResult<Json<ReverseIdentityFeedResponse>> {
+    let body = parse_identity_json_body(body)?;
+    ensure_identity_batch_limit(body.inputs.len())?;
+
+    let storage_inputs = body
+        .inputs
+        .iter()
+        .map(parse_reverse_feed_item)
+        .collect::<ApiResult<Vec<_>>>()?;
+    let groups = bigname_storage::load_reverse_identity_feed_records(&state.pool, &storage_inputs)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                input_count = body.inputs.len(),
+                error = ?load_error,
+                "failed to load reverse identity feed"
+            );
+            ApiError::internal_error("failed to load reverse identity feed")
+        })?;
+
+    let results = groups
+        .into_iter()
+        .map(|group| {
+            let coin_type = group.input.coin_type.parse::<u64>().unwrap_or_default();
+            let roles = IdentityRoles::from_storage(group.input.roles);
+            let record = group
+                .record
+                .as_ref()
+                .map(build_identity_feed_record_response);
+            let status = record
+                .as_ref()
+                .map(|record| record.status.clone())
+                .unwrap_or_else(|| "not_found".to_owned());
+            ReverseIdentityFeedResult {
+                input: ReverseNamesInputResponse {
+                    address: group.input.address,
+                    coin_type,
+                    roles: roles.as_str().to_owned(),
+                },
+                record,
+                total_count: group.total_count,
+                status,
+            }
+        })
+        .collect();
+
+    Ok(Json(ReverseIdentityFeedResponse { results }))
+}
+
 pub(super) async fn indexing_status(
     State(state): State<AppState>,
 ) -> ApiResult<Json<IndexingStatusResponse>> {

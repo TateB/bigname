@@ -40,12 +40,24 @@ pub(crate) struct ReverseIdentityBatchInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityFeedInput {
+    pub(crate) inputs: Vec<ReverseIdentityFeedInputItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ReverseIdentityBatchInputItem {
     pub(crate) address: String,
     pub(crate) coin_type: Option<u64>,
     pub(crate) roles: Option<String>,
     pub(crate) page_size: Option<u64>,
     pub(crate) page_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityFeedInputItem {
+    pub(crate) address: String,
+    pub(crate) coin_type: Option<u64>,
+    pub(crate) roles: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,10 +96,23 @@ pub(crate) struct ReverseIdentityBatchResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityFeedResponse {
+    pub(crate) results: Vec<ReverseIdentityFeedResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ReverseIdentityBatchResult {
     pub(crate) input: ReverseNamesInputResponse,
     pub(crate) records: Vec<ReverseNameRecordResponse>,
     pub(crate) pagination: IdentityPaginationResponse,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReverseIdentityFeedResult {
+    pub(crate) input: ReverseNamesInputResponse,
+    pub(crate) record: Option<IdentityFeedRecordResponse>,
+    pub(crate) total_count: Option<u64>,
     pub(crate) status: String,
 }
 
@@ -133,6 +158,18 @@ pub(crate) struct ReverseNameRecordResponse {
     pub(crate) record: NameRecordResponse,
     pub(crate) is_primary: bool,
     pub(crate) relation_facets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityFeedRecordResponse {
+    pub(crate) name: String,
+    pub(crate) normalized_name: String,
+    pub(crate) namehash: String,
+    pub(crate) namespace: String,
+    pub(crate) network: String,
+    pub(crate) is_primary: bool,
+    pub(crate) relation_facets: Vec<String>,
+    pub(crate) status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

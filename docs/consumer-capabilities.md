@@ -2,6 +2,18 @@
 
 This document lists the consumer-facing capabilities the bigname `v1` API serves and the routes that serve them. Identity, coverage, and resolution semantics live in [`architecture.md`](architecture.md); wire format in [`api-v1.md`](api-v1.md).
 
+## Route sets
+
+Use these sets when choosing a public route:
+
+| Set | Routes | Intended consumers |
+| --- | --- | --- |
+| Partner/feed identity | `/v1/identity/*`, `/v1/status/indexing` | partner-1 style feeds, migration shims, and shadow comparison. Feed rendering should use `POST /v1/identity/addresses:feed`; profile aggregation uses the full reverse identity routes. |
+| Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract rather than partner-shaped DTOs. |
+| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and liveness introspection. |
+| Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
+| Compatibility/explorer adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | supported routes for existing clients, explorer views, and narrow adjuncts. Prefer the canonical product routes above for new integrations when they satisfy the use case. |
+
 ## Capability matrix
 
 | Capability | Example consumer surface | Native `v1` responsibility |
@@ -23,7 +35,7 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 | compact events | activity tables | `GET /v1/events` and history routes with `view=compact` |
 | roles by account/resource/name | resolver and role pages | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` |
 | compact resolver overview | resolver overview pages | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` |
-| partner-compatible identity façade | feed identity, shadow comparison, migration shims | Flat `NameRecord` and `ReverseNameRecord` compatibility DTOs over current projections |
+| partner-compatible identity façade | feed identity, shadow comparison, migration shims | Compact feed DTOs and flat `NameRecord`/`ReverseNameRecord` compatibility DTOs over current projections |
 
 ## Route mapping by capability
 
@@ -44,7 +56,7 @@ This document lists the consumer-facing capabilities the bigname `v1` API serves
 | compact name search | `GET /v1/names?namespace=...&prefix=...` or `contains=...` | Search only — no availability, pricing, or registration workflow semantics. |
 | compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
 | compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, projected `role_bitmap`, and effective powers. |
-| partner identity façade | `GET /v1/identity/names/{name}`, `POST /v1/identity/names:batch`, `GET /v1/identity/addresses/{address}/names`, `POST /v1/identity/addresses:names:batch`, `GET /v1/status/indexing` | App-facing compatibility surface for partner-1 style indexed reads. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen source-family admission. |
+| partner identity façade | `GET /v1/identity/names/{name}`, `POST /v1/identity/names:batch`, `POST /v1/identity/addresses:feed`, `GET /v1/identity/addresses/{address}/names`, `POST /v1/identity/addresses:names:batch`, `GET /v1/status/indexing` | App-facing compatibility surface for partner-1 style indexed reads. `addresses:feed` is the compact latency path for feeds and timelines; the other reverse routes preserve the full profile/detail DTO. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen source-family admission. |
 
 Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` compatibility-reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
 
@@ -52,7 +64,7 @@ Compact defaults suppress full provenance, full coverage, internal projection id
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
 
-The `/v1/identity/*` façade uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is a compatibility read surface for partner-style migration and shadow comparison, not a replacement core model. Production ENSv2 source-family manifests remain outside this façade slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
+The `/v1/identity/*` façade uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is a compatibility read surface for partner-style migration and shadow comparison, not a replacement core model. `POST /v1/identity/addresses:feed` intentionally narrows the reverse response to one compact identity row per input address so feed rendering does not pay for full `NameRecord` hydration or deep provenance. Production ENSv2 source-family manifests remain outside this façade slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
 
 ## Coverage notes
 

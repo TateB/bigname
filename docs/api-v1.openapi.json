@@ -912,6 +912,54 @@
         ],
         "type": "object"
       },
+      "IdentityFeedRecord": {
+        "properties": {
+          "is_primary": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "normalized_name": {
+            "type": "string"
+          },
+          "relation_facets": {
+            "items": {
+              "enum": [
+                "OWNED",
+                "MANAGED",
+                "REGISTRANT",
+                "EFFECTIVE_CONTROLLER"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/NameRecordStatus"
+          }
+        },
+        "required": [
+          "name",
+          "normalized_name",
+          "namehash",
+          "namespace",
+          "network",
+          "is_primary",
+          "relation_facets",
+          "status"
+        ],
+        "type": "object"
+      },
       "IdentityNameResponse": {
         "properties": {
           "record": {
@@ -1943,6 +1991,90 @@
                 "input",
                 "records",
                 "pagination",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "type": "object"
+      },
+      "ReverseIdentityFeedInput": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "coin_type": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "roles": {
+                  "default": "BOTH",
+                  "enum": [
+                    "OWNED",
+                    "MANAGED",
+                    "BOTH"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "address",
+                "coin_type"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          }
+        },
+        "required": [
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "ReverseIdentityFeedResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "properties": {
+                "input": {
+                  "$ref": "#/components/schemas/ReverseNamesInput"
+                },
+                "record": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/IdentityFeedRecord"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NullValue"
+                    }
+                  ]
+                },
+                "status": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                },
+                "total_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "input",
+                "record",
+                "total_count",
                 "status"
               ],
               "type": "object"
@@ -3482,6 +3614,58 @@
           }
         },
         "summary": "Partner-compatible reverse identity lookup",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/identity/addresses:feed": {
+      "post": {
+        "operationId": "identity_address_feed",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReverseIdentityFeedInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseIdentityFeedResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Latency-optimized reverse identity feed lookup",
         "tags": [
           "Identity"
         ]

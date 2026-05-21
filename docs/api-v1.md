@@ -152,6 +152,11 @@ Rules:
 
 The `/v1/identity/*` routes are an app-facing compatibility façade for partner-style indexed identity reads. They flatten existing current projections into `NameRecord` and `ReverseNameRecord` DTOs; they do not replace the canonical name, resolution, address-name, primary-name, or permission contracts.
 
+The façade has two reverse-read profiles:
+
+- Feed profile: `POST /v1/identity/addresses:feed` returns at most one compact identity row per input address, plus `total_count`. It is the partner-1 latency path for feeds and timelines and intentionally excludes full `NameRecord` fields, record inventory, text records, coin-address maps, and deep provenance.
+- Profile/detail profile: `GET /v1/identity/addresses/{address}/names` and `POST /v1/identity/addresses:names:batch` return full `ReverseNameRecord` rows for profile aggregation, account switchers, and compatibility shims. They may carry larger payloads and pagination.
+
 Namespace inference matches `GET /v1/resolve/{name}` after route-name normalization: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Façade reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this façade does not widen the documented ENSv2 `sepolia-dev` support boundary.
 
 Façade not-found behavior is adapter-compatible rather than core-route `404` behavior:
@@ -165,7 +170,7 @@ Façade not-found behavior is adapter-compatible rather than core-route `404` be
 
 `NameRecord` includes the projected display `name`, the canonical `normalized_name`, and `corrected_input_normalization` for forward reads. Reverse records set correction metadata to `false` because the input is an address tuple rather than a name string. Forward response and batch-result statuses can use `unnormalizable_input` before a record exists; nested `NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
 
-Reverse identity pagination always includes `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe.
+Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe.
 
 ## Shared objects
 
@@ -338,37 +343,65 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ## Route catalog
 
-The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md).
+The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: partner/feed routes are the latency-critical façade, canonical product routes are the preferred public API for app and explorer reads, diagnostics carry coverage/provenance detail, and compatibility/explorer routes remain supported without being the primary integration surface.
+
+### Partner/feed identity
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/identity/names/{name}` | Partner-compatible forward identity lookup. |
+| `POST /v1/identity/names:batch` | Partner-compatible batched forward identity lookup. |
+| `POST /v1/identity/addresses:feed` | Latency-optimized reverse feed lookup, one compact row per input. |
+| `GET /v1/identity/addresses/{address}/names` | Profile/detail reverse identity lookup. |
+| `POST /v1/identity/addresses:names:batch` | Batched profile/detail reverse identity lookup. |
+| `GET /v1/status/indexing` | Projection/indexing status by chain. |
+
+### Canonical product reads
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
+| `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
+| `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
+| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
+| `GET /v1/addresses/{address}/names` | Address-to-surface collection. |
+| `GET /v1/primary-names/{address}` | Claimed and verified primary name for `(address, namespace, coin_type)`. |
+| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
+| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
+
+### Metadata and control plane
 
 | Route | Purpose |
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
-| `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
-| `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
-| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
-| `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain detail. |
+| `GET /healthz` | Liveness check. Not part of the `v1` contract. |
+
+### Diagnostics and provenance
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/coverage/{namespace}/{name}` | Single-name completeness and support surface. |
 | `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view. |
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view. |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain. |
-| `GET /v1/addresses/{address}/names` | Address-to-surface collection. |
-| `GET /v1/addresses/{address}/names/count` | Count companion to address relation filters. |
+
+### Compatibility and explorer adjuncts
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/addresses/{address}/names/count` | Count companion to address relation filters. Prefer collection count metadata for new consumers. |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
+| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
+| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview (full envelope). |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
+| `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, cache, verified queries. Prefer records or explain routes when callers need only one side of that contract. |
+| `GET /v1/resolve/{name}` | Namespace-inferred convenience for resolution. Prefer explicit namespace routes for new integrations. |
+| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records; compact view only. Prefer explicit namespace routes for new integrations. |
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
-| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
-| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
-| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
-| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview (full envelope). |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
-| `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, cache, verified queries. |
-| `GET /v1/resolve/{name}` | Namespace-inferred convenience for resolution. |
-| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records; compact view only. |
-| `GET /v1/primary-names/{address}` | Claimed and verified primary name for `(address, namespace, coin_type)`. |
-| `GET /healthz` | Liveness check. Not part of the `v1` contract. |
 
 The running API also serves `GET /openapi.json` and `GET /docs` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 

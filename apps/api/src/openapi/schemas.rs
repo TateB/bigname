@@ -14,10 +14,11 @@ use super::responses::{
 };
 use identity::{
     forward_identity_batch_input_schema, forward_identity_batch_response_schema,
-    identity_as_of_schema, identity_name_response_schema, identity_pagination_schema,
-    identity_status_schema, indexing_status_response_schema, name_record_schema,
-    name_record_status_schema, reverse_identity_batch_input_schema,
-    reverse_identity_batch_response_schema, reverse_name_record_schema, reverse_names_input_schema,
+    identity_as_of_schema, identity_feed_record_schema, identity_name_response_schema,
+    identity_pagination_schema, identity_status_schema, indexing_status_response_schema,
+    name_record_schema, name_record_status_schema, reverse_identity_batch_input_schema,
+    reverse_identity_batch_response_schema, reverse_identity_feed_input_schema,
+    reverse_identity_feed_response_schema, reverse_name_record_schema, reverse_names_input_schema,
     reverse_names_response_schema,
 };
 use primary_name::{
@@ -172,6 +173,7 @@ pub(super) fn openapi_components() -> JsonValue {
             "IdentityAsOf": identity_as_of_schema(),
             "NameRecord": name_record_schema(),
             "ReverseNameRecord": reverse_name_record_schema(),
+            "IdentityFeedRecord": identity_feed_record_schema(),
             "IdentityPagination": identity_pagination_schema(),
             "IdentityNameResponse": identity_name_response_schema(),
             "ForwardIdentityBatchInput": forward_identity_batch_input_schema(),
@@ -180,6 +182,8 @@ pub(super) fn openapi_components() -> JsonValue {
             "ReverseNamesResponse": reverse_names_response_schema(),
             "ReverseIdentityBatchInput": reverse_identity_batch_input_schema(),
             "ReverseIdentityBatchResponse": reverse_identity_batch_response_schema(),
+            "ReverseIdentityFeedInput": reverse_identity_feed_input_schema(),
+            "ReverseIdentityFeedResponse": reverse_identity_feed_response_schema(),
             "IndexingStatusResponse": indexing_status_response_schema(),
             "PrimaryNameClaimedResult": primary_name_claimed_result_schema(),
             "PrimaryNameDeclaredState": json!({

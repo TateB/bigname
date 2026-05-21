@@ -277,6 +277,24 @@ pub(super) fn parse_reverse_batch_item(
     })
 }
 
+pub(super) fn parse_reverse_feed_item(
+    item: &ReverseIdentityFeedInputItem,
+) -> ApiResult<bigname_storage::ReverseIdentityFeedInput> {
+    let address = parse_primary_name_address(&item.address)?;
+    let coin_type = item.coin_type.ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "coin_type is required for every reverse identity feed input".to_owned(),
+    })?;
+    let roles = parse_identity_roles(item.roles.as_deref())?;
+
+    Ok(bigname_storage::ReverseIdentityFeedInput {
+        address,
+        coin_type: coin_type.to_string(),
+        roles: roles.storage_roles(),
+    })
+}
+
 pub(super) fn parse_identity_coin_type(value: Option<&str>) -> ApiResult<u64> {
     let parsed = parse_primary_name_coin_type(value)?;
     parsed.parse::<u64>().map_err(|_| ApiError {

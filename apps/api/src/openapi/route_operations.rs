@@ -8,7 +8,7 @@ use crate::routes::{
 use crate::{
     AppState, Router, address_history, address_names, address_names_count, coverage_current, events,
     explain_authority_control_current, explain_resolution_execution_current,
-    explain_surface_binding_current, get, health, identity_address_names,
+    explain_surface_binding_current, get, health, identity_address_feed, identity_address_names,
     identity_address_names_batch, identity_name, identity_names_batch, indexing_status,
     name_children, name_current, name_history, name_records, name_roles, names,
     namespace_manifests, namespace_metadata, post, primary_names, resolution_current,
@@ -64,7 +64,9 @@ impl ApiRouteDefinition {
             ApiRouteId::ResourceHistory => router.route(self.path, get(resource_history)),
             ApiRouteId::ResourcePermissions => router.route(self.path, get(resource_permissions)),
             ApiRouteId::NamespaceManifests => router.route(self.path, get(namespace_manifests)),
-            ApiRouteId::IdentityNamesBatch | ApiRouteId::IdentityAddressNamesBatch => router,
+            ApiRouteId::IdentityNamesBatch
+            | ApiRouteId::IdentityAddressNamesBatch
+            | ApiRouteId::IdentityAddressFeed => router,
         }
     }
 
@@ -74,6 +76,7 @@ impl ApiRouteDefinition {
             ApiRouteId::IdentityAddressNamesBatch => {
                 router.route(self.path, post(identity_address_names_batch))
             }
+            ApiRouteId::IdentityAddressFeed => router.route(self.path, post(identity_address_feed)),
             _ => router,
         }
     }

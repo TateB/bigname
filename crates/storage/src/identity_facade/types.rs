@@ -99,6 +99,33 @@ pub struct ReverseIdentityGroup {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedInput {
+    pub address: String,
+    pub coin_type: String,
+    pub roles: ReverseIdentityRoles,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedGroup {
+    pub input: ReverseIdentityFeedInput,
+    pub record: Option<ReverseIdentityFeedRecordRow>,
+    pub total_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedRecordRow {
+    pub logical_name_id: String,
+    pub namespace: String,
+    pub canonical_display_name: String,
+    pub normalized_name: String,
+    pub namehash: String,
+    pub chain_positions: Value,
+    pub coverage: Value,
+    pub is_primary: bool,
+    pub relation_facets: Vec<AddressNameRelation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReverseIdentityRecordRow {
     pub name_record: IdentityNameRecordRow,
     pub relation_facets: Vec<AddressNameRelation>,

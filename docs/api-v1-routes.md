@@ -104,6 +104,12 @@ Compact routes advertise only the knobs they own:
 
 These routes are app-facing compatibility routes for the immutable partner-1 requirements in [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). They assemble flat DTOs from existing current projections and persisted projection metadata. They do not run live verified execution by default, do not create partner-specific identity composition, and do not add production ENSv2 manifests.
 
+Use the route profiles intentionally:
+
+- Feed rendering uses `POST /v1/identity/addresses:feed`. It is the target path for partner-1's under-10 ms p95 identity-rendering requirement because it returns one compact record per address and avoids full record inventory hydration.
+- Profile aggregation and compatibility shims use `GET /v1/identity/addresses/{address}/names` or `POST /v1/identity/addresses:names:batch`. These routes preserve the full `ReverseNameRecord` shape and pagination contract.
+- Forward detail and batch detail use `GET /v1/identity/names/{name}` and `POST /v1/identity/names:batch`.
+
 `NameRecord`:
 
 - `name`, `normalized_name`, `corrected_input_normalization`, `namehash`
@@ -203,6 +209,63 @@ Rules:
 - `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page, and does not run a count scan on the request path.
 - Empty result sets are valid.
 - Stable ordering and keyset cursors are applied after logical-name relation facets are deduplicated: `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
+
+## `POST /v1/identity/addresses:feed`
+
+Latency-optimized reverse identity feed lookup.
+
+Request:
+
+```json
+{
+  "inputs": [
+    {
+      "address": "0x0000000000000000000000000000000000000000",
+      "coin_type": 60,
+      "roles": "BOTH"
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "input": {
+        "address": "0x0000000000000000000000000000000000000000",
+        "coin_type": 60,
+        "roles": "BOTH"
+      },
+      "record": {
+        "name": "alice.eth",
+        "normalized_name": "alice.eth",
+        "namehash": "0x...",
+        "namespace": "ens",
+        "network": "ethereum",
+        "is_primary": true,
+        "relation_facets": ["token_holder"],
+        "status": "success"
+      },
+      "total_count": 1,
+      "status": "success"
+    }
+  ]
+}
+```
+
+Rules:
+
+- Preserves one result group per input.
+- Requires `coin_type` per input.
+- `roles` defaults to `BOTH`; role mapping is the same as the profile/detail reverse routes.
+- Returns at most one compact `record` per input, ordered by the same primary-first and role-priority rules as reverse pagination.
+- A miss returns `record=null`, `status=not_found`, and `total_count=0`.
+- `total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar.
+- The compact `record` intentionally omits `NameRecord` fields that require record-inventory hydration: `owner_address`, `manager_address`, `primary_address`, `coin_type_addresses`, `text_records`, `resolver_address`, `expiration`, `token_id`, and `as_of`.
+- Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 
 ## `POST /v1/identity/addresses:names:batch`
 

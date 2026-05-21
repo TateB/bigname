@@ -15,6 +15,7 @@ Environment:
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
 - Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
 - ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
+- `POST /v1/identity/addresses:feed` is the compact feed DTO for latency-sensitive identity rendering. It returns one display record per address plus `total_count`, skips full `NameRecord` hydration, and is backed by covering compact-feed indexes.
 
 ## Before / After
 
@@ -33,9 +34,23 @@ The "before" sample was taken before the slim identity read path and feed-defaul
 | reverse batch 250, `page_size=10` | 1304.36 ms | 332.54 ms | Full `ReverseNameRecord`; 2.53 MB response. |
 | reverse batch 1000, `page_size=10` | 11420.88 ms | 1415.95 ms | Full `ReverseNameRecord`; 10.26 MB response. |
 
+## 2026-05-21 Compact Feed Update
+
+Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-alive HTTP connection, 30 warmup requests per case, and 200 measured requests per case except the 1000-input case, which used 80 measured requests.
+
+| Case | Response size | p95 |
+| --- | ---: | ---: |
+| `POST /v1/identity/addresses:feed`, 1 input | 0.41 KB | 1.74 ms |
+| `POST /v1/identity/addresses:feed`, 10 inputs | 4.11 KB | 2.07 ms |
+| `POST /v1/identity/addresses:feed`, 25 inputs | 10.12 KB | 3.22 ms |
+| `POST /v1/identity/addresses:feed`, 50 inputs | 20.29 KB | 2.88 ms |
+| `POST /v1/identity/addresses:feed`, 100 inputs | 40.58 KB | 5.23 ms |
+| `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 8.22 ms |
+| `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 25.16 ms |
+
 ## Interpretation
 
-The optimized façade is substantially faster and supports 1000-input batches, but full shared-record batch responses still do not meet a 10 ms p95 target. The remaining cost is dominated by the partner-required full `NameRecord` payload shape, JSON serialization, and response size. A 10 ms p95 feed path at hundreds of addresses likely needs a negotiated compact feed DTO or a dedicated materialized response projection with a smaller response shape.
+The compact feed route meets the under-10 ms p95 target for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the compact response is already about 407 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full shared-record reverse batches remain the profile/detail path and are intentionally not the feed latency contract.
 
 ## Unsupported Fields Sample
 

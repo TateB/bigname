@@ -249,6 +249,104 @@ pub(super) fn reverse_identity_batch_input_schema() -> JsonValue {
     })
 }
 
+pub(super) fn identity_feed_record_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "name",
+            "normalized_name",
+            "namehash",
+            "namespace",
+            "network",
+            "is_primary",
+            "relation_facets",
+            "status",
+        ],
+        "properties": {
+            "name": { "type": "string" },
+            "normalized_name": { "type": "string" },
+            "namehash": { "type": "string" },
+            "namespace": { "type": "string" },
+            "network": { "type": "string" },
+            "is_primary": { "type": "boolean" },
+            "relation_facets": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "OWNED",
+                        "MANAGED",
+                        "REGISTRANT",
+                        "EFFECTIVE_CONTROLLER"
+                    ],
+                },
+            },
+            "status": schema_ref("NameRecordStatus"),
+        },
+    })
+}
+
+pub(super) fn reverse_identity_feed_input_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["inputs"],
+        "properties": {
+            "inputs": {
+                "type": "array",
+                "maxItems": 1000,
+                "items": {
+                    "type": "object",
+                    "required": ["address", "coin_type"],
+                    "properties": {
+                        "address": { "type": "string" },
+                        "coin_type": {
+                            "type": "integer",
+                            "minimum": 0,
+                        },
+                        "roles": {
+                            "type": "string",
+                            "enum": ["OWNED", "MANAGED", "BOTH"],
+                            "default": "BOTH",
+                        },
+                    },
+                    "additionalProperties": false,
+                },
+            },
+        },
+        "additionalProperties": false,
+    })
+}
+
+pub(super) fn reverse_identity_feed_response_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "input",
+                        "record",
+                        "total_count",
+                        "status"
+                    ],
+                    "properties": {
+                        "input": schema_ref("ReverseNamesInput"),
+                        "record": nullable_ref_schema("IdentityFeedRecord"),
+                        "total_count": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                        },
+                        "status": schema_ref("IdentityStatus"),
+                    },
+                },
+            },
+        },
+    })
+}
+
 pub(super) fn reverse_identity_batch_response_schema() -> JsonValue {
     json!({
         "type": "object",

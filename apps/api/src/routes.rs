@@ -129,6 +129,7 @@ pub(crate) enum ApiRouteId {
     IdentityNamesBatch,
     IdentityAddressNames,
     IdentityAddressNamesBatch,
+    IdentityAddressFeed,
     Names,
     AddressNames,
     AddressNamesCount,
@@ -220,6 +221,19 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             ApiRouteErrorResponses::new(true, false),
         )
         .with_request_schema("ReverseIdentityBatchInput"),
+    ),
+    ApiRouteDefinition::public_post(
+        ApiRouteId::IdentityAddressFeed,
+        "/v1/identity/addresses:feed",
+        ApiRouteContract::new(
+            "identity_address_feed",
+            "Latency-optimized reverse identity feed lookup",
+            "Identity",
+            &[],
+            "ReverseIdentityFeedResponse",
+            ApiRouteErrorResponses::new(true, false),
+        )
+        .with_request_schema("ReverseIdentityFeedInput"),
     ),
     ApiRouteDefinition::public_get(
         ApiRouteId::Names,

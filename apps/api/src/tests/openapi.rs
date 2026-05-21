@@ -12,6 +12,13 @@ fn openapi_operation<'a>(document: &'a Value, path: &str) -> &'a Value {
         .expect("OpenAPI path must expose a GET operation")
 }
 
+fn openapi_post_operation<'a>(document: &'a Value, path: &str) -> &'a Value {
+    openapi_paths(document)
+        .get(path)
+        .and_then(|path_item| path_item.get("post"))
+        .expect("OpenAPI path must expose a POST operation")
+}
+
 fn openapi_parameter<'a>(operation: &'a Value, name: &str) -> &'a Value {
     operation
         .get("parameters")
@@ -211,6 +218,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
             "/v1/identity/addresses/{address}/names".to_owned(),
+            "/v1/identity/addresses:feed".to_owned(),
             "/v1/identity/addresses:names:batch".to_owned(),
             "/v1/identity/names/{name}".to_owned(),
             "/v1/identity/names:batch".to_owned(),
@@ -511,6 +519,21 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(
         reverse_identity_batch_input.pointer("/properties/inputs/items/properties/page_cursor/type"),
         Some(&json!(["string", "null"]))
+    );
+    let reverse_identity_feed_input = openapi_schema(&document, "ReverseIdentityFeedInput");
+    assert_eq!(
+        reverse_identity_feed_input.pointer("/properties/inputs/items/properties/page_size"),
+        None
+    );
+    let reverse_identity_feed = openapi_post_operation(&document, "/v1/identity/addresses:feed");
+    assert_eq!(
+        reverse_identity_feed
+            .get("responses")
+            .and_then(|responses| responses.get("200"))
+            .and_then(|response| response.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|content_type| content_type.get("schema")),
+        Some(&json!({ "$ref": "#/components/schemas/ReverseIdentityFeedResponse" }))
     );
 
     let events = openapi_operation(&document, "/v1/events");
