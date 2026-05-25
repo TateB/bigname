@@ -331,7 +331,7 @@ Required indexes: by resource, by account, by resolver; permission history by re
 - A raw claim that cannot be normalized surfaces `invalid_name`, not silent drop.
 - Reverse claims alone don't verify — verification must resolve back to the requested address.[^v1-aur-l217][^v1-aur-l226][^v1-aur-l263][^v1-aur-l269]
 
-For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source. The app default tuple (`namespace=ens`, `coin_type=60`) may use a route-local Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing: build the `addr.reverse` node, read its ENS registry resolver, call resolver `name(bytes32)`, normalize the result, and publish provenance as `ens_reverse_rpc` without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback verifies the claimed name with `addr:60` through the ENS Universal Resolver proxy at provider `latest`; it returns verification status without persisting an execution trace.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Outside that fallback, `claimed_primary_name.name` is never synthesized from manifest presence, resolver identity, or verified execution.
+For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source, including the projection-owned legacy reverse-resolver hydration exception documented for configured event-silent ENSv1 reverse resolvers. The app default tuple (`namespace=ens`, `coin_type=60`) may use a route-local Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing: build the `addr.reverse` node, read its ENS registry resolver, call resolver `name(bytes32)`, normalize the result, and publish provenance as `ens_reverse_rpc` without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolver-l11][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback verifies the claimed name with `addr:60` through the ENS Universal Resolver proxy at provider `latest`; it returns verification status without persisting an execution trace.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Outside exact-row hydration and that fallback, `claimed_primary_name.name` is never synthesized from manifest presence, resolver identity alone, or verified execution.
 
 For Basenames, declared primary-claim intake is `basenames_base_primary` (`reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`).[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13][^bn-revreg-l193]
 
@@ -339,7 +339,7 @@ Verified-primary cache identity is `request_type=verified_primary_name` with key
 
 Section-local provenance:
 
-- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
+- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
 - `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`. Route-local ENS/60 verification omits it.
 
 ## Collection semantics
@@ -578,6 +578,7 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
 [^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
 [^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolver-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L11 @ ens_v1@91c966f)
 [^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^v1-aur-l90]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L90 @ ens_v1@91c966f)
