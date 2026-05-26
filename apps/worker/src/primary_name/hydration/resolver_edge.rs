@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use bigname_execution::ens_namehash_hex;
+use bigname_execution::{OnDemandEnsPrimaryNameError, ens_namehash_hex};
 use bigname_storage::{ENS_NAMESPACE, normalize_evm_address};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -130,16 +130,20 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                     continue;
                 }
                 Err(error) => {
-                    summary.failed_lookup_count += 1;
-                    tracing::warn!(
-                        service = "worker",
-                        projection = "primary_names_current",
-                        chain_id,
-                        reverse_node = target.reverse_node,
-                        normalized_name,
-                        error = %format!("{error:#}"),
-                        "legacy reverse-resolver resolver-edge forward confirmation failed"
-                    );
+                    if is_universal_resolver_non_confirmation(&error) {
+                        delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                    } else {
+                        summary.failed_lookup_count += 1;
+                        tracing::warn!(
+                            service = "worker",
+                            projection = "primary_names_current",
+                            chain_id,
+                            reverse_node = target.reverse_node,
+                            normalized_name,
+                            error = %format!("{error:#}"),
+                            "legacy reverse-resolver resolver-edge forward confirmation failed"
+                        );
+                    }
                     continue;
                 }
             };
@@ -207,6 +211,13 @@ fn forward_address_matches_reverse_node(address: &str, reverse_node: &str) -> Re
     }
     let expected = ens_namehash_hex(&format!("{label}.addr.reverse"))?;
     Ok(expected.eq_ignore_ascii_case(reverse_node))
+}
+
+fn is_universal_resolver_non_confirmation(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<OnDemandEnsPrimaryNameError>())
+        .any(OnDemandEnsPrimaryNameError::is_plain_execution_revert)
 }
 
 fn resolver_edge_tuple(address: &str) -> ReverseClaimTuple {

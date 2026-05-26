@@ -436,6 +436,9 @@ async fn lookup_ens_forward_address_at_block_can_decline_ccip_read() -> Result<(
     .expect_err("projection lookup must fail closed on OffchainLookup");
 
     assert_eq!(error.kind(), OnDemandEnsPrimaryNameErrorKind::Execution);
+    assert!(error.is_offchain_lookup_required());
+    assert!(!error.is_plain_execution_revert());
+    assert!(error.message().contains("OffchainLookup required"));
     let requests = join_requests(handle).await?;
     assert_eq!(requests.len(), 1);
 
@@ -475,6 +478,38 @@ async fn lookup_ens_forward_address_at_block_can_decline_ccip_read() -> Result<(
     );
     let requests = join_requests(handle).await?;
     assert_eq!(requests.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_ens_forward_address_at_block_classifies_plain_revert() -> Result<()> {
+    let (rpc_url, handle) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::Null,
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+    let error = lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+        normalized_name: "missing-forward.eth",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_number: 123,
+        block_hash: "0x1234000000000000000000000000000000000000000000000000000000000000",
+        follow_ccip_read: false,
+    })
+    .await
+    .expect_err("plain Universal Resolver revert must fail closed");
+
+    assert_eq!(error.kind(), OnDemandEnsPrimaryNameErrorKind::Execution);
+    assert!(error.is_plain_execution_revert());
+    assert!(!error.is_offchain_lookup_required());
+    assert_eq!(
+        error.message(),
+        "ENS primary-name RPC call failed: execution reverted"
+    );
+    assert_eq!(join_requests(handle).await?.len(), 1);
     Ok(())
 }
 

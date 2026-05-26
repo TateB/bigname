@@ -8,8 +8,8 @@ use crate::ens_resolution_abi::{
     decode_selector_result, decode_universal_resolver_result, dns_encode_name, hex_string,
     hex_to_bytes, namehash, resolver_record_call, universal_resolver_call,
 };
-use crate::ens_resolution_ccip::follow_ccip_read;
-use crate::rpc::{ChainRpcUrls, JsonRpcCallResult, JsonRpcHttpClient};
+use crate::ens_resolution_ccip::{follow_ccip_read, rpc_error_contains_offchain_lookup};
+use crate::rpc::{ChainRpcUrls, JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
 use crate::{ENS_REGISTRY_ADDRESS, ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
 
 mod abi {
@@ -64,6 +64,8 @@ pub enum OnDemandEnsPrimaryNameErrorKind {
 pub struct OnDemandEnsPrimaryNameError {
     kind: OnDemandEnsPrimaryNameErrorKind,
     message: String,
+    plain_execution_revert: bool,
+    offchain_lookup_required: bool,
 }
 
 impl OnDemandEnsPrimaryNameError {
@@ -71,13 +73,25 @@ impl OnDemandEnsPrimaryNameError {
         Self {
             kind: OnDemandEnsPrimaryNameErrorKind::Configuration,
             message: message.into(),
+            plain_execution_revert: false,
+            offchain_lookup_required: false,
         }
     }
 
     fn execution(message: impl Into<String>) -> Self {
+        Self::execution_with_rpc_flags(message, false, false)
+    }
+
+    fn execution_with_rpc_flags(
+        message: impl Into<String>,
+        plain_execution_revert: bool,
+        offchain_lookup_required: bool,
+    ) -> Self {
         Self {
             kind: OnDemandEnsPrimaryNameErrorKind::Execution,
             message: message.into(),
+            plain_execution_revert,
+            offchain_lookup_required,
         }
     }
 
@@ -87,6 +101,23 @@ impl OnDemandEnsPrimaryNameError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub const fn is_plain_execution_revert(&self) -> bool {
+        self.plain_execution_revert
+    }
+
+    pub const fn is_offchain_lookup_required(&self) -> bool {
+        self.offchain_lookup_required
+    }
+
+    #[doc(hidden)]
+    pub fn synthetic_execution_rpc_error_for_tests(
+        message: impl Into<String>,
+        plain_execution_revert: bool,
+        offchain_lookup_required: bool,
+    ) -> Self {
+        Self::execution_with_rpc_flags(message, plain_execution_revert, offchain_lookup_required)
     }
 }
 
@@ -373,12 +404,7 @@ async fn eth_call_result_with_block_selector(
 fn decode_eth_call_result(
     result: JsonRpcCallResult,
 ) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
-    let value = result.result.map_err(|error| {
-        OnDemandEnsPrimaryNameError::execution(format!(
-            "ENS primary-name RPC call failed: {}",
-            error.message
-        ))
-    })?;
+    let value = result.result.map_err(primary_name_rpc_call_error)?;
     let hex_value = value.as_str().ok_or_else(|| {
         OnDemandEnsPrimaryNameError::execution("ENS primary-name RPC result was not a hex string")
     })?;
@@ -387,6 +413,32 @@ fn decode_eth_call_result(
             "ENS primary-name RPC result is malformed: {error}"
         ))
     })
+}
+
+fn primary_name_rpc_call_error(error: JsonRpcCallError) -> OnDemandEnsPrimaryNameError {
+    let offchain_lookup_required = match rpc_error_contains_offchain_lookup(&error) {
+        Ok(value) => value,
+        Err(decode_error) => {
+            return OnDemandEnsPrimaryNameError::execution(format!(
+                "ENS primary-name RPC call failed: {}; failed to inspect RPC revert data: {decode_error}",
+                error.message
+            ));
+        }
+    };
+    let plain_execution_revert = error.message == "execution reverted" && !offchain_lookup_required;
+    let offchain_context = if offchain_lookup_required {
+        " (OffchainLookup required)"
+    } else {
+        ""
+    };
+    OnDemandEnsPrimaryNameError::execution_with_rpc_flags(
+        format!(
+            "ENS primary-name RPC call failed: {}{offchain_context}",
+            error.message
+        ),
+        plain_execution_revert,
+        offchain_lookup_required,
+    )
 }
 
 #[cfg(test)]

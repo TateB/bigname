@@ -313,6 +313,10 @@ fn offchain_lookup_from_rpc_error(error: &JsonRpcCallError) -> Result<Option<Off
     decode_offchain_lookup_revert(&bytes)
 }
 
+pub(crate) fn rpc_error_contains_offchain_lookup(error: &JsonRpcCallError) -> Result<bool> {
+    offchain_lookup_from_rpc_error(error).map(|lookup| lookup.is_some())
+}
+
 // JSON-RPC providers disagree on where revert data lives; keep this compatibility
 // scan centralized so the accepted shapes stay deliberate.
 fn rpc_error_hex_data(value: &Value) -> Option<HexPayload> {

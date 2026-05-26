@@ -153,10 +153,20 @@ impl ReverseNameHydrationClient for ResolverCheckingHydrationClient {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct ForwardCheckingHydrationClient {
     outcomes_by_node: BTreeMap<String, ReverseNameHydrationOutcome>,
     forward_addresses_by_name: BTreeMap<String, Option<String>>,
+    forward_errors_by_name: BTreeMap<String, ForwardLookupError>,
+}
+
+#[derive(Clone, Debug)]
+enum ForwardLookupError {
+    PrimaryName {
+        message: String,
+        plain_execution_revert: bool,
+        offchain_lookup_required: bool,
+    },
 }
 
 impl ReverseNameHydrationClient for ForwardCheckingHydrationClient {
@@ -187,6 +197,21 @@ impl ReverseNameHydrationClient for ForwardCheckingHydrationClient {
         normalized_name: &'a str,
     ) -> BoxFuture<'a, Result<Option<String>>> {
         async move {
+            if let Some(error) = self.forward_errors_by_name.get(normalized_name) {
+                return match error {
+                    ForwardLookupError::PrimaryName {
+                        message,
+                        plain_execution_revert,
+                        offchain_lookup_required,
+                    } => Err(anyhow::Error::from(
+                        bigname_execution::OnDemandEnsPrimaryNameError::synthetic_execution_rpc_error_for_tests(
+                            message.clone(),
+                            *plain_execution_revert,
+                            *offchain_lookup_required,
+                        ),
+                    )),
+                };
+            }
             self.forward_addresses_by_name
                 .get(normalized_name)
                 .cloned()
@@ -333,6 +358,7 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
             "vitalik.eth".to_owned(),
             Some(address.to_owned()),
         )]),
+        ..Default::default()
     };
     let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -419,6 +445,7 @@ async fn deletes_resolver_edge_row_when_forward_confirmation_stops_matching() ->
             "vitalik.eth".to_owned(),
             Some(address.to_owned()),
         )]),
+        ..Default::default()
     };
     hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -437,6 +464,7 @@ async fn deletes_resolver_edge_row_when_forward_confirmation_stops_matching() ->
             "vitalik.eth".to_owned(),
             Some("0x0000000000000000000000000000000000000bad".to_owned()),
         )]),
+        ..Default::default()
     };
     let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -493,6 +521,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_errors() -> Result<()
             "vitalik.eth".to_owned(),
             Some(address.to_owned()),
         )]),
+        ..Default::default()
     };
     hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -508,6 +537,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_errors() -> Result<()
             ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::new(),
+        ..Default::default()
     };
     let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -529,6 +559,158 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_errors() -> Result<()
     )
     .await?
     .expect("transient forward-confirmation failure should retain previous row");
+    assert_eq!(
+        retained.normalized_claim_name.as_deref(),
+        Some("vitalik.eth")
+    );
+    assert_eq!(
+        retained.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(300)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn treats_universal_resolver_revert_as_resolver_edge_non_confirmation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let reverse_node = reverse_node_for_address(address)?;
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[generic_reverse_resolver_changed_event(
+            "resolver-edge-only",
+            &reverse_node,
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            120,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("missing-forward.eth".to_owned()),
+        )]),
+        forward_errors_by_name: BTreeMap::from([(
+            "missing-forward.eth".to_owned(),
+            ForwardLookupError::PrimaryName {
+                message: "ENS primary-name RPC call failed: execution reverted".to_owned(),
+                plain_execution_revert: true,
+                offchain_lookup_required: false,
+            },
+        )]),
+        ..Default::default()
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+    assert_eq!(summary.candidate_tuple_count, 1);
+    assert_eq!(summary.queried_tuple_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+    assert_eq!(summary.deleted_row_count, 0);
+    assert_eq!(summary.failed_lookup_count, 0);
+
+    let skipped = load_primary_name_current_snapshot(
+        database.pool(),
+        &normalized_address,
+        ENS_NAMESPACE,
+        "60",
+    )
+    .await?;
+    assert_eq!(skipped, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn keeps_resolver_edge_row_when_forward_confirmation_requires_offchain_lookup() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let reverse_node = reverse_node_for_address(address)?;
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[generic_reverse_resolver_changed_event(
+            "resolver-edge-only",
+            &reverse_node,
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            120,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+        )]),
+        forward_addresses_by_name: BTreeMap::from([(
+            "vitalik.eth".to_owned(),
+            Some(address.to_owned()),
+        )]),
+        ..Default::default()
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    let offchain_client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
+        )]),
+        forward_errors_by_name: BTreeMap::from([(
+            "vitalik.eth".to_owned(),
+            ForwardLookupError::PrimaryName {
+                message:
+                    "ENS primary-name RPC call failed: execution reverted (OffchainLookup required)"
+                        .to_owned(),
+                plain_execution_revert: false,
+                offchain_lookup_required: true,
+            },
+        )]),
+        ..Default::default()
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &offchain_client,
+    )
+    .await?;
+    assert_eq!(summary.candidate_tuple_count, 1);
+    assert_eq!(summary.queried_tuple_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+    assert_eq!(summary.deleted_row_count, 0);
+    assert_eq!(summary.failed_lookup_count, 1);
+
+    let retained = load_primary_name_current_snapshot(
+        database.pool(),
+        &normalized_address,
+        ENS_NAMESPACE,
+        "60",
+    )
+    .await?
+    .expect("offchain-required forward confirmation should retain previous row");
     assert_eq!(
         retained.normalized_claim_name.as_deref(),
         Some("vitalik.eth")
@@ -572,6 +754,7 @@ async fn keeps_resolver_edge_row_when_checkpoint_is_missing() -> Result<()> {
             "vitalik.eth".to_owned(),
             Some(address.to_owned()),
         )]),
+        ..Default::default()
     };
     hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
@@ -584,6 +767,7 @@ async fn keeps_resolver_edge_row_when_checkpoint_is_missing() -> Result<()> {
     let no_checkpoint_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::new(),
         forward_addresses_by_name: BTreeMap::new(),
+        ..Default::default()
     };
     let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
         database.pool(),
