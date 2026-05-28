@@ -1,3 +1,8 @@
+const STANDARD_PROFILE_RECORD_KEYS: &[&str] =
+    &["addr:60", "avatar", "text:com.twitter", "contenthash"];
+const STANDARD_PROFILE_CACHE_RECORD_KEYS: &[&str] =
+    &["addr:60", "text:com.twitter", "contenthash"];
+
 #[tokio::test]
 async fn get_resolution_execution_explain_returns_persisted_verified_state_and_reuses_resolution_envelope_fields()
 -> Result<()> {
@@ -31,7 +36,6 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
             }
         }
     ]);
-
     database
         .seed_name_current_binding_migrated(
             logical_name_id,
@@ -54,6 +58,12 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
             resource_id,
         ))
         .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
 
     let trace = resolution_execution_trace(
         execution_trace_id,
@@ -64,12 +74,54 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
+        logical_name_id,
+        resource_id,
+    );
+    let profile_request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
+    let profile_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
+        }
+    ]);
+    let profile_outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &profile_request_key,
+        profile_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let explain_response = app_router(database.app_state())
         .oneshot(
@@ -83,7 +135,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -91,34 +143,16 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
         .context("resolution request failed")?;
 
     assert_eq!(explain_response.status(), StatusCode::OK);
-    assert_eq!(resolution_response.status(), StatusCode::OK);
+    if resolution_response.status() != StatusCode::OK {
+        let status = resolution_response.status();
+        let payload: Value = read_json(resolution_response).await?;
+        anyhow::bail!("expected profile response 200, got {status}: {payload}");
+    }
 
     let explain_payload: ResolutionResponse = read_json(explain_response).await?;
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
-        "verified_queries": [
-            {
-                "record_key": "text:com.twitter",
-                "status": "success",
-                "value": {
-                    "value": "@alice"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            },
-            {
-                "record_key": "addr:60",
-                "status": "success",
-                "value": {
-                    "coin_type": "60",
-                    "value": "0x00000000000000000000000000000000000000aa"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            }
-        ]
+        "verified_queries": profile_verified_queries
     });
 
     assert_eq!(explain_payload.data, resolution_payload.data);
@@ -281,11 +315,11 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
         .cloned()
         .context("alias-only projected topology must include final_target")?;
     let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
+    let mut inventory_row = record_inventory_current_row(logical_name_id, resource_id);
+    inventory_row.record_version_boundary = record_boundary.clone();
+    inventory_row.chain_positions = name_row.chain_positions.clone();
     database
-        .insert_record_inventory_current_row(record_inventory_current_row(
-            logical_name_id,
-            resource_id,
-        ))
+        .insert_record_inventory_current_row(inventory_row.clone())
         .await?;
 
     let mut trace = resolution_execution_trace(
@@ -310,9 +344,9 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
-        topology_boundary,
-        record_boundary,
+        persisted_verified_queries.clone(),
+        topology_boundary.clone(),
+        record_boundary.clone(),
     );
     outcome.cache_key.requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
@@ -321,8 +355,64 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
         .get("manifest_versions")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let profile_records = STANDARD_PROFILE_RECORD_KEYS
+        .iter()
+        .map(|record_key| {
+            parse_resolution_record_key(record_key).expect("standard profile selector must parse")
+        })
+        .collect::<Vec<_>>();
+    let profile_cache_records =
+        bigname_storage::resolution_execution_cache_lookup_records(&name_row, &profile_records);
+    let profile_cache_key = bigname_storage::build_resolution_execution_cache_key(
+        &name_row,
+        &profile_cache_records,
+        Some(&inventory_row),
+        name_row.chain_positions.clone(),
+    )?;
+    let profile_request_key = profile_cache_key.request_key.clone();
+    let profile_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "not_found",
+            "failure_reason": "no_addr_record"
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-via-alias.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-via-alias"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
+        }
+    ]);
+    let mut profile_outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &profile_request_key,
+        profile_verified_queries.clone(),
+        topology_boundary,
+        record_boundary,
+    );
+    profile_outcome.cache_key = profile_cache_key;
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let explain_response = app_router(database.app_state())
         .oneshot(
@@ -336,7 +426,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -344,33 +434,16 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
         .context("resolution alias request failed")?;
 
     assert_eq!(explain_response.status(), StatusCode::OK);
-    assert_eq!(resolution_response.status(), StatusCode::OK);
+    if resolution_response.status() != StatusCode::OK {
+        let status = resolution_response.status();
+        let payload: Value = read_json(resolution_response).await?;
+        anyhow::bail!("expected profile response 200, got {status}: {payload}");
+    }
 
     let explain_payload: ResolutionResponse = read_json(explain_response).await?;
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
-        "verified_queries": [
-            {
-                "record_key": "avatar",
-                "status": "success",
-                "value": {
-                    "value": "https://cdn.example.test/alice-via-alias.png"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            },
-            {
-                "record_key": "text:com.twitter",
-                "status": "success",
-                "value": {
-                    "value": "@alice-via-alias"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            }
-        ]
+        "verified_queries": profile_verified_queries
     });
 
     assert_eq!(explain_payload.data, resolution_payload.data);
@@ -751,7 +824,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
                 dns_encoded_name: vec![3, b'e', b't', b'h'],
                 namehash: "namehash:eth".to_owned(),
                 labelhashes: vec!["labelhash:eth".to_owned()],
-                normalizer_version: "uts46-v1".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "ethereum-mainnet".to_owned(),
@@ -912,7 +985,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             dns_encoded_name: b"alice.base.eth".to_vec(),
             namehash: "namehash:alice.base.eth".to_owned(),
             labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -1121,7 +1194,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             "basenames_v1",
             2,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -1624,7 +1697,7 @@ async fn get_resolution_inferred_route_infers_base_eth_as_ens() -> Result<()> {
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/base.eth")
+                .uri("/v1/profiles/names/base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1633,7 +1706,7 @@ async fn get_resolution_inferred_route_infers_base_eth_as_ens() -> Result<()> {
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/base.eth")
+                .uri("/v1/profiles/names/base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1677,7 +1750,7 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth")
+                .uri("/v1/profiles/names/Alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1686,7 +1759,7 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1704,6 +1777,28 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
         inferred_payload.data.get("logical_name_id"),
         Some(&json!("ens:alice.eth"))
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_inferred_route_rejects_unnormalizable_name() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/profiles/names/bad%20name.eth?mode=declared&meta=full")
+                .body(Body::empty())
+                .expect("inferred invalid-name request must build"),
+        )
+        .await
+        .context("inferred invalid-name resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
     database.cleanup().await?;
     Ok(())
@@ -1730,7 +1825,7 @@ async fn get_resolution_inferred_route_infers_child_base_eth_as_basenames() -> R
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.base.eth")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1739,7 +1834,7 @@ async fn get_resolution_inferred_route_infers_child_base_eth_as_basenames() -> R
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1844,47 +1939,17 @@ async fn get_resolution_inferred_basenames_verified_does_not_fallback_to_ens() -
     )
     .await?;
 
-    let canonical_ens_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.base.eth?mode=verified&records=addr:60")
-                .body(Body::empty())
-                .expect("canonical ENS request must build"),
-        )
-        .await
-        .context("canonical ENS alice.base.eth resolution request failed")?;
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.base.eth?mode=verified&records=addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
         .await
         .context("inferred alice.base.eth verified resolution request failed")?;
 
-    assert_eq!(canonical_ens_response.status(), StatusCode::OK);
     assert_eq!(inferred_response.status(), StatusCode::CONFLICT);
-
-    let canonical_ens_payload: ResolutionResponse = read_json(canonical_ens_response).await?;
-    assert_eq!(
-        canonical_ens_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "addr:60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x00000000000000000000000000000000000000aa"
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string()
-                    }
-                }
-            ]
-        }))
-    );
 
     let inferred_error: ErrorResponse = read_json(inferred_response).await?;
     assert_eq!(inferred_error.error.code, "stale");
@@ -2450,7 +2515,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2624,7 +2689,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         worker_row.record_version_boundary.clone(),
         worker_row.record_version_boundary.clone(),
     );
@@ -2641,7 +2706,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2687,10 +2752,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     );
     assert_eq!(
         payload.verified_state,
-        Some(resolution_unsupported_verified_state(&[
-            "text:com.twitter",
-            "addr:60",
-        ])),
+        Some(resolution_unsupported_verified_state(&["addr:60", "text"])),
         "case {}",
         case.label()
     );
@@ -2766,7 +2828,7 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+                    "/v1/profiles/names/alice.base.eth?mode=declared&meta=full",
                 )
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2935,14 +2997,17 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         .get("manifest_versions")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let mut profile_outcome = outcome.clone();
+    profile_outcome.cache_key.request_key = basenames_resolution_request_key(&["addr:60"]);
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                    "/v1/profiles/names/alice.base.eth?mode=both&meta=full",
                 )
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2961,7 +3026,11 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         .await
         .context("basenames execution explain request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let payload: Value = read_json(response).await?;
+        anyhow::bail!("expected basenames profile response 200, got {status}: {payload}");
+    }
     assert_eq!(explain_response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
@@ -2989,16 +3058,16 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
             "record_version_boundary": worker_row.record_version_boundary.clone(),
             "entries": [
                 {
-                    "record_key": "text:com.twitter",
-                    "record_family": "text",
-                    "selector_key": "com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
-                },
-                {
                     "record_key": "addr:60",
                     "record_family": "addr",
                     "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
                 }
@@ -3010,14 +3079,6 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         Some(json!({
             "verified_queries": [
                 {
-                    "record_key": "text:com.twitter",
-                    "status": "not_found",
-                    "failure_reason": "no_text_record",
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string(),
-                    }
-                },
-                {
                     "record_key": "addr:60",
                     "status": "success",
                     "value": {
@@ -3027,6 +3088,11 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
                     "provenance": {
                         "execution_trace_id": execution_trace_id.to_string(),
                     }
+                },
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
                 }
             ]
         }))
@@ -3119,7 +3185,7 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
                 ],
                 "finished_at": format_timestamp(timestamp(1_717_171_900))
             },
-            "verified_queries": payload.verified_state.as_ref().and_then(|state| state.get("verified_queries")).cloned().expect("verified_state must include verified_queries")
+            "verified_queries": persisted_verified_queries
         }))
     );
 
@@ -3196,7 +3262,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3379,7 +3445,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         worker_row.record_version_boundary.clone(),
         worker_row.record_version_boundary.clone(),
     );
@@ -3396,7 +3462,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3472,7 +3538,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3626,7 +3692,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     let mut outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         worker_row.record_version_boundary.clone(),
         worker_row.record_version_boundary.clone(),
     );
@@ -3637,13 +3703,16 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         .get("manifest_versions")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let mut profile_outcome = outcome.clone();
+    profile_outcome.cache_key.request_key = basenames_resolution_request_key(&["addr:60"]);
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3659,7 +3728,11 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         .await
         .context("missing-topology basenames execution explain request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let payload: Value = read_json(response).await?;
+        anyhow::bail!("expected basenames profile response 200, got {status}: {payload}");
+    }
     assert_eq!(explain_response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
@@ -3675,14 +3748,6 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         Some(json!({
             "verified_queries": [
                 {
-                    "record_key": "text:com.twitter",
-                    "status": "not_found",
-                    "failure_reason": "no_text_record",
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string(),
-                    }
-                },
-                {
                     "record_key": "addr:60",
                     "status": "success",
                     "value": {
@@ -3692,6 +3757,11 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
                     "provenance": {
                         "execution_trace_id": execution_trace_id.to_string(),
                     }
+                },
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
                 }
             ]
         }))
@@ -3784,7 +3854,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
                 ],
                 "finished_at": format_timestamp(timestamp(1_717_171_900))
             },
-            "verified_queries": payload.verified_state.as_ref().and_then(|state| state.get("verified_queries")).cloned().expect("verified_state must include verified_queries")
+            "verified_queries": persisted_verified_queries
         }))
     );
 
@@ -3815,7 +3885,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3890,7 +3960,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3912,20 +3982,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
     let payload: ResolutionResponse = read_json(response).await?;
     assert_eq!(
         payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
+        Some(resolution_unsupported_verified_state(&["addr:60", "text"]))
     );
     assert_eq!(
         payload.provenance.get("execution_trace_id"),
@@ -4043,7 +4100,7 @@ async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported(
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/{normalized_name}?mode=verified&records=addr:60&chain_positions={chain_positions_query}"
+                        "/v1/profiles/names/{normalized_name}?mode=verified&chain_positions={chain_positions_query}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("ENSv2 Sepolia verified request must build"),
@@ -4081,7 +4138,7 @@ async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported(
         let explain_payload: ErrorResponse = read_json(explain_response).await?;
         assert_eq!(
             verified_payload.verified_state,
-            Some(resolution_unsupported_verified_state(&["addr:60"])),
+            Some(json!({ "verified_queries": [] })),
             "{normalized_name}"
         );
         assert_eq!(
@@ -4149,7 +4206,7 @@ async fn get_resolution_ensv2_sepolia_dev_declared_record_sections_stay_unsuppor
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/resolutions/ens/{normalized_name}?mode=declared&records=addr:60,text:com.twitter&chain_positions={chain_positions_query}"
+                    "/v1/profiles/names/{normalized_name}?mode=declared&chain_positions={chain_positions_query}&meta=full"
                 ))
                 .body(Body::empty())
                 .expect("ENSv2 Sepolia declared request must build"),
@@ -4194,8 +4251,24 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000022);
-    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
         {
             "record_key": "text:com.twitter",
             "status": "success",
@@ -4207,15 +4280,9 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
             }
         },
         {
-            "record_key": "addr:60",
-            "status": "success",
-            "value": {
-                "coin_type": "60",
-                "value": "0x00000000000000000000000000000000000000aa"
-            },
-            "provenance": {
-                "execution_trace_id": execution_trace_id.to_string()
-            }
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
         }
     ]);
 
@@ -4245,13 +4312,13 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter", "addr:60"],
+        STANDARD_PROFILE_RECORD_KEYS,
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
@@ -4261,7 +4328,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4270,7 +4337,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4283,29 +4350,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let verified_payload: ResolutionResponse = read_json(verified_response).await?;
     let both_payload: ResolutionResponse = read_json(both_response).await?;
     let expected_verified_state = json!({
-        "verified_queries": [
-            {
-                "record_key": "text:com.twitter",
-                "status": "success",
-                "value": {
-                    "value": "@alice"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            },
-            {
-                "record_key": "addr:60",
-                "status": "success",
-                "value": {
-                    "coin_type": "60",
-                    "value": "0x00000000000000000000000000000000000000aa"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            }
-        ]
+        "verified_queries": persisted_verified_queries
     });
 
     assert_eq!(
@@ -4336,7 +4381,7 @@ async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
-    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
     let persisted_verified_queries = json!([
         {
             "record_key": "text:com.twitter",
@@ -4349,7 +4394,6 @@ async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits
             }
         }
     ]);
-
     database
         .seed_name_current_binding_migrated(
             logical_name_id,
@@ -4376,13 +4420,13 @@ async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter", "addr:60"],
+        STANDARD_PROFILE_RECORD_KEYS,
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
@@ -4394,7 +4438,7 @@ async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60"
+                        "/v1/profiles/names/alice.eth?mode={mode}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -4471,34 +4515,19 @@ async fn get_resolution_verified_state_reads_avatar_only_persisted_answer() -> R
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
 
-    let expected_verified_state = json!({
-        "verified_queries": [
-            {
-                "record_key": "avatar",
-                "status": "success",
-                "value": {
-                    "value": "https://cdn.example.test/alice-avatar-only.png"
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            }
-        ]
-    });
-
     for mode in ["verified", "both"] {
         let response = app_router(database.app_state())
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=avatar"
+                        "/v1/profiles/names/alice.eth?mode={mode}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("avatar-only request must build"),
@@ -4506,23 +4535,14 @@ async fn get_resolution_verified_state_reads_avatar_only_persisted_answer() -> R
             .await
             .with_context(|| format!("{mode} avatar-only resolution request failed"))?;
 
-        assert_eq!(response.status(), StatusCode::OK, "{mode}");
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{mode}");
 
-        let payload: ResolutionResponse = read_json(response).await?;
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "stale", "{mode}");
         assert_eq!(
-            payload.provenance.get("execution_trace_id"),
-            Some(&Value::String(execution_trace_id.to_string())),
+            payload.error.message,
+            "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>",
             "{mode}"
-        );
-        assert_eq!(
-            payload.verified_state,
-            Some(expected_verified_state.clone()),
-            "{mode}"
-        );
-        assert_eq!(
-            payload.declared_state.is_some(),
-            mode == "both",
-            "{mode} declared_state"
         );
     }
 
@@ -4539,7 +4559,7 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002c);
-    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
     let persisted_verified_queries = json!([
         {
             "record_key": "addr:60",
@@ -4580,13 +4600,13 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["addr:60"],
+        STANDARD_PROFILE_RECORD_KEYS,
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
@@ -4599,7 +4619,7 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/resolutions/ens/alice.eth?mode={mode}&records={records}"
+                            "/v1/profiles/names/alice.eth?mode={mode}&meta=full"
                         ))
                         .body(Body::empty())
                         .expect("missing-avatar request must build"),
@@ -4613,13 +4633,9 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
 
             let payload: ErrorResponse = read_json(response).await?;
             assert_eq!(payload.error.code, "stale", "{mode} {records}");
-            let expected_message = if records == "avatar" {
-                "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
-            } else {
-                "persisted verified resolution output is not available for the selected snapshot"
-            };
             assert_eq!(
-                payload.error.message, expected_message,
+                payload.error.message,
+                "persisted verified resolution output is not available for the selected snapshot",
                 "{mode} {records}"
             );
         }
@@ -4638,8 +4654,13 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000026);
-    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "not_found",
+            "failure_reason": "no_addr_record"
+        },
         {
             "record_key": "avatar",
             "status": "success",
@@ -4659,6 +4680,11 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
             "provenance": {
                 "execution_trace_id": execution_trace_id.to_string()
             }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
         }
     ]);
 
@@ -4689,13 +4715,13 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["avatar", "text:com.twitter"],
+        STANDARD_PROFILE_RECORD_KEYS,
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
-        persisted_verified_queries,
+        persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
@@ -4705,7 +4731,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4740,30 +4766,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
     );
     assert_eq!(
         payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "avatar",
-                    "status": "success",
-                    "value": {
-                        "value": "https://cdn.example.test/alice-via-alias.png"
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string()
-                    }
-                },
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "success",
-                    "value": {
-                        "value": "@alice-via-alias"
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string()
-                    }
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": persisted_verified_queries }))
     );
 
     database.cleanup().await?;
@@ -4863,7 +4866,7 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("verified request must build"),
         )
@@ -4872,7 +4875,7 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("mixed request must build"),
         )
@@ -4886,6 +4889,17 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
     let both_payload: ResolutionResponse = read_json(both_response).await?;
     let expected_verified_state = json!({
         "verified_queries": [
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
             {
                 "record_key": "avatar",
                 "status": "success",
@@ -4906,17 +4920,6 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
                 "status": "success",
                 "value": {
                     "value": contenthash
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            },
-            {
-                "record_key": "addr:60",
-                "status": "success",
-                "value": {
-                    "coin_type": "60",
-                    "value": "0x00000000000000000000000000000000000000aa"
                 },
                 "provenance": {
                     "execution_trace_id": execution_trace_id.to_string()
@@ -5096,7 +5099,7 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("resolution request must build"),
         )
@@ -5110,6 +5113,17 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
         "verified_queries": [
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
             {
                 "record_key": "avatar",
                 "status": "success",
@@ -5130,17 +5144,6 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
                 "status": "success",
                 "value": {
                     "value": contenthash
-                },
-                "provenance": {
-                    "execution_trace_id": execution_trace_id.to_string()
-                }
-            },
-            {
-                "record_key": "addr:60",
-                "status": "success",
-                "value": {
-                    "coin_type": "60",
-                    "value": "0x00000000000000000000000000000000000000aa"
                 },
                 "provenance": {
                     "execution_trace_id": execution_trace_id.to_string()
@@ -5363,7 +5366,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let default_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5372,7 +5375,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5381,7 +5384,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5390,7 +5393,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5399,35 +5402,30 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
 
     assert_eq!(default_response.status(), StatusCode::OK);
     assert_eq!(declared_response.status(), StatusCode::OK);
-    assert_eq!(verified_response.status(), StatusCode::CONFLICT);
+    assert_eq!(verified_response.status(), StatusCode::OK);
     assert_eq!(both_response.status(), StatusCode::OK);
 
     let default_payload: ResolutionResponse = read_json(default_response).await?;
     let declared_payload: ResolutionResponse = read_json(declared_response).await?;
-    let verified_error: ErrorResponse = read_json(verified_response).await?;
+    let verified_payload: ResolutionResponse = read_json(verified_response).await?;
     let both_payload: ResolutionResponse = read_json(both_response).await?;
 
     assert!(default_payload.declared_state.is_some());
-    assert_eq!(default_payload.verified_state, None);
+    assert_eq!(
+        default_payload.verified_state,
+        Some(json!({ "verified_queries": [] }))
+    );
     assert!(declared_payload.declared_state.is_some());
     assert_eq!(declared_payload.verified_state, None);
-    assert_eq!(verified_error.error.code, "stale");
+    assert_eq!(verified_payload.declared_state, None);
     assert_eq!(
-        verified_error.error.message,
-        "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
+        verified_payload.verified_state,
+        Some(json!({ "verified_queries": [] }))
     );
     assert!(both_payload.declared_state.is_some());
     assert_eq!(
         both_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": [] }))
     );
 
     database.cleanup().await?;
@@ -5485,7 +5483,7 @@ async fn get_resolution_verified_modes_keep_missing_supported_output_stale_for_s
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60{selector_query}"
+                            "/v1/profiles/names/alice.eth?mode={mode}{selector_query}&meta=full"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -5581,8 +5579,8 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
         execution_trace_id,
         &request_key,
         persisted_verified_queries,
-        topology_boundary,
-        record_boundary,
+        topology_boundary.clone(),
+        record_boundary.clone(),
     );
     outcome.cache_key.requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
@@ -5606,7 +5604,7 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5621,21 +5619,7 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
 
     assert_eq!(
         resolution_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "addr:60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x00000000000000000000000000000000000000aa"
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string()
-                    }
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": [] }))
     );
     assert_eq!(
         explain_payload
@@ -5769,7 +5753,7 @@ async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ance
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5792,15 +5776,7 @@ async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ance
     );
     assert_eq!(
         payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": [] }))
     );
 
     database.cleanup().await?;
@@ -5915,7 +5891,7 @@ async fn get_resolution_both_mode_preserves_projected_transport_for_deferred_tra
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5938,15 +5914,7 @@ async fn get_resolution_both_mode_preserves_projected_transport_for_deferred_tra
     );
     assert_eq!(
         payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": [] }))
     );
 
     database.cleanup().await?;
@@ -6186,60 +6154,19 @@ async fn get_resolution_execution_explain_returns_not_found_for_deferred_transpo
     database.cleanup().await?;
     Ok(())
 }
-
 #[tokio::test]
-async fn get_resolution_requires_records_for_verified_modes() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-
-    let verified_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("verified resolution request failed")?;
-    let both_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("mixed resolution request failed")?;
-
-    assert_eq!(verified_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(both_response.status(), StatusCode::BAD_REQUEST);
-
-    let verified_payload: ErrorResponse = read_json(verified_response).await?;
-    let both_payload: ErrorResponse = read_json(both_response).await?;
-    assert_eq!(verified_payload.error.code, "invalid_input");
-    assert_eq!(both_payload.error.code, "invalid_input");
-    assert_eq!(
-        verified_payload.error.message,
-        "records is required when mode is verified or both"
-    );
-    assert_eq!(both_payload.error.message, verified_payload.error.message);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn get_resolution_rejects_duplicate_records_for_verified_modes() -> Result<()> {
+async fn get_resolution_profile_rejects_records_query() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,text")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("duplicate resolution request failed")?;
+        .context("profile records-query rejection request failed")?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
@@ -6247,35 +6174,7 @@ async fn get_resolution_rejects_duplicate_records_for_verified_modes() -> Result
     assert_eq!(payload.error.code, "invalid_input");
     assert_eq!(
         payload.error.message,
-        "records must not contain duplicate selectors"
-    );
-    assert!(payload.error.details.is_empty());
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn get_resolution_rejects_malformed_records() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=:avatar")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("malformed resolution request failed")?;
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "invalid_input");
-    assert_eq!(
-        payload.error.message,
-        "records must contain only valid record selectors"
+        "records is not supported on /v1/profiles/names/{name}; use /v1/names/{namespace}/{name}/records for selector-specific reads"
     );
     assert!(payload.error.details.is_empty());
 
@@ -6323,7 +6222,7 @@ async fn get_resolution_rejects_invalid_snapshot_selectors_as_invalid_input() ->
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter&{query}"
+                        "/v1/profiles/names/alice.eth?mode=declared&{query}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -6355,7 +6254,7 @@ async fn get_resolution_returns_not_found_when_exact_surface_projection_is_missi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6413,7 +6312,7 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6449,8 +6348,8 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
             Some(topology_record_boundary)
         );
         assert_eq!(
-            cacheable_selector_identities(record_inventory),
-            record_cache_entry_identities(record_cache)
+            record_keys(record_cache.get("entries").expect("entries must be present")),
+            ["addr:60", "avatar", "text:com.twitter", "contenthash"]
         );
         assert_eq!(
             record_keys(
@@ -6466,7 +6365,7 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
                     .get("entries")
                     .expect("cache entries must be present")
             ),
-            ["addr:60", "avatar"]
+            ["addr:60", "avatar", "text:com.twitter", "contenthash"]
         );
         assert_eq!(
             record_statuses(
@@ -6474,7 +6373,7 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
                     .get("entries")
                     .expect("cache entries must be present")
             ),
-            ["success", "unsupported"]
+            ["success", "unsupported", "not_found", "not_found"]
         );
     }
 
@@ -6622,10 +6521,106 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
                         "selector_key": null,
                         "status": "unsupported",
                         "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "text:com.twitter",
+                        "record_family": "text",
+                        "selector_key": "com.twitter",
+                        "status": "not_found",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
                     }
                 ]
             }
         }))
+    );
+
+    let compact_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/profiles/names/alice.eth?mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact resolution request failed")?;
+
+    assert_eq!(compact_response.status(), StatusCode::OK);
+
+    let compact_payload: ResolutionResponse = read_json(compact_response).await?;
+    assert_eq!(
+        compact_payload.data,
+        json!({
+            "name": "alice.eth",
+            "namespace": "ens",
+            "namehash": "namehash:alice.eth",
+            "resource_id": resource_id.to_string(),
+        })
+    );
+    assert!(
+        compact_payload.data.get("normalized_name").is_none(),
+        "compact profile data omits routine normalized_name"
+    );
+    assert!(
+        compact_payload.data.get("logical_name_id").is_none(),
+        "compact profile data omits internal logical_name_id"
+    );
+    assert_eq!(compact_payload.provenance, Value::Null);
+    assert_eq!(compact_payload.coverage, Value::Null);
+    assert_eq!(compact_payload.chain_positions, Value::Null);
+    assert!(compact_payload.consistency.is_empty());
+    assert!(compact_payload.last_updated.is_empty());
+    assert_eq!(compact_payload.verified_state, None);
+    let compact_declared_state = compact_payload
+        .declared_state
+        .as_ref()
+        .expect("compact declared_state must be present");
+    assert_eq!(
+        compact_declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+    assert!(
+        compact_declared_state
+            .pointer("/topology/version_boundaries")
+            .is_none(),
+        "compact profile topology omits diagnostic boundaries"
+    );
+    assert_eq!(
+        compact_declared_state
+            .pointer("/record_inventory/explicit_gaps")
+            .cloned(),
+        Some(json!([
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": "not_observed_on_current_resolver",
+            }
+        ]))
+    );
+    assert!(
+        compact_declared_state
+            .pointer("/record_inventory/record_version_boundary")
+            .is_none(),
+        "compact profile inventory omits diagnostic boundary"
+    );
+    assert!(
+        compact_declared_state
+            .pointer("/record_cache/record_version_boundary")
+            .is_none(),
+        "compact profile cache omits diagnostic boundary"
+    );
+    assert_eq!(
+        record_keys(
+            compact_declared_state
+                .pointer("/record_cache/entries")
+                .expect("compact cache entries must be present")
+        ),
+        ["addr:60", "avatar", "text:com.twitter", "contenthash"]
     );
 
     database.cleanup().await?;
@@ -6676,7 +6671,7 @@ async fn get_resolution_preserves_worker_record_inventory_boundary_pointer() -> 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6757,7 +6752,7 @@ async fn get_resolution_returns_unsupported_record_inventory_sections_when_proje
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6834,6 +6829,45 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
             }
         }
     ]);
+    let profile_request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
+    let profile_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000dd"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-dynamic.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-dynamic"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
+        }
+    ]);
 
     database
         .seed_name_current_binding_migrated(
@@ -6879,13 +6913,21 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
         logical_name_id,
         resource_id,
     );
+    let profile_outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &profile_request_key,
+        profile_verified_queries.clone(),
+        logical_name_id,
+        resource_id,
+    );
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("resolution request must build"),
         )
@@ -6910,40 +6952,6 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
         .declared_state
         .as_ref()
         .expect("declared_state must be present");
-    let expected_verified_queries = json!([
-        {
-            "record_key": "avatar",
-            "status": "success",
-            "value": {
-                "value": "https://cdn.example.test/alice-dynamic.png"
-            },
-            "provenance": {
-                "execution_trace_id": execution_trace_id.to_string()
-            }
-        },
-        {
-            "record_key": "text:com.twitter",
-            "status": "success",
-            "value": {
-                "value": "@alice-dynamic"
-            },
-            "provenance": {
-                "execution_trace_id": execution_trace_id.to_string()
-            }
-        },
-        {
-            "record_key": "addr:60",
-            "status": "success",
-            "value": {
-                "coin_type": "60",
-                "value": "0x00000000000000000000000000000000000000dd"
-            },
-            "provenance": {
-                "execution_trace_id": execution_trace_id.to_string()
-            }
-        }
-    ]);
-
     assert_eq!(
         declared_state.pointer("/topology/resolver_path/0/address"),
         Some(&json!(dynamic_resolver_address))
@@ -6978,7 +6986,7 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
     assert_eq!(
         resolution_payload.verified_state,
         Some(json!({
-            "verified_queries": expected_verified_queries
+            "verified_queries": profile_verified_queries
         }))
     );
     assert_eq!(
@@ -7078,7 +7086,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7133,20 +7141,6 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
         Some(&json!({
             "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
             "entries": [
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
-                },
-                {
-                    "record_key": "text:com.twitter",
-                    "record_family": "text",
-                    "selector_key": "com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
-                },
                 {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
@@ -7245,7 +7239,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_returns_observed_addr_w
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7301,13 +7295,6 @@ async fn get_resolution_dynamic_resolver_pending_profile_returns_observed_addr_w
                         "coin_type": "60",
                         "value": "0x00000000000000000000000000000000000000a1",
                     }
-                },
-                {
-                    "record_key": "text:com.twitter",
-                    "record_family": "text",
-                    "selector_key": "com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
                 }
             ]
         }))
@@ -7364,7 +7351,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_keeps_missing_verified_
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60,text:com.twitter,contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7433,13 +7420,31 @@ async fn get_resolution_dynamic_resolver_pending_profile_reads_persisted_verifie
             dynamic_resolver_address,
         ))
         .await?;
+    let mut inventory_row =
+        dynamic_resolver_unsupported_profile_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        );
+    inventory_row.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        }
+    ]);
+    inventory_row.explicit_gaps = json!([]);
+    inventory_row.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "unsupported",
+            "unsupported_reason": "resolver_family_pending"
+        }
+    ]);
     database
-        .insert_record_inventory_current_row(
-            dynamic_resolver_unsupported_profile_record_inventory_current_row(
-                logical_name_id,
-                resource_id,
-            ),
-        )
+        .insert_record_inventory_current_row(inventory_row)
         .await?;
 
     let mut trace = resolution_execution_trace(
@@ -7465,7 +7470,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_reads_persisted_verifie
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7566,7 +7571,7 @@ async fn get_resolution_dynamic_resolver_l2resolver_profile_reads_supported_base
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7729,7 +7734,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/basenames/{normalized_name}?mode=declared&records=addr:60,text:com.twitter"
+                        "/v1/profiles/names/{normalized_name}?mode=declared&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -7790,9 +7795,35 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
                         "unsupported_reason": "resolver_family_pending",
                     },
                     {
-                        "record_key": "text:com.twitter",
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "status": "not_found",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
+                    },
+                    {
+                        "record_key": "text:description",
                         "record_family": "text",
-                        "selector_key": "com.twitter",
+                        "selector_key": "description",
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "text:url",
+                        "record_family": "text",
+                        "selector_key": "url",
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "text:email",
+                        "record_family": "text",
+                        "selector_key": "email",
                         "status": "unsupported",
                         "unsupported_reason": "resolver_family_pending",
                     }
@@ -7844,7 +7875,7 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter,addr:60,avatar")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7875,7 +7906,7 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
                 .get("entries")
                 .expect("cache entries must be present")
         ),
-        ["text:com.twitter", "addr:60", "avatar"]
+        ["addr:60", "avatar", "text:com.twitter", "contenthash"]
     );
     assert_eq!(
         record_statuses(
@@ -7883,7 +7914,7 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
                 .get("entries")
                 .expect("cache entries must be present")
         ),
-        ["not_found", "success", "unsupported"]
+        ["success", "unsupported", "not_found", "not_found"]
     );
     assert_eq!(
         payload
@@ -7893,12 +7924,6 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
         Some(&json!({
             "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
             "entries": [
-                {
-                    "record_key": "text:com.twitter",
-                    "record_family": "text",
-                    "selector_key": "com.twitter",
-                    "status": "not_found",
-                },
                 {
                     "record_key": "addr:60",
                     "record_family": "addr",
@@ -7915,6 +7940,18 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "not_found",
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "not_found",
                 }
             ]
         }))
@@ -7969,7 +8006,7 @@ async fn get_resolution_declared_records_reuse_inventory_projection_for_later_ch
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8044,35 +8081,6 @@ fn get_resolution_declared_default_record_cache_keeps_missing_cacheable_selector
     );
 }
 
-fn record_identity(value: &Value) -> Value {
-    json!({
-        "record_key": value.get("record_key").cloned().unwrap_or(Value::Null),
-        "record_family": value.get("record_family").cloned().unwrap_or(Value::Null),
-        "selector_key": value.get("selector_key").cloned().unwrap_or(Value::Null),
-    })
-}
-
-fn cacheable_selector_identities(record_inventory: &Value) -> Vec<Value> {
-    record_inventory
-        .get("selectors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|selector| selector.get("cacheable").and_then(Value::as_bool) == Some(true))
-        .map(record_identity)
-        .collect()
-}
-
-fn record_cache_entry_identities(record_cache: &Value) -> Vec<Value> {
-    record_cache
-        .get("entries")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(record_identity)
-        .collect()
-}
-
 fn record_keys(records: &Value) -> Vec<&str> {
     records
         .as_array()
@@ -8140,7 +8148,7 @@ async fn get_resolution_declared_records_return_not_found_cache_entry_for_explic
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8172,6 +8180,29 @@ async fn get_resolution_declared_records_return_not_found_cache_entry_for_explic
         Some(&json!({
             "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
             "entries": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000abc"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending"
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "not_found"
+                },
                 {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
@@ -8230,7 +8261,7 @@ async fn get_resolution_declared_records_synthesize_unsupported_family_entries()
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=abi:json,addr:60,pubkey,text")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8257,25 +8288,11 @@ async fn get_resolution_declared_records_synthesize_unsupported_family_entries()
             "record_version_boundary": worker_boundary,
             "entries": [
                 {
-                    "record_key": "abi:json",
-                    "record_family": "abi",
-                    "selector_key": "json",
-                    "status": "unsupported",
-                    "unsupported_reason": "record_family_not_supported_in_phase6_projection",
-                },
-                {
                     "record_key": "addr:60",
                     "record_family": "addr",
                     "selector_key": "60",
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
-                },
-                {
-                    "record_key": "pubkey",
-                    "record_family": "pubkey",
-                    "selector_key": null,
-                    "status": "unsupported",
-                    "unsupported_reason": "record_family_not_supported_in_phase6_projection",
                 },
                 {
                     "record_key": "text",
@@ -8325,7 +8342,7 @@ async fn get_resolution_returns_unsupported_topology_for_non_direct_bindings() -
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8403,7 +8420,7 @@ async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolv
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8474,9 +8491,9 @@ async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolv
             "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
             "entries": [
                 {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
                     "status": "not_found",
                 }
             ],
@@ -8602,7 +8619,7 @@ async fn get_resolution_basenames_no_declared_resolver_addr60_stays_not_found_wi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/no-resolver.base.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/no-resolver.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8684,7 +8701,7 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8706,15 +8723,21 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let name_payload: NameResponse = read_json(name_response).await?;
 
-    assert_eq!(resolution_payload.data, name_payload.data);
-    assert_eq!(resolution_payload.provenance, name_payload.provenance);
-    assert_eq!(resolution_payload.coverage, name_payload.coverage);
     assert_eq!(
-        resolution_payload.chain_positions,
-        name_payload.chain_positions
+        resolution_payload.data,
+        json!({
+            "name": "alice.eth",
+            "namespace": "ens",
+            "namehash": "namehash:alice.eth",
+            "resource_id": resource_id.to_string(),
+        })
     );
-    assert_eq!(resolution_payload.consistency, name_payload.consistency);
-    assert_eq!(resolution_payload.last_updated, name_payload.last_updated);
+    assert_ne!(resolution_payload.data, name_payload.data);
+    assert_eq!(resolution_payload.provenance, Value::Null);
+    assert_eq!(resolution_payload.coverage, Value::Null);
+    assert_eq!(resolution_payload.chain_positions, Value::Null);
+    assert!(resolution_payload.consistency.is_empty());
+    assert!(resolution_payload.last_updated.is_empty());
     assert_eq!(resolution_payload.verified_state, None);
 
     database.cleanup().await?;

@@ -49,7 +49,7 @@
                 ReplayRoute {
                     label: "backfill-losing-resolver-after-replay",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, corpus.losing_resolver_address
                     ),
                 },

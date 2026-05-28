@@ -16,6 +16,9 @@ pub(crate) use derive::{normalized_event_cursor_exists, seed_normalized_event_cu
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;
 const PROJECTION_APPLY_BATCH_LIMIT: i64 = 100;
+const FAILURE_RETRY_DELAY: &str = "60 seconds";
+const CLAIM_RETRY_DELAY: &str = "5 minutes";
+const PRIMARY_NAMES_CURRENT_PROJECTION: &str = "primary_names_current";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedEventChangeCursor {
@@ -76,6 +79,58 @@ pub(crate) async fn run_once(
     }
 
     Ok(summary)
+}
+
+pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH cursor AS (
+            SELECT COALESCE((
+                SELECT last_change_id
+                FROM projection_apply_cursors
+                WHERE cursor_name = $1
+            ), 0) AS last_change_id
+        ),
+        watermark AS (
+            SELECT COALESCE(MAX(change_id), 0) AS max_change_id
+            FROM projection_normalized_event_changes
+        )
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM projection_invalidations
+                WHERE
+                    (
+                        claim_token IS NOT NULL
+                        AND claimed_at >= now() - $2::INTERVAL
+                    )
+                    OR (
+                        (
+                            claim_token IS NULL
+                            OR claimed_at < now() - $2::INTERVAL
+                        )
+                        AND (
+                            last_failure_at IS NULL
+                            OR last_failure_at < now() - $3::INTERVAL
+                        )
+                    )
+                    OR (
+                        projection = $4
+                        AND last_failure_at >= now() - $3::INTERVAL
+                    )
+            )
+            OR cursor.last_change_id < watermark.max_change_id
+        FROM cursor
+        CROSS JOIN watermark
+        "#,
+    )
+    .bind(NORMALIZED_EVENT_CURSOR)
+    .bind(CLAIM_RETRY_DELAY)
+    .bind(FAILURE_RETRY_DELAY)
+    .bind(PRIMARY_NAMES_CURRENT_PROJECTION)
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect projection apply work before primary-name hydration")
 }
 
 pub(crate) async fn load_normalized_event_change_watermark(

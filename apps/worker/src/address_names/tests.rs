@@ -267,6 +267,217 @@ async fn rebuilds_current_token_holder_and_registry_controller_rows() -> Result<
 }
 
 #[tokio::test]
+async fn rebuild_uses_resource_permission_subject_as_tokenized_effective_controller() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:manager.eth",
+        "manager.eth",
+        Some(0x9100),
+        0x9200,
+        0x9300,
+    );
+    let token_holder = "0x0000000000000000000000000000000000000bbb";
+    let controller = "0x0000000000000000000000000000000000000ccc";
+    let old_token_lineage_id = Uuid::from_u128(0x9101);
+    let old_resource_id = Uuid::from_u128(0x9201);
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xmanager-grant", 500, 1_717_180_500),
+            raw_block("ethereum-mainnet", "0xmanager-control", 501, 1_717_180_501),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-old-control",
+                502,
+                1_717_180_502,
+            ),
+            raw_block("ethereum-mainnet", "0xmanager-revoke", 503, 1_717_180_503),
+        ],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &binding,
+        "0xmanager-grant",
+        500,
+        1_717_180_500,
+    )
+    .await?;
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            &binding,
+            old_token_lineage_id,
+            "0xmanager-old-control",
+            502,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            &binding,
+            old_resource_id,
+            Some(old_token_lineage_id),
+            "0xmanager-old-control",
+            502,
+        )],
+    )
+    .await?;
+    let mut old_resource_control = authority_event(
+        &binding,
+        "manager-old-resource-control",
+        "PermissionChanged",
+        ENS_V1_REGISTRY_SOURCE_FAMILY,
+        "0xmanager-old-control",
+        502,
+        Some(0),
+        json!({}),
+        json!({
+            "scope": {"kind": "resource"},
+            "subject": token_holder,
+            "effective_powers": ["resource_control"],
+            "grant_source": {
+                "kind": "ens_v1_authority",
+                "authority_kind": "registrar",
+                "source_event_kind": "TokenControlTransferred"
+            }
+        }),
+    );
+    old_resource_control.resource_id = Some(old_resource_id);
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "manager-grant",
+                "RegistrationGranted",
+                ENS_V1_REGISTRAR_SOURCE_FAMILY,
+                "0xmanager-grant",
+                500,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:manager",
+                    "registrant": token_holder,
+                }),
+            ),
+            authority_event(
+                &binding,
+                "manager-resource-control",
+                "PermissionChanged",
+                ENS_V1_REGISTRY_SOURCE_FAMILY,
+                "0xmanager-control",
+                501,
+                Some(0),
+                json!({
+                    "scope": {"kind": "resource"},
+                    "subject": token_holder,
+                    "effective_powers": ["resource_control"],
+                }),
+                json!({
+                    "scope": {"kind": "resource"},
+                    "subject": controller,
+                    "effective_powers": ["resource_control"],
+                    "grant_source": {
+                        "kind": "ens_v1_authority",
+                        "authority_kind": "registry_only",
+                        "source_event_kind": "AuthorityTransferred"
+                    }
+                }),
+            ),
+            old_resource_control,
+        ],
+    )
+    .await?;
+
+    let controller_summary =
+        rebuild_address_names_current(database.pool(), Some(controller)).await?;
+    assert_eq!(controller_summary.upserted_row_count, 1);
+    let controller_rows =
+        load_address_names_current(database.pool(), controller, Some("ens"), None).await?;
+    assert_eq!(controller_rows.len(), 1);
+    assert_eq!(
+        controller_rows[0].relation,
+        AddressNameRelation::EffectiveController
+    );
+    assert_eq!(controller_rows[0].logical_name_id, binding.logical_name_id);
+
+    let holder_summary = rebuild_address_names_current(database.pool(), Some(token_holder)).await?;
+    assert_eq!(holder_summary.upserted_row_count, 2);
+    let holder_rows =
+        load_address_names_current(database.pool(), token_holder, Some("ens"), None).await?;
+    assert_eq!(
+        holder_rows
+            .iter()
+            .map(|row| row.relation)
+            .collect::<Vec<_>>(),
+        vec![
+            AddressNameRelation::Registrant,
+            AddressNameRelation::TokenHolder,
+        ]
+    );
+
+    seed_events(
+        database.pool(),
+        &[authority_event(
+            &binding,
+            "manager-resource-control-revoked",
+            "PermissionChanged",
+            ENS_V1_REGISTRY_SOURCE_FAMILY,
+            "0xmanager-revoke",
+            503,
+            Some(0),
+            json!({
+                "scope": {"kind": "resource"},
+                "subject": controller,
+                "effective_powers": ["resource_control"],
+            }),
+            json!({
+                "scope": {"kind": "resource"},
+                "subject": controller,
+                "effective_powers": ["set_records"],
+                "revocation_source": {
+                    "kind": "ens_v1_authority",
+                    "authority_kind": "registry_only",
+                    "source_event_kind": "AuthorityTransferred"
+                }
+            }),
+        )],
+    )
+    .await?;
+
+    let controller_summary =
+        rebuild_address_names_current(database.pool(), Some(controller)).await?;
+    assert_eq!(controller_summary.upserted_row_count, 0);
+    assert_eq!(controller_summary.deleted_row_count, 1);
+    let controller_rows =
+        load_address_names_current(database.pool(), controller, Some("ens"), None).await?;
+    assert!(controller_rows.is_empty());
+
+    let holder_summary = rebuild_address_names_current(database.pool(), Some(token_holder)).await?;
+    assert_eq!(holder_summary.upserted_row_count, 3);
+    let holder_rows =
+        load_address_names_current(database.pool(), token_holder, Some("ens"), None).await?;
+    assert_eq!(
+        holder_rows
+            .iter()
+            .map(|row| row.relation)
+            .collect::<Vec<_>>(),
+        vec![
+            AddressNameRelation::Registrant,
+            AddressNameRelation::TokenHolder,
+            AddressNameRelation::EffectiveController,
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_one_address_refreshes_deleted_and_new_relation_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:alpha.eth", "alpha.eth", Some(0x6100), 0x6200, 0x6300);
@@ -1208,7 +1419,7 @@ fn name_surface(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: binding.chain_id.clone(),

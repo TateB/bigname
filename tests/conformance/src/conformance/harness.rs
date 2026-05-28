@@ -73,12 +73,6 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/addresses/{address}/names/count",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::names_collection address count; full first-party cutover still needs app call-site mapping",
-                ),
-            },
-            OpenApiConformanceCoverage {
                 path: "/v1/coverage/{namespace}/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "exact_name.rs::coverage_contract_*",
@@ -121,27 +115,9 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/identity/addresses/{address}/names",
+                path: "/v1/identity:lookup",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/addresses:names:batch",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/names/{name}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_forward_single_and_batch_use_partner_not_found_shape; partner-1 facade compatibility surface",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/identity/names:batch",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::identity_forward_single_and_batch_use_partner_not_found_shape and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 facade compatibility surface",
+                    "apps/api tests::identity_lookup_returns_native_slim_shape; native partner-1 slim identity and latency feed surface",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -199,27 +175,9 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/resolutions/{namespace}/{name}",
+                path: "/v1/profiles/names/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolution_contract_*",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolve/{name}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolution_inferred_route_*",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolve/{name}/records",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::records resolve records; full first-party cutover still needs app call-site mapping",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolvers/{chain_id}/{resolver_address}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolver_overview_contract_*",
+                    "apps/api tests::resolution profile fast path; conformance replay smoke covers route stability",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -247,9 +205,9 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/status/indexing",
+                path: "/v1/status",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::indexing_status_reports_projection_lag_by_chain; partner-1 facade readiness surface",
+                    "apps/api tests::indexing_status_degrades_without_chain_readiness_data; native slim public readiness surface",
                 ),
             },
         ];
@@ -647,7 +605,7 @@
                         dns_encoded_name: b"alice.base.eth".to_vec(),
                         namehash: "namehash:alice.base.eth".to_owned(),
                         labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-                        normalizer_version: "ensip15@2026-04-16".to_owned(),
+                        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                         normalization_warnings: json!([]),
                         normalization_errors: json!([]),
                         chain_id: "base-mainnet".to_owned(),
@@ -1268,14 +1226,13 @@
             match parts.as_slice() {
                 ["v1", "names", namespace, name] => Some((namespace, name)),
                 ["v1", "coverage", namespace, name] => Some((namespace, name)),
-                ["v1", "resolutions", namespace, name] => Some((namespace, name)),
+                ["v1", "profiles", "names", name] => {
+                    Some((infer_conformance_resolution_namespace(name), name))
+                }
                 ["v1", "explain", "names", namespace, name, "surface-binding"]
                 | ["v1", "explain", "names", namespace, name, "authority-control"]
                 | ["v1", "explain", "resolutions", namespace, name, "execution"] => {
                     Some((namespace, name))
-                }
-                ["v1", "resolve", name] => {
-                    Some((infer_conformance_resolution_namespace(name), name))
                 }
                 _ => None,
             }

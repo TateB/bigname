@@ -53,7 +53,7 @@ fn parse_events_filter(query: &EventsQuery) -> ApiResult<ParsedEventsFilter> {
     reject_unsupported_event_filters(query)?;
 
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
-    let name = trimmed_query_value(query.name.as_deref());
+    let name = exact_name_query_value(query.name.as_deref());
     if name.is_some() && namespace.is_none() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -269,6 +269,12 @@ fn unsupported_events_filter(message: &str) -> ApiError {
 fn trimmed_query_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn exact_name_query_value(value: Option<&str>) -> Option<String> {
+    value
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
 }

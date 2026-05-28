@@ -11,6 +11,7 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport-http.workspace = true
 anyhow.workspace = true
+bigname-domain.workspace = true
 bigname-storage.workspace = true
 futures-util.workspace = true
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }

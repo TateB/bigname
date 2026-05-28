@@ -44,6 +44,7 @@ pub(crate) async fn run_poll_loop(
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
     header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: Vec<String>,
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
     let mut live_poll_adapter_sync_restored_after_replay = false;
@@ -395,6 +396,7 @@ pub(crate) async fn run_poll_loop(
                     provider_registry,
                     effective_adapter_sync_on_live_poll,
                     header_audit_mode,
+                    &event_silent_reverse_resolver_addresses,
                 )
                 .await?;
 

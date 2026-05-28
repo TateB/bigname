@@ -76,7 +76,7 @@ fn parse_names_request(query: NamesQuery) -> ApiResult<ParsedNamesRequest> {
 
     let address = parse_names_address_filter(&query)?;
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
-    let name = parse_optional_nonempty_query_value(query.name, "name")?;
+    let name = parse_optional_exact_name_query_value(query.name, "name")?;
     let prefix = parse_optional_nonempty_query_value(query.prefix, "prefix")?;
     let contains = parse_optional_nonempty_query_value(query.contains, "contains")?;
     let contains_nocase =
@@ -280,13 +280,6 @@ fn parse_names_include(include: Option<&str>) -> ApiResult<NamesInclude> {
     Ok(parsed)
 }
 
-fn parse_app_relation(
-    relation: Option<&str>,
-) -> ApiResult<bigname_storage::NameCurrentAddressRelationFilter> {
-    Ok(parse_optional_app_relation(relation)?
-        .unwrap_or(bigname_storage::NameCurrentAddressRelationFilter::Any))
-}
-
 fn parse_optional_app_relation(
     relation: Option<&str>,
 ) -> ApiResult<Option<bigname_storage::NameCurrentAddressRelationFilter>> {
@@ -322,6 +315,26 @@ fn parse_optional_nonempty_query_value(
     field: &'static str,
 ) -> ApiResult<Option<String>> {
     let Some(value) = value.map(|value| value.trim().to_owned()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.contains(',') {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: format!("{field} must not contain comma-separated values"),
+        });
+    }
+    Ok(Some(value))
+}
+
+fn parse_optional_exact_name_query_value(
+    value: Option<String>,
+    field: &'static str,
+) -> ApiResult<Option<String>> {
+    let Some(value) = value else {
         return Ok(None);
     };
     if value.is_empty() {

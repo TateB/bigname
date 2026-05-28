@@ -7,7 +7,7 @@ source_family = "ens_v2_root_l1"
 chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_dev"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 

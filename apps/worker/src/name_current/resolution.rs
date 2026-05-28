@@ -315,10 +315,13 @@ fn build_supported_resolution_boundary_from_event(
 fn alias_final_target_ref(event: &RelevantEvent) -> Option<Value> {
     let logical_name_id = json_str(&event.after_state, &["to_logical_name_id"]).or_else(|| {
         json_str(&event.after_state, &["to_name"])
-            .map(|name| format!("{ENS_NAMESPACE}:{}", name.to_ascii_lowercase()))
+            .and_then(|name| bigname_domain::normalization::normalize_name(&name).ok())
+            .map(|name| format!("{ENS_NAMESPACE}:{}", name.normalized_name))
     })?;
     let normalized_name = json_str(&event.after_state, &["to_normalized_name"]).or_else(|| {
-        json_str(&event.after_state, &["to_name"]).map(|name| name.to_ascii_lowercase())
+        json_str(&event.after_state, &["to_name"])
+            .and_then(|name| bigname_domain::normalization::normalize_name(&name).ok())
+            .map(|name| name.normalized_name)
     })?;
     let canonical_display_name = json_str(&event.after_state, &["to_canonical_display_name"])
         .or_else(|| json_str(&event.after_state, &["to_name"]))?;

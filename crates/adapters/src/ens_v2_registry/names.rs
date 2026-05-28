@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
+use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_name};
 use bigname_manifests::WatchedContractSource;
 use bigname_storage::SurfaceBinding;
 use serde_json::json;
@@ -9,10 +10,7 @@ use sqlx::types::Uuid;
 use super::{
     constants::*,
     types::{ActiveEmitter, NameMetadata, ObservationRef, RegistryNameState},
-    util::{
-        display_name, dns_encode, event_position_timestamp, hex_string, keccak256_bytes,
-        namehash_bytes,
-    },
+    util::{dns_encode, event_position_timestamp, hex_string, keccak256_bytes, namehash_bytes},
 };
 
 pub(super) fn initial_registry_suffixes(emitters: &[ActiveEmitter]) -> HashMap<String, String> {
@@ -34,27 +32,27 @@ pub(super) fn name_under_registry(
     label: &str,
     registry_suffix_by_address: &HashMap<String, String>,
 ) -> Option<String> {
-    let normalized_label = label.trim().to_ascii_lowercase();
-    if normalized_label.is_empty() {
+    if label.is_empty() || label.contains('.') {
         return None;
     }
     let suffix = registry_suffix_by_address.get(registry_address)?;
     if suffix.is_empty() {
-        Some(normalized_label)
+        Some(label.to_owned())
     } else {
-        Some(format!("{normalized_label}.{suffix}"))
+        Some(format!("{label}.{suffix}"))
     }
 }
 
 pub(super) fn observe_name(
     namespace: &str,
     full_name: &str,
-    reference: &ObservationRef,
-    label: &str,
+    _reference: &ObservationRef,
+    _label: &str,
 ) -> Result<NameMetadata> {
-    let normalized_name = full_name.to_ascii_lowercase();
-    let labels = normalized_name
-        .split('.')
+    let normalized = normalize_name(full_name)?;
+    let labels = normalized
+        .normalized_labels
+        .iter()
         .map(|label| label.as_bytes().to_vec())
         .collect::<Vec<_>>();
     let dns_encoded_name = dns_encode(&labels)?;
@@ -64,18 +62,14 @@ pub(super) fn observe_name(
         .collect::<Vec<_>>();
     Ok(NameMetadata {
         namespace: namespace.to_owned(),
-        logical_name_id: format!("{namespace}:{normalized_name}"),
-        input_name: normalized_name.clone(),
-        canonical_display_name: display_name(full_name),
-        normalized_name,
+        logical_name_id: format!("{namespace}:{}", normalized.normalized_name),
+        input_name: normalized.input_name,
+        canonical_display_name: normalized.canonical_display_name,
+        normalized_name: normalized.normalized_name,
         dns_encoded_name,
         namehash: format!("0x{}", hex_string(namehash_bytes(&labels))),
         labelhashes,
-        normalizer_version: if reference.source_family.starts_with("ens_v2") {
-            "uts46-v1".to_owned()
-        } else {
-            label.to_owned()
-        },
+        normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
     })
 }
 

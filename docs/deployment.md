@@ -49,18 +49,31 @@ manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
 The API service also needs its own Ethereum JSON-RPC provider for live ENS
-verified resolution, configured as
-`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/resolutions/{namespace}/{name}` and
-`GET /v1/resolve/{name}` in `mode=verified|both` first use matching persisted
-execution output; when supported ENS verified-resolution selectors are missing
-from execution storage, the API executes them against the selected exact-name
-snapshot, persists the trace/outcome, and then returns the result. With no `at`
-or `chain_positions` selector, that target is `consistency=head` at the latest
-stored Ethereum checkpoint, not provider latest. Missing API provider
+verified resolution and the ENS/60 primary-name on-demand reverse/forward RPC fallback, configured as
+`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/profiles/names/{name}`
+in `mode=verified|both`, and `GET /v1/names/{namespace}/{name}/records` when it
+needs verified values, first use matching persisted execution output; when
+supported ENS verified-resolution selectors are missing from execution storage,
+the API executes them against the selected exact-name snapshot, persists the
+trace/outcome, and then returns the result. With no `at` or `chain_positions`
+selector, that target is `consistency=head` at the latest stored Ethereum
+checkpoint, not provider latest. Missing API provider
 configuration or a provider that cannot serve the selected block must fail
 closed with `409 stale` plus a configuration message; it must not fall back
 to declared record cache. The indexer RPC setting and Reth DB source settings do
 not satisfy this API live-execution provider requirement by themselves.
+
+The primary-name fallback is deliberately softer than verified resolution: when
+`GET /v1/primary-names/{address}` defaults to `namespace=ens&coin_type=60` and
+the persisted tuple is missing, a configured API provider lets the route read
+the current Ethereum Mainnet reverse resolver and, in verified modes, validate
+the claimed name's current `addr:60` value through the ENS Universal Resolver.
+A zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
+empty forward `addr` is a supported fallback miss. Missing provider configuration
+or reverse-provider failure is logged and suppresses the fallback, leaving the
+route to return the persisted/no-fallback response instead of failing the
+request. Forward-verification provider failure after a reverse claim returns
+`verified_primary_name.status=execution_failed`.
 
 The worker may use the same provider shape for projection-owned ENSv1 text
 hydration, configured as
@@ -72,6 +85,20 @@ and only at the stored chain checkpoint selected for the current projection.
 Missing worker RPC configuration leaves those projection cache entries explicit
 `unsupported`; it must not make the worker query provider `latest` or mutate
 normalized events.
+
+The same worker RPC setting enables projection-owned legacy ENSv1 reverse
+resolver hydration for `primary_names_current`. The built-in configured legacy
+reverse resolver set can be extended with
+`BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES` on the indexer and
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_RESOLVER_ADDRESSES` on the worker;
+deployment-specific additions must use the same comma-delimited address list in
+both places so live direct-call observation and worker hydration stay aligned.
+Operators may tune the Multicall3 target and batch size with
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_MULTICALL3_ADDRESS` and
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_BATCH_SIZE`. The pass runs
+after replay/bootstrap and during continuous apply, evaluates reverse-claim,
+resolver, claim-name, and retained direct-call inputs at or behind the stored
+Ethereum Mainnet checkpoint, and writes only `primary_names_current`.
 
 Deployments with a same-host Reth database can layer
 `docker-compose.reth-db.yml` on top of the server compose file. Set

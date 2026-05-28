@@ -24,6 +24,15 @@ pub(super) fn project_relations(
             "AuthorityTransferred" => {
                 registry_owner = json_str(&event.after_state, &["owner"]).map(normalize_address);
             }
+            "PermissionChanged" if event.resource_id == Some(binding.resource_id) => {
+                if let Some(subject) = resource_control_subject(event) {
+                    registry_owner = Some(subject);
+                } else if let Some(subject) = resource_control_revocation_subject(event)
+                    && registry_owner.as_deref() == Some(subject.as_str())
+                {
+                    registry_owner = None;
+                }
+            }
             "AuthorityEpochChanged" | "TokenRegenerated" => {}
             _ => {}
         }
@@ -46,4 +55,38 @@ pub(super) fn project_relations(
             effective_controller: registry_owner,
         }
     }
+}
+
+fn resource_control_subject(event: &RelevantEvent) -> Option<String> {
+    if json_str(&event.after_state, &["scope", "kind"]).as_deref() != Some("resource") {
+        return None;
+    }
+    if !has_effective_power(&event.after_state, "resource_control") {
+        return None;
+    }
+    json_str(&event.after_state, &["subject"]).map(normalize_address)
+}
+
+fn resource_control_revocation_subject(event: &RelevantEvent) -> Option<String> {
+    if json_str(&event.after_state, &["scope", "kind"]).as_deref() != Some("resource") {
+        return None;
+    }
+    let powers = event
+        .after_state
+        .get("effective_powers")
+        .and_then(|value| value.as_array())?;
+    if powers
+        .iter()
+        .any(|value| value.as_str() == Some("resource_control"))
+    {
+        return None;
+    }
+    json_str(&event.after_state, &["subject"]).map(normalize_address)
+}
+
+fn has_effective_power(state: &serde_json::Value, power: &str) -> bool {
+    state
+        .get("effective_powers")
+        .and_then(|value| value.as_array())
+        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(power)))
 }

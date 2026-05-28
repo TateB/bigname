@@ -80,6 +80,9 @@ async fn record_inventory_current(args: RecordInventoryCurrentArgs) -> Result<()
 async fn primary_names_current(args: PrimaryNamesCurrentArgs) -> Result<()> {
     match args.command {
         PrimaryNamesCurrentCommand::Rebuild(args) => rebuild_primary_names_current(args).await,
+        PrimaryNamesCurrentCommand::HydrateLegacyReverseResolver(args) => {
+            hydrate_primary_names_legacy_reverse_resolver(args).await
+        }
     }
 }
 
@@ -201,17 +204,44 @@ async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> 
     Ok(())
 }
 
+async fn hydrate_primary_names_legacy_reverse_resolver(
+    args: PrimaryNamesCurrentHydrateLegacyReverseResolverArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let hydration_config = primary_name_legacy_reverse_hydration_config(
+        &args.chain_rpc_urls,
+        args.multicall3_address,
+        args.batch_size,
+        &args.legacy_reverse_resolver_addresses,
+    )?;
+    let summary =
+        primary_name::hydrate_legacy_reverse_resolver_primary_names(&pool, hydration_config)
+            .await?;
+    primary_name::log_legacy_reverse_hydration_summary(&summary);
+    Ok(())
+}
+
 async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Result<()> {
     let database =
         automatic_projection_replay::all_current_projections_database_config(args.database);
     let pool = bigname_storage::connect(&database).await?;
     let text_hydration_config = optional_text_hydration_config(
         &args.chain_rpc_urls,
-        args.text_hydration_multicall3_address,
+        args.text_hydration_multicall3_address.clone(),
         args.text_hydration_batch_size,
     )?;
-    let summary =
-        replay::rebuild_all_current_projections(&pool, text_hydration_config.as_ref()).await?;
+    let primary_hydration_config = optional_primary_name_legacy_reverse_hydration_config(
+        &args.chain_rpc_urls,
+        args.legacy_reverse_hydration_multicall3_address,
+        args.legacy_reverse_hydration_batch_size,
+        &args.legacy_reverse_resolver_addresses,
+    )?;
+    let summary = replay::rebuild_all_current_projections(
+        &pool,
+        text_hydration_config.as_ref(),
+        primary_hydration_config.as_ref(),
+    )
+    .await?;
 
     if args.json {
         let payload = summary
@@ -313,6 +343,37 @@ fn optional_text_hydration_config(
         chain_rpc_url_entries,
         multicall3_address,
         batch_size,
+    )
+}
+
+fn primary_name_legacy_reverse_hydration_config(
+    chain_rpc_url_entries: &[String],
+    multicall3_address: String,
+    batch_size: usize,
+    extra_resolver_addresses: &[String],
+) -> Result<primary_name::PrimaryNameLegacyReverseHydrationConfig> {
+    primary_name::PrimaryNameLegacyReverseHydrationConfig::from_chain_rpc_url_entries(
+        chain_rpc_url_entries,
+        multicall3_address,
+        batch_size,
+        extra_resolver_addresses,
+    )?
+    .context(
+        "legacy reverse-resolver primary-name hydration requires --chain-rpc-url <chain>=<url>",
+    )
+}
+
+fn optional_primary_name_legacy_reverse_hydration_config(
+    chain_rpc_url_entries: &[String],
+    multicall3_address: String,
+    batch_size: usize,
+    extra_resolver_addresses: &[String],
+) -> Result<Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>> {
+    primary_name::PrimaryNameLegacyReverseHydrationConfig::from_chain_rpc_url_entries(
+        chain_rpc_url_entries,
+        multicall3_address,
+        batch_size,
+        extra_resolver_addresses,
     )
 }
 

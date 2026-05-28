@@ -179,6 +179,7 @@ pub(super) async fn load_current_binding_context(
 pub(super) async fn load_relevant_events(
     pool: &PgPool,
     name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
 ) -> Result<Vec<RelevantEvent>> {
     let event_kinds = RELEVANT_EVENT_KINDS
         .iter()
@@ -190,6 +191,7 @@ pub(super) async fn load_relevant_events(
         ENS_V2_REGISTRAR_DERIVATION_KIND.to_owned(),
         ENS_V2_RESOLVER_DERIVATION_KIND.to_owned(),
     ];
+    let current_resource_id = current_binding.map(|binding| binding.resource_id);
     let rows = if name.namespace == BASENAMES_NAMESPACE {
         let source_families = [
             SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR.to_owned(),
@@ -233,6 +235,10 @@ pub(super) async fn load_relevant_events(
               AND ne.derivation_kind = ANY($3::TEXT[])
               AND ne.event_kind = ANY($4::TEXT[])
               AND ne.source_family = ANY($5::TEXT[])
+              AND (
+                  ne.event_kind <> 'PermissionChanged'
+                  OR ne.resource_id = $6
+              )
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
@@ -251,6 +257,7 @@ pub(super) async fn load_relevant_events(
         .bind(&derivation_kinds)
         .bind(&event_kinds)
         .bind(&source_families)
+        .bind(current_resource_id)
         .fetch_all(pool)
         .await
     } else {
@@ -290,6 +297,10 @@ pub(super) async fn load_relevant_events(
               AND ne.logical_name_id = $2
               AND ne.derivation_kind = ANY($3::TEXT[])
               AND ne.event_kind = ANY($4::TEXT[])
+              AND (
+                  ne.event_kind <> 'PermissionChanged'
+                  OR ne.resource_id = $5
+              )
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
@@ -307,6 +318,7 @@ pub(super) async fn load_relevant_events(
         .bind(&name.logical_name_id)
         .bind(&derivation_kinds)
         .bind(&event_kinds)
+        .bind(current_resource_id)
         .fetch_all(pool)
         .await
     }

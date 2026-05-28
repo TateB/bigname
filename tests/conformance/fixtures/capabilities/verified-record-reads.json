@@ -1,6 +1,6 @@
 {
   "capability_group": "verified record reads",
-  "conformance_owner": "resolution_and_permissions.rs::resolution_execution_explain_*",
+  "conformance_owner": "apps/api tests::resolution profile execution and records verified mode; resolution_and_permissions.rs::resolution_execution_explain_*",
   "fixture_id": "verified-record-reads",
   "request": {
     "method": "GET",
@@ -29,12 +29,13 @@
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
-    "focused verified-resolution conformance",
+    "focused profile / records verified API route tests",
     "execution trace persistence checks",
     "scripts/release-smoke"
   ],
   "route_owner": [
-    "/v1/resolutions/{namespace}/{name}",
+    "/v1/profiles/names/{name}",
+    "/v1/names/{namespace}/{name}/records",
     "/v1/explain/resolutions/{namespace}/{name}/execution"
   ],
   "scope": "local_cutover_evidence"

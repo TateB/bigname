@@ -43,10 +43,32 @@ pub async fn upsert_primary_name_current_snapshots(
         .await
         .context("failed to open transaction for primary_names_current snapshot upsert")?;
 
-    let mut persisted = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
+    let mut ordered_snapshots = snapshots.iter().enumerate().collect::<Vec<_>>();
+    ordered_snapshots.sort_by(|(_, left), (_, right)| {
+        (
+            normalize_address(&left.row.address),
+            left.row.namespace.as_str(),
+            left.row.coin_type.as_str(),
+        )
+            .cmp(&(
+                normalize_address(&right.row.address),
+                right.row.namespace.as_str(),
+                right.row.coin_type.as_str(),
+            ))
+    });
+
+    let mut persisted = vec![None; snapshots.len()];
+    for (input_index, snapshot) in ordered_snapshots {
         validate_primary_name_current_snapshot(snapshot)?;
-        persisted.push(upsert_primary_name_current_snapshot(&mut transaction, snapshot).await?);
+        persisted[input_index] = Some(
+            upsert_primary_name_current_snapshot(&mut transaction, snapshot)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to upsert sorted primary_names_current snapshot at input index {input_index}"
+                    )
+                })?,
+        );
     }
 
     transaction
@@ -54,7 +76,15 @@ pub async fn upsert_primary_name_current_snapshots(
         .await
         .context("failed to commit primary_names_current snapshot upsert")?;
 
-    Ok(persisted)
+    persisted
+        .into_iter()
+        .enumerate()
+        .map(|(input_index, snapshot)| {
+            snapshot.with_context(|| {
+                format!("missing primary_names_current upsert result at input index {input_index}")
+            })
+        })
+        .collect()
 }
 
 async fn upsert_primary_name_current_snapshot(

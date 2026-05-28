@@ -31,6 +31,7 @@ pub(super) struct CurrentBindingSeed {
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub(super) struct RelevantEvent {
     pub(super) normalized_event_id: i64,
+    pub(super) resource_id: Option<Uuid>,
     pub(super) event_kind: String,
     pub(super) source_family: String,
     pub(super) manifest_version: i64,

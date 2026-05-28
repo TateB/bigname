@@ -37,7 +37,9 @@ impl ProviderBlockBundle {
             .take()
             .context("missing transactions in JSON-RPC result")?
             .into_iter()
-            .map(ProviderTransaction::from_rpc_transaction)
+            .map(|transaction| {
+                ProviderTransaction::from_rpc_transaction(transaction.into_transaction()?)
+            })
             .collect::<Result<Vec<_>>>()?;
         let block = ProviderBlock::from_rpc_block(rpc_block)?;
 
@@ -259,12 +261,33 @@ struct RpcBlock {
     #[serde(default)]
     state_root: Option<String>,
     #[serde(default)]
-    transactions: Option<Vec<RpcTransaction>>,
+    transactions: Option<Vec<RpcBlockTransaction>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RpcBlockHash {
     hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RpcBlockTransaction {
+    Hash(B256),
+    Full(RpcTransaction),
+}
+
+impl RpcBlockTransaction {
+    fn into_transaction(self) -> Result<RpcTransaction> {
+        match self {
+            Self::Full(transaction) => Ok(transaction),
+            Self::Hash(hash) => {
+                bail!(
+                    "expected full transaction object in block bundle response, got transaction hash {}",
+                    hash_hex(hash)
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

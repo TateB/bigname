@@ -15,6 +15,7 @@ pub(super) const RELEVANT_EVENT_KINDS: &[&str] = &[
     "TokenControlTransferred",
     "AuthorityTransferred",
     "AuthorityEpochChanged",
+    "PermissionChanged",
     "TokenRegenerated",
 ];
 pub(super) const CANONICAL_STATE_FILTER: &str = r#"

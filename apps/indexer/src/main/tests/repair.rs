@@ -231,6 +231,95 @@ async fn repair_ens_v1_text_records_fills_selectorized_rows_missing_value() -> R
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn repair_name_surface_normalization_updates_compatible_and_records_findings() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let expected = bigname_domain::normalization::ENS_NORMALIZER_VERSION;
+    let old_version = "ensip15@2026-04-16";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            normalization_repair_surface("Alice.eth", "alice.eth", old_version),
+            normalization_repair_surface("bad name.eth", "bad name.eth", old_version),
+            normalization_repair_surface("🅰️🅱.eth", "🅰️🅱.eth", old_version),
+        ],
+    )
+    .await?;
+    insert_raw_normalization_repair_surface(database.pool(), "", "empty-input.eth", old_version)
+        .await?;
+    let retained_observed_at =
+        OffsetDateTime::from_unix_timestamp(1_717_000_000).context("valid timestamp")?;
+    sqlx::query("UPDATE name_surfaces SET observed_at = $1 WHERE logical_name_id = $2")
+        .bind(retained_observed_at)
+        .bind("ens:alice.eth")
+        .execute(database.pool())
+        .await
+        .context("failed to anchor compatible name-surface observed_at")?;
+
+    let outcome = repair_name_surface_normalization(
+        database.pool(),
+        NameSurfaceNormalizationRepairConfig {
+            expected_normalizer_version: expected.to_owned(),
+            page_size: 2,
+            limit: None,
+            apply_compatible: true,
+            record_findings: true,
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.scanned_count, 4);
+    assert_eq!(outcome.compatible_count, 1);
+    assert_eq!(outcome.updated_compatible_count, 1);
+    assert_eq!(outcome.rejected_count, 2);
+    assert_eq!(outcome.incompatible_count, 1);
+    assert_eq!(outcome.recorded_finding_count, 3);
+    assert_eq!(outcome.remaining_old_normalizer_count, 3);
+
+    let (normalizer_version, canonical_display_name, observed_at) =
+        sqlx::query_as::<_, (String, String, OffsetDateTime)>(
+        r#"
+        SELECT normalizer_version, canonical_display_name, observed_at
+        FROM name_surfaces
+        WHERE logical_name_id = 'ens:alice.eth'
+        "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(normalizer_version, expected);
+    assert_eq!(canonical_display_name, "alice.eth");
+    assert_eq!(observed_at, retained_observed_at);
+
+    let findings = sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"
+        SELECT logical_name_id, finding_kind, candidate_logical_name_id
+        FROM name_surface_normalization_repair_findings
+        ORDER BY logical_name_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        findings,
+        vec![
+            ("ens:bad name.eth".to_owned(), "rejected".to_owned(), None),
+            (
+                "ens:empty-input.eth".to_owned(),
+                "rejected".to_owned(),
+                None
+            ),
+            (
+                "ens:🅰️🅱.eth".to_owned(),
+                "incompatible".to_owned(),
+                Some("ens:🅰🅱.eth".to_owned())
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
 async fn insert_generic_text_record_event(
     pool: &PgPool,
     chain: &str,
@@ -250,6 +339,103 @@ async fn insert_generic_text_record_event(
         None,
     )
     .await
+}
+
+async fn insert_raw_normalization_repair_surface(
+    pool: &PgPool,
+    input_name: &str,
+    normalized_name: &str,
+    normalizer_version: &str,
+) -> Result<()> {
+    let labels = normalized_name.split('.').collect::<Vec<_>>();
+    let dns_encoded_name = dns_encoded_name(&labels);
+    sqlx::query(
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            normalization_warnings,
+            normalization_errors,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ens',
+            $2,
+            $3,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            '[]'::jsonb,
+            '[]'::jsonb,
+            'ethereum-mainnet',
+            '0x2222222222222222222222222222222222222222222222222222222222222222',
+            2,
+            '{"source":"name_surface_normalization_repair_raw_test"}'::jsonb,
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(format!("ens:{normalized_name}"))
+    .bind(input_name)
+    .bind(normalized_name)
+    .bind(&dns_encoded_name)
+    .bind(namehash_for_dns_name(&dns_encoded_name))
+    .bind(
+        labels
+            .iter()
+            .map(|label| keccak256_hex(label.as_bytes()))
+            .collect::<Vec<_>>(),
+    )
+    .bind(normalizer_version)
+    .execute(pool)
+    .await
+    .context("failed to insert raw name-surface normalization repair row")?;
+    Ok(())
+}
+
+fn normalization_repair_surface(
+    input_name: &str,
+    normalized_name: &str,
+    normalizer_version: &str,
+) -> NameSurface {
+    let labels = normalized_name.split('.').collect::<Vec<_>>();
+    let dns_encoded_name = dns_encoded_name(&labels);
+    NameSurface {
+        logical_name_id: format!("ens:{normalized_name}"),
+        namespace: "ens".to_owned(),
+        input_name: input_name.to_owned(),
+        canonical_display_name: normalized_name.to_owned(),
+        normalized_name: normalized_name.to_owned(),
+        dns_encoded_name: dns_encoded_name.clone(),
+        namehash: namehash_for_dns_name(&dns_encoded_name),
+        labelhashes: labels
+            .iter()
+            .map(|label| keccak256_hex(label.as_bytes()))
+            .collect(),
+        normalizer_version: normalizer_version.to_owned(),
+        normalization_warnings: json!([]),
+        normalization_errors: json!([]),
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+            .to_owned(),
+        block_number: 1,
+        provenance: json!({"source": "name_surface_normalization_repair_test"}),
+        canonicality_state: CanonicalityState::Canonical,
+    }
 }
 
 async fn insert_selectorized_text_record_event_without_value(

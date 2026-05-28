@@ -184,6 +184,54 @@ FROM normalized_replay_cursors
 ORDER BY deployment_profile, chain_id, cursor_kind;"
 ```
 
+Name-surface normalizer repair status:
+
+```sh
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  exec -T postgres psql -U bigname -d bigname -P pager=off -c "
+SELECT normalizer_version, count(*)
+FROM name_surfaces
+GROUP BY normalizer_version
+ORDER BY count(*) DESC;
+
+SELECT expected_normalizer_version, finding_kind, count(*)
+FROM name_surface_normalization_repair_findings
+GROUP BY expected_normalizer_version, finding_kind
+ORDER BY expected_normalizer_version, finding_kind;"
+```
+
+After deploying a normalizer change and running migrations, apply only compatible
+retained-surface metadata from the existing indexer container:
+
+```sh
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  exec -T indexer bigname-indexer repair name-surface-normalization \
+    --apply-compatible \
+    --record-findings
+```
+
+This command does not rewrite `logical_name_id` or identity-defining hash fields.
+Rows that reject or remap under the active normalizer remain unchanged and are
+recorded in `name_surface_normalization_repair_findings` for a separate
+semantic repair decision.
+
+Because compatible repair may refresh retained surface display metadata, replay
+all current projections before declaring the repair complete:
+
+```sh
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  exec -T worker bigname-worker replay all-current-projections
+```
+
+The live identity validation checks for stale display rows in the API-readable
+current projections and identity-feed sidecar after this replay.
+
 Backfill and projection apply:
 
 ```sh

@@ -1,5 +1,4 @@
 pub(crate) type CompactNamesResponse = JsonValue;
-pub(crate) type AddressNamesCountResponse = JsonValue;
 
 pub(crate) fn build_compact_names_response(
     rows: &[bigname_storage::NameCurrentListRow],
@@ -16,30 +15,6 @@ pub(crate) fn build_compact_names_response(
     if let Some(meta) = meta {
         insert_value_field(&mut response, "meta", meta);
     }
-    response
-}
-
-pub(crate) fn build_address_names_count_response(
-    address: &str,
-    namespace: Option<&str>,
-    relation: &str,
-    count: u64,
-) -> AddressNamesCountResponse {
-    let mut data = empty_object();
-    insert_string_field(&mut data, "address", address.to_owned());
-    if let Some(namespace) = namespace {
-        insert_string_field(&mut data, "namespace", namespace.to_owned());
-    }
-    insert_string_field(&mut data, "relation", relation.to_owned());
-    insert_value_field(&mut data, "count", JsonValue::Number(count.into()));
-
-    let mut response = empty_object();
-    insert_value_field(&mut response, "data", data);
-    insert_value_field(
-        &mut response,
-        "meta",
-        compact_meta_object("partial", Some(count), Vec::new(), Vec::new()),
-    );
     response
 }
 

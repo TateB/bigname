@@ -137,14 +137,18 @@ pub(super) async fn build_resolver_events(
             )])
         }
         ResolverObservation::AliasChanged { from_name, to_name } => {
-            let from_decoded = dns_decode_optional(&from_name)?;
-            let to_decoded = dns_decode_optional(&to_name)?;
-            let alias_removed = matches!(to_decoded.as_deref(), None | Some(""));
+            let from_decoded = match dns_decode_optional(&from_name) {
+                Ok(value) => value,
+                Err(_) => return Ok(Vec::new()),
+            };
+            let to_decoded = dns_decode_optional(&to_name).ok().flatten();
+            let alias_removed = to_name.is_empty();
+            let alias_unknown = !alias_removed && to_decoded.is_none();
             let from_logical_name_id = from_decoded
                 .as_ref()
                 .filter(|name| !name.is_empty())
                 .map(|name| logical_name_id(&raw_log.namespace, name));
-            let to_link = if alias_removed {
+            let to_link = if alias_removed || alias_unknown {
                 NameLink::unknown()
             } else {
                 load_name_link_by_name(
@@ -168,8 +172,8 @@ pub(super) async fn build_resolver_events(
                     "resolver_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
                     "from_dns_encoded_name": format!("0x{}", hex_string(&from_name)),
                     "to_dns_encoded_name": format!("0x{}", hex_string(&to_name)),
-                    "alias_state": if alias_removed { "removed" } else { "active" },
-                    "active": !alias_removed,
+                    "alias_state": if alias_removed { "removed" } else if alias_unknown { "unknown" } else { "active" },
+                    "active": !alias_removed && !alias_unknown,
                     "from_name": from_decoded,
                     "to_name": to_decoded,
                     "to_logical_name_id": to_link.logical_name_id,
@@ -202,20 +206,24 @@ pub(super) fn alias_preimage_events(
 ) -> Result<Vec<NormalizedEvent>> {
     let mut events = Vec::new();
     if !from_name.is_empty() {
-        events.push(preimage_observed_event(
-            raw_log,
-            "AliasChanged",
-            observe_dns_encoded_name(from_name)?,
-            Some("from_name"),
-        ));
+        if let Ok(observation) = observe_dns_encoded_name(from_name) {
+            events.push(preimage_observed_event(
+                raw_log,
+                "AliasChanged",
+                observation,
+                Some("from_name"),
+            ));
+        }
     }
     if !to_name.is_empty() {
-        events.push(preimage_observed_event(
-            raw_log,
-            "AliasChanged",
-            observe_dns_encoded_name(to_name)?,
-            Some("to_name"),
-        ));
+        if let Ok(observation) = observe_dns_encoded_name(to_name) {
+            events.push(preimage_observed_event(
+                raw_log,
+                "AliasChanged",
+                observation,
+                Some("to_name"),
+            ));
+        }
     }
     Ok(events)
 }
@@ -228,10 +236,13 @@ pub(super) fn named_dns_preimage_events(
     if name.is_empty() {
         return Ok(Vec::new());
     }
+    let Ok(observation) = observe_dns_encoded_name(name) else {
+        return Ok(Vec::new());
+    };
     Ok(vec![preimage_observed_event(
         raw_log,
         source_event,
-        observe_dns_encoded_name(name)?,
+        observation,
         None,
     )])
 }
@@ -357,4 +368,85 @@ fn raw_log_preimage_fact_ref(raw_log: &ResolverRawLogRow) -> Value {
         "topic2": raw_log.topics.get(2).cloned(),
         "data_hex": hex_string(&raw_log.data),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigname_storage::CanonicalityState;
+    use sqlx::{postgres::PgPoolOptions, types::time::OffsetDateTime};
+
+    fn raw_log() -> ResolverRawLogRow {
+        ResolverRawLogRow {
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xblock".to_owned(),
+            block_number: 1,
+            event_position_timestamp: OffsetDateTime::UNIX_EPOCH,
+            transaction_hash: "0xtx".to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+            emitting_contract_instance_id: Uuid::nil(),
+            topics: Vec::new(),
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+            source_manifest_id: 1,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            manifest_version: 1,
+        }
+    }
+
+    fn dns_name(labels: &[&str]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for label in labels {
+            encoded.push(u8::try_from(label.len()).expect("label length fits"));
+            encoded.extend_from_slice(label.as_bytes());
+        }
+        encoded.push(0);
+        encoded
+    }
+
+    #[tokio::test]
+    async fn alias_changed_skips_invalid_source_name_without_pool_query() -> Result<()> {
+        let pool =
+            PgPoolOptions::new().connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")?;
+        let events = build_resolver_events(
+            &pool,
+            &raw_log(),
+            ResolverObservation::AliasChanged {
+                from_name: dns_name(&["Ni\u{200d}ck", "eth"]),
+                to_name: dns_name(&["alice", "eth"]),
+            },
+        )
+        .await?;
+
+        assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alias_changed_treats_invalid_target_name_as_unknown_without_pool_query() -> Result<()>
+    {
+        let pool =
+            PgPoolOptions::new().connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")?;
+        let events = build_resolver_events(
+            &pool,
+            &raw_log(),
+            ResolverObservation::AliasChanged {
+                from_name: dns_name(&["alice", "eth"]),
+                to_name: dns_name(&["Ni\u{200d}ck", "eth"]),
+            },
+        )
+        .await?;
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].after_state["alias_state"], "unknown");
+        assert_eq!(events[0].after_state["active"], false);
+        assert_eq!(events[0].after_state["to_name"], Value::Null);
+        assert_eq!(events[0].resource_id, None);
+        assert_eq!(events[1].event_kind, EVENT_KIND_PREIMAGE_OBSERVED);
+        assert_eq!(events[1].after_state["observation_slot"], "from_name");
+        Ok(())
+    }
 }

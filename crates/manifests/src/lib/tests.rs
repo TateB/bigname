@@ -174,7 +174,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "{rollout_status}"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"
@@ -216,7 +216,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"
@@ -253,7 +253,7 @@ source_family = "ens_v1_reverse_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
 
@@ -276,7 +276,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"
@@ -321,7 +321,7 @@ source_family = "ens_v1_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "{rollout_status}"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = {{ status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }}
@@ -352,7 +352,7 @@ source_family = "ens_execution"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "{rollout_status}"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
 
@@ -1441,7 +1441,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"

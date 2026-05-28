@@ -18,11 +18,13 @@ use crate::{
 use super::{
     adapter_sync::sync_live_adapter_state_from_persisted_raw_payloads,
     payload::{
-        canonical_raw_state, ensure_provider_bundle_matches_raw_block, insert_raw_block_candidate,
+        EventSilentResolverCallObservation, canonical_raw_state,
+        ensure_provider_bundle_matches_raw_block, event_silent_direct_call_address_set,
+        event_silent_resolver_call_observations_from_live_payload, insert_raw_block_candidate,
         provider_code_observation_to_raw_code_hash, provider_logs_to_live_selected_raw_logs,
         provider_raw_payload_cache_metadata_to_upserts, provider_receipts_to_selected_raw_receipts,
         provider_transactions_to_selected_raw_transactions, raw_code_hash_candidate_hashes,
-        raw_payload_candidate_hashes, retained_transaction_keys_from_raw_logs,
+        raw_payload_candidate_hashes, retained_transaction_keys_from_live_payload,
         selected_address_set,
     },
     types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode},
@@ -79,6 +81,7 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
     adapter_sync_enabled: bool,
+    event_silent_resolver_addresses: &[String],
 ) -> Result<()> {
     let block_hashes = raw_payload_candidate_hashes(heads, canonical, head_change_set);
     if block_hashes.is_empty() {
@@ -99,7 +102,10 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     let mut receipts = Vec::<RawReceipt>::new();
     let mut logs = Vec::<RawLog>::new();
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
+    let mut event_silent_resolver_calls = Vec::<EventSilentResolverCallObservation>::new();
     let selected_addresses = selected_address_set(selected_addresses);
+    let event_silent_direct_call_addresses =
+        event_silent_direct_call_address_set(chain, event_silent_resolver_addresses);
 
     for raw_block in &raw_blocks {
         let bundle = provider
@@ -118,7 +124,21 @@ pub(crate) async fn persist_reconciled_raw_payloads(
             &bundle.logs,
             &selected_addresses,
         )?;
-        let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
+        let retained_transaction_keys = retained_transaction_keys_from_live_payload(
+            &selected_logs,
+            &bundle.transactions,
+            &bundle.receipts,
+            &event_silent_direct_call_addresses,
+        );
+        event_silent_resolver_calls.extend(
+            event_silent_resolver_call_observations_from_live_payload(
+                chain,
+                raw_block,
+                &bundle.transactions,
+                &bundle.receipts,
+                &event_silent_direct_call_addresses,
+            ),
+        );
 
         transactions.extend(provider_transactions_to_selected_raw_transactions(
             chain,
@@ -139,6 +159,7 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
+    upsert_event_silent_resolver_call_observations(pool, &event_silent_resolver_calls).await?;
     if adapter_sync_enabled {
         sync_live_adapter_state_from_persisted_raw_payloads(pool, chain, &block_hashes).await?;
     } else {
@@ -150,6 +171,71 @@ pub(crate) async fn persist_reconciled_raw_payloads(
             raw_log_count = logs.len(),
             "live raw payload adapter sync skipped after raw fact persistence"
         );
+    }
+
+    Ok(())
+}
+
+async fn upsert_event_silent_resolver_call_observations(
+    pool: &sqlx::PgPool,
+    observations: &[EventSilentResolverCallObservation],
+) -> Result<()> {
+    for observation in observations {
+        sqlx::query(
+            r#"
+            INSERT INTO event_silent_resolver_call_observations (
+                chain_id,
+                resolver_address,
+                block_hash,
+                block_number,
+                transaction_hash,
+                transaction_index,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::canonicality_state)
+            ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
+            SET
+                canonicality_state = CASE
+                    WHEN event_silent_resolver_call_observations.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
+                        AND event_silent_resolver_call_observations.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
+                        THEN event_silent_resolver_call_observations.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'safe'::canonicality_state
+                        AND event_silent_resolver_call_observations.canonicality_state = 'finalized'::canonicality_state
+                        THEN event_silent_resolver_call_observations.canonicality_state
+                    WHEN EXCLUDED.canonicality_state = 'observed'::canonicality_state
+                        THEN event_silent_resolver_call_observations.canonicality_state
+                    ELSE EXCLUDED.canonicality_state
+                END,
+                observed_at = now()
+            WHERE event_silent_resolver_call_observations.resolver_address = EXCLUDED.resolver_address
+              AND event_silent_resolver_call_observations.block_number = EXCLUDED.block_number
+              AND event_silent_resolver_call_observations.transaction_hash = EXCLUDED.transaction_hash
+            RETURNING 1
+            "#,
+        )
+        .bind(&observation.chain_id)
+        .bind(&observation.resolver_address)
+        .bind(&observation.block_hash)
+        .bind(observation.block_number)
+        .bind(&observation.transaction_hash)
+        .bind(observation.transaction_index)
+        .bind(observation.canonicality_state.as_str())
+        .fetch_optional(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upsert event-silent resolver call observation for chain {} block {} transaction {}",
+                observation.chain_id, observation.block_hash, observation.transaction_hash
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "event-silent resolver call observation identity mismatch for chain {} block {} transaction index {}",
+                observation.chain_id, observation.block_hash, observation.transaction_index
+            )
+        })?;
     }
 
     Ok(())

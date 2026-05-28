@@ -48,7 +48,7 @@ fn build_address_names_response_from_summary(
         data,
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_address_names_provenance_from_summary(summary, &supplement),
+        provenance: JsonValue::Null,
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -108,7 +108,7 @@ fn build_resource_permissions_response_from_summary(
         data: page_rows.iter().map(build_permission_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_collection_provenance_from_inputs(&summary.provenance, "declared"),
+        provenance: JsonValue::Null,
         coverage: build_permissions_coverage_from_sample(summary.coverage.as_ref()),
         chain_positions: build_chain_positions_from_values(summary.chain_positions.iter()),
         page,
@@ -264,40 +264,6 @@ fn build_children_declared_state_from_count(child_count: u64, include_counts: bo
         );
     }
     declared_state
-}
-
-fn build_address_names_provenance_from_summary(
-    summary: &bigname_storage::AddressNamesCurrentSummary,
-    supplement: &AddressNamesResponseSupplement,
-) -> JsonValue {
-    let mut summary_provenance = empty_object();
-    insert_value_field(
-        &mut summary_provenance,
-        "normalized_event_ids",
-        summary.provenance.normalized_event_ids.clone(),
-    );
-    insert_value_field(
-        &mut summary_provenance,
-        "raw_fact_refs",
-        summary.provenance.raw_fact_refs.clone(),
-    );
-    insert_value_field(
-        &mut summary_provenance,
-        "manifest_versions",
-        summary.provenance.manifest_versions.clone(),
-    );
-    if let Some(derivation_kind) = summary.provenance.derivation_kind.as_ref() {
-        insert_string_field(
-            &mut summary_provenance,
-            "derivation_kind",
-            derivation_kind.clone(),
-        );
-    }
-
-    let provenances = std::iter::once(&summary_provenance)
-        .chain(supplement.provenances.iter())
-        .collect::<Vec<_>>();
-    build_collection_provenance_from_refs(&provenances, "declared")
 }
 
 fn build_collection_provenance_from_inputs(

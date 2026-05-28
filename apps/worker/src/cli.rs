@@ -60,6 +60,24 @@ pub(crate) struct RunArgs {
         default_value_t = 250_usize
     )]
     pub(crate) text_hydration_batch_size: usize,
+    #[arg(
+        long = "legacy-reverse-resolver-address",
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_RESOLVER_ADDRESSES",
+        value_delimiter = ','
+    )]
+    pub(crate) legacy_reverse_resolver_addresses: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_MULTICALL3_ADDRESS",
+        default_value = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    )]
+    pub(crate) legacy_reverse_hydration_multicall3_address: String,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_BATCH_SIZE",
+        default_value_t = 250_usize
+    )]
+    pub(crate) legacy_reverse_hydration_batch_size: usize,
 }
 
 #[derive(Args, Debug)]
@@ -173,6 +191,7 @@ pub(crate) enum PermissionsCurrentCommand {
 #[derive(Subcommand, Debug)]
 pub(crate) enum PrimaryNamesCurrentCommand {
     Rebuild(PrimaryNamesCurrentRebuildArgs),
+    HydrateLegacyReverseResolver(PrimaryNamesCurrentHydrateLegacyReverseResolverArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -335,6 +354,28 @@ pub(crate) struct PrimaryNamesCurrentRebuildArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct PrimaryNamesCurrentHydrateLegacyReverseResolverArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_WORKER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(long, default_value = "0xcA11bde05977b3631167028862bE2a173976CA11")]
+    pub(crate) multicall3_address: String,
+    #[arg(long, default_value_t = 250_usize)]
+    pub(crate) batch_size: usize,
+    #[arg(
+        long = "legacy-reverse-resolver-address",
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_RESOLVER_ADDRESSES",
+        value_delimiter = ','
+    )]
+    pub(crate) legacy_reverse_resolver_addresses: Vec<String>,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct CompactLogStagingArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
@@ -368,6 +409,24 @@ pub(crate) struct AllCurrentProjectionsArgs {
         default_value_t = 250_usize
     )]
     pub(crate) text_hydration_batch_size: usize,
+    #[arg(
+        long = "legacy-reverse-resolver-address",
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_RESOLVER_ADDRESSES",
+        value_delimiter = ','
+    )]
+    pub(crate) legacy_reverse_resolver_addresses: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_MULTICALL3_ADDRESS",
+        default_value = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    )]
+    pub(crate) legacy_reverse_hydration_multicall3_address: String,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_BATCH_SIZE",
+        default_value_t = 250_usize
+    )]
+    pub(crate) legacy_reverse_hydration_batch_size: usize,
 }
 
 #[derive(Args, Debug)]

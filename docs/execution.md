@@ -27,7 +27,7 @@ For Basenames on the shipped mainnet profile, the entrypoint is active `basename
 
 ### On-demand execution
 
-`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` with `mode=verified` or `mode=both` are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
+`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`, and `GET /v1/names/{namespace}/{name}/records` with verified selectors, are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The profile route does not accept a selector query; it executes every server-derived profile selector from declared inventory selectors, explicit gaps, and record-cache entries for the selected snapshot. If that derived set is non-empty, it is complete for the profile route. The bounded app profile set is used only when a supported declared inventory exists but has no declared selector/gap/cache records; missing, stale, or unsupported inventory does not trigger defaults. The compact records route is the selector-specific app path. Each route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
 
 Live-execution rules:
 
@@ -37,11 +37,11 @@ Live-execution rules:
 - unsupported selector families and unsupported verified path classes stay selector-local `status=unsupported`; on-demand execution does not widen the support boundary
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution` is persisted-trace readback only
 
-The compact records routes — `GET /v1/names/{namespace}/{name}/records` and `GET /v1/resolve/{name}/records` — use the same supported-selector boundary and selected stored snapshot as the canonical resolution route. When they need on-demand ENS verified values, they execute against that snapshot, persist the trace and outcome, and fail closed with `409 stale` when the provider cannot serve the selected block. They never target provider `latest` independently of the selected snapshot.
+The compact records route `GET /v1/names/{namespace}/{name}/records` uses the same supported-selector boundary and selected stored snapshot as the full profile route. When it needs on-demand ENS verified values, it executes against that snapshot, persists the trace and outcome, and fails closed with `409 stale` when the provider cannot serve the selected block. It never targets provider `latest` independently of the selected snapshot.
 
 ### Namespace inference
 
-For `GET /v1/resolve/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple:
+For `GET /v1/profiles/names/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple:
 
 - exact `base.eth` resolves as `namespace=ens`
 - `*.base.eth` resolves as `namespace=basenames`
@@ -69,11 +69,11 @@ For ENS on Ethereum Mainnet, declared claim intake is reverse-only through `ens_
 
 For Basenames, declared claim intake is `basenames_base_primary` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] It stays claim intake only — exact-name, address-name, and children declared truth remain on the Base registry/registrar/resolver families because upstream exposes reverse-name writes through the dedicated `ReverseRegistrar` rather than the Base authority stack. Verification runs through `basenames_execution` against the Mainnet `L1Resolver`; declared and verified ownership do not collapse.[^bn-readme-l22][^bn-l1resolver-l13][^bn-revreg-l193]
 
-`claimed_primary_name.name`, when present, comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple. It is never synthesized from manifest presence, resolver-backed identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source. Missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces; the admitted claim source is the reverse registrar tuple only.[^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
+`claimed_primary_name.name`, when present from persisted state, comes from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple, including projection-owned legacy reverse-resolver hydration for configured event-silent ENSv1 reverse resolvers. Resolver-edge-only legacy hydration may create that exact row only when the hydrated reverse name resolves forward for `addr:60` through the ENS Universal Resolver at the same hash-pinned checkpoint to an ETH address whose computed `addr.reverse` node matches the candidate node; that forward check is claim-side address recovery, not persisted verified-primary execution.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52] The app default tuple (`namespace=ens`, `coin_type=60`) may use an on-demand Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing; the fallback builds the current `addr.reverse` node, reads its ENS registry resolver, calls resolver `name(bytes32)`, normalizes the value, and marks provenance as `ens_reverse_rpc`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback also verifies the claimed name by executing `addr:60` through the ENS Universal Resolver proxy at provider `latest`; it does not persist an execution trace or populate `primary_names_current`.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Other tuple claim sources are not synthesized from manifest presence, resolver-backed forward identity outside that resolver-edge recovery guard, verified execution identity, tuple presence alone, or a different tuple.[^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
 
 ### Coverage and provenance
 
-The exact-tuple verified-primary support class is persisted readback only for the exact route tuple. Both the ENS slice and the first Basenames slice use it; the read path is not a fresh execution entrypoint. Stable execution identity is `request_type=verified_primary_name`; the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`, where `normalized_address` uses the same lowercase normalization as `GET /v1/primary-names/{address}`. Claimed text, normalized identity, verified target, status, and section-local provenance are not part of the key.
+The exact-tuple verified-primary support class remains persisted readback for materialized tuples. Both the ENS slice and the first Basenames slice use it. The ENS/60 app fallback is the narrow route-local exception: it performs current reverse claim lookup and, for verified modes, current forward `addr:60` verification without creating `request_type=verified_primary_name` cache rows. Stable persisted execution identity is still `request_type=verified_primary_name`; the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`, where `normalized_address` uses the same lowercase normalization as `GET /v1/primary-names/{address}`. Claimed text, normalized identity, verified target, status, and section-local provenance are not part of the key.
 
 Supported tuples may publish `coverage.status=partial` with `exhaustiveness=non_enumerable`. Tuples outside the frozen class remain explicit `unsupported`; they do not inherit coverage from manifest rollout, tuple presence, or verified-resolution support.
 
@@ -81,11 +81,11 @@ Supported tuples may publish `coverage.status=partial` with `exhaustiveness=non_
 
 Section-local provenance:
 
-- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row. It strips `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
-- `verified_primary_name.provenance`, when present, is `{execution_trace_id, manifest_versions}`. Its `execution_trace_id` must equal the top-level `provenance.execution_trace_id`; its `manifest_versions` must narrow that same persisted trace.
+- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, including projection-owned legacy reverse-resolver hydration metadata when present, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. Persisted declared provenance strips `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
+- `verified_primary_name.provenance`, when present, is `{execution_trace_id, manifest_versions}` for persisted readback. Its `execution_trace_id` must equal the top-level `provenance.execution_trace_id`; its `manifest_versions` must narrow that same persisted trace. ENS/60 on-demand verification omits this field because it has no persisted trace.
 - Top-level route provenance joins claim-side and verification-side context. `verified_primary_name.provenance` does not publish lookup/invalidation hook material, restate claimed-row provenance, or introduce a second lookup/invalidation identity.
 
-The shipped ENS and Basenames primary-name paths do not require dedicated manifest capability flags. Reverse claim admission stays under `ens_v1_reverse_l1` / `basenames_base_primary`; verified-primary readback stays execution-derived under `ens_execution` / `basenames_execution`. Adding a dedicated capability flag would be additive, not a prerequisite.
+The shipped ENS and Basenames primary-name paths do not require dedicated manifest capability flags. Reverse claim admission stays under `ens_v1_reverse_l1` / `basenames_base_primary`; persisted verified-primary readback stays execution-derived under `ens_execution` / `basenames_execution`; the ENS/60 route-local fallback reports `ens_reverse_rpc` and `ens_execution_rpc` source classes when it performs live verification. Adding a dedicated capability flag would be additive, not a prerequisite.
 
 ## Trace schema
 
@@ -127,7 +127,7 @@ Persisted outcomes live in `execution_cache_outcomes`, keyed by:
 - topology version boundary
 - record version boundary
 
-For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. For `GET /v1/resolve/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set — a namespace-inferred request and the equivalent canonical request share cache identity after inference. The raw convenience path is not a separate cache namespace.
+For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. For `GET /v1/profiles/names/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
 
 For verified primary, the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup/invalidation anchor; projection updates may invalidate request-matching answers but the projection does not persist verified payloads or trace IDs.
 
@@ -172,9 +172,9 @@ Basenames verified resolution on the shipped mainnet profile uses active `basena
 
 CCIP-participating traces are eligible for that class rather than `unsupported`, because upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Explain surfaces the resulting persisted CCIP steps without inventing a second trace family. Other Basenames paths remain `unsupported`. The verified-resolution boundary does not widen route-level primary-name coverage beyond the exact-tuple persisted-readback class and does not add manifest flags.
 
-`GET /v1/resolve/{name}` does not widen this boundary. Inferred Basenames verified selectors return `unsupported` unless the requested snapshot satisfies the same frozen Basenames class.
+`GET /v1/profiles/names/{name}` does not widen this boundary. Inferred Basenames verified selectors return `unsupported` unless the requested snapshot satisfies the same frozen Basenames class.
 
-ENS and Basenames primary-name coverage is graduated only for the exact-tuple persisted-readback class; supported tuples return `coverage.status=partial` with `exhaustiveness=non_enumerable`. Out-of-class tuples, fallback claim sources, richer claimed payloads, fresh verified-primary execution, and namespace-wide claims remain `unsupported` or out of scope. Manifest rollout, capability state, reverse-tuple lookup, and resolver-backed verification detail do not by themselves widen the contract.
+ENS and Basenames primary-name coverage is graduated for the exact-tuple persisted-readback class, including projection-owned legacy reverse-resolver hydration for configured event-silent ENSv1 reverse resolvers, and the ENS/60 app fallback is graduated for on-demand reverse RPC claim lookup plus route-local forward `addr:60` verification when verified mode requests it. Supported classes return `coverage.status=partial` with `exhaustiveness=non_enumerable`. Out-of-class tuples, richer claimed payloads, non-ENS/60 fresh verified-primary execution, and namespace-wide claims remain `unsupported` or out of scope. Manifest rollout, capability state, reverse-tuple lookup, and resolver-backed verification detail do not by themselves widen the verified-readback contract.
 
 Declared resolver-profile gaps remain requestable and explicit on the declared read plane; they do not by themselves make a supported verified-resolution path unsupported. Supported Universal Resolver selectors read matching persisted output or execute on demand at the selected snapshot, then persist and return the outcome.[^v1-iur-l44][^v1-iur-l52]
 
@@ -186,6 +186,7 @@ Declared resolver-profile gaps remain requestable and explicit on the declared r
 [^v1-ursol-l8]: (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L8 @ ens_v1@91c966f)
 [^v1-iur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
 [^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
+[^v1-iaddrres-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L11 @ ens_v1@91c966f)
 [^v1-aur-l90]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L90 @ ens_v1@91c966f)
 [^v1-aur-l106]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L106 @ ens_v1@91c966f)
 [^v1-aur-l217]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L217 @ ens_v1@91c966f)
@@ -199,6 +200,11 @@ Declared resolver-profile gaps remain requestable and explicit on the declared r
 [^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
 [^v1-revreg-l100]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f)
 [^v1-revreg-l123]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
+[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
+[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
 [^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)

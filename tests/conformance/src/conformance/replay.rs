@@ -73,7 +73,7 @@
                 ReplayRoute {
                     label: "winning-resolver-before-replay",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, corpus.winning_resolver_address
                     ),
                 },
@@ -141,7 +141,7 @@
                 ReplayRoute {
                     label: "losing-resolver-after-replay",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, corpus.losing_resolver_address
                     ),
                 },
@@ -538,7 +538,7 @@
                     "ens_v2_sepolia_dev",
                     11,
                     "active",
-                    "ensip15@2026-04-16",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             let registrar_manifest_id = database
@@ -549,7 +549,7 @@
                     "ens_v2_sepolia_dev",
                     11,
                     "active",
-                    "ensip15@2026-04-16",
+                    "ensip15@ens-normalize-0.1.1",
                 )
                 .await?;
             database
@@ -1490,7 +1490,7 @@
                     dns_encoded_name: route_name.as_bytes().to_vec(),
                     namehash: format!("namehash:{route_name}"),
                     labelhashes: vec![format!("labelhash:{route_name}")],
-                    normalizer_version: "ensip15@2026-04-16".to_owned(),
+                    normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                     normalization_warnings: json!([]),
                     normalization_errors: json!([]),
                     chain_id: "base-mainnet".to_owned(),
@@ -2097,28 +2097,24 @@
                 payload.pointer("/data/resolver_address"),
                 Some(&json!(corpus.winning_resolver_address))
             );
-            for section in [
-                "bindings",
-                "aliases",
-                "permissions",
-                "role_holders",
-                "event_summary",
-            ] {
+            assert_eq!(payload.pointer("/data/counts"), Some(&json!({})));
+            for section in ["nodes", "aliases", "roles", "events"] {
                 assert_eq!(
-                    payload.pointer(&format!("/declared_state/{section}/status")),
-                    Some(&json!("unsupported")),
-                    "supported profile-gated full resolver rebuild section {section}"
-                );
-                assert_eq!(
-                    payload.pointer(&format!(
-                        "/declared_state/{section}/unsupported_reason"
-                    )),
-                    Some(&json!("resolver_binding_enumeration_not_projected")),
-                    "supported profile-gated full resolver rebuild section {section}"
+                    payload.pointer(&format!("/data/{section}")),
+                    Some(&Value::Null),
+                    "supported profile-gated resolver overview section {section}"
                 );
             }
             assert_eq!(
-                payload.pointer("/coverage/unsupported_reason"),
+                payload.pointer("/meta/support_status"),
+                Some(&json!("unsupported"))
+            );
+            assert_eq!(
+                payload.pointer("/meta/unsupported_fields"),
+                Some(&json!(["nodes", "aliases", "roles", "events"]))
+            );
+            assert_eq!(
+                payload.pointer("/meta/coverage/unsupported_reason"),
                 Some(&json!("resolver_binding_enumeration_not_projected"))
             );
             assert_json_not_contains(
@@ -2170,20 +2166,6 @@
                 payload.pointer("/declared_state/record_cache/entries"),
                 Some(&json!([
                     {
-                        "record_key": "addr:60",
-                        "record_family": "addr",
-                        "selector_key": "60",
-                        "status": "unsupported",
-                        "unsupported_reason": resolver_family_reason,
-                    },
-                    {
-                        "record_key": "text",
-                        "record_family": "text",
-                        "selector_key": null,
-                        "status": "unsupported",
-                        "unsupported_reason": resolver_family_reason,
-                    },
-                    {
                         "record_key": "contenthash",
                         "record_family": "contenthash",
                         "selector_key": null,
@@ -2211,28 +2193,30 @@
                 Some(&json!(resolver_address)),
                 "case {case_label}"
             );
-            for section in [
-                "bindings",
-                "aliases",
-                "permissions",
-                "role_holders",
-                "event_summary",
-            ] {
+            assert_eq!(
+                payload.pointer("/data/counts"),
+                Some(&json!({})),
+                "case {case_label}"
+            );
+            for section in ["nodes", "aliases", "roles", "events"] {
                 assert_eq!(
-                    payload.pointer(&format!("/declared_state/{section}/status")),
-                    Some(&json!("unsupported")),
-                    "case {case_label} section {section}"
-                );
-                assert_eq!(
-                    payload.pointer(&format!(
-                        "/declared_state/{section}/unsupported_reason"
-                    )),
-                    Some(&json!("resolver_family_pending")),
+                    payload.pointer(&format!("/data/{section}")),
+                    Some(&Value::Null),
                     "case {case_label} section {section}"
                 );
             }
             assert_eq!(
-                payload.pointer("/coverage/unsupported_reason"),
+                payload.pointer("/meta/support_status"),
+                Some(&json!("unsupported")),
+                "case {case_label}"
+            );
+            assert_eq!(
+                payload.pointer("/meta/unsupported_fields"),
+                Some(&json!(["nodes", "aliases", "roles", "events"])),
+                "case {case_label}"
+            );
+            assert_eq!(
+                payload.pointer("/meta/coverage/unsupported_reason"),
                 Some(&json!("resolver_family_pending")),
                 "case {case_label}"
             );
@@ -2468,7 +2452,7 @@
                 ReplayRoute {
                     label: "resolution",
                     uri: format!(
-                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text",
+                        "/v1/profiles/names/{}?mode=declared&meta=full",
                         corpus.route_name
                     ),
                 },
@@ -2479,7 +2463,7 @@
                 ReplayRoute {
                     label: "losing-resolver",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, corpus.losing_resolver_address
                     ),
                 },
@@ -2531,7 +2515,7 @@
                 ReplayRoute {
                     label: "resolution",
                     uri: format!(
-                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text",
+                        "/v1/profiles/names/{}?mode=declared&meta=full",
                         corpus.route_name
                     ),
                 },
@@ -2542,35 +2526,35 @@
                 ReplayRoute {
                     label: "resolver",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, corpus.winning_resolver_address
                     ),
                 },
                 ReplayRoute {
                     label: "pending-profile-resolution",
                     uri: format!(
-                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text,contenthash",
+                        "/v1/profiles/names/{}?mode=declared&meta=full",
                         REPLAY_PROFILE_PENDING_ROUTE_NAME
                     ),
                 },
                 ReplayRoute {
                     label: "pending-profile-resolver",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, REPLAY_PROFILE_PENDING_RESOLVER_ADDRESS
                     ),
                 },
                 ReplayRoute {
                     label: "unsupported-profile-resolution",
                     uri: format!(
-                        "/v1/resolutions/basenames/{}?mode=declared&records=addr:60,text,contenthash",
+                        "/v1/profiles/names/{}?mode=declared&meta=full",
                         REPLAY_PROFILE_UNSUPPORTED_ROUTE_NAME
                     ),
                 },
                 ReplayRoute {
                     label: "unsupported-profile-resolver",
                     uri: format!(
-                        "/v1/resolvers/{}/{}",
+                        "/v1/resolvers/{}/{}/overview?meta=full",
                         corpus.resolver_chain_id, REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS
                     ),
                 },

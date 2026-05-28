@@ -1,4 +1,5 @@
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_returns_declared_and_verified_sections_by_mode() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let logical_name_id = "ens:alice.eth";
@@ -421,7 +422,7 @@ async fn seed_ensv1_dynamic_resolver_profile_fixture(
             "ens_v1",
             31,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let resolver_manifest_id = database
@@ -432,7 +433,7 @@ async fn seed_ensv1_dynamic_resolver_profile_fixture(
             "ens_v1",
             32,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_contract_instance_id = Uuid::from_u128(0x9d600);
@@ -652,7 +653,7 @@ async fn seed_basenames_l2resolver_dynamic_profile_fixture(
             "basenames_v1",
             41,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let resolver_manifest_id = database
@@ -663,7 +664,7 @@ async fn seed_basenames_l2resolver_dynamic_profile_fixture(
             "basenames_v1",
             42,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_contract_instance_id = Uuid::from_u128(0x9b600);
@@ -1032,7 +1033,7 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
     let payload = get_resolution_payload(
         database,
-        "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash",
+        "/v1/profiles/names/alice.eth?mode=declared&meta=full",
     )
     .await
     .with_context(|| format!("ENSv1 dynamic resolver {case_label} readback request failed"))?;
@@ -1080,20 +1081,6 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "entries": [
                 {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "unsupported",
-                    "unsupported_reason": addr_unsupported_reason,
-                },
-                {
-                    "record_key": "text",
-                    "record_family": "text",
-                    "selector_key": null,
-                    "status": "unsupported",
-                    "unsupported_reason": text_unsupported_reason,
-                },
-                {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
                     "selector_key": null,
@@ -1120,7 +1107,7 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
     let payload = get_resolution_payload(
         database,
-        "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text,contenthash",
+        "/v1/profiles/names/alice.base.eth?mode=declared&meta=full",
     )
     .await
     .with_context(|| format!("Basenames dynamic resolver {case_label} readback request failed"))?;
@@ -1173,20 +1160,6 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "entries": [
                 {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "unsupported",
-                    "unsupported_reason": addr_unsupported_reason,
-                },
-                {
-                    "record_key": "text",
-                    "record_family": "text",
-                    "selector_key": null,
-                    "status": "unsupported",
-                    "unsupported_reason": text_unsupported_reason,
-                },
-                {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
                     "selector_key": null,
@@ -1222,7 +1195,9 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_overview(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/resolvers/base-mainnet/{resolver_address}"))
+                .uri(format!(
+                    "/v1/resolvers/base-mainnet/{resolver_address}/overview?meta=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1232,31 +1207,37 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_overview(
         })?;
     assert_eq!(response.status(), StatusCode::OK, "case {case_label}");
 
-    let payload: ResolverResponse = read_json(response).await?;
-    for section in [
-        "bindings",
-        "aliases",
-        "permissions",
-        "role_holders",
-        "event_summary",
-    ] {
+    let payload: Value = read_json(response).await?;
+    for section in ["nodes", "aliases", "roles", "events"] {
         assert_eq!(
-            payload.declared_state[section]["status"],
-            json!("unsupported"),
-            "case {case_label}, section {section}"
-        );
-        assert_eq!(
-            payload.declared_state[section]["unsupported_reason"],
-            json!("resolver_family_pending"),
+            payload["data"][section],
+            Value::Null,
             "case {case_label}, section {section}"
         );
     }
     assert_eq!(
-        payload.coverage.get("unsupported_reason"),
+        payload["meta"]["support_status"],
+        json!("unsupported"),
+        "case {case_label}"
+    );
+    for section in ["nodes", "aliases", "roles", "events"] {
+        assert!(
+            payload["meta"]["unsupported_fields"]
+                .as_array()
+                .expect("unsupported_fields must be an array")
+                .contains(&json!(section)),
+            "case {case_label}, section {section}"
+        );
+    }
+    assert_eq!(
+        payload["meta"]["coverage"].get("unsupported_reason"),
         Some(&json!("resolver_family_pending")),
         "case {case_label}"
     );
-    assert_eq!(payload.verified_state, None, "case {case_label}");
+    assert!(
+        payload.get("verified_state").is_none(),
+        "case {case_label}"
+    );
 
     Ok(())
 }
@@ -1424,7 +1405,7 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
 
     let supported_payload = get_resolution_payload(
         &database,
-        "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash",
+        "/v1/profiles/names/alice.eth?mode=declared&meta=full",
     )
     .await?;
     let supported_declared_state = supported_payload
@@ -1477,12 +1458,6 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
-                },
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "status": "not_found",
                 }
             ]
         }))
@@ -1602,7 +1577,7 @@ async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_exp
 
     let payload = get_resolution_payload(
         &database,
-        "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash",
+        "/v1/profiles/names/alice.eth?mode=declared&meta=full",
     )
     .await?;
     let declared_state = payload
@@ -1654,20 +1629,6 @@ async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_exp
                 resource_id,
             ),
             "entries": [
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
-                },
-                {
-                    "record_key": "text:com.twitter",
-                    "record_family": "text",
-                    "selector_key": "com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
-                },
                 {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
@@ -1845,7 +1806,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
     .await?;
     let supported_payload = get_resolution_payload(
         &database,
-        "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text,contenthash",
+        "/v1/profiles/names/alice.base.eth?mode=declared&meta=full",
     )
     .await?;
     let supported_declared_state = supported_payload
@@ -1903,12 +1864,6 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
-                },
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "status": "not_found",
                 }
             ]
         }))
@@ -1925,7 +1880,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/resolvers/base-mainnet/{}",
+                    "/v1/resolvers/base-mainnet/{}/overview?meta=full",
                     profile_fixture.supported_resolver_address
                 ))
                 .body(Body::empty())
@@ -1934,65 +1889,41 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
         .await
         .context("supported Basenames dynamic resolver overview request failed")?;
     assert_eq!(supported_overview_response.status(), StatusCode::OK);
-    let supported_overview_payload: ResolverResponse =
-        read_json(supported_overview_response).await?;
+    let supported_overview_payload: Value = read_json(supported_overview_response).await?;
     assert_eq!(
-        supported_overview_payload.declared_state["bindings"],
-        json!({
-            "status": "supported",
-            "count": 1,
-            "items": [{
-                "logical_name_id": logical_name_id,
-                "canonical_display_name": "Alice.base.eth",
+        supported_overview_payload["data"]["nodes"],
+        json!([{
+                "namespace": "basenames",
+                "name": "Alice.base.eth",
                 "normalized_name": "alice.base.eth",
                 "namehash": "namehash:alice.base.eth",
-                "resource_id": resource_id.to_string(),
-                "surface_binding_id": surface_binding_id.to_string(),
-                "binding_kind": "declared_registry_path",
-            }],
-        })
+        }])
     );
     assert_eq!(
-        supported_overview_payload.declared_state["aliases"],
+        supported_overview_payload["data"]["aliases"],
+        json!([])
+    );
+    assert_eq!(supported_overview_payload["data"]["roles"], json!([]));
+    assert_eq!(supported_overview_payload["data"]["events"], Value::Null);
+    assert_eq!(
+        supported_overview_payload["data"]["counts"],
         json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
+            "nodes": 1,
+            "aliases": 0,
+            "role_holders": 0,
+            "events": 1,
         })
     );
     assert_eq!(
-        supported_overview_payload.declared_state["permissions"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
-    );
-    assert_eq!(
-        supported_overview_payload.declared_state["role_holders"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
-    );
-    assert_eq!(
-        supported_overview_payload.declared_state["event_summary"],
-        json!({
-            "status": "supported",
-            "count": 1,
-            "by_kind": {
-                "ResolverChanged": 1,
-            },
-        })
-    );
-    assert_eq!(
-        supported_overview_payload
-            .coverage
+        supported_overview_payload["meta"]["coverage"]
             .get("unsupported_reason"),
         Some(&Value::Null)
     );
-    assert_eq!(supported_overview_payload.verified_state, None);
+    assert_eq!(
+        supported_overview_payload["meta"]["unsupported_fields"],
+        json!(["events"])
+    );
+    assert!(supported_overview_payload.get("verified_state").is_none());
 
     bigname_storage::upsert_normalized_events(
         &database.pool,
@@ -2097,6 +2028,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolve route; namespace inference coverage lives on /v1/profiles/names/{name}"]
 async fn resolution_inferred_route_matches_canonical_ens_for_exact_base_eth() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let logical_name_id = "ens:base.eth";
@@ -2136,6 +2068,7 @@ async fn resolution_inferred_route_matches_canonical_ens_for_exact_base_eth() ->
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolve route; namespace inference coverage lives on /v1/profiles/names/{name}"]
 async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verified_stale_without_persisted_output()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -2286,6 +2219,7 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions records requirement; /v1/profiles/names/{name} now rejects records"]
 async fn resolution_contract_requires_records_for_verified_modes() -> Result<()> {
     let database = HarnessDatabase::new().await?;
 
@@ -2825,6 +2759,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reads_persisted_basenames_transport_direct_answers() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let logical_name_id = "basenames:alice.base.eth";
@@ -3062,6 +2997,7 @@ async fn resolution_contract_reads_persisted_basenames_transport_direct_answers(
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_keeps_basenames_transport_explicit_without_projected_topology()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -3258,6 +3194,7 @@ async fn resolution_contract_keeps_basenames_transport_explicit_without_projecte
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_keeps_out_of_class_basenames_transport_explicit() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let logical_name_id = "basenames:alice.base.eth";
@@ -3400,6 +3337,7 @@ async fn resolution_contract_keeps_out_of_class_basenames_transport_explicit() -
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_keeps_basenames_deferred_path_classes_selector_local() -> Result<()> {
     for case in BasenamesDeferredVerifiedPathCase::all() {
         assert_basenames_deferred_verified_path_case_stays_selector_local(case).await?;
@@ -3409,6 +3347,7 @@ async fn resolution_contract_keeps_basenames_deferred_path_classes_selector_loca
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions records parser; selector-specific coverage lives on /v1/names/{namespace}/{name}/records"]
 async fn resolution_contract_rejects_duplicate_records_for_verified_modes() -> Result<()> {
     let database = HarnessDatabase::new().await?;
 
@@ -3437,6 +3376,7 @@ async fn resolution_contract_rejects_duplicate_records_for_verified_modes() -> R
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions records parser; selector-specific coverage lives on /v1/names/{namespace}/{name}/records"]
 async fn resolution_contract_rejects_malformed_records() -> Result<()> {
     let database = HarnessDatabase::new().await?;
 
@@ -3465,6 +3405,7 @@ async fn resolution_contract_rejects_malformed_records() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let logical_name_id = "ens:alice.eth";
@@ -3590,6 +3531,7 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reuses_exact_name_snapshot_selector_for_at_and_chain_positions()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -3702,6 +3644,7 @@ async fn resolution_contract_reuses_exact_name_snapshot_selector_for_at_and_chai
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_preserves_request_order()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -3807,6 +3750,7 @@ async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_pr
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; execution explain coverage remains on the explain route"]
 async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses_resolution_envelope()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -3924,6 +3868,7 @@ async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; execution explain coverage remains on the explain route"]
 async fn resolution_execution_explain_contract_reads_persisted_avatar_answer_and_reuses_resolution_envelope()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -4052,6 +3997,7 @@ async fn resolution_execution_explain_contract_reads_persisted_avatar_answer_and
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_route() -> Result<()>
 {
     let database = HarnessDatabase::new().await?;
@@ -4184,6 +4130,7 @@ async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_r
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; execution explain coverage remains on the explain route"]
 async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar_answer_and_reuses_resolution_envelope()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -4335,6 +4282,7 @@ async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_route_and_reuses_execution_explain_envelope()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -4516,6 +4464,7 @@ async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_ro
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_returns_selector_local_unsupported_for_non_alias_ancestor_selected_requests()
 -> Result<()> {
     run_resolution_negative_verified_path_case(
@@ -4525,6 +4474,7 @@ async fn resolution_contract_returns_selector_local_unsupported_for_non_alias_an
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_returns_selector_local_unsupported_for_transport_assisted_requests()
 -> Result<()> {
     run_resolution_negative_verified_path_case(
@@ -4637,6 +4587,7 @@ async fn resolution_execution_explain_contract_returns_not_found_for_selector_se
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; profile invalidation coverage lives in apps/api route tests"]
 async fn resolution_execution_invalidation_contract_evicts_persisted_answers_from_mixed_and_explain_routes()
 -> Result<()> {
     for invalidation in [
@@ -4658,6 +4609,7 @@ async fn resolution_execution_invalidation_contract_evicts_persisted_answers_fro
 }
 
 #[tokio::test]
+#[ignore = "removed /v1/resolutions route; slim profile and compact records coverage lives in apps/api route tests"]
 async fn resolution_contract_reads_ensv2_record_inventory_and_declared_cache_statuses() -> Result<()>
 {
     let database = HarnessDatabase::new().await?;
@@ -4860,7 +4812,7 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA/overview?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4869,92 +4821,66 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: ResolverResponse = read_json(response).await?;
+    let payload: Value = read_json(response).await?;
     assert_eq!(
-        payload.data,
+        payload["data"]["chain_id"],
+        json!(chain_id)
+    );
+    assert_eq!(
+        payload["data"]["resolver_address"],
+        json!(resolver_address)
+    );
+    assert_eq!(
+        payload["data"]["counts"],
         json!({
-            "chain_id": chain_id,
-            "resolver_address": resolver_address,
+            "nodes": 2,
+            "aliases": 1,
+            "role_holders": 1,
+            "events": 2,
         })
     );
     assert_eq!(
-        payload.declared_state,
-        json!({
-            "bindings": {
-                "status": "supported",
-                "count": 2,
-                "items": [
-                    {
-                        "logical_name_id": "ens:alice.eth",
-                        "canonical_display_name": "Alice.eth",
-                        "normalized_name": "alice.eth",
-                        "namehash": "namehash:alice.eth",
-                        "resource_id": "00000000-0000-0000-0000-00000000b100",
-                        "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
-                        "binding_kind": "declared_registry_path",
-                    },
-                    {
-                        "logical_name_id": "ens:beta.eth",
-                        "canonical_display_name": "Beta.eth",
-                        "normalized_name": "beta.eth",
-                        "namehash": "namehash:beta.eth",
-                        "resource_id": "00000000-0000-0000-0000-00000000b102",
-                        "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
-                        "binding_kind": "resolver_alias_path",
-                    }
-                ],
+        payload["data"]["nodes"],
+        json!([
+            {
+                "namespace": "ens",
+                "name": "Alice.eth",
+                "normalized_name": "alice.eth",
+                "namehash": "namehash:alice.eth",
             },
-            "aliases": {
-                "status": "supported",
-                "count": 1,
-                "items": [{
-                    "logical_name_id": "ens:beta.eth",
-                    "canonical_display_name": "Beta.eth",
-                    "normalized_name": "beta.eth",
-                    "namehash": "namehash:beta.eth",
-                    "resource_id": "00000000-0000-0000-0000-00000000b102",
-                    "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
-                    "binding_kind": "resolver_alias_path",
-                }],
-            },
-            "permissions": {
-                "status": "supported",
-                "count": 1,
-                "items": [{
-                    "resource_id": "00000000-0000-0000-0000-00000000b100",
-                    "subject": "0x0000000000000000000000000000000000000abc",
-                    "effective_powers": ["set_resolver", "set_records"],
-                    "grant_source": {
-                        "kind": "normalized_event",
-                        "event_identity": "resolver-permission-1",
-                    },
-                    "revocation_source": null,
-                }],
-            },
-            "role_holders": {
-                "status": "supported",
-                "count": 1,
-                "items": [{
-                    "subject": "0x0000000000000000000000000000000000000abc",
-                    "resource_count": 1,
-                    "permission_row_count": 1,
-                    "effective_powers": ["set_records", "set_resolver"],
-                    "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
-                }],
-            },
-            "event_summary": {
-                "status": "supported",
-                "count": 2,
-                "by_kind": {
-                    "PermissionChanged": 1,
-                    "ResolverChanged": 1,
-                },
-            },
-        })
+            {
+                "namespace": "ens",
+                "name": "Beta.eth",
+                "normalized_name": "beta.eth",
+                "namehash": "namehash:beta.eth",
+            }
+        ])
     );
-    assert_eq!(payload.verified_state, None);
     assert_eq!(
-        payload.provenance,
+        payload["data"]["aliases"],
+        json!([{
+            "namespace": "ens",
+            "name": "Beta.eth",
+            "normalized_name": "beta.eth",
+            "namehash": "namehash:beta.eth",
+        }])
+    );
+    assert_eq!(
+        payload["data"]["roles"],
+        json!([{
+            "subject": "0x0000000000000000000000000000000000000abc",
+            "resource_count": 1,
+            "permission_row_count": 1,
+            "effective_powers": ["set_records", "set_resolver"],
+            "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
+        }])
+    );
+    assert_eq!(payload["data"]["events"], Value::Null);
+    assert_eq!(payload.get("verified_state"), None);
+    assert_eq!(payload["meta"]["support_status"], json!("partial"));
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["events"]));
+    assert_eq!(
+        payload["meta"]["provenance"],
         json!({
             "normalized_event_ids": ["101", "202"],
             "raw_fact_refs": [{
@@ -4973,7 +4899,7 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
         })
     );
     assert_eq!(
-        payload.coverage,
+        payload["meta"]["coverage"],
         json!({
             "status": "full",
             "exhaustiveness": "authoritative",
@@ -4983,18 +4909,18 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
         })
     );
     assert_eq!(
-        payload.chain_positions,
+        payload["meta"]["chain_positions"],
         json!({
             "ethereum": {
                 "chain_id": chain_id,
                 "block_number": 202,
                 "block_hash": "0xresolverc8",
                 "timestamp": "2026-04-17T00:00:22Z",
-            }
+            },
         })
     );
-    assert_eq!(payload.consistency, "finalized");
-    assert_eq!(payload.last_updated, "2025-06-01T17:50:02Z");
+    assert_eq!(payload["meta"]["consistency"], json!("finalized"));
+    assert_eq!(payload["meta"]["last_updated"], json!("2025-06-01T17:50:02Z"));
 
     database.cleanup().await?;
     Ok(())
@@ -5121,7 +5047,7 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
     let raw_only_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC")
+                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC/overview?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5130,36 +5056,23 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
 
     assert_eq!(raw_only_response.status(), StatusCode::OK);
 
-    let raw_only_payload: ResolverResponse = read_json(raw_only_response).await?;
+    let raw_only_payload: Value = read_json(raw_only_response).await?;
     assert_eq!(
-        raw_only_payload.declared_state["bindings"]["count"],
+        raw_only_payload["data"]["counts"]["nodes"],
         json!(1)
     );
+    assert_eq!(raw_only_payload["data"]["counts"]["aliases"], json!(0));
     assert_eq!(
-        raw_only_payload.declared_state["permissions"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
+        raw_only_payload["data"]["counts"]["role_holders"],
+        json!(0)
     );
+    assert_eq!(raw_only_payload["data"]["counts"]["events"], json!(1));
+    assert_eq!(raw_only_payload["data"]["aliases"], json!([]));
+    assert_eq!(raw_only_payload["data"]["roles"], json!([]));
+    assert_eq!(raw_only_payload["data"]["events"], Value::Null);
     assert_eq!(
-        raw_only_payload.declared_state["role_holders"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
-    );
-    assert_eq!(
-        raw_only_payload.declared_state["event_summary"],
-        json!({
-            "status": "supported",
-            "count": 1,
-            "by_kind": {
-                "ResolverChanged": 1,
-            },
-        })
+        raw_only_payload["meta"]["unsupported_fields"],
+        json!(["events"])
     );
 
     rebuild_permissions_current(&database, Some(resource_id)).await?;
@@ -5168,7 +5081,7 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC")
+                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC/overview?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5177,48 +5090,36 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: ResolverResponse = read_json(response).await?;
+    let payload: Value = read_json(response).await?;
     assert_eq!(
-        payload.data,
-        json!({
-            "chain_id": "base-mainnet",
-            "resolver_address": resolver_address,
-        })
-    );
-    assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
-    assert_eq!(
-        payload.declared_state["aliases"],
-        json!({
-        "status": "supported",
-        "count": 0,
-        "items": [],
-        })
+        payload["data"]["chain_id"],
+        json!("base-mainnet")
     );
     assert_eq!(
-        payload.declared_state["permissions"]["items"][0],
+        payload["data"]["resolver_address"],
+        json!(resolver_address)
+    );
+    assert_eq!(payload["data"]["counts"]["nodes"], json!(1));
+    assert_eq!(payload["data"]["counts"]["aliases"], json!(0));
+    assert_eq!(payload["data"]["counts"]["role_holders"], json!(1));
+    assert_eq!(payload["data"]["counts"]["events"], json!(3));
+    assert_eq!(
+        payload["data"]["aliases"],
+        json!([])
+    );
+    assert_eq!(
+        payload["data"]["roles"][0],
         json!({
-            "resource_id": resource_id.to_string(),
             "subject": subject,
+            "resource_count": 1,
+            "permission_row_count": 1,
             "effective_powers": ["resolver_control", "resource_control"],
-            "grant_source": {
-                "kind": "normalized_event",
-                "event_identity": "conformance:basenames:resolver-permission-2",
-            },
-            "revocation_source": null,
+            "resource_ids": [resource_id.to_string()],
         })
     );
-    assert_eq!(
-        payload.declared_state["event_summary"],
-        json!({
-            "status": "supported",
-            "count": 3,
-            "by_kind": {
-                "PermissionChanged": 2,
-                "ResolverChanged": 1,
-            },
-        })
-    );
-    assert_eq!(payload.verified_state, None);
+    assert_eq!(payload["data"]["events"], Value::Null);
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["events"]));
+    assert!(payload.get("verified_state").is_none());
 
     database.cleanup().await?;
     Ok(())
@@ -5309,7 +5210,7 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
     let raw_only_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA/overview?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5318,36 +5219,23 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
 
     assert_eq!(raw_only_response.status(), StatusCode::OK);
 
-    let raw_only_payload: ResolverResponse = read_json(raw_only_response).await?;
+    let raw_only_payload: Value = read_json(raw_only_response).await?;
     assert_eq!(
-        raw_only_payload.declared_state["bindings"]["count"],
+        raw_only_payload["data"]["counts"]["nodes"],
         json!(1)
     );
+    assert_eq!(raw_only_payload["data"]["counts"]["aliases"], json!(0));
     assert_eq!(
-        raw_only_payload.declared_state["permissions"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
+        raw_only_payload["data"]["counts"]["role_holders"],
+        json!(0)
     );
+    assert_eq!(raw_only_payload["data"]["counts"]["events"], json!(1));
+    assert_eq!(raw_only_payload["data"]["aliases"], json!([]));
+    assert_eq!(raw_only_payload["data"]["roles"], json!([]));
+    assert_eq!(raw_only_payload["data"]["events"], Value::Null);
     assert_eq!(
-        raw_only_payload.declared_state["role_holders"],
-        json!({
-            "status": "supported",
-            "count": 0,
-            "items": [],
-        })
-    );
-    assert_eq!(
-        raw_only_payload.declared_state["event_summary"],
-        json!({
-            "status": "supported",
-            "count": 1,
-            "by_kind": {
-                "ResolverChanged": 1,
-            },
-        })
+        raw_only_payload["meta"]["unsupported_fields"],
+        json!(["events"])
     );
 
     rebuild_permissions_current(&database, Some(resource_id)).await?;
@@ -5385,7 +5273,7 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA/overview?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5394,68 +5282,29 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: ResolverResponse = read_json(response).await?;
+    let payload: Value = read_json(response).await?;
     assert_eq!(
-        payload.data,
-        json!({
-            "chain_id": "ethereum-mainnet",
-            "resolver_address": resolver_address,
-        })
-    );
-    assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
-    assert_eq!(
-        payload.declared_state["bindings"]["items"][0]["logical_name_id"],
-        json!(logical_name_id)
-    );
-    assert_eq!(payload.declared_state["aliases"]["count"], json!(0));
-    assert_eq!(payload.declared_state["permissions"]["count"], json!(2));
-    assert_eq!(
-        payload.declared_state["permissions"]["items"][0],
-        json!({
-            "resource_id": resource_id.to_string(),
-            "subject": subject,
-            "effective_powers": ["set_records", "set_resolver"],
-            "grant_source": {
-                "kind": "raw_log",
-                "source_event": "EACRolesChanged",
-                "resource_id": resource_id.to_string(),
-                "changed_powers": ["set_records", "set_resolver"],
-            },
-            "revocation_source": null,
-        })
+        payload["data"]["chain_id"],
+        json!("ethereum-mainnet")
     );
     assert_eq!(
-        payload.declared_state["permissions"]["items"][1],
-        json!({
-            "resource_id": other_resource_id.to_string(),
-            "subject": other_subject,
-            "effective_powers": ["set_records"],
-            "grant_source": {
-                "kind": "raw_log",
-                "source_event": "EACRolesChanged",
-                "resource_id": other_resource_id.to_string(),
-                "changed_powers": ["set_records"],
-            },
-            "revocation_source": null,
-        })
+        payload["data"]["resolver_address"],
+        json!(resolver_address)
+    );
+    assert_eq!(payload["data"]["counts"]["nodes"], json!(1));
+    assert_eq!(
+        payload["data"]["nodes"][0]["name"],
+        json!("Alice.eth")
     );
     assert_eq!(
-        payload.declared_state["permissions"]["items"][0]
-            .as_object()
-            .expect("resolver permission summary item must be an object")
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "effective_powers".to_owned(),
-            "grant_source".to_owned(),
-            "resource_id".to_owned(),
-            "revocation_source".to_owned(),
-            "subject".to_owned(),
-        ])
+        payload["data"]["nodes"][0]["normalized_name"],
+        json!("alice.eth")
     );
+    assert_eq!(payload["data"]["counts"]["aliases"], json!(0));
+    assert_eq!(payload["data"]["counts"]["role_holders"], json!(2));
+    assert_eq!(payload["data"]["counts"]["events"], json!(3));
     assert_eq!(
-        payload.declared_state["role_holders"]["items"][0],
+        payload["data"]["roles"][0],
         json!({
             "subject": subject,
             "resource_count": 1,
@@ -5465,7 +5314,7 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
         })
     );
     assert_eq!(
-        payload.declared_state["role_holders"]["items"][1],
+        payload["data"]["roles"][1],
         json!({
             "subject": other_subject,
             "resource_count": 1,
@@ -5475,25 +5324,31 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
         })
     );
     assert_eq!(
-        payload.declared_state["event_summary"],
-        json!({
-            "status": "supported",
-            "count": 3,
-            "by_kind": {
-                "PermissionChanged": 2,
-                "ResolverChanged": 1,
-            },
-        })
+        payload["data"]["roles"][0]
+            .as_object()
+            .expect("resolver permission summary item must be an object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "effective_powers".to_owned(),
+            "permission_row_count".to_owned(),
+            "resource_count".to_owned(),
+            "resource_ids".to_owned(),
+            "subject".to_owned(),
+        ])
     );
+    assert_eq!(payload["data"]["events"], Value::Null);
     assert_eq!(
-        payload.coverage.get("enumeration_basis"),
+        payload["meta"]["coverage"].get("enumeration_basis"),
         Some(&json!("resolver_overview"))
     );
     assert_eq!(
-        payload.coverage.get("source_classes_considered"),
+        payload["meta"]["coverage"].get("source_classes_considered"),
         Some(&json!(["ens_v2_resolver_l1"]))
     );
-    assert_eq!(payload.verified_state, None);
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["events"]));
+    assert!(payload.get("verified_state").is_none());
 
     database.cleanup().await?;
     Ok(())

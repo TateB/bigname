@@ -24,9 +24,12 @@ pub(crate) enum ApiParameterSchema {
     String,
     Boolean,
     UuidString,
-    StringPattern(&'static str),
     StringEnum(&'static [&'static str]),
     StringDefault(&'static str),
+    StringPatternDefault {
+        pattern: &'static str,
+        default: &'static str,
+    },
     StringEnumDefault {
         values: &'static [&'static str],
         default: &'static str,
@@ -125,6 +128,11 @@ const NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "Normalized name within the namespace.",
     ApiParameterSchema::String,
 );
+const INFERRED_NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
+    "name",
+    "Name input normalized before namespace inference.",
+    ApiParameterSchema::String,
+);
 const ADDRESS_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "address",
     "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
@@ -152,8 +160,16 @@ const NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const REQUIRED_NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::required_query(
     "namespace",
-    "Required namespace identifier for the requested primary-name tuple.",
+    "Required namespace identifier.",
     ApiParameterSchema::StringEnum(crate::PUBLIC_NAMESPACES),
+);
+const PRIMARY_NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
+    "namespace",
+    "Primary-name namespace. Defaults to ENS for the app fast path.",
+    ApiParameterSchema::StringEnumDefault {
+        values: crate::PUBLIC_NAMESPACES,
+        default: "ens",
+    },
 );
 const RELATION_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "relation",
@@ -186,7 +202,7 @@ const HISTORY_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "Response view selector.",
     ApiParameterSchema::StringEnumDefault {
         values: &["compact", "full"],
-        default: "full",
+        default: "compact",
     },
 );
 const COMPACT_FULL_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(
@@ -226,32 +242,6 @@ const PAGE_SIZE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
         maximum: crate::MAX_PAGE_SIZE,
     },
 );
-const PAGE_CURSOR_QUERY: ApiRouteParameter = ApiRouteParameter::query(
-    "page_cursor",
-    "Identity façade pagination cursor.",
-    ApiParameterSchema::String,
-);
-const REQUIRED_COIN_TYPE_QUERY: ApiRouteParameter = ApiRouteParameter::required_query(
-    "coin_type",
-    "Required decimal SLIP-44 / ENSIP-11 coin type.",
-    ApiParameterSchema::IntegerMin(0),
-);
-const IDENTITY_ROLES_QUERY: ApiRouteParameter = ApiRouteParameter::query(
-    "roles",
-    "Reverse identity relation filter.",
-    ApiParameterSchema::StringEnumDefault {
-        values: &["OWNED", "MANAGED", "BOTH"],
-        default: "BOTH",
-    },
-);
-const RESOLUTION_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
-    "mode",
-    "Resolution read mode.",
-    ApiParameterSchema::StringEnumDefault {
-        values: &["declared", "verified", "both"],
-        default: "declared",
-    },
-);
 const PRIMARY_NAME_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "mode",
     "Primary-name read mode.",
@@ -259,11 +249,6 @@ const PRIMARY_NAME_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
         values: &["declared", "verified", "both"],
         default: "declared",
     },
-);
-const RECORDS_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
-    "records",
-    "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-    ApiParameterSchema::String,
 );
 const ORDER_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "order",
@@ -342,16 +327,6 @@ pub(crate) const NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     PAGE_SIZE_QUERY,
 ];
 
-pub(crate) const IDENTITY_NAME_PARAMETERS: &[ApiRouteParameter] = &[NAME_PATH];
-
-pub(crate) const IDENTITY_ADDRESS_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
-    ADDRESS_PATH,
-    REQUIRED_COIN_TYPE_QUERY,
-    IDENTITY_ROLES_QUERY,
-    PAGE_SIZE_QUERY,
-    PAGE_CURSOR_QUERY,
-];
-
 pub(crate) const ADDRESS_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ADDRESS_PATH,
     NAMESPACE_QUERY,
@@ -364,32 +339,6 @@ pub(crate) const ADDRESS_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ),
     CURSOR_QUERY,
     PAGE_SIZE_QUERY,
-];
-
-pub(crate) const ADDRESS_NAMES_COUNT_PARAMETERS: &[ApiRouteParameter] = &[
-    ADDRESS_PATH,
-    NAMESPACE_QUERY,
-    APP_RELATION_QUERY,
-    ApiRouteParameter::query(
-        "prefix",
-        "Normalized-name prefix search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "contains",
-        "Normalized-name contains search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "contains_nocase",
-        "Case-insensitive normalized-name contains search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "resolver",
-        "Current declared resolver address filter.",
-        ApiParameterSchema::String,
-    ),
 ];
 
 pub(crate) const ADDRESS_HISTORY_PARAMETERS: &[ApiRouteParameter] = &[
@@ -405,11 +354,14 @@ pub(crate) const ADDRESS_HISTORY_PARAMETERS: &[ApiRouteParameter] = &[
 
 pub(crate) const PRIMARY_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ADDRESS_PATH,
-    REQUIRED_NAMESPACE_QUERY,
-    ApiRouteParameter::required_query(
+    PRIMARY_NAMESPACE_QUERY,
+    ApiRouteParameter::query(
         "coin_type",
-        "Required `coin_type` selector for the requested primary-name tuple.",
-        ApiParameterSchema::StringPattern("^[0-9]+$"),
+        "`coin_type` selector. Defaults to 60 for the app fast path.",
+        ApiParameterSchema::StringPatternDefault {
+            pattern: "^[0-9]+$",
+            default: "60",
+        },
     ),
     PRIMARY_NAME_MODE_QUERY,
 ];

@@ -9,20 +9,17 @@ Bootstrap supported-read contract harness for already-shipped routes and collect
 - `GET /v1/names/{namespace}/{name}/records`
 - `GET /v1/names/{namespace}/{name}/roles`
 - `GET /v1/addresses/{address}/names`
-- `GET /v1/addresses/{address}/names/count`
 - `GET /v1/names/{namespace}/{name}`
+- `GET /v1/profiles/names/{name}`
 - `GET /v1/events`
 - `GET /v1/roles`
 - `GET /v1/resources/lookup`
 - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
-- `GET /v1/resolutions/{namespace}/{name}`
-- `GET /v1/resolve/{name}`
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/primary-names/{address}`
 - `GET /v1/resources/{resource_id}/permissions`
-- `GET /v1/resolvers/{chain_id}/{resolver_address}`
 - `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
 - `GET /v1/history/addresses/{address}`
 - `GET /v1/history/names/{namespace}/{name}`
@@ -148,9 +145,10 @@ Execution notes:
   `history` declared-state sections on `GET /v1/names/{namespace}/{name}`, with
   `declared_state.history.{surface_head,resource_head}` acting as the exact-name links into the
   shipped history routes that satisfy the Phase 6 history-explain deliverable
-- the resolution contract reuses the exact-name rebuild seed and asserts the shipped mixed-route
-  envelope on `GET /v1/resolutions/{namespace}/{name}` across `declared`, `verified`, and `both`
-  modes, including required and invalid `records` handling, the supported declared `topology`,
+- the profile and records contracts reuse the exact-name rebuild seed and assert the shipped
+  profile envelope on `GET /v1/profiles/names/{name}` across `declared`, `verified`, and `both`
+  modes plus selector-specific behavior on `GET /v1/names/{namespace}/{name}/records`, including
+  rejection of `records` on the profile route, the supported declared `topology`,
   `record_inventory`, and `record_cache` sections, the shared record-version-boundary invariant
   across those declared sections, selector identity and cache-subset invariants between
   `record_inventory` and `record_cache`, explicit unsupported verified entries when no shipped
@@ -172,11 +170,11 @@ Execution notes:
   offchain-gateway Basenames path classes stay explicitly deferred as selector-local
   `unsupported` with `provenance.execution_trace_id=null` on the mixed route; beyond those shipped
   lanes, other transport-assisted, other non-alias ancestor-selected, and broader non-wildcard
-  non-direct verified support remain out of scope. The inferred convenience route
-  `GET /v1/resolve/{name}` is locked to the canonical resolution envelope for `base.eth` as ENS
-  and `alice.base.eth` as Basenames, including shared `mode` / `records` semantics and the
-  Basenames verified unsupported selector-local behavior even when an ENS row for the same name
-  has a persisted verified answer. Standalone ENSv2 declared record-inventory coverage
+  non-direct verified support remain out of scope. The namespace-inferred app full-profile route
+  `GET /v1/profiles/names/{name}` is locked to the canonical `{namespace, name}` selection for
+  `base.eth` as ENS and `alice.base.eth` as Basenames, including server-owned profile record
+  selection and Basenames verified unsupported selector-local behavior even when an ENS row for
+  the same name has a persisted verified answer. Standalone ENSv2 declared record-inventory coverage
   reads normalized resolver events into `record_inventory` and `record_cache` only: supported
   selector inventory is limited to retained selector identity and the shared
   `record_version_boundary`, requested `addr:60` and `text` cache entries remain
@@ -252,13 +250,13 @@ Execution notes:
   `scope` query filters. Standalone ENSv2 readback coverage includes resource-scope and
   resolver-scope permission rows from `ens_v2_resolver_l1`, omits fully revoked rows from the
   current collection, and leaves `verified_state` absent
-- the resolver-overview contract seeds `resolver_current` rows and asserts the shipped declared
-  summary sections, including the supported `{status, count, items}` alias envelope narrowed to
-  current `binding_kind=resolver_alias_path` bindings, plus projection provenance, coverage, and
-  lowercase address normalization for `GET /v1/resolvers/{chain_id}/{resolver_address}`.
+- the resolver-overview contract seeds `resolver_current` rows and asserts the shipped compact
+  overview sections, including current `binding_kind=resolver_alias_path` alias rows, role-holder
+  summaries, projection provenance, coverage, and lowercase address normalization for
+  `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`.
   Standalone ENSv2 resolver-overview coverage reads resolver binding, permission, role-holder,
-  and event-summary counts from the declared summary while keeping the permission item shape to
-  `resource_id`, `subject`, `effective_powers`, `grant_source`, and `revocation_source`; it does
+  and event-summary counts from the declared summary while keeping compact role items to
+  `subject`, `resource_count`, `permission_row_count`, `effective_powers`, and `resource_ids`; it does
   not expand the public permission ledger or graduate manifest capabilities
 - the address-history contract seeds `address_names_current` anchors plus the backing surfaces,
   resources, token lineage, bindings, and canonical normalized events; the harness covers the
@@ -306,7 +304,7 @@ Execution notes:
 - resolution execution explain conformance reuses that exact-name rebuild seed, inserts persisted
   execution trace/outcome rows directly, and covers
   `GET /v1/explain/resolutions/{namespace}/{name}/execution`, asserting shared top-level envelope
-  invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
+  invariants with the app full-profile route where applicable, request-order preservation for
   `verified_queries`, presence of the persisted execution summary, explain-route readback of the
   same persisted ENS exact-surface direct-path `contenthash` answer for the requested selector
   set, shipped persisted verified `avatar` explain-route readback only for ENS exact-surface
@@ -324,7 +322,7 @@ Execution notes:
   execution-outcome invalidation APIs to assert that exact manifest,
   topology-boundary, and record-boundary
   invalidation evicts the persisted ENS verified-resolution answer from the mixed
-  `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
+  `GET /v1/profiles/names/{name}?mode=both` route and the execution explain route
 - replay capability conformance seeds a per-test supported-read corpus from existing source-truth
   fixtures, snapshots exact-name, child and address-name collection, name/resource/address
   history, resolution, resource-permissions, resolver-overview, and primary-name route payloads,

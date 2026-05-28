@@ -26,19 +26,12 @@ mod handler_primary_names;
 mod handler_resolution;
 #[path = "handlers/resolution_on_demand.rs"]
 mod handler_resolution_on_demand;
-#[path = "handlers/resolvers.rs"]
-mod handler_resolvers;
 
 use self::{
     handler_app_facing_events::events,
-    handler_app_facing_identity::{
-        identity_address_names, identity_address_names_batch, identity_name, identity_names_batch,
-        indexing_status,
-    },
-    handler_app_facing_names_collection::{address_names_count, names},
-    handler_app_facing_records::{
-        name_records, resolve_records, warm_compact_records_route_sql_path,
-    },
+    handler_app_facing_identity::{identity_lookup, public_status},
+    handler_app_facing_names_collection::names,
+    handler_app_facing_records::{name_records, warm_compact_records_route_sql_path},
     handler_app_facing_resolver_overview::resolver_overview,
     handler_app_facing_roles::{name_roles, resource_lookup, roles},
     handler_collections::{address_names, name_children, resource_permissions},
@@ -50,8 +43,5 @@ use self::{
     handler_history::{address_history, name_history, resource_history},
     handler_namespaces::{namespace_manifests, namespace_metadata},
     handler_primary_names::primary_names,
-    handler_resolution::{
-        explain_resolution_execution_current, resolution_current, resolve_current,
-    },
-    handler_resolvers::resolver_current,
+    handler_resolution::{explain_resolution_execution_current, name_profile},
 };

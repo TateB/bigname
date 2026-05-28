@@ -23,8 +23,9 @@ pub use request_keys::{
     resolution_requested_chain_positions_from_projection,
 };
 pub use support_classes::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
-    ETHEREUM_MAINNET_CHAIN_ID, VerifiedResolutionPathClass, VerifiedResolutionRecord,
+    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE,
+    ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
+    VerifiedResolutionPathClass, VerifiedResolutionRecord,
     VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
 };
 pub use topology::{

@@ -9,6 +9,7 @@ license.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 anyhow.workspace = true
+bigname-domain = { workspace = true }
 bigname-manifests = { workspace = true }
 bigname-storage = { workspace = true }
 futures-util = "0.3.31"

@@ -1,10 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::NormalizedEvent;
 
 use super::{
     LabelRegistered, LabelReserved, NameRegistered_0, NameRegistered_1, NameRenewed_0,
     NameRenewed_1, ParentUpdated, build_preimage_observed_normalized_event, decode_event_log,
-    log_context,
 };
 use crate::block_derived_normalized_events::constants::{
     ENS_V1_NAME_REGISTERED_SIGNATURE, ENS_V1_NAME_RENEWED_SIGNATURE,
@@ -26,7 +25,6 @@ struct LabelPreimageSpec {
     source_event: &'static str,
     signature: &'static str,
     observation_kind: LabelPreimageObservationKind,
-    derivation_context: &'static str,
     indexed_labelhash_topic: Option<usize>,
     missing_labelhash_context: Option<&'static str>,
 }
@@ -42,7 +40,6 @@ const ENS_V1_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_NAME_REGISTERED,
         signature: ENS_V1_NAME_REGISTERED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::RegistrarEthName,
-        derivation_context: "failed to derive registrar .eth preimage",
         indexed_labelhash_topic: Some(1),
         missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
     },
@@ -50,7 +47,6 @@ const ENS_V1_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_NAME_RENEWED,
         signature: ENS_V1_NAME_RENEWED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::RegistrarEthName,
-        derivation_context: "failed to derive registrar .eth preimage",
         indexed_labelhash_topic: Some(1),
         missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
     },
@@ -61,7 +57,6 @@ const ENS_V2_REGISTRY_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_LABEL_REGISTERED,
         signature: LABEL_REGISTERED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::SingleLabel,
-        derivation_context: "failed to derive ENSv2 registry label preimage",
         indexed_labelhash_topic: Some(2),
         missing_labelhash_context: Some(
             "ENSv2 registry observation is missing the explicit labelhash",
@@ -71,7 +66,6 @@ const ENS_V2_REGISTRY_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_LABEL_RESERVED,
         signature: LABEL_RESERVED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::SingleLabel,
-        derivation_context: "failed to derive ENSv2 registry label preimage",
         indexed_labelhash_topic: Some(2),
         missing_labelhash_context: Some(
             "ENSv2 registry observation is missing the explicit labelhash",
@@ -81,7 +75,6 @@ const ENS_V2_REGISTRY_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_PARENT_UPDATED,
         signature: PARENT_UPDATED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::SingleLabel,
-        derivation_context: "failed to derive ENSv2 registry parent label preimage",
         indexed_labelhash_topic: None,
         missing_labelhash_context: None,
     },
@@ -92,7 +85,6 @@ const ENS_V2_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_NAME_REGISTERED,
         signature: ENS_V2_NAME_REGISTERED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::RegistrarEthName,
-        derivation_context: "failed to derive ENSv2 registrar .eth preimage",
         indexed_labelhash_topic: None,
         missing_labelhash_context: None,
     },
@@ -100,7 +92,6 @@ const ENS_V2_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
         source_event: SOURCE_EVENT_NAME_RENEWED,
         signature: ENS_V2_NAME_RENEWED_SIGNATURE,
         observation_kind: LabelPreimageObservationKind::RegistrarEthName,
-        derivation_context: "failed to derive ENSv2 registrar .eth preimage",
         indexed_labelhash_topic: None,
         missing_labelhash_context: None,
     },
@@ -169,12 +160,13 @@ fn build_label_preimage_observed_events(
     let Some(label) = decode_observable_event_label(raw_log, spec.signature) else {
         return Ok(Vec::new());
     };
-    let observation = spec
-        .observation_kind
-        .observe(&label)
-        .with_context(|| log_context(raw_log, spec.derivation_context))?;
+    let Ok(observation) = spec.observation_kind.observe(&label) else {
+        return Ok(Vec::new());
+    };
 
-    validate_indexed_labelhash(raw_log, spec, &observation)?;
+    if !indexed_labelhash_matches(raw_log, spec, &observation)? {
+        return Ok(Vec::new());
+    }
 
     Ok(vec![build_preimage_observed_normalized_event(
         raw_log,
@@ -193,13 +185,13 @@ impl LabelPreimageObservationKind {
     }
 }
 
-fn validate_indexed_labelhash(
+fn indexed_labelhash_matches(
     raw_log: &WatchedRawLogRow,
     spec: &LabelPreimageSpec,
     observation: &PreimageObservation,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(indexed_labelhash_topic) = spec.indexed_labelhash_topic else {
-        return Ok(());
+        return Ok(true);
     };
     let observed_labelhash = observation.labelhashes.first().context(
         spec.missing_labelhash_context
@@ -208,17 +200,9 @@ fn validate_indexed_labelhash(
     if let Some(indexed_labelhash) = raw_log.topics.get(indexed_labelhash_topic)
         && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
     {
-        bail!(
-            "{} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
-            spec.source_event,
-            indexed_labelhash,
-            observed_labelhash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
 
 fn decode_observable_event_label(raw_log: &WatchedRawLogRow, signature: &str) -> Option<String> {

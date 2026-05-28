@@ -577,7 +577,7 @@ async fn insert_active_contract_fixture_with_manifest(
             chain: seed.chain,
             deployment_epoch: seed.deployment_epoch,
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: seed.file_path,
         },
     )
@@ -622,7 +622,7 @@ async fn insert_ens_registry_current_and_old_fixture(
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v3.toml",
         },
     )
@@ -1250,6 +1250,42 @@ fn build_authority_observation_skips_non_utf8_registrar_labels() -> Result<()> {
         &registrar_raw_log(
             vec![unwrapped_name_renewed_topic0(), labelhash],
             encode_controller_label_bytes_event_log_data(&invalid_label, &[1, 2_000_000_000, 3]),
+            1,
+        ),
+        &event_topics,
+    )?;
+    assert_eq!(renewed, None);
+
+    Ok(())
+}
+
+#[test]
+fn build_authority_observation_skips_unnormalizable_registrar_labels() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
+    let owner_topic = hex_string(&abi_word_address(
+        "0x0000000000000000000000000000000000000001",
+    ));
+    let invalid_label = "Ni\u{200d}ck";
+    let labelhash = keccak256_hex(invalid_label.as_bytes());
+
+    let registered = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic,
+            ],
+            encode_controller_label_event_log_data(invalid_label, &[1, 2, 1_800_000_000]),
+            0,
+        ),
+        &event_topics,
+    )?;
+    assert_eq!(registered, None);
+
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), labelhash],
+            encode_controller_label_event_log_data(invalid_label, &[1, 2_000_000_000, 3]),
             1,
         ),
         &event_topics,
@@ -2585,22 +2621,8 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
             99,
         ),
         &event_topics,
-    )?
-    .context("cased NameWrapped observation should decode")?;
-    let AuthorityObservation::WrapperNameWrapped(cased_wrapped_observation) =
-        cased_wrapped_observation
-    else {
-        panic!("expected cased NameWrapped observation");
-    };
-    assert_eq!(cased_wrapped_observation.name.namehash, cased_namehash);
-    assert_eq!(
-        cased_wrapped_observation.name.labelhashes[0],
-        keccak256_hex(b"Sean")
-    );
-    assert_eq!(
-        cased_wrapped_observation.name.normalized_name,
-        "sean.decashed.com"
-    );
+    )?;
+    assert_eq!(cased_wrapped_observation, None);
 
     let nul_label_dns_name = vec![3, b'b', 0, b'd', 3, b'e', b't', b'h', 0];
     assert_eq!(
@@ -2721,7 +2743,7 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -5516,7 +5538,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -5560,7 +5582,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -6871,7 +6893,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
         },
     )
@@ -6885,7 +6907,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -6899,7 +6921,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
         },
     )
@@ -7214,7 +7236,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -7228,7 +7250,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )
@@ -7242,7 +7264,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
         },
     )
@@ -8115,7 +8137,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_registrar/v1.toml",
         },
     )
@@ -8129,7 +8151,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_registry/v1.toml",
         },
     )
@@ -8143,7 +8165,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
             chain: "base-mainnet",
             deployment_epoch: "basenames_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/basenames/basenames_base_resolver/v1.toml",
         },
     )
@@ -8873,7 +8895,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -8917,7 +8939,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
         },
     )

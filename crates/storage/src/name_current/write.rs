@@ -3,6 +3,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::SurfaceBindingKind;
 
+use super::replacement_publish::publish_name_current_replacement_rows;
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
 
 const NAME_CURRENT_REPLACEMENT_BATCH_SIZE: usize = 2_000;
@@ -112,7 +113,7 @@ async fn index_name_current_replacement_rows(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<()> {
     sqlx::query(
-        "CREATE INDEX name_current_replacement_logical_name_id_idx
+        "CREATE UNIQUE INDEX name_current_replacement_logical_name_id_idx
          ON name_current_replacement (logical_name_id)",
     )
     .execute(&mut **executor)
@@ -220,74 +221,6 @@ async fn insert_name_current_replacement_chunk(
         .context("failed to stage name_current replacement chunk")?;
 
     Ok(())
-}
-
-async fn publish_name_current_replacement_rows(
-    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<usize> {
-    let rows_affected = sqlx::query(
-        r#"
-        INSERT INTO name_current (
-            logical_name_id,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            declared_summary,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        )
-        SELECT
-            logical_name_id,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            declared_summary,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM name_current_replacement
-        ON CONFLICT (logical_name_id) DO UPDATE
-        SET
-            namespace = EXCLUDED.namespace,
-            canonical_display_name = EXCLUDED.canonical_display_name,
-            normalized_name = EXCLUDED.normalized_name,
-            namehash = EXCLUDED.namehash,
-            surface_binding_id = EXCLUDED.surface_binding_id,
-            resource_id = EXCLUDED.resource_id,
-            token_lineage_id = EXCLUDED.token_lineage_id,
-            binding_kind = EXCLUDED.binding_kind,
-            declared_summary = EXCLUDED.declared_summary,
-            provenance = EXCLUDED.provenance,
-            coverage = EXCLUDED.coverage,
-            chain_positions = EXCLUDED.chain_positions,
-            canonicality_summary = EXCLUDED.canonicality_summary,
-            manifest_version = EXCLUDED.manifest_version,
-            last_recomputed_at = EXCLUDED.last_recomputed_at
-        "#,
-    )
-    .execute(&mut **executor)
-    .await
-    .context("failed to publish staged name_current replacement rows")?
-    .rows_affected();
-
-    usize::try_from(rows_affected).context("name_current replacement row count exceeds usize")
 }
 
 async fn upsert_name_current_rows_in_transaction(

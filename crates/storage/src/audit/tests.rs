@@ -305,7 +305,7 @@ async fn insert_live_manifest_audit_fixture(pool: &PgPool) -> Result<()> {
             'eth-mainnet',
             'ens_v2',
             'active',
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.1',
             'manifests/ens/ens_v2_registry_l1/v1.toml',
             '{"rollout_status":"active"}'::JSONB
         )
@@ -486,7 +486,7 @@ async fn insert_manifest_alert_persistence_fixture(pool: &PgPool) -> Result<Mani
             'eth-mainnet',
             'ens_v1',
             'active',
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.1',
             'manifests/ens/ens_v1_registry_l1/v7.toml',
             '{"rollout_status":"active"}'::JSONB
         )

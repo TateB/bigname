@@ -40,7 +40,7 @@ fn parse_roles_name_filter(
     name: Option<&str>,
 ) -> ApiResult<Option<(String, String)>> {
     let namespace = namespace.map(str::trim).filter(|value| !value.is_empty());
-    let name = name.map(str::trim).filter(|value| !value.is_empty());
+    let name = parse_optional_exact_name_query_value(name);
 
     match (namespace, name) {
         (None, None) => Ok(None),
@@ -61,7 +61,7 @@ fn parse_required_resource_lookup_name(
     name: Option<&str>,
 ) -> ApiResult<(String, String)> {
     let namespace = namespace.map(str::trim).filter(|value| !value.is_empty());
-    let name = name.map(str::trim).filter(|value| !value.is_empty());
+    let name = parse_optional_exact_name_query_value(name);
 
     match (namespace, name) {
         (Some(namespace), Some(name)) => {
@@ -79,6 +79,10 @@ fn parse_required_resource_lookup_name(
             message: "name is required".to_owned(),
         }),
     }
+}
+
+fn parse_optional_exact_name_query_value(name: Option<&str>) -> Option<&str> {
+    name.filter(|value| !value.is_empty())
 }
 
 async fn ensure_permissions_current_projection_available(

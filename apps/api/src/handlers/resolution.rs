@@ -5,42 +5,18 @@ include!("resolution_explain.rs");
 #[cfg(test)]
 pub(crate) use super::record_inventory_chain_positions_match_selected_snapshot;
 
-pub(super) async fn resolution_current(
-    Path((namespace, name)): Path<(String, String)>,
-    Query(query): Query<ResolutionQuery>,
-    State(state): State<AppState>,
-) -> ApiResult<Json<ResolutionResponse>> {
-    ensure_public_namespace(&namespace)?;
-
-    Ok(Json(
-        resolution_response_for_name(&state, &namespace, &name, query).await?,
-    ))
-}
-
-pub(super) async fn resolve_current(
+pub(super) async fn name_profile(
     Path(name): Path<String>,
-    Query(query): Query<InferredResolutionQuery>,
+    Query(query): Query<NameProfileQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<ResolutionResponse>> {
-    let namespace = infer_resolution_namespace(&name);
-    let query = ResolutionQuery {
-        mode: query.mode,
-        records: query.records,
-        ..ResolutionQuery::default()
-    };
+    let parsed = normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
+    let namespace = parsed.namespace;
+    let normalized_name = parsed.normalized_name;
 
-    Ok(Json(
-        resolution_response_for_name(&state, namespace, &name, query).await?,
-    ))
-}
-
-async fn resolution_response_for_name(
-    state: &AppState,
-    namespace: &str,
-    name: &str,
-    query: ResolutionQuery,
-) -> ApiResult<ResolutionResponse> {
-    let read = load_resolution_records_read(state, namespace, name, query).await?;
+    let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
+    let include_provenance = meta == MetaMode::Full;
+    let read = load_name_profile_records_read(&state, namespace, &normalized_name, query).await?;
     let ResolutionRecordsRead {
         row,
         mode,
@@ -57,20 +33,22 @@ async fn resolution_response_for_name(
         record_inventory_current.as_ref(),
         persisted_verified_outcome.as_ref(),
         &selected_snapshot,
+        include_provenance,
     )
+    .map(Json)
     .map_err(|build_error| {
         error!(
             service = "api",
             namespace = %namespace,
-            name = %name,
+            name = %normalized_name,
             logical_name_id = %logical_name_id,
             mode = ?mode,
             records = ?records,
             error = ?build_error,
-            "failed to build resolution response"
+            "failed to build name profile response"
         );
         ApiError::internal_error(format!(
-            "failed to load resolution projection for name {namespace}/{name}"
+            "failed to load profile projection for name {namespace}/{normalized_name}"
         ))
     })
 }

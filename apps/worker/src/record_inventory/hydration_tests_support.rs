@@ -54,3 +54,26 @@ pub(crate) async fn hydrate_with_values(
     };
     hydrate_record_inventory_text_values_with_client(pool, resource_id, &client).await
 }
+
+pub(crate) async fn hydrate_with_failed_values(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    values: &[(&str, &str, &str, &str)],
+) -> Result<RecordInventoryTextHydrationSummary> {
+    let client = StaticTextHydrationClient {
+        values: values
+            .iter()
+            .map(|(resolver_address, name, text_key, message)| {
+                (
+                    (
+                        normalize_address(resolver_address),
+                        (*name).to_owned(),
+                        (*text_key).to_owned(),
+                    ),
+                    TextHydrationOutcome::Failed((*message).to_owned()),
+                )
+            })
+            .collect(),
+    };
+    hydrate_record_inventory_text_values_with_client(pool, resource_id, &client).await
+}

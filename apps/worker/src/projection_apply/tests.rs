@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use super::derive::derive_normalized_event_invalidations;
+use super::{derive::derive_normalized_event_invalidations, has_primary_hydration_blocking_work};
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -77,6 +77,35 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     insert_event(
         &database,
         EventSeed {
+            event_identity: "projection-apply:resource-permission",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(11),
+            block_hash: Some("0xblock11"),
+            before_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa1"
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
             event_identity: "projection-apply:address",
             namespace: "ens",
             logical_name_id: Some("ens:alice.eth"),
@@ -121,6 +150,33 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     insert_event(
         &database,
         EventSeed {
+            event_identity: "projection-apply:primary-resolver",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(14),
+            block_hash: Some("0xblock14"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000abc",
+                "primary_claim_source": {
+                    "address": "0x0000000000000000000000000000000000000fff",
+                    "namespace": "ens",
+                    "coin_type": "60",
+                    "reverse_node": "0xreverse"
+                }
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
             event_identity: "projection-apply:children",
             namespace: "ens",
             logical_name_id: Some("ens:parent.eth"),
@@ -129,8 +185,8 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
             source_family: "ens_v1_registry_l1",
             derivation_kind: "ens_v1_subregistry_changed",
             chain_id: Some("ethereum-mainnet"),
-            block_number: Some(14),
-            block_hash: Some("0xblock14"),
+            block_number: Some(15),
+            block_hash: Some("0xblock15"),
             before_state: json!({}),
             after_state: json!({}),
             observed_at,
@@ -139,8 +195,8 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     .await?;
 
     let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
-    assert_eq!(summary.scanned_event_count, 5);
-    assert!(summary.enqueued_invalidation_count >= 8);
+    assert_eq!(summary.scanned_event_count, 7);
+    assert!(summary.enqueued_invalidation_count >= 10);
 
     let invalidations = load_invalidations(&database).await?;
     assert!(has_key(&invalidations, "name_current", "ens:alice.eth"));
@@ -181,8 +237,23 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     ));
     assert!(has_key(
         &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa1"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa2"
+    ));
+    assert!(has_key(
+        &invalidations,
         "primary_names_current",
         "0x0000000000000000000000000000000000000eee:ens:60"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "primary_names_current",
+        "0x0000000000000000000000000000000000000fff:ens:60"
     ));
 
     sqlx::query(
@@ -203,6 +274,56 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert_eq!(summary.scanned_event_count, 1);
     let generation = invalidation_generation(&database, "name_current", "ens:alice.eth").await?;
     assert_eq!(generation, 1);
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear generated projection invalidations")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:resource-permission-revoked",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(15),
+            block_hash: Some("0xblock15"),
+            before_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2",
+                "effective_powers": ["resource_control"]
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2",
+                "effective_powers": []
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa2"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000ddd"
+    ));
 
     database.cleanup().await
 }
@@ -380,6 +501,120 @@ async fn derives_record_inventory_cross_resource_invalidations_for_logical_name_
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn primary_hydration_blocking_work_ignores_unrelated_retry_delayed_failures() -> Result<()> {
+    let database = test_database().await?;
+
+    insert_failed_invalidation(
+        &database,
+        "name_current",
+        "ens:retry-delayed.eth",
+        "1 second",
+    )
+    .await?;
+    assert!(
+        !has_primary_hydration_blocking_work(database.pool()).await?,
+        "recently failed unrelated invalidations must not starve primary hydration"
+    );
+
+    insert_failed_invalidation(&database, "name_current", "ens:claimable.eth", "2 minutes").await?;
+    assert!(
+        has_primary_hydration_blocking_work(database.pool()).await?,
+        "failed invalidations become pending once the retry delay expires"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn primary_hydration_blocking_work_detects_primary_retry_delayed_failures() -> Result<()> {
+    let database = test_database().await?;
+
+    insert_failed_invalidation(
+        &database,
+        "primary_names_current",
+        "0x0000000000000000000000000000000000000aaa:ens:60",
+        "1 second",
+    )
+    .await?;
+    assert!(
+        has_primary_hydration_blocking_work(database.pool()).await?,
+        "recently failed primary_names_current invalidations can affect hydration inputs"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn primary_hydration_blocking_work_detects_claimable_invalidations_and_cursor_lag()
+-> Result<()> {
+    let database = test_database().await?;
+    assert!(!has_primary_hydration_blocking_work(database.pool()).await?);
+
+    insert_invalidation(&database, "name_current", "ens:pending.eth").await?;
+    assert!(has_primary_hydration_blocking_work(database.pool()).await?);
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear pending invalidation")?;
+    assert!(!has_primary_hydration_blocking_work(database.pool()).await?);
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:pending-work-cursor-lag",
+            namespace: "ens",
+            logical_name_id: Some("ens:cursor-lag.eth"),
+            resource_id: Some(Uuid::new_v4()),
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(30),
+            block_hash: Some("0xcursor30"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000aaa"
+            }),
+            observed_at: timestamp(1_800_000_300),
+        },
+    )
+    .await?;
+    assert!(has_primary_hydration_blocking_work(database.pool()).await?);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn primary_hydration_blocking_work_detects_active_claimed_invalidations() -> Result<()> {
+    let database = test_database().await?;
+
+    insert_claimed_invalidation(&database, "name_current", "ens:in-flight.eth", "1 minute").await?;
+    assert!(
+        has_primary_hydration_blocking_work(database.pool()).await?,
+        "freshly claimed invalidations are active apply work and must block hydration"
+    );
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear active claimed invalidation")?;
+    insert_claimed_invalidation(
+        &database,
+        "name_current",
+        "ens:stale-claim.eth",
+        "10 minutes",
+    )
+    .await?;
+    assert!(
+        has_primary_hydration_blocking_work(database.pool()).await?,
+        "expired claims are claimable apply work and must block hydration"
+    );
+
+    database.cleanup().await
+}
+
 fn has_key(invalidations: &[(String, String)], projection: &str, projection_key: &str) -> bool {
     invalidations
         .iter()
@@ -449,6 +684,86 @@ async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<(
     .execute(database.pool())
     .await
     .context("failed to insert projection apply test resource")?;
+    Ok(())
+}
+
+async fn insert_invalidation(
+    database: &TestDatabase,
+    projection: &str,
+    projection_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES ($1, $2, '{}'::jsonb)
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection invalidation")?;
+
+    Ok(())
+}
+
+async fn insert_failed_invalidation(
+    database: &TestDatabase,
+    projection: &str,
+    projection_key: &str,
+    failure_age: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            last_failure_at
+        )
+        VALUES ($1, $2, '{}'::jsonb, now() - $3::INTERVAL)
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .bind(failure_age)
+    .execute(database.pool())
+    .await
+    .context("failed to insert failed projection invalidation")?;
+
+    Ok(())
+}
+
+async fn insert_claimed_invalidation(
+    database: &TestDatabase,
+    projection: &str,
+    projection_key: &str,
+    claim_age: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            claim_token,
+            claimed_at
+        )
+        VALUES ($1, $2, '{}'::jsonb, $3, now() - $4::INTERVAL)
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .bind(Uuid::new_v4())
+    .bind(claim_age)
+    .execute(database.pool())
+    .await
+    .context("failed to insert claimed projection invalidation")?;
+
     Ok(())
 }
 

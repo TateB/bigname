@@ -11,12 +11,14 @@ pub(super) fn resolver_resource_hint(
     selector_key: Option<String>,
     selector_hash: Option<String>,
 ) -> Result<ResolverResourceHint> {
-    let normalized_name = dns_decode(&dns_encoded_name)?;
+    let normalized_name = dns_decode(&dns_encoded_name).ok();
     Ok(ResolverResourceHint {
         upstream_resource,
-        logical_name_id: (!normalized_name.is_empty())
-            .then(|| format!("{}:{normalized_name}", raw_log.namespace)),
-        normalized_name: (!normalized_name.is_empty()).then_some(normalized_name),
+        logical_name_id: normalized_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("{}:{name}", raw_log.namespace)),
+        normalized_name,
         dns_encoded_name: Some(dns_encoded_name),
         selector_kind: selector_kind.to_owned(),
         selector_key,

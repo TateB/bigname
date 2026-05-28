@@ -20,20 +20,30 @@ use super::{
 pub async fn rebuild_all_current_projections(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
-    rebuild_all_current_projections_inner(pool, None, false, text_hydration_config).await
+    rebuild_all_current_projections_inner(
+        pool,
+        None,
+        false,
+        text_hydration_config,
+        primary_hydration_config,
+    )
+    .await
 }
 
 pub async fn rebuild_pending_all_current_projections(
     pool: &PgPool,
     normalized_target_block: Option<i64>,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
     rebuild_all_current_projections_inner(
         pool,
         normalized_target_block,
         true,
         text_hydration_config,
+        primary_hydration_config,
     )
     .await
 }
@@ -43,6 +53,7 @@ async fn rebuild_all_current_projections_inner(
     normalized_target_block: Option<i64>,
     skip_completed: bool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
     let mut steps = Vec::with_capacity(ALL_CURRENT_PROJECTION_ORDER.len());
 
@@ -124,11 +135,42 @@ async fn rebuild_all_current_projections_inner(
         address_names::rebuild_address_names_current(pool, None),
         requested_address_count
     ));
-    steps.push(replay_step!(
-        "primary_names_current",
-        primary_name::rebuild_primary_names_current(pool, None, None, None),
-        requested_tuple_count
-    ));
+    steps.push(
+        replay_projection_step(
+            pool,
+            "primary_names_current",
+            normalized_target_block,
+            skip_completed,
+            async {
+                let summary = primary_name::rebuild_primary_names_current(pool, None, None, None)
+                    .await
+                    .context("failed to replay primary_names_current")?;
+                if let Some(config) = primary_hydration_config {
+                    let hydration_summary =
+                        primary_name::hydrate_legacy_reverse_resolver_primary_names(
+                            pool,
+                            config.clone(),
+                        )
+                        .await
+                        .context(
+                            "failed to hydrate primary_names_current legacy reverse-resolver claims",
+                        )?;
+                    if hydration_summary.candidate_tuple_count > 0
+                        || hydration_summary.failed_lookup_count > 0
+                    {
+                        primary_name::log_legacy_reverse_hydration_summary(&hydration_summary);
+                    }
+                }
+                Ok(CurrentProjectionReplayStepSummary {
+                    projection: "primary_names_current",
+                    requested_key_count: summary.requested_tuple_count,
+                    upserted_row_count: summary.upserted_row_count,
+                    deleted_row_count: summary.deleted_row_count,
+                })
+            },
+        )
+        .await?,
+    );
 
     debug_assert_eq!(
         steps.iter().map(|step| step.projection).collect::<Vec<_>>(),

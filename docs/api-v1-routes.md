@@ -2,6 +2,18 @@
 
 Per-route reference. Conventions, snapshot selection, the response envelope, shared objects, and the error model live in [`api-v1.md`](api-v1.md).
 
+## Route Set Guide
+
+Use the route groups as integration guidance, not just documentation order:
+
+| Set | Routes | Use for |
+| --- | --- | --- |
+| Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | Partner-1 feed/profile reads and shadow comparison. Use `profile=feed` for the under-10 ms p95 feed target. |
+| Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | New app, explorer, and public API integrations that want bigname-native semantics. |
+| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | Namespace, manifest, and process/database liveness introspection. |
+| Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
+| Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | Supported surfaces for specialist workflows; prefer canonical product reads for new integrations when they fit. |
+
 ## `GET /v1/namespaces/{namespace}`
 
 Manifest-backed metadata for one public namespace.
@@ -18,7 +30,7 @@ Active manifest versions and capability flags. Declared-only.
 
 ## `GET /v1/names/{namespace}/{name}`
 
-Exact name lookup. Full envelope. Uses the exact-name snapshot selector.
+Exact name lookup. Uses the exact-name snapshot selector and does not include route-level provenance by default.
 
 Query: `at`, `chain_positions`, `consistency`.
 
@@ -44,12 +56,32 @@ Rules:
 - For `namespace=ens` on the ENSv2 `sepolia-dev` profile, the promoted exact-name profile is supported for declared exact-name lookup, backed by `ens_v2_registry_l1` registry/token/lifecycle/resolver-target events plus `ens_v2_registrar_l1` `.eth` registration and renewal events from the admitted `ETHRegistry` and `ETHRegistrar` deployments.[^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-iperm-l34][^v2-events-l15][^v2-iethreg-l32][^v2-iethreg-l53] Coverage: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`. This doesn't widen mainnet, reverse/primary, wrapper authority, migration, Universal Resolver, verified resolution, or execution-explain.
 - For `namespace=basenames`, declared truth comes from the Base authority split (`basenames_base_registry`, `basenames_base_registrar`, `basenames_base_resolver`). `basenames_base_primary`, `basenames_l1_compat`, and `basenames_execution` don't widen this route.[^bn-readme-l70][^bn-revreg-l12][^bn-revreg-l150]
 - `declared_state.control` is the narrow current-resource summary. Full role/permission lineage stays on the dedicated permissions route.
-- Supported `declared_state.resolver` uses `chain_id, address` as the same key as `GET /v1/resolvers/{chain_id}/{resolver_address}`. Both `null` means no declared resolver, not unsupported.
-- Supported `declared_state.record_inventory` uses the same `ResolutionRecordInventory` shape as `GET /v1/resolutions/{namespace}/{name}` and exposes the same `record_version_boundary` for the same snapshot.
+- Supported `declared_state.resolver` uses `chain_id, address` as the same resolver identity key exposed by resolver overview. Both `null` means no declared resolver, not unsupported.
+- Supported `declared_state.record_inventory` uses the same `ResolutionRecordInventory` shape as `GET /v1/profiles/names/{name}` and exposes the same `record_version_boundary` for the same snapshot.
 - `declared_state.history.surface_head` and `resource_head` point at the first canonical rows of `GET /v1/history/names/{namespace}/{name}` under `scope=surface` and `scope=resource`. No `both_head` field; use `scope=both` on the dedicated route.
 - `coverage` matches `GET /v1/coverage/{namespace}/{name}` for the same `{namespace, name}` and snapshot.
 - No `include` expansions. History, permissions, resolution, and primary-name reads stay on their dedicated routes.
 - `verified_state` is `null`.
+
+## `GET /v1/profiles/names/{name}`
+
+App-facing full profile path for callers that need name identity, declared topology/inventory/cache, and verified record results in one request without specifying a namespace.
+
+Query: `at`, `chain_positions`, `consistency`, `mode=declared|verified|both` (default `both`), `meta=none|summary|full`.
+
+Rules:
+
+- The path `name` is normalized before lookup. Namespace inference matches native identity lookup: `base.eth` is ENS, any non-empty `*.base.eth` suffix is Basenames, and other names are ENS. The inferred namespace is returned on `data.namespace`.
+- Default `data` is the compact app identity tuple: `name`, `namespace`, `namehash`, and `resource_id`. It does not include `logical_name_id`, `normalized_name`, `canonical_display_name`, `token_lineage_id`, or `binding_kind`. `meta=full` may return the diagnostic exact-name data shape used by `GET /v1/names/{namespace}/{name}` for the inferred namespace, normalized name, and selected snapshot.
+- `declared_state` is present for `mode=declared|both` and contains compact `topology`, `record_inventory`, and `record_cache` by default.
+- `verified_state` is present for `mode=verified|both` and contains compact `verified_queries` by default.
+- Record selection is server-owned. The route does not accept caller-selected `records`, and `mode=verified|both` executes every selected profile record rather than a caller-supplied subset. The selector set is derived from the selected snapshot's declared state: every `record_inventory.selectors[*].record_key`, every `record_inventory.explicit_gaps[*].record_key`, and every `record_cache.entries[*].record_key`, deduped in that order. If that derived set is non-empty, it is the complete profile record set for this route.
+- Default profile records are used only for a supported but empty declared inventory. In that case the route falls back to the bounded app profile set `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and `text:email`. Missing inventory, stale inventory, or explicitly unsupported inventory does not use fallback records.
+- Supplying `records` on this route returns `400 invalid_input`; selector-specific reads belong on the compact records route.
+- Use `GET /v1/names/{namespace}/{name}/records` for selector-specific app reads. Use `GET /v1/explain/resolutions/{namespace}/{name}/execution` for persisted execution diagnostics of an explicit selector set.
+- Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it. On-demand execution never targets provider `latest` independently of the selected stored snapshot.
+- Default `meta=summary` omits top-level `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance`. It also strips diagnostic topology version boundaries and per-query execution provenance. `meta=full` restores the full route envelope and diagnostic topology/cache/execution metadata.
+- Deeper execution explanation lives on `GET /v1/explain/resolutions/{namespace}/{name}/execution`; profile responses do not inline raw traces or step dumps.
 
 ## `GET /v1/coverage/{namespace}/{name}`
 
@@ -87,133 +119,111 @@ Compact routes advertise only the knobs they own:
 
 | Route | `view` | `mode` | `meta` |
 | --- | --- | --- | --- |
-| `GET /v1/names` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/names` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/profiles/names/{name}` | full profile; selector set is server-derived from declared state, with bounded defaults only for supported empty inventory | `declared`, `verified`, `both` | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/children` | `compact`, `full` | none | `none`, `summary`, `full` |
-| `GET /v1/names/{namespace}/{name}/records` | `compact` only; `full` is compatibility-reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
-| `GET /v1/resolve/{name}/records` | `compact` only; `full` is compatibility-reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
-| `GET /v1/names/{namespace}/{name}/roles` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
-| `GET /v1/roles` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
-| `GET /v1/resources/lookup` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | `compact`, `full` | none | `none`, `summary`, `full` |
-| `GET /v1/events` | `compact` only; `full` is compatibility-reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/names/{namespace}/{name}/records` | `compact` only; `full` is reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
+| `GET /v1/names/{namespace}/{name}/roles` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/roles` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/resources/lookup` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
+| `GET /v1/events` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
 | History routes | `compact`, `full` | none | `none`, `summary`, `full` |
 
-`GET /v1/names` keeps its compatibility bridge: omitting `namespace` spans supported public namespaces. First-party app replacement code should pass an explicit namespace when it knows one. `GET /v1/names?name=...` is a compact collection filter that returns zero or one `CompactDomainSummary`; the canonical exact-name profile remains `GET /v1/names/{namespace}/{name}`.
+`GET /v1/names` keeps its namespace-omitted bridge: omitting `namespace` spans supported public namespaces. First-party app replacement code should pass an explicit namespace when it knows one. `GET /v1/names?name=...` is a compact collection filter that returns zero or one `CompactDomainSummary`; the canonical exact-name profile remains `GET /v1/names/{namespace}/{name}`.
 
-## Identity Façade Routes
+## Identity Routes
 
-These routes are app-facing compatibility routes for the immutable partner-1 requirements in [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). They assemble flat DTOs from existing current projections and persisted projection metadata. They do not run live verified execution by default, do not create partner-specific identity composition, and do not add production ENSv2 manifests.
+`POST /v1/identity:lookup` is the native slim identity primitive for partner-1 feeds, profile aggregation, and shadow comparison.
 
-`NameRecord`:
+Names supplied by callers are normalized before lookup.
 
-- `name`, `namehash`
-- `owner_address`, `manager_address`, `primary_address`
-- `coin_type_addresses`, `text_records`
-- `resolver_address`, `expiration`, `token_id`, `network`
-- `as_of.chain_positions`, `as_of.as_of_timestamp`
-- `status`, `unsupported_fields`
+In native bigname response DTOs, `name` is the canonical normalized name string returned by the API. Clients should render `name` by default and use `namespace + namehash` as the stable identity key.
 
-`ReverseNameRecord` is `NameRecord` plus `is_primary` and `relation_facets`.
+The caller-supplied name is echoed only under `input.name` on lookup result objects.
 
-## `GET /v1/identity/names/{name}`
+A `normalization` object may appear on lookup results when caller input was transformed or rejected. Do not include `normalized_name` as a routine peer of `name` in native DTOs.
 
-Forward identity lookup. Namespace inference follows `GET /v1/resolve/{name}`.
+### `NormalizationInfo`
 
-Response:
+Only present on name lookup results when relevant.
 
 ```json
 {
+  "changed": true,
+  "input_name": "Alice.eth",
+  "reason": "case_normalized"
+}
+```
+
+Rules:
+
+- `record.name` is the normalized output name.
+- `input.name` is the caller-supplied input.
+- `normalization.changed=true` means the API accepted the input but canonicalized it.
+- `status=unnormalizable_input` uses `record=null` and may include `normalization.reason`.
+
+Native `IdentityRecord` detail shape:
+
+```json
+{
+  "name": "alice.eth",
+  "namespace": "ens",
+  "namehash": "0x...",
+  "owner_address": "0x...",
+  "manager_address": "0x...",
+  "primary_address": "0x...",
+  "coin_type_addresses": { "60": "0x..." },
+  "text_records": { "avatar": "ipfs://..." },
+  "resolver_address": "0x...",
+  "expiration": 1770000000,
+  "token_id": "123",
+  "network": "ethereum",
+  "is_primary": true,
+  "relation_facets": ["owned"],
   "status": "success",
-  "record": {}
+  "unsupported_fields": []
 }
 ```
 
-Rules:
+Native feed profile subset:
 
-- A miss returns `200` with `status=not_found` and `record=null`.
-- The route reads `name_current`, `record_inventory_current`, and address relation projections where available.
-- `primary_address` is the declared `addr:60` value when retained; other retained `addr:<coin_type>` records appear in `coin_type_addresses`.
-- `manager_address` is populated only when current relation rows identify one unambiguous effective controller. Ambiguous or unbacked manager values stay `null` and add `manager_address` to `unsupported_fields`.
-- `token_id` is read from projected authority/registration/control summaries first, then falls back to the current surface labelhash as a uint256 string only for ENS second-level `.eth` names with namespace-local ERC-721 identity.
-- Production ENSv2/L2 record coverage remains deferred to a separate manifest/admission workstream.
+```json
+{
+  "name": "alice.eth",
+  "namespace": "ens",
+  "namehash": "0x...",
+  "network": "ethereum",
+  "is_primary": true,
+  "relation_facets": ["owned"],
+  "status": "success"
+}
+```
 
-## `POST /v1/identity/names:batch`
+## `POST /v1/identity:lookup`
+
+Single/batch identity primitive.
 
 Request:
 
 ```json
 {
-  "names": ["alice.eth", "someone.base.eth"]
-}
-```
-
-Response:
-
-```json
-{
-  "results": [
-    {
-      "input": { "name": "alice.eth" },
-      "record": {},
-      "status": "success"
-    }
-  ]
-}
-```
-
-Rules:
-
-- Preserves input order.
-- Deduplicates internally by inferred logical name.
-- Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
-- Over-limit or malformed request bodies return `400 invalid_input`; per-name misses are returned as `status=not_found`.
-
-## `GET /v1/identity/addresses/{address}/names`
-
-Reverse identity lookup.
-
-Query: `coin_type` (required), `roles=OWNED|MANAGED|BOTH`, `page_size`, `page_cursor`.
-
-Response:
-
-```json
-{
-  "input": {
-    "address": "0x0000000000000000000000000000000000000000",
-    "coin_type": 60,
-    "roles": "BOTH"
-  },
-  "records": [],
-  "pagination": {
-    "total_count": 0,
-    "has_more": false
-  }
-}
-```
-
-Rules:
-
-- `coin_type` is required and scopes primary-name marking.
-- `roles` defaults to `BOTH`; `OWNED` maps to token-holder and registrant current relations, while `MANAGED` maps to effective-controller current relations.
-- `is_primary=true` only when `primary_names_current(address, coin_type, namespace)` has a successful normalized claim matching the record's normalized name.
-- For reverse responses, nested `NameRecord.primary_address` is selected from the requested `addr:<coin_type>` when that retained address record is available. Forward responses keep `addr:60` as the default `primary_address`.
-- `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page, and does not run a count scan on the request path.
-- Empty result sets are valid.
-- Stable ordering is `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
-
-## `POST /v1/identity/addresses:names:batch`
-
-Request:
-
-```json
-{
+  "profile": "feed",
+  "namespace": "public",
   "inputs": [
     {
+      "id": "name-1",
+      "kind": "name",
+      "name": "Alice.eth"
+    },
+    {
+      "id": "addr-1",
+      "kind": "address",
       "address": "0x0000000000000000000000000000000000000000",
       "coin_type": 60,
-      "roles": "BOTH",
+      "roles": ["owned", "managed"],
       "page_size": 1,
-      "page_cursor": null
+      "cursor": null
     }
   ]
 }
@@ -225,50 +235,90 @@ Response:
 {
   "results": [
     {
+      "id": "name-1",
+      "kind": "name",
+      "status": "success",
+      "input": { "name": "Alice.eth" },
+      "normalization": {
+        "changed": true,
+        "input_name": "Alice.eth",
+        "reason": "case_normalized"
+      },
+      "record": {
+        "name": "alice.eth",
+        "namespace": "ens",
+        "namehash": "0x..."
+      }
+    },
+    {
+      "id": "addr-1",
+      "kind": "address",
+      "status": "success",
       "input": {
         "address": "0x0000000000000000000000000000000000000000",
         "coin_type": 60,
-        "roles": "BOTH"
+        "roles": ["owned", "managed"]
       },
       "records": [],
-      "pagination": {
+      "page": {
+        "next_cursor": null,
         "total_count": 0,
         "has_more": false
-      },
-      "status": "success"
+      }
     }
   ]
 }
 ```
 
+Unnormalizable input example:
+
+```json
+{
+  "id": "name-1",
+  "kind": "name",
+  "status": "unnormalizable_input",
+  "input": { "name": "bad name" },
+  "normalization": {
+    "changed": false,
+    "input_name": "bad name",
+    "reason": "invalid_normalized_name"
+  },
+  "record": null
+}
+```
+
 Rules:
 
-- Preserves one result group per input.
-- Requires `coin_type` per input.
-- Deduplicates identical storage reads internally while preserving requested pagination per input.
-- Omitting `page_size` defaults to `1` for batched feed rendering. Pass a larger `page_size` when using the batch route for profile-style expansion.
-- Empty result sets are successful.
-- `pagination.total_count` is always populated for each result group from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page.
-- Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- `profile=feed` is the partner-1 latency path. Address inputs return at most one compact identity row plus `total_count`, backed by indexed feed/count sidecars.
+- `profile=detail` is the profile aggregation path. Address inputs return paged full native `IdentityRecord` rows and name inputs return full native `IdentityRecord`.
+- `profile=shadow` currently follows `detail` response shape for deterministic migration comparison.
+- Address inputs require `coin_type` per input. Address misses return `records=[]`, `status=success`, and `total_count=0` unless the input itself is invalid.
+- Explicit `namespace=ens|basenames` is supported for name inputs only in this slice. Address inputs use `namespace=public`/`auto` semantics and reject explicit namespace filters; use canonical address routes for namespace-scoped address collections.
+- Name misses return `record=null`, `status=not_found`.
+- Input order and grouping are preserved. Backend planning may coalesce identical internal reads by normalized input key, selected namespace, `coin_type`, roles, and page request.
+- Native identity record equality is `namespace + namehash`; deterministic name-order pagination may still sort by `(namespace, name, namehash)`.
+- `profile=feed` is the only identity profile counted against partner-1 feed latency SLOs. `profile=detail`, `profile=shadow`, and full coverage/provenance diagnostics are outside that SLO.
 
-## `GET /v1/status/indexing`
+## `GET /v1/status`
 
-Projection/indexing status by chain. This is not `/healthz`; `/healthz` remains process and database liveness.
+Projection/indexing readiness and chain lag. This is not `/healthz`; `/healthz` remains process and database liveness.
 
 Response:
 
 ```json
 {
-  "status": "ready",
-  "chains": {
-    "ethereum-mainnet": {
-      "canonical_block": 0,
-      "safe_block": 0,
-      "finalized_block": 0,
-      "latest_projected_block": 0,
-      "latest_projected_timestamp": null,
-      "projection_lag_blocks": 0,
-      "projection_lag_seconds": null
+  "data": {
+    "status": "ready",
+    "chains": {
+      "ethereum-mainnet": {
+        "canonical_block": 0,
+        "safe_block": 0,
+        "finalized_block": 0,
+        "latest_projected_block": 0,
+        "latest_projected_timestamp": null,
+        "projection_lag_blocks": 0,
+        "projection_lag_seconds": null
+      }
     }
   }
 }
@@ -298,7 +348,7 @@ Rules:
 - Sort orders break ties on `(namespace, normalized_name, namehash)`. `null` sort values order after non-null on `asc`, before non-null on `desc`.
 - `include=record_summaries` adds compact record counts, known text-key hints, avatar/content-hash presence, and known coin-type hints from declared inventory/cache. No verified execution.
 - `include=total_count` populates `meta.total_count` for the filtered set before cursor slicing where supported. Unsupported combinations leave `total_count=null` and add `total_count` to `meta.unsupported_fields`.
-- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+- `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/names/{namespace}/{name}/children`
 
@@ -311,7 +361,7 @@ Each compact item: `name`, `normalized_name`, `label_name`, `labelhash`, `nameha
 Rules:
 
 - `view=compact` is the default. `view=full` returns the existing full-envelope declared child collection.
-- `name` is the child display name; `label_name` is the single child label relative to the requested parent.
+- `name` is the child identity name; `label_name` is the single child label relative to the requested parent.
 - `labelhash` is `null` when the projection doesn't carry a stable label hash.
 - `owner` and `registrant` are `null` when not projected for that child; this doesn't imply route-level unsupported.
 - `include=counts` adds `subname_count` per child where projected. When unprojected, the field is `null` and `meta.unsupported_fields` includes `subname_count` unless `meta=none`.
@@ -338,12 +388,12 @@ Rules:
 - `content_hash=true` requests the declared content-hash selector.
 - `coin_types` is a comma-separated list of textual coin-type selectors.
 - `mode=declared` uses `record_cache` and `record_inventory`. No live execution.
-- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/resolutions/{namespace}/{name}`. Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it.
+- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/profiles/names/{name}`. Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it.
 - `mode=auto`: an authoritative declared profile uses local inventory/cache only when the declared cache can satisfy every requested value from replayable state, including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild. Requested selectors with explicit declared gaps, unretained declared values, or no declared selectors use verified output instead, including on-demand Universal Resolver execution at the selected stored snapshot when no exact-snapshot output exists.
 - Without declared selectors, `mode=auto|verified|both` may probe the basic app profile set (`addr:60`, `avatar`, `contenthash`, text keys `description`, `url`, `email`).
 - On-demand execution never targets provider `latest` independently of the selected stored snapshot. If the provider cannot serve that block, the route returns `409 stale`; declared cache is not a fallback for a verified miss.
 - Selector-specific record history isn't on this route. Use `GET /v1/events` or history routes with event-type filters.
-- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+- `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/names/{namespace}/{name}/roles`
 
@@ -351,7 +401,7 @@ Compact role rows for the name's current resource.
 
 Query: `account`, `role_bitmap`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
-Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/addresses/{address}/names`
 
@@ -371,29 +421,6 @@ Rules:
 - `record_count` counts distinct stable declared selectors at the current version boundary (same answer shape as `Resolution.record_inventory`).
 - For `namespace=basenames`, address-name membership and relations come from the Base authority split. Reverse-claim and transport state don't add rows or widen relations.[^bn-readme-l69][^bn-readme-l70][^bn-revreg-l12]
 
-## `GET /v1/addresses/{address}/names/count`
-
-Count companion to `GET /v1/names` address relation filters.
-
-Query: `namespace`, `relation=token_holder|registrant|effective_controller|any`, `prefix`, `contains`, `contains_nocase`, `resolver`.
-
-```json
-{
-  "data": {
-    "address": "0x0000000000000000000000000000000000000000",
-    "namespace": "ens",
-    "relation": "token_holder",
-    "count": 0
-  },
-  "meta": {
-    "support_status": "partial",
-    "unsupported_filters": []
-  }
-}
-```
-
-`relation=any` counts the deduped union. Filter support matches `GET /v1/names`. The count is over the filtered set before any cursor slice. No item rows, provenance, or coverage detail by default.
-
 ## `GET /v1/resources/lookup`
 
 Compact lookup from `{namespace, name}` to current `resource_id`.
@@ -412,7 +439,7 @@ Query: `namespace`, `name`, `view=compact`, `meta=none|summary|full`. Both `name
 }
 ```
 
-`resource_id` is opaque and is the stable API key for resource-scoped roles and permissions. `resource_hex` is deferred unless a stable projected field is documented for the namespace; clients must not derive it from `resource_id`, `namehash`, token ID, or calldata. Reads the same exact-name projection as `GET /v1/names/{namespace}/{name}`. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+`resource_id` is opaque and is the stable API key for resource-scoped roles and permissions. `resource_hex` is deferred unless a stable projected field is documented for the namespace; clients must not derive it from `resource_id`, `namehash`, token ID, or calldata. Reads the same exact-name projection as `GET /v1/names/{namespace}/{name}`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resources/{resource_id}/permissions`
 
@@ -450,37 +477,13 @@ Rules:
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
 - Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
-- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
-
-## `GET /v1/resolvers/{chain_id}/{resolver_address}`
-
-Resolver overview.
-
-`data` identifies the resolver target. `declared_state`:
-
-- `bindings`: `ResolverOverviewBindingSummary | UnsupportedSummary`
-- `aliases`: `ResolverOverviewBindingSummary | UnsupportedSummary`
-- resolver-scoped permissions
-- role-holder summary
-- resolver event summary
-
-Declared-only; `verified_state` is `null`. No query parameters.
-
-Rules:
-
-- Supported enumerable `bindings` include every current resolver-linked binding whose target matches the route, regardless of `binding_kind`.
-- `aliases` reuses the same `{status, count, items}` envelope but narrows `items` to the `binding_kind=resolver_alias_path` subset of current resolver-linked bindings. No historical alias enumeration.
-- For an enumerable target with no current alias binding, `aliases` returns `{status:"supported", count:0, items:[]}`.
-- For ENSv1 PublicResolver-generation targets admitted through the supported gate, `bindings`, `aliases`, and resolver event fan-in summaries return `UnsupportedSummary` with `unsupported_reason="resolver_binding_enumeration_not_projected"` rather than enumerating every name pointing at that shared resolver.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l66][^v1-pres-l114] Exact-name resolver state stays on exact-name and resolution routes.
-- A discovered ENSv1 target with `pending` or `unsupported` profile state, or an admitted legacy generation without the requested family, returns explicit `UnsupportedSummary` rather than zero-count latest-PublicResolver summaries.
-- For Basenames, a discovered target requires `L2Resolver`-compatible `supported` profile state for the requested family; otherwise explicit `UnsupportedSummary`. The ENSv1 gate, L1 transport, and offchain gateways don't satisfy this.[^bn-l2resolver-l22][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
-- Counts for nodes, aliases, and role holders live inside the declared summaries.
+- `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
 
-Compact resolver overview using the same target and `resolver_current` boundary as the full-envelope route.
+Compact resolver overview using the resolver target and `resolver_current` boundary.
 
-Query: `include=nodes,aliases,roles,events`, `view=compact|full`, `meta=none|summary|full`.
+Query: `include=nodes,aliases,roles,events`, `view=compact`, `meta=none|summary|full`.
 
 Defaults: `view=compact`, `meta=summary`, `include=nodes,aliases,roles,events`.
 
@@ -492,129 +495,7 @@ Rules:
 - `nodes` and `aliases` are `null` when their fan-in is unprojected, and they appear in `meta.unsupported_fields` accordingly. Unsupported fan-in is never rendered as a supported zero count.
 - `roles` is the compact role-holder list from resolver-scoped permission rows when projected; row-granular lineage stays on permissions routes.
 - `events` is a compact event list from canonical normalized events for the target when projected. Selector-specific record history is deferred.
-- `view=full` delegates to the full-envelope route when supported; otherwise reserved and returns `400 invalid_input`.
-
-## `GET /v1/resolutions/{namespace}/{name}`
-
-Mixed declared+verified resolution. Canonical route. `namespace` is part of the public resource identity and is the stable storage/execution/cache key.
-
-Query: `at`, `chain_positions`, `consistency`, `mode=declared|verified|both`, `records`.
-
-`data` matches `GET /v1/names/{namespace}/{name}` for the snapshot.
-
-Populated `declared_state`:
-
-- `topology`: `ResolutionTopology | UnsupportedSummary`
-- `record_inventory`: `ResolutionRecordInventory | UnsupportedSummary`
-- `record_cache`: `ResolutionRecordCache | UnsupportedSummary`
-
-Populated `verified_state`:
-
-- `verified_queries`
-
-Example fully-supported declared shape:
-
-```json
-{
-  "topology": {
-    "registry_path": [
-      {"logical_name_id": "ens:alice.eth", "namespace": "ens", "normalized_name": "alice.eth", "canonical_display_name": "alice.eth", "namehash": "0x...", "resource_id": "00000000-0000-0000-0000-000000000000", "binding_kind": "declared_registry_path"}
-    ],
-    "subregistry_path": [],
-    "resolver_path": [
-      {"logical_name_id": "ens:alice.eth", "namespace": "ens", "normalized_name": "alice.eth", "canonical_display_name": "alice.eth", "resource_id": "00000000-0000-0000-0000-000000000000", "chain_id": "ethereum-mainnet", "address": "0x...", "latest_event_kind": "ResolverChanged"}
-    ],
-    "wildcard": {"source": null, "matched_labels": []},
-    "alias": {"final_target": null, "hops": []},
-    "version_boundaries": {
-      "topology_version_boundary": {"logical_name_id": "ens:alice.eth", "resource_id": "00000000-0000-0000-0000-000000000000", "normalized_event_id": null, "event_kind": null, "chain_position": {"chain_id": "ethereum-mainnet", "block_number": 0, "block_hash": "0x0", "timestamp": "2026-04-16T00:00:00Z"}},
-      "record_version_boundary": {"logical_name_id": "ens:alice.eth", "resource_id": "00000000-0000-0000-0000-000000000000", "normalized_event_id": null, "event_kind": null, "chain_position": {"chain_id": "ethereum-mainnet", "block_number": 0, "block_hash": "0x0", "timestamp": "2026-04-16T00:00:00Z"}}
-    },
-    "transport": {"source_chain_id": null, "target_chain_id": null, "contract_address": null, "latest_event_kind": null}
-  },
-  "record_inventory": {
-    "record_version_boundary": {"logical_name_id": "ens:alice.eth", "resource_id": "00000000-0000-0000-0000-000000000000", "normalized_event_id": null, "event_kind": null, "chain_position": {"chain_id": "ethereum-mainnet", "block_number": 0, "block_hash": "0x0", "timestamp": "2026-04-16T00:00:00Z"}},
-    "enumeration_basis": {"observed_selectors": true, "capability_declared_families": true, "globally_enumerable": false},
-    "selectors": [],
-    "explicit_gaps": [],
-    "unsupported_families": [],
-    "last_change": null
-  },
-  "record_cache": {
-    "record_version_boundary": {"logical_name_id": "ens:alice.eth", "resource_id": "00000000-0000-0000-0000-000000000000", "normalized_event_id": null, "event_kind": null, "chain_position": {"chain_id": "ethereum-mainnet", "block_number": 0, "block_hash": "0x0", "timestamp": "2026-04-16T00:00:00Z"}},
-    "entries": []
-  }
-}
-```
-
-Rules:
-
-- Uses the exact-name snapshot for data, declared sections, coverage, verified support, and execution target.
-- `mode=verified|both`: persisted verified output is eligible only when its stored chain positions exactly match the selected snapshot. When matching output is missing for a supported ENS Universal Resolver selector, the route executes on demand against the selected snapshot, persists the trace and outcome, and returns it.[^v1-iur-l44][^v1-iur-l52]
-- `topology`, `record_inventory`, and `record_cache` are always present as objects when `declared_state` is populated. Missing projections return `UnsupportedSummary`.
-- Callers round-trip the surfaced `record_key` strings in `records`. `record_family` and `selector_key` are explanatory.
-- `record_inventory` defines the known selector space and version boundary. It does not imply global enumeration.
-- `record_cache` is the declared last-known-value view over that space. It never implies verified execution ran.
-- For ENSv1 and Basenames, a current resolver target alone doesn't claim complete `record_inventory`, `record_cache`, or resolver-overview support. Retained resolver-local events may produce selector-level cache successes; complete family coverage requires resolver-profile admission for that family.[^v1-ens-l12][^v1-pres-l20][^v1-pres-l31][^bn-registry-l132][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l22]
-- `record_version_boundary` is identical across `topology.version_boundaries.record_version_boundary`, `record_inventory.record_version_boundary`, and `record_cache.record_version_boundary` when those sections are supported together.
-- `record_cache.entries[*]` and `verified_queries[*]` always echo `record_key` even when status isn't `success`.
-- `records` is comma-separated. In `mode=declared` it's optional; if supplied, `record_cache` narrows to those selectors. In `mode=verified|both`, `records` is required and duplicates return `400 invalid_input`. Malformed selectors return `400 invalid_input`.
-- If the surface doesn't exist for the namespace and snapshot, return `404 not_found`.
-- `verified_queries` returns one result per requested selector in request order. Statuses: `success`, `not_found`, `unsupported`, `execution_failed`. Unsupported selector families, unsupported verified path classes, and namespaces without a verified entrypoint return `200` with `verified_queries[*].status=unsupported`. They never silently downgrade to declared cache.
-- Declared resolver-profile gaps don't suppress verified execution for an otherwise supported Universal Resolver path. In `mode=verified|both`, supported ENS selectors read persisted output or execute on demand.
-
-### Verified support classes
-
-ENS supports three exact-surface classes, evaluated against the same declared topology snapshot used for `mode=declared|both`:
-
-- **Direct path**: `resolver_path[0].logical_name_id == data.logical_name_id`, `wildcard.source=null`, `alias.final_target=null`, all `transport=null`.
-- **Alias-only**: same as direct, but `alias.final_target` non-null with non-empty `hops`.
-- **Wildcard-derived**: `wildcard.source` non-null with non-empty `matched_labels`, `resolver_path[0].logical_name_id == wildcard.source.logical_name_id`, `alias.final_target=null`, `subregistry_path=[]`, all `transport=null`.
-
-Other ENS classes — non-alias ancestor-selected, linked-subregistry ancestor-selected, transport-assisted, CCIP-participating — return `verified_queries[*].status=unsupported`.
-
-Basenames supports one class: exact-surface transport-assisted direct-path through the L1 Resolver. `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`. The class includes CCIP-Read participation because upstream `L1Resolver` emits `OffchainLookup` for non-`base.eth` requests and verifies the callback through `resolveWithProof`.[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Other Basenames classes return `unsupported`.
-
-Verified execution that runs but produces no trustworthy answer returns `status=execution_failed` with `failure_reason`. When a supported ENS selector needs on-demand execution, the Ethereum RPC provider must be configured and able to serve the selected block; otherwise `409 stale` with a configuration message — never declared cache fallback.
-
-For `mode=verified|both`, top-level `provenance` summarizes the request-scoped trace; `verified_queries[*]` may carry narrower per-selector provenance.
-
-Deeper execution explanation lives on `GET /v1/explain/resolutions/{namespace}/{name}/execution`. This route doesn't inline step lists or raw trace dumps. Per-selector verified misses don't change route-level `coverage`.
-
-## `GET /v1/resolve/{name}`
-
-Namespace-inferred convenience for `GET /v1/resolutions/{namespace}/{name}`.
-
-Query: `mode=declared|verified|both`, `records`.
-
-Returns the same envelope as the canonical route after inference.
-
-Inference on the normalized `{name}`:
-
-- exact `base.eth` → `namespace=ens`
-- `*.base.eth` → `namespace=basenames`
-- other supported ENS names → `namespace=ens`
-
-Rules:
-
-- The canonical namespaced route is preferred when callers know the namespace; persisted identity stays namespaced.
-- Inferred namespace is echoed through `data.namespace` and `data.logical_name_id`.
-- `at`, `chain_positions`, `consistency` are not on this route. The canonical default snapshot applies (head, latest stored checkpoint); supported ENS on-demand execution targets that.
-- Selector identity is namespace-local after inference. `*.base.eth` interprets `records` against the Basenames selector space.
-- Inference and verified support are independent. `*.base.eth` does not fall back to `namespace=ens` outside the Basenames support class.
-- Inferred ENS in `mode=verified|both` shares the canonical cache-or-live-execute behavior and the same fail-closed RPC-provider requirement.
-
-## `GET /v1/resolve/{name}/records`
-
-Namespace-inferred convenience for `GET /v1/names/{namespace}/{name}/records`. Default `mode=auto`. Selected-snapshot projection read (no normalized-event catch-up).
-
-Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
-
-Defaults: `mode=auto`, `view=compact`, `meta=summary`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`.
-
-Inference matches `GET /v1/resolve/{name}`. After inference, returns the same `CompactRecordSummary` and verified support boundary as the canonical compact records route. The default also turns on the common app-facing sections so one request returns resolver address, known text keys, avatar, content hash, and known coin addresses where available.
-
-Without declared selectors, `mode=auto` probes the basic app profile set through verified resolution and returns successful fallback text rows plus the ETH coin row when available. It doesn't claim `known_text_keys` inventory support from those probes. No `at`, `chain_positions`, or `consistency`; the canonical default snapshot applies. Supported ENS verified fallback uses that selected stored snapshot and fails closed with `409 stale` when the provider cannot serve it. Identity, support state, and errors stay namespace-local — Basenames doesn't fall back to ENS when the inferred tuple is missing. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+- `view=full` is reserved and returns `400 invalid_input`.
 
 ## `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 
@@ -622,7 +503,7 @@ Persisted verified execution explain.
 
 Query: `records` (required).
 
-`data` matches the current surface and binding from the resolution route. `declared_state` is `null`.
+`data` matches the current surface and binding for the explicit `{namespace, name}` target. `declared_state` is `null`.
 
 `verified_state`:
 
@@ -634,13 +515,13 @@ Rules:
 - Verified-only; doesn't duplicate declared topology, inventory, or cache.
 - `at`, `chain_positions`, `consistency` are not on this route.
 - Duplicate or malformed `records` selectors return `400 invalid_input`.
-- Keyed by the same exact surface and selector set the resolution route would use. Explains the persisted answer.
-- Public verified-resolution support boundary matches the resolution route. ENS direct, alias-only, and wildcard-derived classes are in scope. Basenames supports the exact-surface transport-assisted direct-path class through the L1 Resolver, including persisted CCIP-Read steps.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
-- `verified_queries` reuses selector-scoped result objects, request order, and `ResultStatus` from the resolution route.
+- Keyed by the explicit `{namespace, name}` exact surface and requested selector set. Explains the persisted answer.
+- Public verified-resolution support boundary matches the full profile read for that exact surface. ENS direct, alias-only, and wildcard-derived classes are in scope. Basenames supports the exact-surface transport-assisted direct-path class through the L1 Resolver, including persisted CCIP-Read steps.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
+- `verified_queries` reuses selector-scoped result objects, request order, and `ResultStatus` from full profile reads.
 - `verified_state.execution.execution_trace_id == provenance.execution_trace_id`. `verified_queries[*].provenance` stays under that same `execution_trace_id`.
 - `verified_state.execution.steps` is the persisted ordered step summary. Not raw calldata, raw gateway payloads, or a replayable dump.
 - The route doesn't trigger fresh execution and doesn't synthesize from declared topology. With no persisted answer for the requested surface and selector set, return `404 not_found`.
-- For `{namespace, name, records}`, top-level `coverage` matches `GET /v1/resolutions/{namespace}/{name}`.
+- For `{namespace, name, records}`, top-level `coverage` matches the explicit exact-name target's profile/coverage answer.
 - No `include` expansions.
 
 ## `GET /v1/history/names/{namespace}/{name}`
@@ -697,13 +578,14 @@ Rules:
 - `type` filters by normalized event type or route-owned compact type alias. Unsupported aliases return non-2xx `unsupported`.
 - `from_block` and `to_block` apply to canonical chain position. They don't trigger raw fact scans.
 - Observed and orphaned events are excluded.
-- `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+- `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/primary-names/{address}`
 
-Claimed and verified primary name for one `(address, namespace, coin_type)` tuple.
+Claimed and verified primary name for one address. The app fast path defaults to the ENS
+coin type 60 tuple while still allowing explicit tuple selectors.
 
-Query: `mode=declared|verified|both`, `coin_type` (required), `namespace` (required).
+Query: `mode=declared|verified|both`, `coin_type` (default `60`), `namespace` (default `ens`).
 
 `data`: `address`, `namespace`, `coin_type`.
 
@@ -715,19 +597,24 @@ Rules:
 
 - Head-only. No `at` or `consistency`.
 - `claimed_primary_name` is the candidate only; it never implies verification.
-- For ENS, the admitted claim source is `ens_v1_reverse_l1` reverse intake at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] The route doesn't trigger fresh reverse lookups while serving the declared response. Missing or unsupported claims don't fall back to registry, resolver, or other claim-setting surfaces.
-- `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source. Never synthesized from manifest presence, resolver-backed name data, verified execution identity, tuple presence, or another tuple's stored identity.
+- For ENS, the persisted admitted claim source is `ens_v1_reverse_l1` reverse intake at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
+- `namespace` defaults to `ens` and `coin_type` defaults to `60`. Supplying both selectors keeps the exact tuple behavior for non-default use.
+- Declared lookup first reads `primary_names_current(address, coin_type, namespace)`. If that tuple is missing and the request is the default ENS/60 tuple, the route may perform an on-demand Ethereum Mainnet RPC lookup against the current reverse node resolver and return the normalized `name(bytes32)` value as `claimed_primary_name.name`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25]
+- On-demand ENS/60 fallback provenance is `{source_family: "ens_reverse_rpc", resolver_address}`. It is route-local read provenance, not projection lineage, and does not populate `primary_names_current`.
+- A successful on-demand lookup with no resolver, empty name, wrong namespace, or unnormalizable reverse name returns `claimed_primary_name.status=not_found` with ENS reverse-RPC partial coverage. Missing or failing API RPC configuration suppresses the fallback and keeps the route in the persisted/no-fallback coverage class.
+- For `mode=verified|both`, a successful ENS/60 on-demand reverse claim is verified immediately by calling the ENS Universal Resolver proxy for `addr:60` on the claimed name at provider `latest`.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Matching address returns `verified_primary_name.status=success`; a concrete nonmatching address returns `mismatch`; an empty `addr` result returns `not_found`; an RPC or malformed-return failure returns `execution_failed`.
+- Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source, including projection-owned legacy reverse-resolver hydration for configured event-silent ENSv1 reverse resolvers. Resolver-edge-only legacy hydration may persist the exact row only after the hydrated reverse name resolves forward for `addr:60` through the ENS Universal Resolver at the same hash-pinned checkpoint to an ETH address whose computed `addr.reverse` node matches the candidate node.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52] Outside exact-row hydration and the ENS/60 on-demand fallback, it is never synthesized from manifest presence, resolver-backed name data, verified execution identity, tuple presence, or another tuple's stored identity.
 - For Basenames, the admitted claim family is `basenames_base_primary` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] Claim intake only — does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads.
 - `claimed_primary_name.raw_claim_name` may appear only when `status=invalid_name` for the exact requested tuple, copied verbatim from `primary_names_current.raw_claim_name`. Blank or whitespace-only raw claims become `not_found`; `invalid_name` is for nonblank claims that fail normalization.
-- `claimed_primary_name.provenance` is exact-tuple declared provenance from the requested `primary_names_current` row. It strips any verified-primary lookup/invalidation hook material and omits `execution_trace_id`.
+- `claimed_primary_name.provenance` is exact-tuple declared provenance from the requested `primary_names_current` row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` provenance for the ENS/60 on-demand fallback. Persisted declared provenance strips any verified-primary lookup/invalidation hook material and omits `execution_trace_id`.
 - `verified_primary_name` field boundary: `{status, name?, unsupported_reason?, failure_reason?, provenance?}`. `name` uses `NameRef` and appears only for `success` or `mismatch`. `raw_claim_name` never appears here.
-- `verified_primary_name.provenance` (when present) is the section-local `{execution_trace_id, manifest_versions}` for the same tuple. `execution_trace_id` equals top-level `provenance.execution_trace_id`.
+- `verified_primary_name.provenance` (when present) is the section-local `{execution_trace_id, manifest_versions}` for a persisted same-tuple answer. Route-local ENS/60 on-demand verification has no persisted trace and omits section provenance. The primary-name route does not emit top-level route provenance by default.
 - `verified_primary_name` is authoritative only on `status=success`. `status=mismatch` means the claim normalizes and the verified target resolves for the requested `coin_type` but doesn't equal the requested `{address}`.
 - `failure_reason` on `verified_primary_name` is verification-local and may appear only for `mismatch`, `invalid_name`, or `execution_failed`.
 - Verified persisted-readback uses execution identity `request_type=verified_primary_name` keyed on `{namespace}:{normalized_address}:{coin_type}` (lowercased address).
-- `primary_names_current(address, coin_type, namespace)` is the only claim-side lookup/invalidation anchor.
+- `primary_names_current(address, coin_type, namespace)` remains the only claim-side lookup/invalidation anchor for persisted claim and verified-primary readback.
 - For Basenames in `mode=verified|both`, persisted `verified_primary_name` results are returned for the exact requested tuple via `basenames_execution`. Declared and verified stay separate because upstream keeps reverse-name writes on the Base ReverseRegistrar while verified resolution enters through the L1 Resolver.[^bn-readme-l22][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l193][^bn-l1resolver-l13]
-- Invalid address syntax, missing `namespace` or `coin_type`, or a malformed tuple returns `400 invalid_input`.
+- Invalid address syntax or malformed `namespace` / `coin_type` returns `400 invalid_input`.
 - Unsupported public namespace returns `404 not_found`.
 - No declared or verified answer for the tuple returns `200` with `status=not_found`.
 - Unsupported claim surfaces or verified entrypoints return `200` with the corresponding object `status=unsupported`.
@@ -737,10 +624,11 @@ Rules:
 Local to the requested tuple. Not the single-name `Coverage` from `GET /v1/coverage/{namespace}/{name}`.
 
 - ENS mainnet supported tuple class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]`, `enumeration_basis=primary_name_lookup`.[^v1-revreg-deploy][^v1-ur-deploy]
+- ENS/60 on-demand fallback class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["ens_reverse_rpc"]` for declared-only fallback and `["ens_reverse_rpc","ens_execution_rpc"]` when on-demand forward verification runs, `enumeration_basis=primary_name_lookup`.
 - Basenames mainnet supported tuple class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["basenames_base_primary","basenames_execution"]`, `enumeration_basis=primary_name_lookup`.
 - Out of class: `coverage.status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, `unsupported_reason="primary-name exact-tuple persisted readback is not supported for the requested tuple"`. Out-of-class verified objects use `verified_primary_name.status=unsupported`.
 
-Tuple presence, absence, mismatch, or resolver-backed verification detail doesn't change these states. Class membership chooses route-level coverage; result-object `status` describes the tuple answer inside that class.
+Persisted class membership, ENS/60 fallback availability, and result-object status are separate: `claimed_primary_name.status` describes the answer, while route-level coverage describes whether the answer came from the persisted exact-tuple class, the on-demand ENS/60 reverse RPC class, or neither.
 
 ## App-facing examples
 
@@ -771,8 +659,15 @@ GET /v1/names/ens/alice.eth/children?include=counts&page_size=50
 Resolver records:
 
 ```
-GET /v1/resolve/alice.eth/records
-GET /v1/resolve/alice.eth/records?include=resolver_address,known_text_keys,avatar,content_hash,coins&texts=avatar,com.twitter&coin_types=60,0
+GET /v1/names/ens/alice.eth/records
+GET /v1/names/ens/alice.eth/records?include=resolver_address,known_text_keys,avatar,content_hash,coins&texts=avatar,com.twitter&coin_types=60,0
+```
+
+Full profile with verified records:
+
+```
+GET /v1/profiles/names/alice.eth
+GET /v1/profiles/names/alice.eth?mode=both
 ```
 
 Name history:
@@ -850,13 +745,19 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 [^v1-iur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
 [^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v1-iaddrres-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L11 @ ens_v1@91c966f)
 
+[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
 [^v1-revreg-l19]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L19 @ ens_v1@91c966f)
 [^v1-revreg-l74]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
 [^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
 [^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
+[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)

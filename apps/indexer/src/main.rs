@@ -74,7 +74,10 @@ use provider::{
 };
 #[allow(unused_imports)]
 use reconciliation::*;
-use repair::{EnsV1TextRecordRepairConfig, repair_ens_v1_text_records_from_provider};
+use repair::{
+    EnsV1TextRecordRepairConfig, NameSurfaceNormalizationRepairConfig,
+    repair_ens_v1_text_records_from_provider, repair_name_surface_normalization,
+};
 pub(crate) use replay::{
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
@@ -356,6 +359,33 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
                 missing_log_count = outcome.missing_log_count,
                 skipped_decode_count = outcome.skipped_decode_count,
                 "ENSv1 text record normalized-event repair completed"
+            );
+            Ok(())
+        }
+        RepairCommand::NameSurfaceNormalization(args) => {
+            let pool = bigname_storage::connect(&args.database).await?;
+            let outcome = repair_name_surface_normalization(
+                &pool,
+                NameSurfaceNormalizationRepairConfig {
+                    expected_normalizer_version: args.expected_normalizer,
+                    page_size: args.page_size,
+                    limit: args.limit,
+                    apply_compatible: args.apply_compatible,
+                    record_findings: args.record_findings,
+                },
+            )
+            .await?;
+            tracing::info!(
+                service = "indexer",
+                command = "repair name-surface-normalization",
+                scanned_count = outcome.scanned_count,
+                compatible_count = outcome.compatible_count,
+                updated_compatible_count = outcome.updated_compatible_count,
+                rejected_count = outcome.rejected_count,
+                incompatible_count = outcome.incompatible_count,
+                recorded_finding_count = outcome.recorded_finding_count,
+                remaining_old_normalizer_count = outcome.remaining_old_normalizer_count,
+                "name-surface normalization repair completed"
             );
             Ok(())
         }

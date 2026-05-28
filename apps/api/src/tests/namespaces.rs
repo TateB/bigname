@@ -10,7 +10,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
             "ens_v2",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -33,7 +33,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
             "ens_v2_base",
             2,
             "active",
-            "uts46-v2",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -48,7 +48,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
             "ens_shadow",
             3,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -63,7 +63,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
             "basenames_v1",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -121,7 +121,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
     );
     assert_eq!(
         payload.declared_state.manifests[0].normalizer_version,
-        "uts46-v1"
+        "ensip15@ens-normalize-0.1.1"
     );
     assert_eq!(
         payload.declared_state.manifests[0]
@@ -162,7 +162,7 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
     );
     assert_eq!(
         payload.declared_state.manifests[1].normalizer_version,
-        "uts46-v2"
+        "ensip15@ens-normalize-0.1.1"
     );
     assert_eq!(
         payload.declared_state.manifests[1]
@@ -198,7 +198,7 @@ async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
             "ens_v2",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -213,7 +213,7 @@ async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
             "ens_v2_base",
             2,
             "active",
-            "uts46-v2",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -228,7 +228,7 @@ async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
             "ens_shadow",
             3,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -263,7 +263,7 @@ async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
     );
     assert_eq!(
         payload.declared_state.normalizer_versions,
-        vec!["uts46-v1".to_owned(), "uts46-v2".to_owned()]
+        vec!["ensip15@ens-normalize-0.1.1".to_owned()]
     );
     assert_eq!(payload.coverage.status, "full");
     assert_eq!(payload.coverage.exhaustiveness, "authoritative");
@@ -321,7 +321,7 @@ async fn get_namespace_metadata_returns_empty_summary_when_namespace_has_no_acti
             "ens_shadow",
             1,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -434,7 +434,7 @@ async fn get_namespace_manifests_returns_empty_list_when_namespace_has_no_active
             "ens_shadow",
             1,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -529,4 +529,3 @@ async fn get_namespace_manifests_returns_not_found_for_unknown_namespace() -> Re
     database.cleanup().await?;
     Ok(())
 }
-

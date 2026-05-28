@@ -1,0 +1,1219 @@
+#!/usr/bin/env python3
+"""Live identity feed and ENS normalization validation.
+
+This is an operational check, not a hermetic unit test: it samples the live
+projection database and checks the running API against those rows.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+
+DEFAULT_EXPECTED_NORMALIZER = "ensip15@ens-normalize-0.1.1"
+DEFAULT_API_URL = "http://127.0.0.1:3000"
+
+
+@dataclass(frozen=True)
+class CheckFailure:
+    check: str
+    detail: str
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Sample live identity rows and verify reverse feed, forward name "
+            "lookup, and ENS normalization behavior through /v1/identity:lookup."
+        )
+    )
+    parser.add_argument(
+        "--api-url",
+        default=os.environ.get("BIGNAME_IDENTITY_CHECK_API_URL", DEFAULT_API_URL),
+        help=f"API base URL, default {DEFAULT_API_URL}",
+    )
+    parser.add_argument(
+        "--database-url",
+        default=os.environ.get("BIGNAME_IDENTITY_CHECK_DATABASE_URL"),
+        help="Use host psql against this URL instead of docker exec.",
+    )
+    parser.add_argument(
+        "--postgres-container",
+        default=os.environ.get("BIGNAME_IDENTITY_CHECK_POSTGRES_CONTAINER", "bigname-postgres-1"),
+        help="PostgreSQL Docker container to query when --database-url is omitted.",
+    )
+    parser.add_argument(
+        "--postgres-user",
+        default=os.environ.get("POSTGRES_USER", "bigname"),
+        help="PostgreSQL user for docker-exec psql mode.",
+    )
+    parser.add_argument(
+        "--postgres-db",
+        default=os.environ.get("POSTGRES_DB", "bigname"),
+        help="PostgreSQL database for docker-exec psql mode.",
+    )
+    parser.add_argument(
+        "--expected-normalizer",
+        default=os.environ.get(
+            "BIGNAME_EXPECTED_NORMALIZER_VERSION", DEFAULT_EXPECTED_NORMALIZER
+        ),
+        help=f"Expected normalizer_version, default {DEFAULT_EXPECTED_NORMALIZER}",
+    )
+    parser.add_argument(
+        "--reverse-sample-size",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_REVERSE_SAMPLE_SIZE", "10000")),
+        help="Random distinct reverse-address inputs to sample from the feed sidecar.",
+    )
+    parser.add_argument(
+        "--name-sample-size",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_NAME_SAMPLE_SIZE", "10000")),
+        help="Random current names to verify through forward identity lookup.",
+    )
+    parser.add_argument(
+        "--normalization-sample-size",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_NORMALIZATION_SAMPLE_SIZE", "250")),
+        help="Random ASCII-mutatable names for case and invalid-input normalization probes.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_CHECK_BATCH_SIZE", "1000")),
+        help="Identity lookup request batch size.",
+    )
+    parser.add_argument(
+        "--roles",
+        choices=("owned", "managed", "both"),
+        default=os.environ.get("BIGNAME_IDENTITY_CHECK_ROLES", "both"),
+        help="Reverse identity role set to sample.",
+    )
+    parser.add_argument(
+        "--coin-type",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_CHECK_COIN_TYPE", "60")),
+        help="Reverse identity coin type to request.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=positive_float,
+        default=float(os.environ.get("BIGNAME_IDENTITY_CHECK_TIMEOUT_SECS", "30")),
+        help="HTTP request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--failure-limit",
+        type=positive_int,
+        default=int(os.environ.get("BIGNAME_IDENTITY_CHECK_FAILURE_LIMIT", "20")),
+        help="Maximum detailed failures to print per check family.",
+    )
+    parser.add_argument(
+        "--skip-db-invariants",
+        action="store_true",
+        help="Skip DB normalizer/version and projection invariant checks.",
+    )
+    parser.add_argument(
+        "--exact-db-counts",
+        action="store_true",
+        help="Run exact full-table DB counts for normalizer distribution. This can be slow.",
+    )
+    parser.add_argument(
+        "--exact-random-sampling",
+        action="store_true",
+        help="Use ORDER BY random() instead of faster TABLESAMPLE-based sampling.",
+    )
+    parser.add_argument(
+        "--table-sample-percent",
+        type=positive_float,
+        default=float(os.environ.get("BIGNAME_IDENTITY_TABLE_SAMPLE_PERCENT", "5")),
+        help="TABLESAMPLE percentage for default sampling mode.",
+    )
+    parser.add_argument(
+        "--skip-reverse",
+        action="store_true",
+        help="Skip random reverse-address feed validation.",
+    )
+    parser.add_argument(
+        "--skip-names",
+        action="store_true",
+        help="Skip random forward name validation.",
+    )
+    parser.add_argument(
+        "--skip-normalization",
+        action="store_true",
+        help="Skip case-normalized and invalid-input probes.",
+    )
+    return parser.parse_args()
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def sql_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def log(message: str) -> None:
+    print(f"[identity-10k] {message}", flush=True)
+
+
+def psql_command(args: argparse.Namespace) -> list[str]:
+    if args.database_url:
+        return ["psql", args.database_url]
+    return [
+        "docker",
+        "exec",
+        args.postgres_container,
+        "psql",
+        "-U",
+        args.postgres_user,
+        "-d",
+        args.postgres_db,
+    ]
+
+
+def query_json_lines(args: argparse.Namespace, sql: str) -> list[dict[str, Any]]:
+    command = psql_command(args) + ["-X", "-q", "-t", "-A", "-c", sql]
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise SystemExit(
+            f"missing command {error.filename!r}; use --database-url with psql "
+            "installed, or run with Docker available"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, file=sys.stderr, end="")
+        if error.stderr:
+            print(error.stderr, file=sys.stderr, end="")
+        raise SystemExit(f"psql query failed with exit code {error.returncode}") from error
+
+    rows = []
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def api_url(args: argparse.Namespace, path: str) -> str:
+    return args.api_url.rstrip("/") + path
+
+
+def http_json(
+    args: argparse.Namespace,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], float, int]:
+    body = None
+    headers = {"accept": "application/json"}
+    if payload is not None:
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        body = encoded
+        headers["content-type"] = "application/json"
+
+    request = urllib.request.Request(
+        api_url(args, path),
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as error:
+        response_body = error.read()
+        raise RuntimeError(
+            f"{method} {path} returned HTTP {error.code}: "
+            f"{response_body.decode('utf-8', errors='replace')[:500]}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"{method} {path} failed: {error}") from error
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return json.loads(response_body), elapsed_ms, len(response_body)
+
+
+def identity_lookup(
+    args: argparse.Namespace,
+    inputs: list[dict[str, Any]],
+    namespace: str | None = None,
+) -> tuple[list[dict[str, Any]], float, int]:
+    # Native feed identity records expose normalized names in record.name.
+    payload = {"profile": "feed", "inputs": inputs}
+    if namespace is not None:
+        payload["namespace"] = namespace
+    payload, elapsed_ms, byte_size = http_json(
+        args,
+        "POST",
+        "/v1/identity:lookup",
+        payload,
+    )
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError(f"identity response did not include results: {payload!r}")
+    return results, elapsed_ms, byte_size
+
+
+def chunks(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * pct) - 1))
+    return ordered[index]
+
+
+def role_payload(role: str) -> list[str]:
+    if role == "owned":
+        return ["owned"]
+    if role == "managed":
+        return ["managed"]
+    return ["owned", "managed"]
+
+
+def group_rows_by_namespace(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["namespace"]), []).append(row)
+    return grouped
+
+
+def run_health_check(args: argparse.Namespace) -> list[CheckFailure]:
+    try:
+        payload, elapsed_ms, _byte_size = http_json(args, "GET", "/healthz")
+    except RuntimeError as error:
+        return [CheckFailure("healthz", str(error))]
+    if payload.get("status") != "ready":
+        return [CheckFailure("healthz", f"expected ready, got {payload!r}")]
+    log(f"healthz ready in {elapsed_ms:.2f} ms")
+    return []
+
+
+def run_db_invariants(args: argparse.Namespace) -> list[CheckFailure]:
+    expected = sql_quote(args.expected_normalizer)
+    invariant_sql = f"""
+WITH checks AS (
+  SELECT 'active_manifest_normalizer_mismatch' AS check_name, COUNT(*)::BIGINT AS count
+  FROM manifest_versions
+  WHERE rollout_status = 'active' AND normalizer_version <> {expected}
+  UNION ALL
+  SELECT 'name_surfaces_logical_id_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM name_surfaces
+      WHERE logical_name_id <> namespace || ':' || normalized_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'name_surfaces_unclassified_normalizer_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM name_surfaces surface
+      WHERE surface.normalizer_version <> {expected}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM name_surface_normalization_repair_findings findings
+          WHERE findings.expected_normalizer_version = {expected}
+            AND findings.logical_name_id = surface.logical_name_id
+        )
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'name_surfaces_unclassified_normalization_errors_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM name_surfaces surface
+      WHERE surface.normalization_errors <> '[]'::JSONB
+        AND NOT EXISTS (
+          SELECT 1
+          FROM name_surface_normalization_repair_findings findings
+          WHERE findings.expected_normalizer_version = {expected}
+            AND findings.logical_name_id = surface.logical_name_id
+        )
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'name_current_logical_id_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM name_current
+      WHERE logical_name_id <> namespace || ':' || normalized_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'name_current_surface_display_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM name_current nc
+      JOIN name_surfaces surface
+        ON surface.logical_name_id = nc.logical_name_id
+      LEFT JOIN resources resource
+        ON resource.resource_id = nc.resource_id
+      LEFT JOIN surface_bindings binding
+        ON binding.surface_binding_id = nc.surface_binding_id
+      LEFT JOIN token_lineages token_lineage
+        ON token_lineage.token_lineage_id = nc.token_lineage_id
+      WHERE nc.canonical_display_name <> surface.canonical_display_name
+        AND surface.canonicality_state IN (
+            'canonical'::canonicality_state,
+            'safe'::canonicality_state,
+            'finalized'::canonicality_state
+        )
+        AND (
+            nc.surface_binding_id IS NULL
+            OR (
+                resource.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+                )
+                AND binding.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+                )
+                AND (
+                    nc.token_lineage_id IS NULL
+                    OR token_lineage.canonicality_state IN (
+                        'canonical'::canonicality_state,
+                        'safe'::canonicality_state,
+                        'finalized'::canonicality_state
+                    )
+                )
+            )
+        )
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'address_names_current_surface_display_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM address_names_current anc
+      JOIN name_surfaces surface
+        ON surface.logical_name_id = anc.logical_name_id
+      WHERE anc.canonical_display_name <> surface.canonical_display_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'children_current_surface_display_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM children_current child
+      JOIN name_surfaces surface
+        ON surface.logical_name_id = child.child_logical_name_id
+      WHERE child.canonical_display_name <> surface.canonical_display_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'identity_feed_surface_display_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM address_names_current_identity_feed feed
+      JOIN name_surfaces surface
+        ON surface.logical_name_id = feed.logical_name_id
+      WHERE feed.canonical_display_name <> surface.canonical_display_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'address_names_current_logical_id_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM address_names_current
+      WHERE logical_name_id <> namespace || ':' || normalized_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'identity_feed_logical_id_mismatch_present',
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM address_names_current_identity_feed
+      WHERE logical_name_id <> namespace || ':' || normalized_name
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+  UNION ALL
+  SELECT 'identity_counts_feed_row_mismatch_present',
+    CASE WHEN EXISTS (
+      WITH feed_keys AS (
+        SELECT address, roles
+        FROM address_names_current_identity_feed
+        WHERE coin_type = ''
+        GROUP BY address, roles
+      )
+      SELECT 1
+      FROM address_names_current_identity_counts counts
+      FULL OUTER JOIN feed_keys feed
+        ON feed.address = counts.address
+       AND feed.roles = counts.roles
+      WHERE counts.address IS NULL OR feed.address IS NULL
+      LIMIT 1
+    ) THEN 1 ELSE 0 END
+)
+SELECT json_build_object('check', check_name, 'count', count)::TEXT
+FROM checks
+ORDER BY check_name;
+"""
+    if args.exact_db_counts:
+        distribution_sql = """
+SELECT json_build_object(
+  'normalizer_version', normalizer_version,
+  'count', COUNT(*)::BIGINT
+)::TEXT
+FROM name_surfaces
+GROUP BY normalizer_version
+ORDER BY COUNT(*) DESC, normalizer_version ASC;
+"""
+        distribution_label = "exact"
+    else:
+        distribution_sql = """
+SELECT json_build_object(
+  'normalizer_version', normalizer_version,
+  'sample_count', COUNT(*)::BIGINT
+)::TEXT
+FROM (
+  SELECT normalizer_version
+  FROM name_surfaces TABLESAMPLE SYSTEM (0.25)
+  LIMIT 20000
+) sampled
+GROUP BY normalizer_version
+ORDER BY COUNT(*) DESC, normalizer_version ASC;
+"""
+        distribution_label = "sampled"
+
+    findings_sql = f"""
+SELECT json_build_object(
+  'finding_kind', finding_kind,
+  'count', COUNT(*)::BIGINT
+)::TEXT
+FROM name_surface_normalization_repair_findings
+WHERE expected_normalizer_version = {expected}
+GROUP BY finding_kind
+ORDER BY finding_kind;
+"""
+
+    failures: list[CheckFailure] = []
+    log("checking DB normalizer/version invariants")
+    for row in query_json_lines(args, invariant_sql):
+        count = int(row["count"])
+        status = "ok" if count == 0 else "FAIL"
+        suffix = "present" if row["check"].endswith("_present") else "count"
+        log(f"{status} {row['check']} {suffix}={count}")
+        if count:
+            failures.append(CheckFailure(row["check"], f"count={count}"))
+
+    log(f"name_surfaces normalizer_version distribution ({distribution_label})")
+    for row in query_json_lines(args, distribution_sql):
+        count = row.get("count", row.get("sample_count", 0))
+        log(f"  {row['normalizer_version']}: {count}")
+
+    log("pending name_surface_normalization_repair_findings")
+    finding_rows = query_json_lines(args, findings_sql)
+    if finding_rows:
+        for row in finding_rows:
+            log(f"  {row['finding_kind']}: {row['count']}")
+    else:
+        log("  none")
+    return failures
+
+
+def exact_sampling_args(args: argparse.Namespace) -> argparse.Namespace:
+    exact_args = argparse.Namespace(**vars(args))
+    exact_args.exact_random_sampling = True
+    return exact_args
+
+
+def sample_reverse_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
+    role = sql_quote(args.roles)
+    coin_type = sql_quote(str(args.coin_type))
+    if args.exact_random_sampling:
+        sample_source = f"""
+  SELECT address
+  FROM address_names_current_identity_feed
+  WHERE roles = {role} AND coin_type = ''
+  GROUP BY address
+  ORDER BY random()
+  LIMIT {args.reverse_sample_size}
+"""
+    else:
+        sample_source = f"""
+  SELECT address
+  FROM address_names_current_identity_feed
+    TABLESAMPLE SYSTEM ({args.table_sample_percent})
+  WHERE roles = {role} AND coin_type = ''
+  GROUP BY address
+  LIMIT {args.reverse_sample_size}
+"""
+    sql = f"""
+WITH sampled AS (
+{sample_source}
+),
+relation_groups AS (
+  SELECT
+      anc.address,
+      anc.logical_name_id,
+      BOOL_OR(anc.relation IN ('registrant', 'token_holder')) AS owned,
+      BOOL_OR(anc.relation = 'effective_controller') AS managed
+  FROM sampled
+  JOIN address_names_current anc
+    ON anc.address = sampled.address
+  JOIN name_surfaces surface
+    ON surface.logical_name_id = anc.logical_name_id
+  JOIN resources resource
+    ON resource.resource_id = anc.resource_id
+  JOIN surface_bindings binding
+    ON binding.surface_binding_id = anc.surface_binding_id
+  LEFT JOIN token_lineages token_lineage
+    ON token_lineage.token_lineage_id = anc.token_lineage_id
+  JOIN name_current identity_nc
+    ON identity_nc.logical_name_id = anc.logical_name_id
+  JOIN name_surfaces identity_nc_surface
+    ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+  LEFT JOIN resources identity_nc_resource
+    ON identity_nc_resource.resource_id = identity_nc.resource_id
+  LEFT JOIN surface_bindings identity_nc_binding
+    ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+  LEFT JOIN token_lineages identity_nc_token_lineage
+    ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+  WHERE surface.canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+    AND resource.canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+    AND binding.canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+    AND (
+        anc.token_lineage_id IS NULL
+        OR token_lineage.canonicality_state IN (
+            'canonical'::canonicality_state,
+            'safe'::canonicality_state,
+            'finalized'::canonicality_state
+        )
+    )
+    AND identity_nc_surface.canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+    AND (
+        identity_nc.surface_binding_id IS NULL
+        OR (
+            identity_nc_resource.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+            AND identity_nc_binding.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+            AND (
+                identity_nc.token_lineage_id IS NULL
+                OR identity_nc_token_lineage.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+                )
+            )
+        )
+    )
+  GROUP BY anc.address, anc.logical_name_id
+),
+exact_counts AS (
+  SELECT address, 'owned'::text AS roles, COUNT(*)::BIGINT AS total_count
+  FROM relation_groups
+  WHERE owned
+  GROUP BY address
+  UNION ALL
+  SELECT address, 'managed'::text AS roles, COUNT(*)::BIGINT AS total_count
+  FROM relation_groups
+  WHERE managed
+  GROUP BY address
+  UNION ALL
+  SELECT address, 'both'::text AS roles, COUNT(*)::BIGINT AS total_count
+  FROM relation_groups
+  GROUP BY address
+)
+SELECT json_build_object(
+  'address', sampled.address,
+  'namespace', COALESCE(primary_feed.namespace, fallback_feed.namespace),
+  'normalized_name', COALESCE(primary_feed.normalized_name, fallback_feed.normalized_name),
+  'namehash', COALESCE(primary_feed.namehash, fallback_feed.namehash),
+  'total_count', COALESCE(exact_counts.total_count, 0),
+  'sidecar_total_count', COALESCE(counts.total_count, 0)
+)::TEXT
+FROM sampled
+JOIN address_names_current_identity_feed fallback_feed
+  ON fallback_feed.address = sampled.address
+ AND fallback_feed.roles = {role}
+ AND fallback_feed.coin_type = ''
+LEFT JOIN address_names_current_identity_feed primary_feed
+  ON primary_feed.address = sampled.address
+ AND primary_feed.roles = {role}
+ AND primary_feed.coin_type = {coin_type}
+LEFT JOIN address_names_current_identity_counts counts
+  ON counts.address = sampled.address
+ AND counts.roles = {role}
+LEFT JOIN exact_counts
+  ON exact_counts.address = sampled.address
+ AND exact_counts.roles = {role}
+ORDER BY sampled.address;
+"""
+    return query_json_lines(args, sql)
+
+
+def run_reverse_check(args: argparse.Namespace) -> list[CheckFailure]:
+    log(f"sampling {args.reverse_sample_size} reverse feed addresses")
+    rows = sample_reverse_rows(args)
+    if len(rows) < args.reverse_sample_size and not args.exact_random_sampling:
+        log(
+            f"table sample returned {len(rows)} reverse samples; "
+            "retrying with exact random sampling"
+        )
+        rows = sample_reverse_rows(exact_sampling_args(args))
+    failures: list[CheckFailure] = []
+    if len(rows) < args.reverse_sample_size:
+        failures.append(
+            CheckFailure(
+                "reverse_sample_size",
+                f"requested {args.reverse_sample_size} reverse samples, got {len(rows)}",
+            )
+        )
+    expected_by_id = {f"r{index}": row for index, row in enumerate(rows)}
+    timings: list[float] = []
+    byte_sizes: list[int] = []
+    roles = role_payload(args.roles)
+
+    for batch_index, batch in enumerate(chunks(rows, args.batch_size), start=1):
+        offset = (batch_index - 1) * args.batch_size
+        inputs = [
+            {
+                "id": f"r{offset + index}",
+                "kind": "address",
+                "address": row["address"],
+                "coin_type": args.coin_type,
+                "roles": roles,
+            }
+            for index, row in enumerate(batch)
+        ]
+        results, elapsed_ms, byte_size = identity_lookup(args, inputs)
+        timings.append(elapsed_ms)
+        byte_sizes.append(byte_size)
+        if len(results) != len(inputs):
+            failures.append(
+                CheckFailure(
+                    "reverse_result_count",
+                    f"batch {batch_index}: expected {len(inputs)}, got {len(results)}",
+                )
+            )
+            continue
+        for result in results:
+            result_id = result.get("id")
+            expected = expected_by_id.get(str(result_id))
+            if expected is None:
+                failures.append(
+                    CheckFailure("reverse_unknown_id", f"unexpected result id {result_id!r}")
+                )
+                continue
+            records = result.get("records")
+            page = result.get("page") or {}
+            if result.get("status") != "success" or not isinstance(records, list) or not records:
+                failures.append(
+                    CheckFailure(
+                        "reverse_status",
+                        f"{expected['address']}: expected success with one record, got {result!r}",
+                    )
+                )
+                continue
+            record = records[0]
+            if record.get("name") != expected["normalized_name"]:
+                failures.append(
+                    CheckFailure(
+                        "reverse_name",
+                        f"{expected['address']}: expected {expected['normalized_name']}, "
+                        f"got {record.get('name')}",
+                    )
+                )
+            if record.get("namespace") != expected["namespace"]:
+                failures.append(
+                    CheckFailure(
+                        "reverse_namespace",
+                        f"{expected['address']}: expected {expected['namespace']}, "
+                        f"got {record.get('namespace')}",
+                    )
+                )
+            if int(page.get("total_count", -1)) != int(expected["total_count"]):
+                failures.append(
+                    CheckFailure(
+                        "reverse_total_count",
+                        f"{expected['address']}: expected {expected['total_count']}, "
+                        f"got {page.get('total_count')}",
+                    )
+                )
+            if int(expected.get("sidecar_total_count", -1)) != int(expected["total_count"]):
+                failures.append(
+                    CheckFailure(
+                        "reverse_sidecar_total_count",
+                        f"{expected['address']}: sidecar has "
+                        f"{expected.get('sidecar_total_count')}, exact count is "
+                        f"{expected['total_count']}",
+                    )
+                )
+
+    if timings:
+        log(
+            "reverse feed batches: "
+            f"count={len(timings)} batch_size={args.batch_size} "
+            f"p50={percentile(timings, 0.50):.2f}ms "
+            f"p95={percentile(timings, 0.95):.2f}ms "
+            f"max={max(timings):.2f}ms "
+            f"avg_response={sum(byte_sizes) / len(byte_sizes) / 1024.0:.2f}KB"
+        )
+    return failures
+
+
+def sample_name_rows(
+    args: argparse.Namespace,
+    sample_size: int,
+    ascii_mutatable: bool,
+) -> list[dict[str, Any]]:
+    expected_normalizer = sql_quote(args.expected_normalizer)
+    filter_sql = "TRUE"
+    if ascii_mutatable:
+        filter_sql += " AND nc.normalized_name ~ '[a-z]'"
+    if args.exact_random_sampling:
+        source_sql = f"""
+FROM name_current nc
+JOIN name_surfaces surface
+  ON surface.logical_name_id = nc.logical_name_id
+LEFT JOIN resources resource
+  ON resource.resource_id = nc.resource_id
+LEFT JOIN surface_bindings binding
+  ON binding.surface_binding_id = nc.surface_binding_id
+LEFT JOIN token_lineages token_lineage
+  ON token_lineage.token_lineage_id = nc.token_lineage_id
+WHERE {filter_sql}
+  AND surface.normalizer_version = {expected_normalizer}
+  AND surface.normalization_errors = '[]'::JSONB
+  AND surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      nc.surface_binding_id IS NULL
+      OR (
+          resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              nc.token_lineage_id IS NULL
+              OR token_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+          )
+      )
+  )
+ORDER BY random()
+LIMIT {sample_size}
+"""
+    else:
+        source_sql = f"""
+FROM (
+  SELECT *
+  FROM name_current TABLESAMPLE SYSTEM ({args.table_sample_percent})
+) nc
+JOIN name_surfaces surface
+  ON surface.logical_name_id = nc.logical_name_id
+LEFT JOIN resources resource
+  ON resource.resource_id = nc.resource_id
+LEFT JOIN surface_bindings binding
+  ON binding.surface_binding_id = nc.surface_binding_id
+LEFT JOIN token_lineages token_lineage
+  ON token_lineage.token_lineage_id = nc.token_lineage_id
+WHERE {filter_sql}
+  AND surface.normalizer_version = {expected_normalizer}
+  AND surface.normalization_errors = '[]'::JSONB
+  AND surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      nc.surface_binding_id IS NULL
+      OR (
+          resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              nc.token_lineage_id IS NULL
+              OR token_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+          )
+      )
+  )
+LIMIT {sample_size}
+"""
+    sql = f"""
+SELECT json_build_object(
+  'namespace', nc.namespace,
+  'normalized_name', nc.normalized_name
+)::TEXT
+{source_sql};
+"""
+    return query_json_lines(args, sql)
+
+
+def run_name_check(args: argparse.Namespace) -> list[CheckFailure]:
+    log(f"sampling {args.name_sample_size} forward names")
+    rows = sample_name_rows(args, args.name_sample_size, ascii_mutatable=False)
+    if len(rows) < args.name_sample_size and not args.exact_random_sampling:
+        log(
+            f"table sample returned {len(rows)} names; "
+            "retrying with exact random sampling"
+        )
+        rows = sample_name_rows(exact_sampling_args(args), args.name_sample_size, ascii_mutatable=False)
+    failures: list[CheckFailure] = []
+    if len(rows) < args.name_sample_size:
+        failures.append(
+            CheckFailure(
+                "name_sample_size",
+                f"requested {args.name_sample_size} names, got {len(rows)}",
+            )
+        )
+    rows = [{**row, "id": f"n{index}"} for index, row in enumerate(rows)]
+    expected_by_id = {row["id"]: row for row in rows}
+    timings: list[float] = []
+    byte_sizes: list[int] = []
+
+    for namespace, namespace_rows in group_rows_by_namespace(rows).items():
+        for batch_index, batch in enumerate(chunks(namespace_rows, args.batch_size), start=1):
+            inputs = [
+                {
+                    "id": row["id"],
+                    "kind": "name",
+                    "name": row["normalized_name"],
+                }
+                for row in batch
+            ]
+            results, elapsed_ms, byte_size = identity_lookup(args, inputs, namespace=namespace)
+            timings.append(elapsed_ms)
+            byte_sizes.append(byte_size)
+            if len(results) != len(inputs):
+                failures.append(
+                    CheckFailure(
+                        "name_result_count",
+                        f"{namespace} batch {batch_index}: expected {len(inputs)}, got {len(results)}",
+                    )
+                )
+                continue
+            for result in results:
+                result_id = result.get("id")
+                expected = expected_by_id.get(str(result_id))
+                if expected is None:
+                    failures.append(CheckFailure("name_unknown_id", f"unexpected id {result_id!r}"))
+                    continue
+                record = result.get("record") or {}
+                if result.get("status") != "success":
+                    failures.append(
+                        CheckFailure(
+                            "name_status",
+                            f"{expected['namespace']}:{expected['normalized_name']}: "
+                            f"expected success, got {result!r}",
+                        )
+                    )
+                    continue
+                if record.get("name") != expected["normalized_name"]:
+                    failures.append(
+                        CheckFailure(
+                            "name_record",
+                            f"{expected['namespace']}:{expected['normalized_name']}: "
+                            f"got {record.get('name')}",
+                        )
+                    )
+                if record.get("namespace") != expected["namespace"]:
+                    failures.append(
+                        CheckFailure(
+                            "name_namespace",
+                            f"{expected['normalized_name']}: expected {expected['namespace']}, "
+                            f"got {record.get('namespace')}",
+                        )
+                    )
+                if "normalization" in result:
+                    failures.append(
+                        CheckFailure(
+                            "name_unexpected_normalization",
+                            f"{expected['namespace']}:{expected['normalized_name']}: "
+                            f"got {result.get('normalization')}",
+                        )
+                    )
+
+    if timings:
+        log(
+            "forward name batches: "
+            f"count={len(timings)} batch_size={args.batch_size} "
+            f"p50={percentile(timings, 0.50):.2f}ms "
+            f"p95={percentile(timings, 0.95):.2f}ms "
+            f"max={max(timings):.2f}ms "
+            f"avg_response={sum(byte_sizes) / len(byte_sizes) / 1024.0:.2f}KB"
+        )
+    return failures
+
+
+def uppercase_first_ascii_letter(name: str) -> str | None:
+    for index, char in enumerate(name):
+        if "a" <= char <= "z":
+            return name[:index] + char.upper() + name[index + 1 :]
+    return None
+
+
+def run_normalization_check(args: argparse.Namespace) -> list[CheckFailure]:
+    log(f"sampling {args.normalization_sample_size} names for normalization probes")
+    rows = sample_name_rows(args, args.normalization_sample_size, ascii_mutatable=True)
+    failures: list[CheckFailure] = []
+    if len(rows) < args.normalization_sample_size and not args.exact_random_sampling:
+        log(
+            f"table sample returned {len(rows)} normalization probe names; "
+            "retrying with exact random sampling"
+        )
+        rows = sample_name_rows(
+            exact_sampling_args(args),
+            args.normalization_sample_size,
+            ascii_mutatable=True,
+        )
+    if len(rows) < args.normalization_sample_size:
+        failures.append(
+            CheckFailure(
+                "normalization_sample_size",
+                f"requested {args.normalization_sample_size} names, got {len(rows)}",
+            )
+        )
+    if not rows:
+        failures.append(CheckFailure("normalization_sample", "no ASCII-mutatable names found"))
+        return failures
+
+    case_expected: dict[str, dict[str, Any]] = {}
+    invalid_expected: dict[str, dict[str, Any]] = {}
+    inputs_by_namespace: dict[str, list[dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        namespace = str(row["namespace"])
+        cased = uppercase_first_ascii_letter(row["normalized_name"])
+        if cased is not None and cased != row["normalized_name"]:
+            case_id = f"case{index}"
+            case_expected[case_id] = {**row, "input_name": cased}
+            inputs_by_namespace.setdefault(namespace, []).append(
+                {"id": case_id, "kind": "name", "name": cased}
+            )
+        invalid_id = f"invalid{index}"
+        invalid_name = row["normalized_name"] + " "
+        invalid_expected[invalid_id] = {**row, "input_name": invalid_name}
+        inputs_by_namespace.setdefault(namespace, []).append(
+            {"id": invalid_id, "kind": "name", "name": invalid_name}
+        )
+
+    for namespace, namespace_inputs in inputs_by_namespace.items():
+        for batch_index, batch in enumerate(chunks(namespace_inputs, args.batch_size), start=1):
+            results, _elapsed_ms, _byte_size = identity_lookup(args, batch, namespace=namespace)
+            if len(results) != len(batch):
+                failures.append(
+                    CheckFailure(
+                        "normalization_result_count",
+                        f"{namespace} batch {batch_index}: expected {len(batch)}, got {len(results)}",
+                    )
+                )
+                continue
+            for result in results:
+                result_id = str(result.get("id"))
+                if result_id in case_expected:
+                    expected = case_expected[result_id]
+                    normalization = result.get("normalization") or {}
+                    record = result.get("record") or {}
+                    if result.get("status") != "success":
+                        failures.append(
+                            CheckFailure(
+                                "case_normalization_status",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"expected success, got {result!r}",
+                            )
+                        )
+                        continue
+                    if normalization != {
+                        "changed": True,
+                        "input_name": expected["input_name"],
+                        "reason": "case_normalized",
+                    }:
+                        failures.append(
+                            CheckFailure(
+                                "case_normalization_payload",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"got {normalization!r}",
+                            )
+                        )
+                    if record.get("name") != expected["normalized_name"]:
+                        failures.append(
+                            CheckFailure(
+                                "case_normalization_record",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"expected {expected['normalized_name']}, got {record.get('name')}",
+                            )
+                        )
+                    if record.get("namespace") != expected["namespace"]:
+                        failures.append(
+                            CheckFailure(
+                                "case_normalization_namespace",
+                                f"{expected['input_name']}: expected {expected['namespace']}, "
+                                f"got {record.get('namespace')}",
+                            )
+                        )
+                elif result_id in invalid_expected:
+                    expected = invalid_expected[result_id]
+                    normalization = result.get("normalization") or {}
+                    if result.get("status") != "unnormalizable_input":
+                        failures.append(
+                            CheckFailure(
+                                "invalid_normalization_status",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"expected unnormalizable_input, got {result!r}",
+                            )
+                        )
+                        continue
+                    if result.get("record") is not None:
+                        failures.append(
+                            CheckFailure(
+                                "invalid_normalization_record",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"expected null record, got {result.get('record')!r}",
+                            )
+                        )
+                    if normalization != {
+                        "changed": False,
+                        "input_name": expected["input_name"],
+                        "reason": "invalid_normalized_name",
+                    }:
+                        failures.append(
+                            CheckFailure(
+                                "invalid_normalization_payload",
+                                f"{expected['namespace']}:{expected['input_name']}: "
+                                f"got {normalization!r}",
+                            )
+                        )
+                else:
+                    failures.append(
+                        CheckFailure(
+                            "normalization_unknown_id",
+                            f"unexpected result id {result.get('id')!r}",
+                        )
+                    )
+
+    log(
+        "normalization probes: "
+        f"case_inputs={len(case_expected)} invalid_inputs={len(invalid_expected)}"
+    )
+    return failures
+
+
+def print_failures(failures: list[CheckFailure], limit: int) -> None:
+    by_check: dict[str, list[str]] = {}
+    for failure in failures:
+        by_check.setdefault(failure.check, []).append(failure.detail)
+
+    for check, details in sorted(by_check.items()):
+        print(f"[identity-10k] FAIL {check}: {len(details)} issue(s)", file=sys.stderr)
+        for detail in details[:limit]:
+            print(f"[identity-10k]   {detail}", file=sys.stderr)
+        if len(details) > limit:
+            print(
+                f"[identity-10k]   ... {len(details) - limit} more",
+                file=sys.stderr,
+            )
+
+
+def main() -> int:
+    args = parse_args()
+    failures: list[CheckFailure] = []
+
+    if args.batch_size > 1000:
+        log(
+            "warning: batch size exceeds the default API limit of 1000; "
+            "set BIGNAME_API_IDENTITY_BATCH_LIMIT on the API if this is intentional"
+        )
+
+    failures.extend(run_health_check(args))
+    if not args.skip_db_invariants:
+        failures.extend(run_db_invariants(args))
+    if not args.skip_reverse:
+        failures.extend(run_reverse_check(args))
+    if not args.skip_names:
+        failures.extend(run_name_check(args))
+    if not args.skip_normalization:
+        failures.extend(run_normalization_check(args))
+
+    if failures:
+        print_failures(failures, args.failure_limit)
+        log(f"completed with {len(failures)} failure(s)")
+        return 1
+
+    log("all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

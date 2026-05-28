@@ -5,7 +5,7 @@ fn build_name_response(
 ) -> NameResponse {
     let declared_state = build_name_declared_state(&row, record_inventory_row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, false)
 }
 
 fn build_name_coverage_response(
@@ -14,7 +14,7 @@ fn build_name_coverage_response(
 ) -> NameResponse {
     let declared_state = build_name_coverage_declared_state(&row.coverage);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_surface_binding_explain_response(
@@ -23,7 +23,7 @@ fn build_name_surface_binding_explain_response(
 ) -> NameResponse {
     let declared_state = build_name_surface_binding_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_authority_control_explain_response(
@@ -32,19 +32,24 @@ fn build_name_authority_control_explain_response(
 ) -> NameResponse {
     let declared_state = build_name_authority_control_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_declared_response(
     row: NameCurrentRow,
     declared_state: JsonValue,
     selected_snapshot: &SelectedSnapshot,
+    include_provenance: bool,
 ) -> NameResponse {
     NameResponse {
         data: build_name_data(&row),
         declared_state,
         verified_state: None,
-        provenance: build_name_provenance(&row.provenance),
+        provenance: if include_provenance {
+            build_name_provenance(&row.provenance)
+        } else {
+            JsonValue::Null
+        },
         coverage: build_name_coverage(&row.coverage),
         chain_positions: selected_snapshot.chain_positions_value(),
         consistency: selected_snapshot.consistency.as_str().to_owned(),
@@ -59,23 +64,54 @@ fn build_resolution_response(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     persisted_verified_outcome: Option<&ExecutionOutcome>,
     selected_snapshot: &SelectedSnapshot,
+    include_full_metadata: bool,
 ) -> Result<ResolutionResponse> {
-    let data = build_name_data(&row);
-    let declared_state = mode
-        .includes_declared()
-        .then(|| build_resolution_declared_state(&row, record_inventory_row, records));
+    let data = if include_full_metadata {
+        build_name_data(&row)
+    } else {
+        build_profile_name_data(&row)
+    };
+    let declared_state = mode.includes_declared().then(|| {
+        if include_full_metadata {
+            build_resolution_declared_state(&row, record_inventory_row, records)
+        } else {
+            build_compact_resolution_declared_state(&row, record_inventory_row, records)
+        }
+    });
     let verified_state = mode
         .includes_verified()
-        .then(|| build_resolution_verified_state(&row, records, persisted_verified_outcome))
+        .then(|| {
+            if include_full_metadata {
+                build_resolution_verified_state(&row, records, persisted_verified_outcome)
+            } else {
+                build_compact_resolution_verified_state(&row, records, persisted_verified_outcome)
+            }
+        })
         .transpose()?;
-    let provenance = build_name_provenance_with_execution_trace(
-        &row.provenance,
-        persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
-    );
-    let coverage = build_name_coverage(&row.coverage);
-    let chain_positions = selected_snapshot.chain_positions_value();
-    let consistency = selected_snapshot.consistency.as_str().to_owned();
-    let last_updated = format_timestamp(row.last_recomputed_at);
+    let provenance = if include_full_metadata {
+        build_name_provenance_with_execution_trace(
+            &row.provenance,
+            persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
+        )
+    } else {
+        JsonValue::Null
+    };
+    let coverage = if include_full_metadata {
+        build_name_coverage(&row.coverage)
+    } else {
+        JsonValue::Null
+    };
+    let chain_positions = if include_full_metadata {
+        selected_snapshot.chain_positions_value()
+    } else {
+        JsonValue::Null
+    };
+    let consistency = include_full_metadata
+        .then(|| selected_snapshot.consistency.as_str().to_owned())
+        .unwrap_or_default();
+    let last_updated = include_full_metadata
+        .then(|| format_timestamp(row.last_recomputed_at))
+        .unwrap_or_default();
 
     Ok(ResolutionResponse {
         data,
@@ -87,6 +123,121 @@ fn build_resolution_response(
         consistency,
         last_updated,
     })
+}
+
+fn build_profile_name_data(row: &NameCurrentRow) -> JsonValue {
+    let mut data = empty_object();
+    insert_string_field(&mut data, "name", row.normalized_name.clone());
+    insert_string_field(&mut data, "namespace", row.namespace.clone());
+    insert_string_field(&mut data, "namehash", row.namehash.clone());
+    insert_optional_string_field(
+        &mut data,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    data
+}
+
+fn build_compact_resolution_declared_state(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+) -> JsonValue {
+    let full = build_resolution_declared_state(row, record_inventory_row, records);
+    let mut declared_state = empty_object();
+    if let Some(topology) = provenance_field(&full, "topology") {
+        insert_value_field(&mut declared_state, "topology", compact_resolution_topology(topology));
+    }
+    if let Some(inventory) = provenance_field(&full, "record_inventory") {
+        insert_value_field(
+            &mut declared_state,
+            "record_inventory",
+            compact_resolution_record_inventory(inventory),
+        );
+    }
+    if let Some(cache) = provenance_field(&full, "record_cache") {
+        insert_value_field(
+            &mut declared_state,
+            "record_cache",
+            compact_resolution_record_cache(cache),
+        );
+    }
+    declared_state
+}
+
+fn compact_resolution_topology(topology: &JsonValue) -> JsonValue {
+    let mut compact = topology.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("version_boundaries");
+    }
+    compact
+}
+
+fn compact_resolution_record_inventory(inventory: &JsonValue) -> JsonValue {
+    let mut compact = empty_object();
+    if summary_is_unsupported(Some(inventory)) {
+        if let Some(status) = provenance_field(inventory, "status").cloned() {
+            insert_value_field(&mut compact, "status", status);
+        }
+        if let Some(unsupported_reason) = provenance_field(inventory, "unsupported_reason").cloned()
+        {
+            insert_value_field(&mut compact, "unsupported_reason", unsupported_reason);
+        }
+        return compact;
+    }
+    if let Some(selectors) = provenance_field(inventory, "selectors").cloned() {
+        insert_value_field(&mut compact, "selectors", selectors);
+    }
+    if let Some(explicit_gaps) = provenance_field(inventory, "explicit_gaps").cloned() {
+        insert_value_field(&mut compact, "explicit_gaps", explicit_gaps);
+    }
+    if let Some(unsupported_families) = provenance_field(inventory, "unsupported_families").cloned()
+        && unsupported_families.as_array().is_some_and(|items| !items.is_empty())
+    {
+        insert_value_field(&mut compact, "unsupported_families", unsupported_families);
+    }
+    compact
+}
+
+fn compact_resolution_record_cache(cache: &JsonValue) -> JsonValue {
+    let mut compact = empty_object();
+    if summary_is_unsupported(Some(cache)) {
+        if let Some(status) = provenance_field(cache, "status").cloned() {
+            insert_value_field(&mut compact, "status", status);
+        }
+        if let Some(unsupported_reason) = provenance_field(cache, "unsupported_reason").cloned() {
+            insert_value_field(&mut compact, "unsupported_reason", unsupported_reason);
+        }
+        return compact;
+    }
+    insert_value_field(
+        &mut compact,
+        "entries",
+        provenance_field(cache, "entries")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new())),
+    );
+    compact
+}
+
+fn build_compact_resolution_verified_state(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    persisted_outcome: Option<&ExecutionOutcome>,
+) -> Result<JsonValue> {
+    let mut verified_state = build_resolution_verified_state(row, records, persisted_outcome)?;
+    if let Some(queries) = verified_state
+        .as_object_mut()
+        .and_then(|object| object.get_mut("verified_queries"))
+        .and_then(JsonValue::as_array_mut)
+    {
+        for query in queries {
+            if let Some(object) = query.as_object_mut() {
+                object.remove("provenance");
+            }
+        }
+    }
+    Ok(verified_state)
 }
 
 fn build_resolution_execution_explain_response(
@@ -140,24 +291,11 @@ fn build_primary_name_response(
         data,
         declared_state,
         verified_state,
-        provenance: primary_name_route_provenance(lookup_state),
+        provenance: JsonValue::Null,
         coverage: primary_name_route_coverage(&namespace, lookup_state),
         chain_positions: empty_object(),
         consistency: "head".to_owned(),
         last_updated: primary_name_last_updated(lookup_state.persisted_verified.as_ref()),
-    }
-}
-
-fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
-    ResolverResponse {
-        data: build_resolver_data(&row),
-        declared_state: build_resolver_declared_state(&row.declared_summary),
-        verified_state: None,
-        provenance: build_name_provenance(&row.provenance),
-        coverage: build_name_coverage(&row.coverage),
-        chain_positions: ensure_object(&row.chain_positions),
-        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
-        last_updated: format_timestamp(row.last_recomputed_at),
     }
 }
 
@@ -166,7 +304,21 @@ fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue
         PrimaryNameTupleState::ProjectionUnavailable => primary_name_unsupported_result(
             "declared primary-name claim surface is not yet supported",
         ),
-        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::TupleMissing => {
+            if let OnDemandPrimaryNameClaimState::Found(on_demand_claim) =
+                &lookup_state.on_demand_claim
+            {
+                return json!({
+                    "status": "success",
+                    "name": on_demand_claim.normalized_name.clone(),
+                    "provenance": {
+                        "source_family": "ens_reverse_rpc",
+                        "resolver_address": on_demand_claim.resolver_address.clone(),
+                    },
+                });
+            }
+            primary_name_not_found_result()
+        }
         PrimaryNameTupleState::TuplePresent(row) => {
             let mut result = json!({
                 "status": row.claim_status.as_str(),
@@ -215,7 +367,14 @@ fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonVa
     }
 
     match lookup_state.tuple_state {
-        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::TupleMissing => {
+            if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
+                &lookup_state.on_demand_verified
+            {
+                return on_demand_verified.clone();
+            }
+            primary_name_not_found_result()
+        }
         PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
@@ -231,72 +390,6 @@ fn primary_name_unsupported_result(reason: &str) -> JsonValue {
         "status": "unsupported",
         "unsupported_reason": reason,
     })
-}
-
-fn primary_name_bootstrap_provenance() -> JsonValue {
-    json!({
-        "normalized_event_ids": [],
-        "raw_fact_refs": [],
-        "manifest_versions": [],
-        "execution_trace_id": null,
-        "derivation_kind": "primary_name_route_bootstrap",
-    })
-}
-
-fn primary_name_declared_route_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
-    let mut provenance = primary_name_bootstrap_provenance();
-    insert_value_field(
-        &mut provenance,
-        "normalized_event_ids",
-        array_value_strings(provenance_field(&row.claim_provenance, "normalized_event_ids")),
-    );
-    insert_value_field(
-        &mut provenance,
-        "raw_fact_refs",
-        array_or_empty(provenance_field(&row.claim_provenance, "raw_fact_refs")),
-    );
-    insert_value_field(
-        &mut provenance,
-        "manifest_versions",
-        array_or_empty(provenance_field(&row.claim_provenance, "manifest_versions")),
-    );
-    insert_string_field(
-        &mut provenance,
-        "derivation_kind",
-        string_field(provenance_field(&row.claim_provenance, "derivation_kind"))
-            .unwrap_or_else(|| "primary_name_route_bootstrap".to_owned()),
-    );
-    provenance
-}
-
-fn primary_name_route_provenance(lookup_state: &PrimaryNameLookupState) -> JsonValue {
-    let mut provenance = match &lookup_state.tuple_state {
-        PrimaryNameTupleState::TuplePresent(row) => primary_name_declared_route_provenance(row),
-        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TupleMissing => {
-            primary_name_bootstrap_provenance()
-        }
-    };
-
-    if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
-        insert_value_field(
-            &mut provenance,
-            "manifest_versions",
-            array_or_empty(provenance_field(
-                &persisted_verified.provenance,
-                "manifest_versions",
-            )),
-        );
-        insert_nullable_string_field(
-            &mut provenance,
-            "execution_trace_id",
-            string_field(provenance_field(
-                &persisted_verified.provenance,
-                "execution_trace_id",
-            )),
-        );
-    }
-
-    provenance
 }
 
 fn primary_name_verified_readback_provenance(
@@ -392,6 +485,22 @@ fn primary_name_route_coverage(
             }
             _ => {}
         }
+    }
+
+    if matches!(
+        lookup_state.on_demand_verified,
+        OnDemandPrimaryNameVerificationState::Verified(_)
+    ) && namespace == "ens"
+    {
+        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc", "ens_execution_rpc"]);
+    }
+
+    if matches!(
+        lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::Found(_) | OnDemandPrimaryNameClaimState::NotFound
+    ) && namespace == "ens"
+    {
+        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc"]);
     }
 
     primary_name_unsupported_exact_tuple_coverage()

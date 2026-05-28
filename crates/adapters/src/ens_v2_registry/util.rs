@@ -39,26 +39,6 @@ pub(super) fn dns_encode(labels: &[Vec<u8>]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-pub(super) fn display_name(name: &str) -> String {
-    let mut labels = name.split('.');
-    let Some(first) = labels.next() else {
-        return name.to_owned();
-    };
-    let mut first_chars = first.chars();
-    let display_first = match first_chars.next() {
-        Some(first_char) => format!(
-            "{}{}",
-            first_char.to_uppercase(),
-            first_chars.as_str().to_ascii_lowercase()
-        ),
-        None => first.to_owned(),
-    };
-    std::iter::once(display_first)
-        .chain(labels.map(|label| label.to_ascii_lowercase()))
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
 pub(super) fn deterministic_uuid(seed: &str) -> Uuid {
     let digest = keccak256_bytes(seed.as_bytes());
     let mut bytes = [0u8; 16];

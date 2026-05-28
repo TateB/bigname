@@ -177,6 +177,22 @@ async fn get_events_returns_compact_canonical_rows_with_projection_filters() -> 
     assert!(second_page_payload["data"][0].get("provenance").is_none());
     assert!(second_page_payload["data"][0].get("coverage").is_none());
 
+    let spaced_name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events?namespace=ens&name=%20alice.eth%20")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("events whitespace-padded name filter request failed")?;
+    assert_eq!(spaced_name_response.status(), StatusCode::OK);
+    let spaced_name_payload: Value = read_json(spaced_name_response).await?;
+    assert_eq!(
+        spaced_name_payload["data"].as_array().map(Vec::len),
+        Some(0)
+    );
+
     let address_response = app_router(database.app_state())
         .oneshot(
             Request::builder()

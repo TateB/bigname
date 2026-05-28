@@ -17,6 +17,15 @@ use super::types::{
     CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
 };
 
+#[path = "payload/event_silent.rs"]
+mod event_silent;
+
+pub(crate) use event_silent::{
+    EventSilentResolverCallObservation, event_silent_direct_call_address_set,
+    event_silent_resolver_call_observations_from_live_payload,
+    retained_transaction_keys_from_live_payload,
+};
+
 pub(crate) fn raw_payload_candidate_hashes(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
@@ -461,3 +470,7 @@ pub(crate) fn provider_block_to_raw_block_with_header_audit_mode(
         canonicality_state,
     }
 }
+
+#[cfg(test)]
+#[path = "payload_tests.rs"]
+mod tests;

@@ -264,7 +264,44 @@ async fn round_trips_primary_name_snapshots_with_normalized_claim_name() -> Resu
 }
 
 #[tokio::test]
-async fn rejects_mixed_case_normalized_claim_name_sources() -> Result<()> {
+async fn batch_upsert_preserves_input_order_after_sorted_locking() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    let second_address_snapshot = PrimaryNameCurrentSnapshot {
+        row: PrimaryNameCurrentRow {
+            address: "0x0000000000000000000000000000000000000def".to_owned(),
+            namespace: "ens".to_owned(),
+            coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::Success,
+            raw_claim_name: None,
+            claim_provenance: serde_json::json!({"source": "primary_name_order_test"}),
+        },
+        normalized_claim_name: Some("zeta.eth".to_owned()),
+    };
+    let first_address_snapshot = PrimaryNameCurrentSnapshot {
+        row: PrimaryNameCurrentRow {
+            address: "0x0000000000000000000000000000000000000abc".to_owned(),
+            namespace: "ens".to_owned(),
+            coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::Success,
+            raw_claim_name: None,
+            claim_provenance: serde_json::json!({"source": "primary_name_order_test"}),
+        },
+        normalized_claim_name: Some("alpha.eth".to_owned()),
+    };
+
+    let input = vec![
+        second_address_snapshot.clone(),
+        first_address_snapshot.clone(),
+    ];
+    let inserted = upsert_primary_name_current_snapshots(database.pool(), &input).await?;
+    assert_eq!(inserted, input);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_non_normalized_claim_name_sources() -> Result<()> {
     let database = TestDatabase::new().await?;
 
     let error = upsert_primary_name_current_snapshots(
@@ -282,12 +319,12 @@ async fn rejects_mixed_case_normalized_claim_name_sources() -> Result<()> {
         }],
     )
     .await
-    .expect_err("mixed-case claimed names must be rejected");
+    .expect_err("non-normalized claimed names must be rejected");
 
     assert!(
         error
             .to_string()
-            .contains("must already be ASCII-normalized")
+            .contains("must already be ENSIP-15-normalized")
     );
 
     database.cleanup().await

@@ -223,7 +223,7 @@ async fn get_resolvers_compact_overview_honors_include_and_meta_none() -> Result
 }
 
 #[tokio::test]
-async fn get_resolvers_compact_overview_view_full_reuses_full_envelope() -> Result<()> {
+async fn get_resolvers_compact_overview_rejects_view_full() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let chain_id = "ethereum-mainnet";
     let resolver_address = "0x0000000000000000000000000000000000000aaa";
@@ -244,18 +244,14 @@ async fn get_resolvers_compact_overview_view_full_reuses_full_envelope() -> Resu
         .await
         .context("full resolver overview request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let payload: ResolverResponse = read_json(response).await?;
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
     assert_eq!(
-        payload.data,
-        json!({
-            "chain_id": chain_id,
-            "resolver_address": resolver_address,
-        })
+        payload.error.message,
+        "view=full is not supported for compact resolver overview"
     );
-    assert_eq!(payload.declared_state["bindings"]["count"], json!(2));
-    assert_eq!(payload.verified_state, None);
 
     database.cleanup().await?;
     Ok(())

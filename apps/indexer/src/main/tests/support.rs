@@ -289,7 +289,7 @@ impl TestDatabase {
                     chain TEXT NOT NULL,
                     deployment_epoch TEXT NOT NULL DEFAULT 'bootstrap',
                     rollout_status manifest_rollout_status NOT NULL,
-                    normalizer_version TEXT NOT NULL DEFAULT 'uts46-v1',
+                    normalizer_version TEXT NOT NULL DEFAULT 'ensip15@ens-normalize-0.1.1',
                     file_path TEXT NOT NULL DEFAULT 'tests/v1.toml',
                     manifest_payload JSONB NOT NULL DEFAULT '{default_manifest_payload}'::jsonb,
                     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -618,6 +618,25 @@ impl TestDatabase {
         .context("failed to create raw_receipts table for indexer tests")?;
         sqlx::query(
             r#"
+                CREATE TABLE event_silent_resolver_call_observations (
+                    event_silent_resolver_call_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    chain_id TEXT NOT NULL,
+                    resolver_address TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    transaction_hash TEXT NOT NULL,
+                    transaction_index BIGINT NOT NULL,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (chain_id, block_hash, transaction_index)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create event_silent_resolver_call_observations table for indexer tests")?;
+        sqlx::query(
+            r#"
                 CREATE TABLE raw_logs (
                     raw_log_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     chain_id TEXT NOT NULL,
@@ -726,6 +745,52 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create name_surfaces table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE name_surface_normalization_repair_findings (
+                    logical_name_id TEXT NOT NULL,
+                    expected_normalizer_version TEXT NOT NULL,
+                    finding_kind TEXT NOT NULL,
+                    current_normalizer_version TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    input_name TEXT NOT NULL,
+                    current_normalized_name TEXT NOT NULL,
+                    candidate_logical_name_id TEXT,
+                    candidate_normalized_name TEXT,
+                    error_message TEXT,
+                    details JSONB NOT NULL DEFAULT '{}'::JSONB,
+                    detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (expected_normalizer_version, logical_name_id),
+                    CHECK (expected_normalizer_version <> ''),
+                    CHECK (finding_kind IN ('rejected', 'incompatible')),
+                    CHECK (
+                        finding_kind <> 'rejected'
+                        OR error_message IS NOT NULL
+                    ),
+                    CHECK (
+                        finding_kind <> 'incompatible'
+                        OR candidate_logical_name_id IS NOT NULL
+                    )
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create name_surface_normalization_repair_findings table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX name_surface_normalization_repair_findings_kind_idx
+                    ON name_surface_normalization_repair_findings (
+                        expected_normalizer_version,
+                        finding_kind,
+                        logical_name_id
+                    )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create name-surface normalization repair findings index for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE surface_bindings (
@@ -1064,7 +1129,7 @@ source_family = "ens_v2_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 exact_lookup = "{capability_status}"
@@ -1097,7 +1162,7 @@ source_family = "ens_v1_registry_l1"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"
@@ -1131,7 +1196,7 @@ source_family = "basenames_base_registry"
 chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = "supported"

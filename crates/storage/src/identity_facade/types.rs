@@ -21,6 +21,7 @@ pub struct IdentityNameCurrentRow {
     pub labelhash: Option<String>,
     pub labelhash_count: Option<i32>,
     pub resource_id: Option<Uuid>,
+    pub record_inventory_boundary_key: Option<String>,
     pub declared_summary: Value,
     pub coverage: Value,
     pub chain_positions: Value,
@@ -95,6 +96,33 @@ pub struct ReverseIdentityGroup {
     pub entries: Vec<ReverseIdentityRecordRow>,
     pub total_count: Option<u64>,
     pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedInput {
+    pub address: String,
+    pub coin_type: String,
+    pub roles: ReverseIdentityRoles,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedGroup {
+    pub input: ReverseIdentityFeedInput,
+    pub record: Option<ReverseIdentityFeedRecordRow>,
+    pub total_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseIdentityFeedRecordRow {
+    pub logical_name_id: String,
+    pub namespace: String,
+    pub canonical_display_name: String,
+    pub normalized_name: String,
+    pub namehash: String,
+    pub chain_positions: Value,
+    pub coverage: Value,
+    pub is_primary: bool,
+    pub relation_facets: Vec<AddressNameRelation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

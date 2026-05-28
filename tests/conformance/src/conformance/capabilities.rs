@@ -86,20 +86,6 @@
                 ],
             },
             CapabilityCutoverEvidence {
-                capability_group: "address names count",
-                route_owner: &["/v1/addresses/{address}/names/count"],
-                conformance_owner: "apps/api tests::names_collection address count",
-                rollout_gate: &[
-                    OPENAPI_ROUTE_OWNER_GATE,
-                    "focused address names count API route tests",
-                    RELEASE_SMOKE_GATE,
-                ],
-                rollback_gate: &[
-                    ROLLBACK_SMOKE_GATE,
-                    "stable count filters without changing address-name collection rows",
-                ],
-            },
-            CapabilityCutoverEvidence {
                 capability_group: "declared child subnames and counts",
                 route_owner: &["/v1/names/{namespace}/{name}/children"],
                 conformance_owner:
@@ -116,11 +102,11 @@
             },
             CapabilityCutoverEvidence {
                 capability_group: "record inventory for editing",
-                route_owner: &["/v1/resolutions/{namespace}/{name}"],
-                conformance_owner: "resolution_and_permissions.rs::resolution_record_inventory_contract_*",
+                route_owner: &["/v1/profiles/names/{name}", "/v1/names/{namespace}/{name}/records"],
+                conformance_owner: "apps/api tests::resolution profile record selection and records compact route",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused resolution conformance",
+                    "focused profile and records API route tests",
                     "supported resolver-profile evidence",
                     RELEASE_SMOKE_GATE,
                 ],
@@ -146,13 +132,14 @@
             CapabilityCutoverEvidence {
                 capability_group: "verified record reads",
                 route_owner: &[
-                    "/v1/resolutions/{namespace}/{name}",
+                    "/v1/profiles/names/{name}",
+                    "/v1/names/{namespace}/{name}/records",
                     "/v1/explain/resolutions/{namespace}/{name}/execution",
                 ],
-                conformance_owner: "resolution_and_permissions.rs::resolution_execution_explain_*",
+                conformance_owner: "apps/api tests::resolution profile execution and records verified mode; resolution_and_permissions.rs::resolution_execution_explain_*",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused verified-resolution conformance",
+                    "focused profile / records verified API route tests",
                     "execution trace persistence checks",
                     RELEASE_SMOKE_GATE,
                 ],
@@ -277,17 +264,17 @@
             },
             CapabilityCutoverEvidence {
                 capability_group: "resolver-centric overview",
-                route_owner: &["/v1/resolvers/{chain_id}/{resolver_address}"],
-                conformance_owner: "resolution_and_permissions.rs::resolver_overview_contract_*",
+                route_owner: &["/v1/resolvers/{chain_id}/{resolver_address}/overview"],
+                conformance_owner: "resolution_and_permissions.rs::resolver_overview_contract_* and apps/api tests::resolvers",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused resolver conformance",
+                    "focused resolver overview conformance",
                     "supported resolver-profile evidence",
                     RELEASE_SMOKE_GATE,
                 ],
                 rollback_gate: &[
                     ROLLBACK_SMOKE_GATE,
-                    "UnsupportedSummary for pending / unsupported resolver profiles",
+                    "null compact sections and meta.unsupported_fields for pending / unsupported resolver profiles",
                 ],
             },
             CapabilityCutoverEvidence {
@@ -355,13 +342,6 @@
                 body: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/fixtures/capabilities/compact-names-collection.json"
-                )),
-            },
-            CapabilityGoldenFixtureDocument {
-                fixture_path: "fixtures/capabilities/address-names-count.json",
-                body: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/fixtures/capabilities/address-names-count.json"
                 )),
             },
             CapabilityGoldenFixtureDocument {
@@ -500,7 +480,6 @@
                 "names owned / controlled by address",
                 "names owned / controlled by address with role summary",
                 "compact names collection",
-                "address names count",
                 "declared child subnames and counts",
                 "record inventory for editing",
                 "compact name records",

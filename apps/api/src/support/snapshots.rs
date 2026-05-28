@@ -76,8 +76,8 @@ impl<'a> From<&'a ExactNameSnapshotQuery> for ExactNameSnapshotSelector<'a> {
     }
 }
 
-impl<'a> From<&'a ResolutionQuery> for ExactNameSnapshotSelector<'a> {
-    fn from(query: &'a ResolutionQuery) -> Self {
+impl<'a> From<&'a NameProfileQuery> for ExactNameSnapshotSelector<'a> {
+    fn from(query: &'a NameProfileQuery) -> Self {
         Self {
             at: query.at.as_deref(),
             chain_positions: query.chain_positions.as_deref(),

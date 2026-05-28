@@ -7,17 +7,20 @@ use crate::PUBLIC_NAMESPACES;
 mod primary_name;
 #[path = "schemas/identity.rs"]
 mod identity;
+#[path = "schemas/identity_native.rs"]
+mod identity_native;
 
 use super::responses::{
     declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
     primary_name_response_schema,
 };
 use identity::{
-    forward_identity_batch_input_schema, forward_identity_batch_response_schema,
-    identity_as_of_schema, identity_name_response_schema, identity_pagination_schema,
-    identity_status_schema, indexing_status_response_schema, name_record_schema,
-    reverse_identity_batch_input_schema, reverse_identity_batch_response_schema,
-    reverse_name_record_schema, reverse_names_input_schema, reverse_names_response_schema,
+    identity_status_schema, indexing_status_response_schema, name_record_status_schema,
+    public_status_response_schema,
+};
+use identity_native::{
+    identity_lookup_input_schema, identity_lookup_page_schema, identity_lookup_response_schema,
+    native_identity_record_schema, normalization_info_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
@@ -146,6 +149,20 @@ pub(super) fn openapi_components() -> JsonValue {
                     },
                 },
             }),
+            "ProfileNameData": json!({
+                "type": "object",
+                "required": ["name", "namespace", "namehash", "resource_id"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "namespace": { "type": "string" },
+                    "namehash": { "type": "string" },
+                    "resource_id": {
+                        "type": ["string", "null"],
+                        "format": "uuid",
+                    },
+                },
+                "additionalProperties": false,
+            }),
             "ResolverData": json!({
                 "type": "object",
                 "required": ["chain_id", "resolver_address"],
@@ -167,18 +184,14 @@ pub(super) fn openapi_components() -> JsonValue {
                 },
             }),
             "IdentityStatus": identity_status_schema(),
-            "IdentityAsOf": identity_as_of_schema(),
-            "NameRecord": name_record_schema(),
-            "ReverseNameRecord": reverse_name_record_schema(),
-            "IdentityPagination": identity_pagination_schema(),
-            "IdentityNameResponse": identity_name_response_schema(),
-            "ForwardIdentityBatchInput": forward_identity_batch_input_schema(),
-            "ForwardIdentityBatchResponse": forward_identity_batch_response_schema(),
-            "ReverseNamesInput": reverse_names_input_schema(),
-            "ReverseNamesResponse": reverse_names_response_schema(),
-            "ReverseIdentityBatchInput": reverse_identity_batch_input_schema(),
-            "ReverseIdentityBatchResponse": reverse_identity_batch_response_schema(),
+            "NameRecordStatus": name_record_status_schema(),
+            "NativeIdentityRecord": native_identity_record_schema(),
+            "NormalizationInfo": normalization_info_schema(),
+            "IdentityLookupPage": identity_lookup_page_schema(),
+            "IdentityLookupInput": identity_lookup_input_schema(),
+            "IdentityLookupResponse": identity_lookup_response_schema(),
             "IndexingStatusResponse": indexing_status_response_schema(),
+            "PublicStatusResponse": public_status_response_schema(),
             "PrimaryNameClaimedResult": primary_name_claimed_result_schema(),
             "PrimaryNameDeclaredState": json!({
                 "type": "object",
@@ -202,11 +215,13 @@ pub(super) fn openapi_components() -> JsonValue {
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),
             ),
-            "ResolverResponse": declared_response_schema(
-                schema_ref("ResolverData"),
-                schema_ref("JsonObject"),
-            ),
             "ResolutionResponse": mixed_response_schema(schema_ref("ExactNameData")),
+            "NameProfileResponse": mixed_response_schema(json!({
+                "oneOf": [
+                    schema_ref("ProfileNameData"),
+                    schema_ref("ExactNameData"),
+                ],
+            })),
             "PrimaryNameResponse": primary_name_response_schema(),
             "CollectionResponse": paginated_declared_response_schema(
                 json!({
@@ -221,13 +236,9 @@ pub(super) fn openapi_components() -> JsonValue {
             "CompactHistoryEvent": compact_history_event_schema(),
             "RoleRow": role_row_schema(),
             "ResourceLookupData": resource_lookup_data_schema(),
-            "AddressNamesCountData": address_names_count_data_schema(),
             "ResolverOverviewCompact": resolver_overview_compact_schema(),
             "CompactNamesResponse": compact_collection_response_schema(
                 schema_ref("CompactDomainSummary"),
-            ),
-            "AddressNamesCountResponse": compact_single_response_schema(
-                schema_ref("AddressNamesCountData"),
             ),
             "CompactNameRecordsResponse": compact_single_response_schema(
                 schema_ref("CompactRecordSummary"),
@@ -405,11 +416,6 @@ fn role_row_schema() -> JsonValue {
 #[rustfmt::skip]
 fn resource_lookup_data_schema() -> JsonValue {
     compact_object_schema(&["namespace", "name", "normalized_name", "resource_id", "resource_hex"], &["namespace", "name", "normalized_name", "resource_id", "resource_hex"])
-}
-
-#[rustfmt::skip]
-fn address_names_count_data_schema() -> JsonValue {
-    compact_object_schema(&["address", "count"], &["address", "namespace", "relation", "count"])
 }
 
 #[rustfmt::skip]

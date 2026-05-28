@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_domain::normalization::normalize_name;
 use bigname_storage::sql_row;
 use sqlx::PgPool;
 
@@ -10,7 +11,7 @@ use crate::ens_v2_common::{
 use super::{
     constants::{RESOLVER_EDGE_KIND, SOURCE_FAMILY_ENS_V2_RESOLVER_L1},
     types::{NameLink, ResolverRawLogRow},
-    util::{display_name, event_position_timestamp, logical_name_id},
+    util::{event_position_timestamp, logical_name_id},
 };
 
 pub(super) async fn load_name_link_by_namehash(
@@ -70,10 +71,10 @@ pub(super) async fn load_name_link_by_name(
     raw_log: &ResolverRawLogRow,
     name: &str,
 ) -> Result<NameLink> {
-    let normalized_name = name.to_ascii_lowercase();
-    if normalized_name.is_empty() {
+    let Ok(normalized) = normalize_name(name) else {
         return Ok(NameLink::unknown());
-    }
+    };
+    let normalized_name = normalized.normalized_name;
     let position = event_position_timestamp(raw_log);
     let row = sqlx::query(
         r#"
@@ -119,7 +120,7 @@ pub(super) async fn load_name_link_by_name(
     Ok(row.map(decode_name_link).transpose()?.unwrap_or(NameLink {
         logical_name_id: Some(logical_name_id(&raw_log.namespace, &normalized_name)),
         normalized_name: Some(normalized_name.clone()),
-        canonical_display_name: Some(display_name(&normalized_name)),
+        canonical_display_name: Some(normalized.canonical_display_name),
         namehash: None,
         resource_id: None,
     }))

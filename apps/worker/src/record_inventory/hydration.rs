@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use bigname_execution::{
     ChainRpcUrls, EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest,
-    EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, execute_ens_text_record_multicall,
+    EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, ens_namehash_hex,
+    execute_ens_text_record_multicall,
 };
 use bigname_storage::normalize_evm_address;
 use futures_util::{FutureExt, future::BoxFuture};
@@ -38,6 +39,7 @@ struct HydrationRow {
     resource_id: Uuid,
     record_version_boundary_key: String,
     logical_name_id: String,
+    namehash: Option<String>,
     chain_id: String,
     resolver_address: String,
     entries: Value,
@@ -47,6 +49,7 @@ struct HydrationRow {
 struct TextHydrationCall {
     resolver_address: String,
     name: String,
+    namehash: String,
     text_key: String,
 }
 
@@ -95,7 +98,7 @@ impl TextHydrationClient for MulticallTextHydrationClient {
                     .iter()
                     .map(|call| EnsTextRecordMulticallRequest {
                         resolver_address: call.resolver_address.clone(),
-                        name: call.name.clone(),
+                        namehash: call.namehash.clone(),
                         text_key: call.text_key.clone(),
                     })
                     .collect::<Vec<_>>();
@@ -189,6 +192,20 @@ async fn hydrate_record_inventory_text_values_with_client(
                 summary.skipped_entry_count += candidate_text_entry_count(&row.entries)?;
                 continue;
             };
+            let namehash = match row
+                .namehash
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(namehash) => namehash.to_owned(),
+                None => match ens_namehash_hex(name) {
+                    Ok(namehash) => namehash,
+                    Err(_) => {
+                        summary.failed_entry_count += candidate_text_entry_count(&row.entries)?;
+                        continue;
+                    }
+                },
+            };
 
             let entries = row
                 .entries
@@ -210,6 +227,7 @@ async fn hydrate_record_inventory_text_values_with_client(
                         TextHydrationCall {
                             resolver_address: row.resolver_address.clone(),
                             name: name.to_owned(),
+                            namehash: namehash.clone(),
                             text_key: text_key.to_owned(),
                         },
                     ));
@@ -261,6 +279,11 @@ async fn hydrate_record_inventory_text_values_with_client(
                         set_entry_not_found(entry);
                         changed_rows.insert(call_ref.row_index);
                         summary.not_found_entry_count += 1;
+                    }
+                    TextHydrationOutcome::Failed(message)
+                        if text_hydration_failure_is_skippable(&message) =>
+                    {
+                        summary.skipped_entry_count += 1;
                     }
                     TextHydrationOutcome::Failed(_) => {
                         summary.failed_entry_count += 1;
@@ -385,8 +408,11 @@ async fn load_text_hydration_rows(
                 ric.resource_id,
                 ric.record_version_boundary_key,
                 ric.record_version_boundary ->> 'logical_name_id' AS logical_name_id,
+                ns.namehash,
                 ric.entries
             FROM record_inventory_current ric
+            LEFT JOIN name_surfaces ns
+              ON ns.logical_name_id = ric.record_version_boundary ->> 'logical_name_id'
             WHERE ($1::UUID IS NULL OR ric.resource_id = $1)
               AND (
                   $2::UUID IS NULL
@@ -411,6 +437,7 @@ async fn load_text_hydration_rows(
             candidate_rows.resource_id,
             candidate_rows.record_version_boundary_key,
             candidate_rows.logical_name_id,
+            candidate_rows.namehash,
             resolver_event.chain_id,
             LOWER(resolver_event.after_state ->> 'resolver') AS resolver_address,
             candidate_rows.entries
@@ -464,6 +491,7 @@ async fn load_text_hydration_rows(
                 resource_id: row.try_get("resource_id")?,
                 record_version_boundary_key: row.try_get("record_version_boundary_key")?,
                 logical_name_id: row.try_get("logical_name_id")?,
+                namehash: row.try_get("namehash")?,
                 chain_id: row.try_get("chain_id")?,
                 resolver_address: row.try_get("resolver_address")?,
                 entries: row.try_get("entries")?,
@@ -532,6 +560,10 @@ fn set_entry_not_found(entry: &mut Value) {
     entry["status"] = json!("not_found");
     remove_entry_field(entry, "value");
     remove_entry_field(entry, "unsupported_reason");
+}
+
+fn text_hydration_failure_is_skippable(message: &str) -> bool {
+    message.starts_with("resolver text call return data is malformed:")
 }
 
 fn remove_entry_field(entry: &mut Value, field: &str) {

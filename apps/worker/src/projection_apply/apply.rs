@@ -7,8 +7,7 @@ use crate::{
     address_names, children, name_current, permissions, primary_name, record_inventory, resolver,
 };
 
-const FAILURE_RETRY_DELAY: &str = "60 seconds";
-const CLAIM_RETRY_DELAY: &str = "5 minutes";
+use super::{CLAIM_RETRY_DELAY, FAILURE_RETRY_DELAY};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ProjectionInvalidationApplySummary {

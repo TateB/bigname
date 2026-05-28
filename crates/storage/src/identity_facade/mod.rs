@@ -1,18 +1,23 @@
 mod counts;
 mod forward;
 mod reverse;
+mod reverse_feed;
+mod reverse_page;
+mod reverse_rows;
 mod status;
 mod types;
 
 use std::collections::BTreeSet;
 
-pub use forward::load_identity_records_by_names;
+pub use forward::{load_identity_name_feed_records_by_names, load_identity_records_by_names};
 pub use reverse::load_reverse_identity_records;
+pub use reverse_feed::load_reverse_identity_feed_records;
 pub use status::load_indexing_status;
 pub use types::{
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
-    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
+    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityFeedGroup, ReverseIdentityFeedInput,
+    ReverseIdentityFeedRecordRow, ReverseIdentityGroup, ReverseIdentityRecordRow,
     ReverseIdentityRoles, ReverseIdentityStorageInput,
 };
 

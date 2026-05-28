@@ -1,7 +1,7 @@
 use bigname_storage::sql_row;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_manifests::load_watched_contracts;
 use sqlx::{PgPool, Row, types::Uuid};
 
@@ -216,28 +216,9 @@ pub(crate) fn dns_decode_optional(bytes: &[u8]) -> Result<Option<String>> {
 }
 
 pub(crate) fn dns_decode(bytes: &[u8]) -> Result<String> {
-    let mut labels = Vec::new();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let length = bytes[index] as usize;
-        index += 1;
-        if length == 0 {
-            if index != bytes.len() {
-                bail!("DNS-encoded name has trailing bytes");
-            }
-            return Ok(labels.join(".").to_ascii_lowercase());
-        }
-        let end = index + length;
-        if end > bytes.len() {
-            bail!("DNS-encoded name label exceeds payload length");
-        }
-        labels.push(
-            String::from_utf8(bytes[index..end].to_vec())
-                .context("DNS-encoded label is not valid UTF-8")?,
-        );
-        index = end;
-    }
-    bail!("DNS-encoded name is missing root label")
+    bigname_domain::normalization::normalize_dns_encoded_name(bytes)
+        .map(|name| name.normalized_name)
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {

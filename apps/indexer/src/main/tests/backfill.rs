@@ -4557,7 +4557,7 @@ async fn insert_active_backfill_manifest_version(
                 $4,
                 $5,
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
                 DEFAULT
             )

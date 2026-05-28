@@ -185,6 +185,10 @@ record_inventory_changed_events AS (
       AND block_number IS NOT NULL
       AND block_hash IS NOT NULL
 ),
+record_inventory_changed_names AS (
+    SELECT DISTINCT logical_name_id
+    FROM record_inventory_changed_events
+),
 target_resource_events AS (
     SELECT DISTINCT
         target.resource_id,
@@ -192,6 +196,8 @@ target_resource_events AS (
         target.block_number,
         COALESCE(target.log_index, -1::BIGINT) AS log_index
     FROM normalized_events target
+    JOIN record_inventory_changed_names changed_name
+      ON changed_name.logical_name_id = target.logical_name_id
     JOIN resources resource
       ON resource.resource_id = target.resource_id
      AND resource.canonicality_state IN (
@@ -316,6 +322,20 @@ WITH changed_events AS (
     WHERE change.change_id > $1
       AND change.change_id <= $2
 ),
+resource_permission_changed_names AS (
+    SELECT DISTINCT
+        logical_name_id,
+        normalized_event_id,
+        change_id,
+        changed_at
+    FROM changed_events
+    WHERE event_kind = 'PermissionChanged'
+      AND logical_name_id IS NOT NULL
+      AND (
+          after_state -> 'scope' ->> 'kind' = 'resource'
+          OR before_state -> 'scope' ->> 'kind' = 'resource'
+      )
+),
 candidate_keys AS (
     SELECT
         'address_names_current'::TEXT AS projection,
@@ -343,6 +363,52 @@ candidate_keys AS (
     )
       AND address.address IS NOT NULL
       AND address.address <> ''
+
+    UNION ALL
+
+    SELECT
+        'address_names_current'::TEXT AS projection,
+        lower(address.address) AS projection_key,
+        jsonb_build_object('address', lower(address.address)) AS key_payload,
+        ne.normalized_event_id,
+        ne.change_id,
+        ne.changed_at
+    FROM changed_events ne
+    CROSS JOIN LATERAL (
+        VALUES
+            (ne.after_state ->> 'subject', ne.after_state -> 'scope'),
+            (ne.before_state ->> 'subject', ne.before_state -> 'scope')
+    ) AS address(address, scope)
+    WHERE ne.event_kind = 'PermissionChanged'
+      AND address.scope ->> 'kind' = 'resource'
+      AND address.address IS NOT NULL
+      AND address.address <> ''
+
+    UNION ALL
+
+    SELECT
+        'address_names_current'::TEXT AS projection,
+        lower(fallback.address) AS projection_key,
+        jsonb_build_object('address', lower(fallback.address)) AS key_payload,
+        changed.normalized_event_id,
+        changed.change_id,
+        changed.changed_at
+    FROM resource_permission_changed_names changed
+    JOIN normalized_events ne
+      ON ne.logical_name_id = changed.logical_name_id
+    CROSS JOIN LATERAL (
+        VALUES
+            (ne.after_state ->> 'registrant'),
+            (ne.after_state ->> 'to')
+    ) AS fallback(address)
+    WHERE ne.event_kind IN ('RegistrationGranted', 'TokenControlTransferred')
+      AND ne.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+      AND fallback.address IS NOT NULL
+      AND fallback.address <> ''
 )
 "#;
 
@@ -414,6 +480,37 @@ candidate_keys AS (
       AND ne.logical_name_id IS NULL
       AND ne.resource_id IS NULL
       AND ne.after_state ->> 'record_key' = 'name'
+      AND tuple.claim_source ->> 'address' IS NOT NULL
+      AND tuple.claim_source ->> 'address' <> ''
+      AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) IS NOT NULL
+      AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) <> ''
+      AND tuple.claim_source ->> 'coin_type' IS NOT NULL
+      AND tuple.claim_source ->> 'coin_type' <> ''
+
+    UNION ALL
+
+    SELECT
+        'primary_names_current'::TEXT AS projection,
+        lower(tuple.claim_source ->> 'address')
+            || ':' || COALESCE(tuple.claim_source ->> 'namespace', ne.namespace)
+            || ':' || (tuple.claim_source ->> 'coin_type') AS projection_key,
+        jsonb_build_object(
+            'address', lower(tuple.claim_source ->> 'address'),
+            'namespace', COALESCE(tuple.claim_source ->> 'namespace', ne.namespace),
+            'coin_type', tuple.claim_source ->> 'coin_type'
+        ) AS key_payload,
+        ne.normalized_event_id,
+        ne.change_id,
+        ne.changed_at
+    FROM changed_events ne
+    CROSS JOIN LATERAL (
+        VALUES
+            (ne.after_state -> 'primary_claim_source'),
+            (ne.before_state -> 'primary_claim_source')
+    ) AS tuple(claim_source)
+    WHERE ne.event_kind = 'ResolverChanged'
+      AND ne.logical_name_id IS NULL
+      AND ne.resource_id IS NULL
       AND tuple.claim_source ->> 'address' IS NOT NULL
       AND tuple.claim_source ->> 'address' <> ''
       AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) IS NOT NULL

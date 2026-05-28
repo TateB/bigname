@@ -71,6 +71,23 @@ fn builds_resource_hints_for_observed_and_fallback_resources() -> Result<()> {
     assert_eq!(hint.selector_kind, "addr");
     assert_eq!(hint.selector_key.as_deref(), Some("60"));
 
+    let invalid_name = dns_name("Ni\u{200d}ck", "eth");
+    let invalid_hint = resolver_resource_hint(
+        &raw_log,
+        resource.clone(),
+        invalid_name.clone(),
+        "addr",
+        Some("60".to_owned()),
+        None,
+    )?;
+    assert_eq!(invalid_hint.upstream_resource, resource);
+    assert_eq!(invalid_hint.logical_name_id, None);
+    assert_eq!(invalid_hint.normalized_name, None);
+    assert_eq!(
+        invalid_hint.dns_encoded_name.as_deref(),
+        Some(invalid_name.as_slice())
+    );
+
     let root = "0x0000000000000000000000000000000000000000000000000000000000000000";
     let fallback = fallback_resource_hint(&raw_log, root.to_owned(), true);
     assert_eq!(fallback.logical_name_id, None);

@@ -33,7 +33,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
                 DEFAULT
             )
@@ -193,7 +193,7 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
                 DEFAULT
             )
@@ -314,7 +314,7 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
                 DEFAULT
             )
@@ -522,7 +522,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_wrapper_l1/v1.toml',
                     DEFAULT
                 ),
@@ -534,7 +534,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
                     DEFAULT
                 )
@@ -760,7 +760,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_primary/v1.toml',
                     DEFAULT
                 ),
@@ -772,7 +772,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
                     DEFAULT
                 ),
@@ -784,7 +784,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
                     DEFAULT
                 ),
@@ -796,7 +796,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
                     DEFAULT
                 )

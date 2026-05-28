@@ -46,6 +46,7 @@ pub(crate) async fn poll_provider_heads(
         provider_registry,
         true,
         HeaderAuditMode::Minimal,
+        &[],
     )
     .await
 }
@@ -56,6 +57,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     provider_registry: &ProviderRegistry,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<()> {
     let mut next_tasks = tasks.clone();
     let mut any_change = false;
@@ -71,6 +73,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             provider,
             adapter_sync_enabled,
             header_audit_mode,
+            event_silent_reverse_resolver_addresses,
         )
         .await
         {
@@ -111,6 +114,7 @@ pub(crate) async fn reconcile_intake_chain_task(
         provider,
         true,
         HeaderAuditMode::Minimal,
+        &[],
     )
     .await
 }
@@ -121,6 +125,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     provider: &(impl ChainProviderOps + ?Sized),
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let heads = provider.fetch_chain_heads().await?;
     reconcile_fetched_heads_with_adapter_sync(
@@ -130,6 +135,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
         &heads,
         adapter_sync_enabled,
         header_audit_mode,
+        event_silent_reverse_resolver_addresses,
     )
     .await
 }
@@ -148,6 +154,7 @@ pub(crate) async fn reconcile_fetched_heads(
         heads,
         true,
         HeaderAuditMode::Minimal,
+        &[],
     )
     .await
 }
@@ -159,6 +166,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     heads: &ProviderHeadSnapshot,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let canonical = reconcile_canonical_head(
         pool,
@@ -192,6 +200,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
             &canonical,
             head_change_set,
             adapter_sync_enabled,
+            event_silent_reverse_resolver_addresses,
         )
         .await?;
     }

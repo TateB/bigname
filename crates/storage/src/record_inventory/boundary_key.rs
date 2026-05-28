@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-pub(super) fn record_version_boundary_storage_key(
+pub(crate) fn record_version_boundary_storage_key(
     record_version_boundary: &Value,
     expected_resource_id: Uuid,
 ) -> Result<String> {

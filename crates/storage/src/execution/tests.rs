@@ -162,7 +162,7 @@ fn execution_trace() -> ExecutionTrace {
         failure_payload: None,
         request_metadata: json!({
             "surface": "alice.eth",
-            "normalizer_version": "nfkc-v1"
+            "normalizer_version": "ensip15@ens-normalize-0.1.1"
         }),
         finished_at: Some(timestamp(1_717_171_717)),
         steps: vec![
@@ -264,7 +264,7 @@ fn execution_trace_variant(
     trace.request_key = request_key.to_owned();
     trace.request_metadata = json!({
         "surface": request_key,
-        "normalizer_version": "nfkc-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     trace.finished_at = Some(timestamp(finished_at));
     trace

@@ -52,56 +52,6 @@ pub(super) fn build_name_declared_state(
     declared_state
 }
 
-pub(super) fn build_resolver_declared_state(summary: &JsonValue) -> JsonValue {
-    let mut declared_state = empty_object();
-    insert_value_field(
-        &mut declared_state,
-        "bindings",
-        declared_summary_section(
-            summary,
-            "bindings",
-            "resolver bindings summary is not yet projected",
-        ),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "aliases",
-        declared_summary_section(
-            summary,
-            "aliases",
-            "resolver alias summary is not yet projected",
-        ),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "permissions",
-        declared_summary_section(
-            summary,
-            "permissions",
-            "resolver permissions summary is not yet projected",
-        ),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "role_holders",
-        declared_summary_section(
-            summary,
-            "role_holders",
-            "resolver role holder summary is not yet projected",
-        ),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "event_summary",
-        declared_summary_section(
-            summary,
-            "event_summary",
-            "resolver event summary is not yet projected",
-        ),
-    );
-    declared_state
-}
-
 pub(super) fn build_name_surface_binding_explain_declared_state(
     row: &NameCurrentRow,
 ) -> JsonValue {

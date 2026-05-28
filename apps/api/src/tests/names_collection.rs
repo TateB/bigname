@@ -213,24 +213,6 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/v1/addresses/{address}/names/count?namespace=ens&relation=any&contains=lic&resolver={resolver}"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("compact address names count request failed")?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let count_payload: Value = read_json(response).await?;
-    assert_eq!(count_payload["data"]["address"], json!(address));
-    assert_eq!(count_payload["data"]["namespace"], json!("ens"));
-    assert_eq!(count_payload["data"]["relation"], json!("any"));
-    assert_eq!(count_payload["data"]["count"], json!(2));
-
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
                 .uri("/v1/names?resolved_address=0x0000000000000000000000000000000000000abc")
                 .body(Body::empty())
                 .expect("request must build"),

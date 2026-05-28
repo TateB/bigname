@@ -36,14 +36,12 @@ impl CompactNameRecordsMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompactNameRecordsDefaultMode {
-    Auto,
     Declared,
 }
 
 impl CompactNameRecordsDefaultMode {
     fn mode(self) -> CompactNameRecordsMode {
         match self {
-            Self::Auto => CompactNameRecordsMode::Auto,
             Self::Declared => CompactNameRecordsMode::Declared,
         }
     }

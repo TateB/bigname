@@ -1,4 +1,5 @@
 mod list;
+mod replacement_publish;
 mod row;
 mod snapshot;
 mod write;

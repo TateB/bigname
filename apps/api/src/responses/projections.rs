@@ -99,19 +99,11 @@ mod projections {
         data::build_name_data(row)
     }
 
-    pub(super) fn build_resolver_data(row: &ResolverCurrentRow) -> JsonValue {
-        data::build_resolver_data(row)
-    }
-
     pub(super) fn build_name_declared_state(
         row: &NameCurrentRow,
         record_inventory_row: Option<&RecordInventoryCurrentRow>,
     ) -> JsonValue {
         declared_state::build_name_declared_state(row, record_inventory_row)
-    }
-
-    pub(super) fn build_resolver_declared_state(summary: &JsonValue) -> JsonValue {
-        declared_state::build_resolver_declared_state(summary)
     }
 
     pub(super) fn build_name_surface_binding_explain_declared_state(
@@ -176,19 +168,11 @@ fn build_name_data(row: &NameCurrentRow) -> JsonValue {
     projections::build_name_data(row)
 }
 
-fn build_resolver_data(row: &ResolverCurrentRow) -> JsonValue {
-    projections::build_resolver_data(row)
-}
-
 fn build_name_declared_state(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> JsonValue {
     projections::build_name_declared_state(row, record_inventory_row)
-}
-
-fn build_resolver_declared_state(summary: &JsonValue) -> JsonValue {
-    projections::build_resolver_declared_state(summary)
 }
 
 fn build_name_provenance(provenance: &JsonValue) -> JsonValue {

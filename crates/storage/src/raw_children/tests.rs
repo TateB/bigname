@@ -509,6 +509,30 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
         ],
     )
     .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO event_silent_resolver_call_observations (
+            chain_id,
+            resolver_address,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            canonicality_state
+        )
+        VALUES (
+            'eth-mainnet',
+            '0xa2c122be93b0074270ebee7f6b7292c7deb45047',
+            '0x002',
+            2,
+            '0xtx002',
+            0,
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
 
     let counts =
         mark_raw_block_facts_range_orphaned(database.pool(), "eth-mainnet", "0x002", Some("0x001"))
@@ -537,6 +561,14 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM raw_transactions WHERE block_hash = '0x002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM event_silent_resolver_call_observations WHERE block_hash = '0x002'"
         )
         .fetch_one(database.pool())
         .await?,

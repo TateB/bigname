@@ -11,7 +11,7 @@ use super::support::{
 };
 
 #[tokio::test]
-async fn targeted_rebuild_rejects_non_ascii_claim_name_source() -> Result<()> {
+async fn targeted_rebuild_rejects_invalid_claim_name_source() -> Result<()> {
     let database = TestDatabase::new().await?;
 
     upsert_normalized_events(
@@ -26,10 +26,10 @@ async fn targeted_rebuild_rejects_non_ascii_claim_name_source() -> Result<()> {
                 CanonicalityState::Canonical,
             ),
             reverse_linked_name_event(
-                "record-a-60-non-ascii",
+                "record-a-60-invalid-name",
                 "0x0000000000000000000000000000000000000aaa",
                 "60",
-                Some("Älice.eth"),
+                Some("Ni\u{200d}ck.eth"),
                 201,
                 0,
                 CanonicalityState::Canonical,
@@ -70,7 +70,7 @@ async fn targeted_rebuild_rejects_non_ascii_claim_name_source() -> Result<()> {
             namespace: "ens".to_owned(),
             coin_type: "60".to_owned(),
             claim_status: PrimaryNameClaimStatus::InvalidName,
-            raw_claim_name: Some("Älice.eth".to_owned()),
+            raw_claim_name: Some("Ni\u{200d}ck.eth".to_owned()),
             claim_provenance: expected_claim_provenance(
                 "0x0000000000000000000000000000000000000aaa",
                 "60",

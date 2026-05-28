@@ -437,7 +437,7 @@ fn request_metadata(row: &NameCurrentRow, records: &[EnsResolutionRecord]) -> Va
             .iter()
             .map(|record| record.record_key.clone())
             .collect::<Vec<_>>(),
-        "normalizer_version": "uts46-v1",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
         "entrypoint": ENS_UNIVERSAL_RESOLVER_ROLE,
         "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
     });

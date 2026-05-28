@@ -719,6 +719,17 @@ fn name_wrapped_upstream_topic_emits_preimage_and_old_swapped_topic_is_ignored()
     );
     assert!(build_test_preimage_observed_events(&old_swapped_log)?.is_empty());
 
+    let mismatched_log = watched_log(
+        "ens_v1_wrapper_l1",
+        3,
+        vec![
+            UPSTREAM_NAME_WRAPPED_TOPIC0.to_owned(),
+            hex_string(&[0x11; 32]),
+        ],
+        encode_name_wrapped_log_data(&dns_name),
+    );
+    assert!(build_test_preimage_observed_events(&mismatched_log)?.is_empty());
+
     Ok(())
 }
 
@@ -863,9 +874,68 @@ fn malformed_label_payloads_do_not_abort_preimage_observation() -> Result<()> {
 }
 
 #[test]
+fn unnormalizable_label_logs_do_not_abort_preimage_observation() -> Result<()> {
+    let invalid_label = "Ni\u{200d}ck";
+    let registrar_log = watched_log(
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        8,
+        RegistrarExplicitLabelEvent::NameRegistered.topics(invalid_label),
+        encode_registrar_label_log_data(invalid_label),
+    );
+    assert!(build_test_preimage_observed_events(&registrar_log)?.is_empty());
+
+    let registry_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        9,
+        vec![
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
+            hex_string(&abi_word_u64(1)),
+            keccak256_hex(invalid_label.as_bytes()),
+            hex_string(&abi_word_address(
+                "0x00000000000000000000000000000000000000aa",
+            )),
+        ],
+        encode_ens_v2_label_registered_data(
+            invalid_label,
+            "0x00000000000000000000000000000000000000bb",
+            2_000_000_000,
+        ),
+    );
+    assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn labelhash_mismatch_logs_do_not_abort_preimage_observation() -> Result<()> {
+    let label = "alice";
+    let registry_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        10,
+        vec![
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
+            hex_string(&abi_word_u64(1)),
+            keccak256_hex(b"bob"),
+            hex_string(&abi_word_address(
+                "0x00000000000000000000000000000000000000aa",
+            )),
+        ],
+        encode_ens_v2_label_registered_data(
+            label,
+            "0x00000000000000000000000000000000000000bb",
+            2_000_000_000,
+        ),
+    );
+    assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> {
     let alice_dns_name = dns_encoded_name(&["alice", "eth"]);
     let bob_dns_name = dns_encoded_name(&["bob", "eth"]);
+    let invalid_dns_name = dns_encoded_name(&["Ni\u{200d}ck", "eth"]);
     let alias_log = watched_log(
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         4,
@@ -891,6 +961,27 @@ fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> 
     assert_ne!(
         alias_events[0].event_identity,
         alias_events[1].event_identity
+    );
+
+    let invalid_alias_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+        5,
+        vec![
+            keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
+            keccak256_hex(&invalid_dns_name),
+            keccak256_hex(&bob_dns_name),
+        ],
+        encode_two_dynamic_bytes(&invalid_dns_name, &bob_dns_name),
+    );
+    let invalid_alias_events = build_test_preimage_observed_events(&invalid_alias_log)?;
+    assert_eq!(invalid_alias_events.len(), 1);
+    assert_eq!(
+        invalid_alias_events[0].after_state["observation_slot"],
+        "to_name"
+    );
+    assert_eq!(
+        invalid_alias_events[0].after_state["decoded_name"],
+        "bob.eth"
     );
 
     let named_cases = [
@@ -935,6 +1026,17 @@ fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> 
         assert_eq!(events[0].after_state["source_event"], source_event);
         assert_eq!(events[0].after_state["decoded_name"], "alice.eth");
     }
+
+    let invalid_named_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+        20,
+        vec![
+            keccak_signature_hex("NamedResource(uint256,bytes)"),
+            hex_string(&abi_word_u64(45)),
+        ],
+        encode_single_dynamic_bytes(&invalid_dns_name),
+    );
+    assert!(build_test_preimage_observed_events(&invalid_named_log)?.is_empty());
 
     Ok(())
 }
@@ -1195,7 +1297,7 @@ async fn sync_block_derived_normalized_events_is_idempotent() -> Result<()> {
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
@@ -1209,7 +1311,7 @@ async fn sync_block_derived_normalized_events_is_idempotent() -> Result<()> {
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1_shadow",
             rollout_status: "draft",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/2.toml",
         },
     )
@@ -1371,7 +1473,7 @@ async fn sync_block_derived_normalized_events_replays_scoped_selected_logs_witho
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -1525,7 +1627,7 @@ async fn sync_block_derived_normalized_events_uses_active_manifest_after_reactiv
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v0",
             rollout_status: "deprecated",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/0.toml",
         },
     )
@@ -1539,7 +1641,7 @@ async fn sync_block_derived_normalized_events_uses_active_manifest_after_reactiv
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
@@ -1633,7 +1735,7 @@ async fn sync_block_derived_normalized_events_watches_proxy_implementations_but_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
@@ -1780,7 +1882,7 @@ async fn sync_block_derived_normalized_events_skips_inactive_manifests() -> Resu
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "deprecated",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_wrapper_l1/1.toml",
         },
     )
@@ -1861,7 +1963,7 @@ async fn sync_block_derived_normalized_events_emits_registrar_observations_for_l
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -1984,7 +2086,7 @@ async fn sync_block_derived_normalized_events_is_idempotent_for_registrar_label_
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -2081,7 +2183,7 @@ async fn sync_block_derived_normalized_events_skips_orphaned_registrar_logs() ->
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -2183,7 +2285,7 @@ async fn sync_block_derived_normalized_events_skips_inactive_and_non_registrar_l
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "deprecated",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
         },
     )
@@ -2197,7 +2299,7 @@ async fn sync_block_derived_normalized_events_skips_inactive_and_non_registrar_l
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v1",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_test_wrapper/v1.toml",
         },
     )

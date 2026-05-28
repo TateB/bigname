@@ -19,6 +19,18 @@ pub(super) struct CompactRecordsRead {
     pub(super) verified_outcome: Option<ExecutionOutcome>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct NormalizedRouteNameInput {
+    pub(super) namespace: &'static str,
+    pub(super) normalized_name: String,
+    pub(super) corrected_input_normalization: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RouteNameNormalizationError {
+    pub(super) message: String,
+}
+
 pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
     if name == "base.eth" {
         return bigname_storage::ENS_NAMESPACE;
@@ -34,15 +46,51 @@ pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
     }
 }
 
-pub(super) async fn load_resolution_records_read(
+pub(super) fn normalize_inferred_route_name(
+    name: &str,
+) -> Result<NormalizedRouteNameInput, RouteNameNormalizationError> {
+    if name.is_empty() {
+        return Err(RouteNameNormalizationError {
+            message: "name must not be empty".to_owned(),
+        });
+    }
+
+    let normalized = bigname_domain::normalization::normalize_name(name).map_err(|error| {
+        RouteNameNormalizationError {
+            message: error.message().to_owned(),
+        }
+    })?;
+
+    Ok(NormalizedRouteNameInput {
+        namespace: infer_resolution_namespace(&normalized.normalized_name),
+        corrected_input_normalization: name != normalized.normalized_name,
+        normalized_name: normalized.normalized_name,
+    })
+}
+
+pub(super) fn route_name_normalization_api_error(error: RouteNameNormalizationError) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: error.message,
+    }
+}
+
+pub(super) async fn load_name_profile_records_read(
     state: &AppState,
     namespace: &str,
     name: &str,
-    query: ResolutionQuery,
+    query: NameProfileQuery,
 ) -> ApiResult<ResolutionRecordsRead> {
     let pool = &state.pool;
-    let mode = parse_resolution_mode(query.mode.as_deref())?;
-    let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
+    let mode = parse_resolution_mode(query.mode.as_deref().or(Some("both")))?;
+    if query.records.is_some() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "records is not supported on /v1/profiles/names/{name}; use /v1/names/{namespace}/{name}/records for selector-specific reads".to_owned(),
+        });
+    }
     let ExactNameRead {
         row,
         selected_snapshot,
@@ -59,6 +107,12 @@ pub(super) async fn load_resolution_records_read(
             .map_err(snapshot_selection_api_error)?
     } else {
         None
+    };
+
+    let records = if mode.includes_declared() || mode.includes_verified() {
+        profile_record_keys(record_inventory_current.as_ref())
+    } else {
+        Vec::new()
     };
 
     let persisted_verified_outcome = if mode.includes_verified() {
@@ -85,6 +139,82 @@ pub(super) async fn load_resolution_records_read(
         record_inventory_current,
         persisted_verified_outcome,
     })
+}
+
+fn profile_default_record_keys() -> Vec<ResolutionRecordKey> {
+    profile_record_keys_from_names(PROFILE_FALLBACK_RECORD_KEYS.iter().copied())
+}
+
+const PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
+    "addr:60",
+    "avatar",
+    "contenthash",
+    "text:description",
+    "text:url",
+    "text:email",
+];
+
+fn profile_record_keys(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Vec<ResolutionRecordKey> {
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+    let Some(row) = record_inventory_row else {
+        return records;
+    };
+
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.selectors.as_array().into_iter().flatten(),
+    );
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.explicit_gaps.as_array().into_iter().flatten(),
+    );
+    profile_push_record_keys_from_section(
+        &mut records,
+        &mut seen,
+        row.entries.as_array().into_iter().flatten(),
+    );
+
+    if records.is_empty() && !record_inventory_current_is_explicitly_unsupported(row) {
+        profile_default_record_keys()
+    } else {
+        records
+    }
+}
+
+fn record_inventory_current_is_explicitly_unsupported(row: &RecordInventoryCurrentRow) -> bool {
+    string_field(provenance_field(&row.coverage, "status"))
+        .is_some_and(|status| status == "unsupported")
+}
+
+fn profile_push_record_keys_from_section<'a>(
+    records: &mut Vec<ResolutionRecordKey>,
+    seen: &mut BTreeSet<String>,
+    values: impl Iterator<Item = &'a JsonValue>,
+) {
+    for record_key in values.filter_map(|value| string_field(provenance_field(value, "record_key")))
+    {
+        if seen.insert(record_key.clone())
+            && let Some(record) = parse_resolution_record_key(&record_key)
+        {
+            records.push(record);
+        }
+    }
+}
+
+fn profile_record_keys_from_names<'a>(
+    record_keys: impl Iterator<Item = &'a str>,
+) -> Vec<ResolutionRecordKey> {
+    record_keys
+        .map(|record_key| {
+            parse_resolution_record_key(record_key)
+                .expect("profile fallback record selector must be valid")
+        })
+        .collect()
 }
 
 pub(super) async fn load_compact_records_read(

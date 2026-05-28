@@ -1,10 +1,10 @@
 {
   "capability_group": "record inventory for editing",
-  "conformance_owner": "resolution_and_permissions.rs::resolution_record_inventory_contract_*",
+  "conformance_owner": "apps/api tests::resolution profile record selection and records compact route",
   "fixture_id": "record-inventory-for-editing",
   "request": {
     "method": "GET",
-    "path": "/v1/resolutions/{namespace}/{name}",
+    "path": "/v1/profiles/names/{name}",
     "query": {}
   },
   "response": {
@@ -29,12 +29,13 @@
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
-    "focused resolution conformance",
+    "focused profile and records API route tests",
     "supported resolver-profile evidence",
     "scripts/release-smoke"
   ],
   "route_owner": [
-    "/v1/resolutions/{namespace}/{name}"
+    "/v1/profiles/names/{name}",
+    "/v1/names/{namespace}/{name}/records"
   ],
   "scope": "local_cutover_evidence"
 }

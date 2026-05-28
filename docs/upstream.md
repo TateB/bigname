@@ -51,7 +51,7 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 
 > **Basenames verified/explain public support narrowing** — bigname narrows the upstream Basenames L1Resolver and CCIP entrypoint into one first public support class instead of publishing every upstream-reachable non-`base.eth` path immediately.
 > **Upstream**: `(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)`
-> **Our rule**: `docs/api-v1.md` § `GET /v1/resolutions/{namespace}/{name}` and § `GET /v1/explain/resolutions/{namespace}/{name}/execution`; mirrored in `docs/execution.md` § Initial Support Boundary and `docs/manifests.md` § Basenames source-family ownership.
+> **Our rule**: `docs/api-v1.md` § `GET /v1/profiles/names/{name}` and § `GET /v1/explain/resolutions/{namespace}/{name}/execution`; mirrored in `docs/execution.md` § Initial Support Boundary and `docs/manifests.md` § Basenames source-family ownership.
 > **Why**: freeze the first Basenames consumer-replacement slice on the declared Base-authority plus L1-transport boundary before widening alias-participating, wildcard-derived, linked-subregistry, transport-free, or offchain-gateway path classes.
 > **Since**: `2026-04-19`
 

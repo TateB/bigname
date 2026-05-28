@@ -34,6 +34,7 @@ alloy-transport-http = { version = "2.0.1", default-features = false, features =
 anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 clap = { version = "4.5.49", features = ["derive", "env"] }
+ens-normalize = "0.1.1"
 serde = { version = "1.0.228", features = ["derive"] }
 futures-util = "0.3.31"
 sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }

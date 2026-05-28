@@ -5,7 +5,7 @@ source_family = "ens_execution"
 chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "shadow"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
 

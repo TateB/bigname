@@ -10,7 +10,7 @@ source_family = "basenames_base_registry"
 chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs on Base mainnet" }

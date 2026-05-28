@@ -98,7 +98,9 @@ This separation captures: one resource under multiple public names, alias-resolv
 
 ## Normalization and preimage observation
 
-Normalization is version-pinned via `normalizer_version`. The canonical `NameSurface` carries one representative result; alternate spellings persist as immutable preimage observation facts.
+Normalization is version-pinned via `normalizer_version`. The active normalizer is `ensip15@ens-normalize-0.1.1`, backed by the Rust `ens-normalize` crate and its embedded ENSIP-15 data. API input normalization, adapter name-surface admission, reverse-claim claim-name normalization, resolver alias target normalization, DNS-encoded name handling, `namehash`, `labelhashes`, and DNS wire-name derivation all use that one boundary. IDNA/UTS-46 conversion, ASCII lowercasing, trimming, or route-local normalization are not fallback normalizers. Blank or whitespace-only reverse-claim source values are classified as no claim before name normalization; every nonblank reverse-claim source value must pass this ENSIP-15 boundary or surface as `invalid_name`.
+
+The canonical `NameSurface` carries one representative result; alternate spellings persist as immutable preimage observation facts.
 
 `PreimageObserved` facts may come from registrar/registry events with explicit labels, wrapper events with human-readable names, reverse/primary flows that reveal names, and metadata when a manifest allows. Invalid input is never silently coerced into a valid identity.
 
@@ -329,7 +331,7 @@ Required indexes: by resource, by account, by resolver; permission history by re
 - A raw claim that cannot be normalized surfaces `invalid_name`, not silent drop.
 - Reverse claims alone don't verify — verification must resolve back to the requested address.[^v1-aur-l217][^v1-aur-l226][^v1-aur-l263][^v1-aur-l269]
 
-For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source. It is never synthesized from manifest presence, resolver identity, or verified execution.
+For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source, including the projection-owned legacy reverse-resolver hydration exception documented for configured event-silent ENSv1 reverse resolvers. That exception covers admitted reverse tuples and current registry resolver edges whose node hash forward-confirms through `addr:60` on the ENS Universal Resolver to the recovered address at the same hash-pinned checkpoint; the forward check only recovers the address preimage for the reverse node and does not persist verified-primary state.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52] The app default tuple (`namespace=ens`, `coin_type=60`) may use a route-local Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing: build the `addr.reverse` node, read its ENS registry resolver, call resolver `name(bytes32)`, normalize the result, and publish provenance as `ens_reverse_rpc` without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolver-l11][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback verifies the claimed name with `addr:60` through the ENS Universal Resolver proxy at provider `latest`; it returns verification status without persisting an execution trace.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Outside exact-row hydration and that fallback, `claimed_primary_name.name` is never synthesized from manifest presence, resolver identity alone, or verified execution.
 
 For Basenames, declared primary-claim intake is `basenames_base_primary` (`reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`).[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13][^bn-revreg-l193]
 
@@ -337,8 +339,8 @@ Verified-primary cache identity is `request_type=verified_primary_name` with key
 
 Section-local provenance:
 
-- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row. No `execution_trace_id`.
-- `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` and must equal the top-level `execution_trace_id`.
+- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
+- `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`. Route-local ENS/60 verification omits it.
 
 ## Collection semantics
 
@@ -397,7 +399,7 @@ Coverage is contractual.
 - Wildcard and offchain name classes are not globally enumerable.
 - Record inventory is `best_effort` unless a resolver family enumerates explicitly or there's a source-specific index.
 - Child enumeration is authoritative only for declared direct children unless the caller opts into other surface classes.
-- Primary-name route-level coverage is `partial` for the frozen ENS and Basenames exact-tuple persisted-readback class, with `exhaustiveness=non_enumerable`, `enumeration_basis=primary_name_lookup`, namespace-local `source_classes_considered`. Out-of-class tuples are explicit `unsupported`.
+- Primary-name route-level coverage is `partial` for the frozen ENS and Basenames exact-tuple persisted-readback class and for the ENS/60 on-demand fallback, including `ens_execution_rpc` when verified mode performs live forward verification, with `exhaustiveness=non_enumerable` and `enumeration_basis=primary_name_lookup`. Out-of-class tuples are explicit `unsupported`.
 
 Every response carries `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.unsupported_reason`, `coverage.enumeration_basis`.
 
@@ -537,6 +539,9 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v1-publicresolver-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v1-iur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
+[^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
+[^v1-iaddrres-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L11 @ ens_v1@91c966f)
 
 [^v1-nw-l132]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
 [^v1-nw-l240]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240 @ ens_v1@91c966f)
@@ -570,6 +575,12 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
 [^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 [^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
+[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolver-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L11 @ ens_v1@91c966f)
+[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^v1-aur-l90]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L90 @ ens_v1@91c966f)
 [^v1-aur-l106]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L106 @ ens_v1@91c966f)

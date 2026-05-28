@@ -33,7 +33,7 @@ Useful one-shots:
 - `cargo worker -- run`
 - `cargo worker -- migrate`
 
-To enable live ingestion and live verified ENS resolution, set `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_API_CHAIN_RPC_URLS`. See [`docs/development.md`](docs/development.md).
+To enable live ingestion, live verified ENS resolution, and the ENS/60 primary-name on-demand reverse/forward RPC fallback, set `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_API_CHAIN_RPC_URLS`. See [`docs/development.md`](docs/development.md).
 
 ## Container
 

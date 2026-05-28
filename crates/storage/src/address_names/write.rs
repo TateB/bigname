@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{decode::decode_address_name_current_row, types::AddressNameCurrentRow};
 use crate::projection_helpers::{require_json_object, serialize_jsonb_field};
@@ -56,10 +56,48 @@ pub async fn clear_address_names_current(pool: &PgPool) -> Result<u64> {
         .map(|result| result.rows_affected())
 }
 
+const ADDRESS_NAMES_CURRENT_SIDECAR_TRIGGERS: &[&str] = &[
+    "address_names_current_identity_counts_after_delete",
+    "address_names_current_identity_counts_after_insert",
+    "address_names_current_identity_counts_after_update",
+    "address_names_current_identity_feed_after_change",
+];
+
+pub(super) async fn set_address_names_current_sidecar_triggers(
+    transaction: &mut Transaction<'_, Postgres>,
+    enabled: bool,
+) -> Result<()> {
+    let action = if enabled { "ENABLE" } else { "DISABLE" };
+    for trigger in ADDRESS_NAMES_CURRENT_SIDECAR_TRIGGERS {
+        let sql = format!("ALTER TABLE address_names_current {action} TRIGGER {trigger}");
+        sqlx::query(&sql)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to {} address_names_current sidecar trigger {}",
+                    action.to_ascii_lowercase(),
+                    trigger
+                )
+            })?;
+    }
+    Ok(())
+}
+
 async fn upsert_address_name_current_row(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &AddressNameCurrentRow,
 ) -> Result<AddressNameCurrentRow> {
+    upsert_address_name_current_row_into_table(executor, "address_names_current", row).await
+}
+
+pub(super) async fn upsert_address_name_current_row_into_table(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    target_table_sql: &str,
+    row: &AddressNameCurrentRow,
+) -> Result<AddressNameCurrentRow> {
+    validate_address_name_current_row(row)?;
+
     let provenance = serialize_jsonb_field(
         &row.provenance,
         "failed to serialize address_names_current provenance",
@@ -77,9 +115,9 @@ async fn upsert_address_name_current_row(
         "failed to serialize address_names_current canonicality_summary",
     )?;
 
-    let snapshot = sqlx::query(
+    let query = format!(
         r#"
-        INSERT INTO address_names_current (
+        INSERT INTO {target_table_sql} (
             address,
             logical_name_id,
             relation,
@@ -152,7 +190,9 @@ async fn upsert_address_name_current_row(
             manifest_version,
             last_recomputed_at
         "#,
-    )
+    );
+
+    let snapshot = sqlx::query(&query)
     .bind(&row.address)
     .bind(&row.logical_name_id)
     .bind(row.relation.as_str())

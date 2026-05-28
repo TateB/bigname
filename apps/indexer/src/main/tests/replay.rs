@@ -1877,7 +1877,7 @@ async fn insert_active_replay_watched_contract_with_source_family(
             $2,
             'ens_v1',
             'active',
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.1',
             ('manifests/ens/' || $3 || '/v1.toml'),
             DEFAULT
         )
@@ -1984,7 +1984,7 @@ async fn insert_active_replay_manifest(
             $4,
             $5,
             'active',
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.1',
             ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
             DEFAULT
         )

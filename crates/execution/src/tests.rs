@@ -811,7 +811,7 @@ fn name_surface_for_request(
         dns_encoded_name: requested_selectors.surface.as_bytes().to_vec(),
         namehash: format!("namehash:{}", requested_selectors.surface),
         labelhashes: vec![format!("labelhash:{}", requested_selectors.surface)],
-        normalizer_version: "uts46-v1".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: chain_id.to_owned(),
@@ -1278,7 +1278,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
                 dns_encoded_name: source_normalized_name.as_bytes().to_vec(),
                 namehash: source_namehash.to_owned(),
                 labelhashes: vec![format!("labelhash:{source_normalized_name}")],
-                normalizer_version: "uts46-v1".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
@@ -1444,7 +1444,7 @@ async fn insert_basenames_execution_manifest(pool: &PgPool) -> Result<i64> {
     .bind(ETHEREUM_MAINNET_CHAIN_ID)
     .bind("basenames_v1")
     .bind("active")
-    .bind("ensip15@2026-04-16")
+    .bind("ensip15@ens-normalize-0.1.1")
     .bind("tests/execution/basenames_execution-v2.toml")
     .bind("{}")
     .fetch_one(pool)
@@ -1616,7 +1616,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
             dns_encoded_name: b"alice.base.eth".to_vec(),
             namehash: "namehash:alice.base.eth".to_owned(),
             labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
@@ -2158,7 +2158,7 @@ fn success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
             request_metadata: json!({
                 "surface": "alice.eth",
                 "record_key": "addr:60",
-                "normalizer_version": "uts46-v1"
+                "normalizer_version": "ensip15@ens-normalize-0.1.1"
             }),
             finished_at: Some(finished_at),
             steps: vec![
@@ -2279,7 +2279,7 @@ fn contenthash_success_request() -> PersistEnsExactNameVerifiedResolutionRequest
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_key": "contenthash",
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.steps[1].step_payload = json!({
         "name": "alice.eth",
@@ -2315,7 +2315,7 @@ fn avatar_success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_key": "avatar",
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.steps[1].step_payload = json!({
         "name": "alice.eth",
@@ -2432,7 +2432,7 @@ fn multi_selector_request() -> PersistEnsExactNameVerifiedResolutionRequest {
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": ordered_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.finished_at = Some(finished_at);
     request.outcome.cache_key.request_key = request_key;
@@ -2487,7 +2487,7 @@ fn contenthash_mixed_selector_request() -> PersistEnsExactNameVerifiedResolution
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": ordered_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.finished_at = Some(finished_at);
     request.outcome.cache_key.request_key = request_key;
@@ -2552,7 +2552,7 @@ fn avatar_mixed_selector_request() -> PersistEnsExactNameVerifiedResolutionReque
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": ordered_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.finished_at = Some(finished_at);
     request.outcome.cache_key.request_key = request_key;
@@ -2586,7 +2586,7 @@ fn alias_only_text_request() -> PersistEnsExactNameVerifiedResolutionRequest {
             "final_target": alias_target.clone(),
             "hops": [alias_target.clone()]
         },
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.steps[1].step_payload = json!({
         "name": "alice.eth",
@@ -2630,7 +2630,7 @@ fn alias_only_avatar_request() -> PersistEnsExactNameVerifiedResolutionRequest {
             "final_target": alias_target.clone(),
             "hops": [alias_target.clone()]
         },
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.steps[1].step_payload = json!({
         "name": "alice.eth",
@@ -3344,7 +3344,7 @@ async fn rejects_duplicate_selectors_before_writing_any_storage() -> Result<()> 
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": duplicate_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.final_payload = Some(json!({
         "verified_queries": [
@@ -3413,7 +3413,7 @@ async fn persists_text_selector_results_before_writing_storage() -> Result<()> {
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": ordered_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.final_payload = Some(json!({
         "verified_queries": [
@@ -3468,7 +3468,7 @@ async fn rejects_still_unsupported_selector_before_writing_any_storage() -> Resu
     request.trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_keys": ordered_record_keys,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.final_payload = Some(json!({
         "verified_queries": [
@@ -3565,7 +3565,7 @@ async fn rejects_linked_subregistry_binding_before_writing_any_storage() -> Resu
         "surface": "alice.eth",
         "record_key": "addr:60",
         "binding_kind": LINKED_SUBREGISTRY_PATH_BINDING_KIND,
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
 
     let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
@@ -3646,7 +3646,7 @@ async fn persists_exact_surface_wildcard_derived_path_with_observed_wildcard_bin
             "source": wildcard_source.clone(),
             "matched_labels": ["alice"]
         },
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     request.trace.steps.push(ExecutionTraceStep {
         step_index: 2,
@@ -4046,7 +4046,7 @@ fn verified_primary_request_for_namespace(
                     }
                 }),
                 step_payload: json!({
-                    "normalizer_version": "uts46-v1"
+                    "normalizer_version": "ensip15@ens-normalize-0.1.1"
                 }),
             },
             ExecutionTraceStep {
@@ -4303,7 +4303,7 @@ fn verified_primary_invalid_name_request() -> PersistEnsVerifiedPrimaryNameReque
                 }
             }),
             step_payload: json!({
-                "normalizer_version": "uts46-v1",
+                "normalizer_version": "ensip15@ens-normalize-0.1.1",
                 "error": "label_has_whitespace"
             }),
         },
@@ -4428,7 +4428,7 @@ fn verified_primary_basenames_invalid_name_request() -> PersistEnsVerifiedPrimar
                 }
             }),
             step_payload: json!({
-                "normalizer_version": "uts46-v1",
+                "normalizer_version": "ensip15@ens-normalize-0.1.1",
                 "error": "label_has_whitespace"
             }),
         },
@@ -4844,7 +4844,7 @@ async fn rolls_back_verified_primary_trace_when_outcome_write_fails() -> Result<
     conflicting_trace.request_metadata = json!({
         "surface": "alice.eth",
         "record_key": "addr:60",
-        "normalizer_version": "uts46-v1"
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
     });
     upsert_execution_trace(database.pool(), &conflicting_trace).await?;
 

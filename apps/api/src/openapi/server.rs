@@ -47,6 +47,7 @@ pub(crate) fn app_router(state: AppState) -> Router {
         .iter()
         .copied()
         .fold(Router::new(), |router, route| route.register(router))
+        .route("/", get(openapi_docs))
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(openapi_docs))
         .route("/docs/", get(openapi_docs))

@@ -14,6 +14,8 @@ include!("responses/app_facing/names_collection.rs");
 
 include!("responses/app_facing/identity.rs");
 
+include!("responses/app_facing/identity_native.rs");
+
 include!("responses/app_facing/records.rs");
 
 include!("responses/app_facing/events.rs");

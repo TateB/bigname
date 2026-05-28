@@ -191,7 +191,7 @@ fn name_surface(
         dns_encoded_name: vec![4, b't', b'e', b's', b't', 3, b'e', b't', b'h', 0],
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec![format!("labelhash:{normalized_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id,
@@ -587,7 +587,7 @@ async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -
     );
     compatible_surface.input_name = "No-Snapshot-Surface.eth".to_owned();
     compatible_surface.canonical_display_name = "no-snapshot-surface.eth".to_owned();
-    compatible_surface.normalizer_version = "ensip15@later-compatible".to_owned();
+    compatible_surface.normalizer_version = "ensip15@ens-normalize-0.1.1".to_owned();
     compatible_surface.normalization_warnings = json!(["display_metadata_changed"]);
     upsert_name_surfaces_without_snapshots(
         database.pool(),
@@ -1270,7 +1270,7 @@ async fn orphaned_binding_can_coexist_with_overlapping_replacement_after_repair(
             ],
             namehash: "namehash:repair.eth".to_owned(),
             labelhashes: vec!["labelhash:repair.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: chain_id.to_owned(),
@@ -1341,7 +1341,7 @@ async fn orphaned_binding_can_coexist_with_overlapping_replacement_after_repair(
             ],
             namehash: "namehash:repair.eth".to_owned(),
             labelhashes: vec!["labelhash:repair.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: chain_id.to_owned(),
@@ -1479,7 +1479,7 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
             ],
             namehash: "namehash:stable.eth".to_owned(),
             labelhashes: vec!["labelhash:stable.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: chain_id.to_owned(),
@@ -1536,7 +1536,7 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
         ],
         namehash: "namehash:stable.eth".to_owned(),
         labelhashes: vec!["labelhash:stable.eth".to_owned()],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: chain_id.to_owned(),

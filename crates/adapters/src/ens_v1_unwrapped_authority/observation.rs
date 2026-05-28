@@ -26,9 +26,12 @@ pub(super) fn build_authority_observation(
                     .get(1)
                     .context("NameRegistered log is missing indexed labelhash")?,
             )?;
-            let observed = profile
+            let Ok(observed) = profile
                 .context("registrar observation is missing an authority profile")?
-                .observe_name(&registration.label, &raw_log.normalizer_version)?;
+                .observe_name(&registration.label, &raw_log.normalizer_version)
+            else {
+                return Ok(None);
+            };
             let observed_labelhash = observed
                 .labelhashes
                 .first()
@@ -67,9 +70,12 @@ pub(super) fn build_authority_observation(
                     .get(1)
                     .context("NameRenewed log is missing indexed labelhash")?,
             )?;
-            let observed = profile
+            let Ok(observed) = profile
                 .context("registrar renewal observation is missing an authority profile")?
-                .observe_name(&renewal.label, &raw_log.normalizer_version)?;
+                .observe_name(&renewal.label, &raw_log.normalizer_version)
+            else {
+                return Ok(None);
+            };
             let observed_labelhash = observed
                 .labelhashes
                 .first()

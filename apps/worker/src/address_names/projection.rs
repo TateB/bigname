@@ -23,6 +23,7 @@ pub(super) async fn build_rows_for_binding(
         &binding.namespace,
         &binding.logical_name_id,
         &binding.surface_chain_id,
+        binding.resource_id,
     )
     .await?;
     let relations = project_relations(binding, &events);

@@ -9,7 +9,7 @@ The bigname public read contract. Wire format for the model defined in [`archite
 - Timestamps are RFC 3339 UTC.
 - Semantic identities are strings; opaque internal IDs (UUIDs) are returned as-is and are never derived by clients.
 - `namespace` is explicit on canonical name routes. Convenience routes that infer namespace still echo it back in identity fields.
-- Path-segment names are normalized names, URL-encoded.
+- Path-segment names are ENSIP-15-normalized names, URL-encoded. Convenience routes that accept unnormalized names normalize them with the same `ensip15@ens-normalize-0.1.1` boundary used by adapters before namespace inference. Unnormalizable names reject as `invalid_input` or, on the identity façade, return `unnormalizable_input` where documented.
 
 ### Common query parameters
 
@@ -47,7 +47,7 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/resolutions/{namespace}/{name}`, `GET /v1/resolve/{name}`, `GET /v1/names/{namespace}/{name}/records`, and `GET /v1/resolve/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route has no caller-selected `records` parameter: it selects all profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries. It falls back to the bounded app profile set only when a supported declared inventory exists but has no declared selectors, gaps, or cache entries; missing, stale, or explicitly unsupported inventory does not use fallback records.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
 - Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
@@ -71,7 +71,7 @@ These routes share the exact-name snapshot:
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
-- `GET /v1/resolutions/{namespace}/{name}` (data, declared topology, inventory/cache, coverage, verified support, execution target)
+- `GET /v1/profiles/names/{name}` (data, declared topology, inventory/cache, server-selected verified profile records, execution target)
 
 Rules:
 
@@ -80,11 +80,11 @@ Rules:
 - A `name_current` or `record_inventory_current` row whose stored position predates the selected snapshot stays eligible only when no newer canonical input exists for the same `logical_name_id` or `resource_id` through the selected positions, and the chain set matches.
 - `coverage` for `{namespace, name}` matches between `GET /v1/names/{namespace}/{name}` and `GET /v1/coverage/{namespace}/{name}`.
 - The two explain routes resolve the same `logical_name_id`, `resource_id`, `token_lineage_id`, `surface_binding_id`, and `binding_kind` as the exact-name route at the same snapshot.
-- `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
+- `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. `GET /v1/profiles/names/{name}` executes every server-selected profile record derived from declared state; it never accepts a caller-supplied selector subset. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
 - Without `at` or `chain_positions`, the snapshot is `consistency=head` at the latest stored checkpoint, and live execution targets that.
 - Live ENS verified resolution requires an Ethereum RPC provider on the API process. If unconfigured or unable to serve the selected block, supported selectors return `409 stale` with a configuration message; declared cache is not a fallback.
 - Handlers serve from projections and execution output. Raw facts and adapter-owned normalized events are never read directly.
-- `GET /v1/resolve/{name}` infers namespace and uses the canonical default snapshot. It does not accept `at`, `chain_positions`, or `consistency`.
+- The slim API does not expose namespace-inferred resolution aliases; callers pass `{namespace}` explicitly on name routes.
 
 ## Response envelope
 
@@ -143,28 +143,37 @@ Rules:
 - `coverage` is route-level completeness and enumeration basis, not freshness.
 - `chain_positions` may carry multiple chains for cross-chain answers.
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
-- Top-level `provenance` is the route-level summary. Mixed declared+verified routes may add section-local `provenance` where derivations differ.
+- Top-level `provenance` is optional and reserved for explicit diagnostic/full metadata paths. Product routes omit it by default; mixed declared+verified routes may add section-local `provenance` where derivations differ.
 - `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
-- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
+- `GET /v1/profiles/names/{name}` is the app full-profile exception to the ordinary full-envelope default: `meta=summary` and `meta=none` return compact profile `data` without internal IDs or routine `normalized_name`, omit top-level coverage/chain/provenance fields, and strip per-query execution provenance. `meta=full` is required for diagnostic exact-name data and envelope metadata.
+- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
-## Identity Façade
+## Identity
 
-The `/v1/identity/*` routes are an app-facing compatibility façade for partner-style indexed identity reads. They flatten existing current projections into `NameRecord` and `ReverseNameRecord` DTOs; they do not replace the canonical name, resolution, address-name, primary-name, or permission contracts.
+`POST /v1/identity:lookup` is the native slim app-facing route for partner-style indexed identity reads. It flattens existing current projections into native `IdentityRecord` DTOs, with result-level `input` and `normalization` metadata for name inputs. Native records use `name` as the canonical normalized name string and do not include routine `normalized_name` or `corrected_input_normalization` peers.
 
-Namespace inference matches `GET /v1/resolve/{name}`: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Façade reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this façade does not widen the documented ENSv2 `sepolia-dev` support boundary.
+The identity route has three read profiles:
 
-Façade not-found behavior is adapter-compatible rather than core-route `404` behavior:
+- Feed profile: `POST /v1/identity:lookup` with `profile=feed` returns at most one compact identity row per input address, plus `total_count`. It is the partner-1 latency path for feeds and timelines and intentionally excludes full `IdentityRecord` fields, record inventory, text records, coin-address maps, and deep provenance.
+- Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation and account switchers. It may carry larger payloads and pagination.
+- Shadow profile: `POST /v1/identity:lookup` with `profile=shadow` follows the detail response shape for deterministic migration comparison.
 
-- `GET /v1/identity/names/{name}` returns `200` with `{ "status": "not_found", "record": null }` for a forward miss.
-- Reverse misses return `records: []`.
-- Batch routes preserve input order and return per-input status objects.
+Identity lookup normalizes names before lookup. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 `sepolia-dev` support boundary.
+
+Identity not-found behavior is adapter-compatible rather than core-route `404` behavior:
+
+- Name inputs return `record=null` with `status=not_found` for a miss.
+- Unnormalizable name inputs return `status=unnormalizable_input`, `record=null`, and result-level `normalization.reason`.
+- Address misses return `records=[]`, `status=success`, and `total_count=0`.
+- Explicit `namespace=ens|basenames` filters are currently supported for name inputs only; address inputs use public namespace semantics and reject explicit namespace filters.
+- The route preserves input order and returns one result object per input.
 - Batch limits default to `1000` inputs and may be configured with `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
-- Reverse single defaults to profile-style `page_size=100`; reverse batch defaults to feed-style `page_size=1` unless the input item asks for a larger page.
+- Address inputs default to `page_size=1` unless the input item asks for a larger page.
 
-`NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
+`IdentityRecord` includes canonical `name`, `namespace`, `namehash`, optional owner/manager/primary/record fields where projected, `network`, optional primary/relation facets for reverse reads, `status`, and `unsupported_fields`. Name result statuses can use `unnormalizable_input` before a record exists; nested `IdentityRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Optional fields are omitted when no backed value is available. `unsupported_fields` lists fields that the identity route could not prove from the current projections without inventing a value.
 
-Reverse identity pagination always includes `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe.
+Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe. The compact feed identity row is read from `address_names_current_identity_feed`, a sidecar that materializes the same readable first-row ordering per address, role set, and primary-name coin type.
 
 ## Shared objects
 
@@ -226,7 +235,7 @@ Used when a documented declared subdocument exists but isn't projected. The fiel
 
 `chain_id`, `address`, `latest_event_kind`. Topology-only target identity. `chain_id=null, address=null` means no declared resolver, not unsupported.
 
-For ENSv1, complete family coverage and resolver-overview support require admission to an ENS Labs PublicResolver-generation profile.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l66][^v1-pres-l114] Retained generic resolver-local events may produce observed cache successes while profile state is `pending`. ENSv1 resolver `NameChanged` text observed via reverse/primary paths is preimage only — it doesn't make `GET /v1/resolve/{name}` found, doesn't prove primary truth, and doesn't populate records without matching forward-node observations.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130]
+For ENSv1, complete family coverage and resolver-overview support require admission to an ENS Labs PublicResolver-generation profile.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l66][^v1-pres-l114] Retained generic resolver-local events may produce observed cache successes while profile state is `pending`. ENSv1 resolver `NameChanged` text observed via reverse/primary paths is preimage only — it doesn't make exact-name reads found, doesn't prove primary truth, and doesn't populate records without matching forward-node observations.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130]
 
 For Basenames, complete family coverage requires a discovered Base resolver to be `L2Resolver`-compatible and admitted as `supported`.[^bn-l2resolver-l22][^bn-l2resolver-l182][^bn-l2resolver-l193] The ENSv1 profile gate, L1 transport, and offchain gateways don't satisfy this.
 
@@ -329,47 +338,67 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `ResolverOverviewBindingItem`
 
-`logical_name_id`, `canonical_display_name`, `normalized_name`, `namehash`, `resource_id`, `surface_binding_id`, `binding_kind`. Ordered by `canonical_display_name`, then `logical_name_id`, then `surface_binding_id`.
+`namespace`, `name`, `normalized_name`, `namehash`. Used in compact resolver `nodes` and `aliases` arrays. `name` is the route-owned surface string for display/order, and `namehash` is the stable name identity key.
 
-### `ResolverOverviewBindingSummary`
+### `ResolverOverviewRoleItem`
 
-`status: "supported"`, `count`, `items`. Used for supported `declared_state.bindings` and `declared_state.aliases`. `count = items.length`. `aliases` narrows `items` to the `binding_kind=resolver_alias_path` subset.
+`subject`, `resource_count`, `permission_row_count`, `effective_powers`, `resource_ids`. Row-granular grant and revocation lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 
 ## Route catalog
 
-The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md).
+The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: native slim identity routes are the latency-critical partner/feed surface, canonical product routes are the preferred public API for app and explorer reads, and diagnostics carry coverage/provenance detail. Removed convenience aliases such as `/v1/resolve*` and `/v1/resolutions*` are not part of the slim native surface.
+
+### Native slim identity
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/identity:lookup` | Native slim identity lookup. `profile=feed` is the partner-1 latency path; `profile=detail` is profile aggregation. |
+| `GET /v1/status` | Public projection/indexing readiness by chain. |
+
+### Canonical product reads
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/names` | Compact name search, exact-name filter, address relations, suggestions. |
+| `GET /v1/names/{namespace}/{name}` | Exact name lookup without routine deep provenance. |
+| `GET /v1/profiles/names/{name}` | App-facing full profile path with declared topology/cache and server-selected verified profile record results. |
+| `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
+| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
+| `GET /v1/addresses/{address}/names` | Address-to-surface collection. |
+| `GET /v1/primary-names/{address}` | App primary-name lookup for an address; defaults to ENS coin type 60, with route-local on-demand reverse claim and forward verification when the persisted tuple is missing. |
+| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
+| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
+
+### Metadata and control plane
 
 | Route | Purpose |
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
-| `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
-| `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
-| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
-| `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain detail. |
+| `GET /healthz` | Liveness check. Not part of the `v1` contract. |
+
+### Diagnostics and provenance
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/coverage/{namespace}/{name}` | Single-name completeness and support surface. |
 | `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view. |
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view. |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain. |
-| `GET /v1/addresses/{address}/names` | Address-to-surface collection. |
-| `GET /v1/addresses/{address}/names/count` | Count companion to address relation filters. |
+
+### Specialist adjuncts
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
+| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
+| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
-| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
-| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
-| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
-| `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview (full envelope). |
-| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
-| `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, cache, verified queries. |
-| `GET /v1/resolve/{name}` | Namespace-inferred convenience for resolution. |
-| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records; compact view only. |
-| `GET /v1/primary-names/{address}` | Claimed and verified primary name for `(address, namespace, coin_type)`. |
-| `GET /healthz` | Liveness check. Not part of the `v1` contract. |
 
-The running API also serves `GET /openapi.json` and `GET /docs` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
+The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 
 ## Sorting and pagination
 

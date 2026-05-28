@@ -108,22 +108,12 @@ fn build_name_wrapped_preimage_observed_events(
         })?;
     let indexed_namehash = hex_string(event.node.as_slice());
     let dns_name = event.name.to_vec();
-    let observation = observe_dns_encoded_name(&dns_name).with_context(|| {
-        format!(
-            "failed to interpret dns-encoded name for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Ok(observation) = observe_dns_encoded_name(&dns_name) else {
+        return Ok(Vec::new());
+    };
 
     if !indexed_namehash.eq_ignore_ascii_case(&observation.namehash) {
-        bail!(
-            "NameWrapped indexed namehash {} does not match decoded namehash {} for chain {} block {} log {}",
-            indexed_namehash,
-            observation.namehash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
+        return Ok(Vec::new());
     }
 
     Ok(vec![build_preimage_observed_normalized_event(
@@ -192,13 +182,6 @@ fn build_ens_v2_preimage_observed_events(
     Ok(Vec::new())
 }
 
-fn log_context(raw_log: &WatchedRawLogRow, message: &str) -> String {
-    format!(
-        "{message} for chain {} block {} log {}",
-        raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-    )
-}
-
 fn build_ens_v2_alias_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {
@@ -228,20 +211,24 @@ fn build_ens_v2_alias_preimage_observed_events(
 
     let mut events = Vec::new();
     if !from_name.is_empty() {
-        events.push(build_preimage_observed_normalized_event(
-            raw_log,
-            SOURCE_EVENT_ALIAS_CHANGED,
-            observe_dns_encoded_name(&from_name)?,
-            Some("from_name"),
-        ));
+        if let Ok(observation) = observe_dns_encoded_name(&from_name) {
+            events.push(build_preimage_observed_normalized_event(
+                raw_log,
+                SOURCE_EVENT_ALIAS_CHANGED,
+                observation,
+                Some("from_name"),
+            ));
+        }
     }
     if !to_name.is_empty() {
-        events.push(build_preimage_observed_normalized_event(
-            raw_log,
-            SOURCE_EVENT_ALIAS_CHANGED,
-            observe_dns_encoded_name(&to_name)?,
-            Some("to_name"),
-        ));
+        if let Ok(observation) = observe_dns_encoded_name(&to_name) {
+            events.push(build_preimage_observed_normalized_event(
+                raw_log,
+                SOURCE_EVENT_ALIAS_CHANGED,
+                observation,
+                Some("to_name"),
+            ));
+        }
     }
     Ok(events)
 }
@@ -259,12 +246,9 @@ fn build_ens_v2_named_dns_preimage_observed_events(
     if dns_name.is_empty() {
         return Ok(Vec::new());
     }
-    let observation = observe_dns_encoded_name(&dns_name).with_context(|| {
-        format!(
-            "failed to interpret {source_event} DNS-encoded name for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Ok(observation) = observe_dns_encoded_name(&dns_name) else {
+        return Ok(Vec::new());
+    };
 
     Ok(vec![build_preimage_observed_normalized_event(
         raw_log,

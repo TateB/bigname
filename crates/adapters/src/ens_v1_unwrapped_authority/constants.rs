@@ -67,7 +67,7 @@ pub(super) const TRANSFER_SINGLE_SIGNATURE: &str =
     "TransferSingle(address,address,address,uint256,uint256)";
 
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-pub(super) const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
+pub(super) use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 pub(super) const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
 pub(super) const ENS_NATIVE_COIN_TYPE: &str = "60";
 pub(super) const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";

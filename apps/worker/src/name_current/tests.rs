@@ -455,7 +455,7 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "uts46-v1".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "ethereum-sepolia".to_owned(),
@@ -719,7 +719,7 @@ async fn rebuild_ignores_deprecated_ens_v2_registrar_shadow_events_after_support
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: ETHEREUM_SEPOLIA_CHAIN_ID.to_owned(),
@@ -911,7 +911,7 @@ async fn rebuild_keeps_ens_v2_registry_only_exact_name_coverage_shadow() -> Resu
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "uts46-v1".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "ethereum-sepolia".to_owned(),
@@ -1883,7 +1883,7 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: BASE_MAINNET_CHAIN_ID.to_owned(),
@@ -2374,6 +2374,204 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
     assert_eq!(
         row.declared_summary["control"]["registrant"],
         Value::String("0x0000000000000000000000000000000000000bbb".to_owned())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_keeps_resource_permission_manager_out_of_registry_owner() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new("ens:manager.eth", "manager.eth", 0x9100, 0x9200, 0x9300);
+    let token_holder = "0x0000000000000000000000000000000000000bbb";
+    let registry_owner = "0x0000000000000000000000000000000000000aaa";
+    let controller = "0x0000000000000000000000000000000000000ccc";
+    let old_token_lineage_id = Uuid::from_u128(0x9101);
+    let old_resource_id = Uuid::from_u128(0x9201);
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xmanager-grant", 501, 1_717_171_901),
+            raw_block("ethereum-mainnet", "0xmanager-owner", 502, 1_717_171_902),
+            raw_block("ethereum-mainnet", "0xmanager-control", 503, 1_717_171_903),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-old-control",
+                504,
+                1_717_171_904,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-downgrade",
+                505,
+                1_717_171_905,
+            ),
+        ],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &binding,
+        "0xmanager-grant",
+        501,
+        1_717_171_901,
+    )
+    .await?;
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            old_token_lineage_id,
+            "0xmanager-old-control",
+            504,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            old_resource_id,
+            old_token_lineage_id,
+            "0xmanager-old-control",
+            504,
+        )],
+    )
+    .await?;
+    let mut old_resource_control = with_source_family(
+        authority_event(
+            &binding,
+            "manager-old-control",
+            "PermissionChanged",
+            "0xmanager-old-control",
+            504,
+            Some(0),
+            json!({}),
+            json!({
+                "scope": {"kind": "resource"},
+                "subject": token_holder,
+                "effective_powers": ["resource_control"],
+                "grant_source": {
+                    "kind": "ens_v1_authority",
+                    "authority_kind": "registrar",
+                    "source_event_kind": "TokenControlTransferred"
+                }
+            }),
+        ),
+        "ens_v1_registry_l1",
+    );
+    old_resource_control.resource_id = Some(old_resource_id);
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "manager-grant",
+                "RegistrationGranted",
+                "0xmanager-grant",
+                501,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:manager",
+                    "registrant": token_holder,
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-owner",
+                    "AuthorityTransferred",
+                    "0xmanager-owner",
+                    502,
+                    Some(0),
+                    json!({
+                        "owner": token_holder,
+                    }),
+                    json!({
+                        "owner": registry_owner,
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-control",
+                    "PermissionChanged",
+                    "0xmanager-control",
+                    503,
+                    Some(0),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": token_holder,
+                        "effective_powers": ["resource_control"],
+                    }),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["resource_control"],
+                        "grant_source": {
+                            "kind": "ens_v1_authority",
+                            "authority_kind": "registry_only",
+                            "source_event_kind": "AuthorityTransferred"
+                        }
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            old_resource_control,
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-control-downgrade",
+                    "PermissionChanged",
+                    "0xmanager-downgrade",
+                    505,
+                    Some(0),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["resource_control", "set_records"],
+                    }),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["set_records"],
+                        "revocation_source": {
+                            "kind": "ens_v1_authority",
+                            "authority_kind": "registry_only",
+                            "source_event_kind": "AuthorityTransferred"
+                        }
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt manager row must exist")?;
+    assert_eq!(
+        row.declared_summary["registration"]["registrant"],
+        Value::String(token_holder.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        Value::String(registry_owner.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["latest_event_kind"],
+        Value::String("AuthorityTransferred".to_owned())
+    );
+    assert!(
+        !row.provenance.to_string().contains(controller),
+        "name_current provenance should not inline resource permission manager events"
     );
 
     database.cleanup().await
@@ -3083,7 +3281,7 @@ async fn seed_basenames_identity(
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
             labelhashes: vec![format!("labelhash:{}", binding.display_name)],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -3214,7 +3412,7 @@ async fn insert_manifest_version(
     .bind(ETHEREUM_SEPOLIA_CHAIN_ID)
     .bind(SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH)
     .bind(rollout_status)
-    .bind("ensip15@2026-04-16")
+    .bind("ensip15@ens-normalize-0.1.1")
     .bind(format!(
         "tests/{source_family}/ens-v2-sepolia-dev-v{manifest_version}.toml"
     ))
@@ -3254,7 +3452,7 @@ async fn insert_basenames_execution_manifest_version(
     .bind(ETHEREUM_MAINNET_CHAIN_ID)
     .bind(BASENAMES_V1_DEPLOYMENT_EPOCH)
     .bind(rollout_status)
-    .bind("ensip15@2026-04-16")
+    .bind("ensip15@ens-normalize-0.1.1")
     .bind(format!(
         "tests/{}/{}-v{manifest_version}.toml",
         SOURCE_FAMILY_BASENAMES_EXECUTION, BASENAMES_V1_DEPLOYMENT_EPOCH
@@ -3458,7 +3656,7 @@ fn name_surface(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: "ethereum-mainnet".to_owned(),

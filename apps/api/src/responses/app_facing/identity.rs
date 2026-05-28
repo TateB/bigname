@@ -1,30 +1,7 @@
-pub(crate) fn build_identity_name_response(
-    record: Option<&bigname_storage::IdentityNameRecordRow>,
-) -> IdentityNameResponse {
-    match record {
-        Some(record) => {
-            let record = build_name_record_response(record);
-            IdentityNameResponse {
-                status: record.status.clone(),
-                record: Some(record),
-            }
-        }
-        None => IdentityNameResponse {
-            status: "not_found".to_owned(),
-            record: None,
-        },
-    }
-}
-
-pub(crate) fn build_name_record_response(
-    record: &bigname_storage::IdentityNameRecordRow,
-) -> NameRecordResponse {
-    build_name_record_response_for_coin_type(record, "60")
-}
-
 fn build_name_record_response_for_coin_type(
     record: &bigname_storage::IdentityNameRecordRow,
     primary_coin_type: &str,
+    corrected_input_normalization: bool,
 ) -> NameRecordResponse {
     let coin_type_addresses = identity_coin_type_addresses(record.record_inventory_current.as_ref());
     let text_records = identity_text_records(record.record_inventory_current.as_ref());
@@ -72,6 +49,8 @@ fn build_name_record_response_for_coin_type(
 
     NameRecordResponse {
         name: record.row.canonical_display_name.clone(),
+        normalized_name: record.row.normalized_name.clone(),
+        corrected_input_normalization,
         namehash: record.row.namehash.clone(),
         owner_address,
         manager_address,
@@ -95,25 +74,6 @@ fn build_name_record_response_for_coin_type(
         },
         status: identity_record_status(&record.row),
         unsupported_fields: unsupported_fields.into_iter().collect(),
-    }
-}
-
-pub(crate) fn build_reverse_name_record_response(
-    record: &bigname_storage::ReverseIdentityRecordRow,
-) -> ReverseNameRecordResponse {
-    let is_primary = record.primary_name.as_ref().is_some_and(|primary| {
-        primary.claim_status == bigname_storage::PrimaryNameClaimStatus::Success
-            && primary.normalized_claim_name.as_deref()
-                == Some(record.name_record.row.normalized_name.as_str())
-    });
-
-    ReverseNameRecordResponse {
-        record: build_name_record_response_for_coin_type(
-            &record.name_record,
-            &record.requested_coin_type,
-        ),
-        is_primary,
-        relation_facets: identity_relation_facets(&record.relation_facets),
     }
 }
 
@@ -323,15 +283,40 @@ fn json_path<'a>(mut value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValu
 }
 
 fn identity_network(row: &bigname_storage::IdentityNameCurrentRow) -> String {
-    match row.namespace.as_str() {
+    identity_network_from_parts(&row.namespace, &row.chain_positions)
+}
+
+fn identity_network_from_parts(namespace: &str, chain_positions: &JsonValue) -> String {
+    match namespace {
+        "basenames" if identity_has_chain_position(chain_positions, "base-sepolia") => {
+            "base-sepolia".to_owned()
+        }
         "basenames" => "base".to_owned(),
+        "ens" if identity_has_chain_position(chain_positions, "ethereum-sepolia") => {
+            "ethereum-sepolia".to_owned()
+        }
         "ens" => "ethereum".to_owned(),
         namespace => namespace.to_owned(),
     }
 }
 
+fn identity_has_chain_position(chain_positions: &JsonValue, chain_id: &str) -> bool {
+    chain_positions
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(slot, value)| {
+            slot == chain_id
+                || string_field(provenance_field(value, "chain_id")).as_deref() == Some(chain_id)
+        })
+}
+
 fn identity_record_status(row: &bigname_storage::IdentityNameCurrentRow) -> String {
-    match string_field(provenance_field(&row.coverage, "status")).as_deref() {
+    identity_record_status_from_coverage(&row.coverage)
+}
+
+fn identity_record_status_from_coverage(coverage: &JsonValue) -> String {
+    match string_field(provenance_field(coverage, "status")).as_deref() {
         Some("stale") => "stale".to_owned(),
         Some("unsupported") => "unsupported".to_owned(),
         _ => "success".to_owned(),
@@ -349,35 +334,6 @@ fn identity_as_of_timestamp(record: &bigname_storage::IdentityNameRecordRow) -> 
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
-}
-
-fn identity_relation_facets(relations: &[bigname_storage::AddressNameRelation]) -> Vec<String> {
-    let has_owned = relations.iter().any(|relation| {
-        matches!(
-            relation,
-            bigname_storage::AddressNameRelation::Registrant
-                | bigname_storage::AddressNameRelation::TokenHolder
-        )
-    });
-    let has_managed = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::EffectiveController));
-    let has_registrant = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::Registrant));
-    let has_effective_controller = relations
-        .iter()
-        .any(|relation| matches!(relation, bigname_storage::AddressNameRelation::EffectiveController));
-
-    [
-        (has_owned, "OWNED"),
-        (has_managed, "MANAGED"),
-        (has_registrant, "REGISTRANT"),
-        (has_effective_controller, "EFFECTIVE_CONTROLLER"),
-    ]
-    .into_iter()
-    .filter_map(|(present, label)| present.then(|| label.to_owned()))
-    .collect()
 }
 
 fn indexing_status_label<'a>(

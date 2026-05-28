@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use super::{
     constants::{CANONICAL_STATE_FILTER, RELEVANT_EVENT_KINDS},
@@ -45,6 +46,18 @@ pub(super) async fn load_current_bindings_for_address(
               AND ne.after_state ->> 'owner' IS NOT NULL
               AND ne.after_state ->> 'owner' <> ''
               AND lower(ne.after_state ->> 'owner') = $1
+
+            UNION
+
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'PermissionChanged'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state -> 'scope' ->> 'kind' = 'resource'
+              AND ne.after_state ->> 'subject' IS NOT NULL
+              AND ne.after_state ->> 'subject' <> ''
+              AND lower(ne.after_state ->> 'subject') = $1
         )
         SELECT
             ns.logical_name_id,
@@ -174,6 +187,7 @@ pub(super) async fn load_relevant_events(
     namespace: &str,
     logical_name_id: &str,
     authority_chain_id: &str,
+    binding_resource_id: Uuid,
 ) -> Result<Vec<RelevantEvent>> {
     let event_kinds = RELEVANT_EVENT_KINDS
         .iter()
@@ -189,6 +203,7 @@ pub(super) async fn load_relevant_events(
         r#"
         SELECT
             ne.normalized_event_id,
+            ne.resource_id,
             ne.event_kind,
             ne.source_family,
             ne.manifest_version,
@@ -210,6 +225,10 @@ pub(super) async fn load_relevant_events(
           AND ne.event_kind = ANY($4::TEXT[])
           AND ne.source_family = ANY($5::TEXT[])
           AND ne.chain_id = $6
+          AND (
+              ne.event_kind <> 'PermissionChanged'
+              OR ne.resource_id = $7
+          )
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number NULLS FIRST,
@@ -223,6 +242,7 @@ pub(super) async fn load_relevant_events(
     .bind(&event_kinds)
     .bind(&source_families)
     .bind(authority_chain_id)
+    .bind(binding_resource_id)
     .fetch_all(pool)
     .await
     .with_context(|| {

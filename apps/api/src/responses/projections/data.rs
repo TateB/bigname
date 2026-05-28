@@ -43,10 +43,3 @@ pub(super) fn build_name_data(row: &NameCurrentRow) -> JsonValue {
     );
     data
 }
-
-pub(super) fn build_resolver_data(row: &ResolverCurrentRow) -> JsonValue {
-    let mut data = empty_object();
-    insert_string_field(&mut data, "chain_id", row.chain_id.clone());
-    insert_string_field(&mut data, "resolver_address", row.resolver_address.clone());
-    data
-}

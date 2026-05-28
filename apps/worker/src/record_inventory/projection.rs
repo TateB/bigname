@@ -371,11 +371,14 @@ fn record_scope_boundary_index(
         }
 
         match latest_resolver_event {
-            Some(current_resolver_event) => resolver_local_event_in_current_scope(
-                event,
-                Some(current_resolver_event),
-                resolver_scope_boundary_event,
-            ),
+            Some(current_resolver_event) => {
+                event_sort_key(event) >= event_sort_key(current_resolver_event)
+                    && resolver_local_event_in_current_scope(
+                        event,
+                        Some(current_resolver_event),
+                        resolver_scope_boundary_event,
+                    )
+            }
             None => true,
         }
     })

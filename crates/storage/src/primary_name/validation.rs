@@ -69,15 +69,24 @@ pub(super) fn validate_primary_name_current_snapshot(
             snapshot.row.coin_type
         );
     }
-    if normalized_claim_name
-        .is_some_and(|value| !value.is_ascii() || value != value.to_ascii_lowercase())
-    {
-        bail!(
-            "primary_names_current normalized_claim_name for address {} namespace {} coin_type {} must already be ASCII-normalized",
-            snapshot.row.address,
-            snapshot.row.namespace,
-            snapshot.row.coin_type
-        );
+    if let Some(value) = normalized_claim_name {
+        let normalized = bigname_domain::normalization::normalize_name(value).map_err(|error| {
+            anyhow::anyhow!(
+                "primary_names_current normalized_claim_name for address {} namespace {} coin_type {} is not ENSIP-15-normalized: {}",
+                snapshot.row.address,
+                snapshot.row.namespace,
+                snapshot.row.coin_type,
+                error
+            )
+        })?;
+        if normalized.normalized_name != value {
+            bail!(
+                "primary_names_current normalized_claim_name for address {} namespace {} coin_type {} must already be ENSIP-15-normalized",
+                snapshot.row.address,
+                snapshot.row.namespace,
+                snapshot.row.coin_type
+            );
+        }
     }
 
     Ok(())

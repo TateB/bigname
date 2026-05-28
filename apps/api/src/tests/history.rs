@@ -137,7 +137,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth")
+                .uri("/v1/history/names/ens/alice.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -301,7 +301,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?page_size=1")
+                .uri("/v1/history/names/ens/alice.eth?page_size=1&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -319,7 +319,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}"
+                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -333,7 +333,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}"
+                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -474,7 +474,7 @@ async fn get_name_history_honors_scope_query_parameter() -> Result<()> {
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?scope=surface")
+                .uri("/v1/history/names/ens/alice.eth?scope=surface&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -489,7 +489,7 @@ async fn get_name_history_honors_scope_query_parameter() -> Result<()> {
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?scope=resource")
+                .uri("/v1/history/names/ens/alice.eth?scope=resource&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -504,7 +504,7 @@ async fn get_name_history_honors_scope_query_parameter() -> Result<()> {
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?scope=both")
+                .uri("/v1/history/names/ens/alice.eth?scope=both&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -626,7 +626,7 @@ async fn get_name_history_resource_scope_preserves_rebound_resources() -> Result
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?scope=resource")
+                .uri("/v1/history/names/ens/alice.eth?scope=resource&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -641,7 +641,7 @@ async fn get_name_history_resource_scope_preserves_rebound_resources() -> Result
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/alice.eth?scope=both")
+                .uri("/v1/history/names/ens/alice.eth?scope=both&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -664,7 +664,7 @@ async fn get_name_history_returns_not_found_when_anchor_is_missing() -> Result<(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/missing.eth")
+                .uri("/v1/history/names/ens/missing.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -692,7 +692,7 @@ async fn get_name_history_returns_not_found_for_unsupported_namespace() -> Resul
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/unknown/alice.eth")
+                .uri("/v1/history/names/unknown/alice.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -796,7 +796,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}"))
+                .uri(format!("/v1/history/resources/{resource_id}?view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -838,7 +838,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?page_size=1"))
+                .uri(format!("/v1/history/resources/{resource_id}?page_size=1&view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -856,7 +856,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
+                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -870,7 +870,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
+                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1011,7 +1011,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=surface"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=surface&view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1027,7 +1027,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/resources/{resource_id}?scope=resource"
+                    "/v1/history/resources/{resource_id}?scope=resource&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1043,7 +1043,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=both"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=both&view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1165,7 +1165,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=surface"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=surface&view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1180,7 +1180,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=both"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=both&view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1428,7 +1428,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant"
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1460,7 +1460,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1"
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1479,7 +1479,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}"
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1493,7 +1493,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}"
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2027,7 +2027,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let name_both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/current-v2.eth")
+                .uri("/v1/history/names/ens/current-v2.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2065,7 +2065,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let name_surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/current-v2.eth?scope=surface")
+                .uri("/v1/history/names/ens/current-v2.eth?scope=surface&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2081,7 +2081,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let name_resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/current-v2.eth?scope=resource")
+                .uri("/v1/history/names/ens/current-v2.eth?scope=resource&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2097,7 +2097,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let resource_both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{current_resource_id}"))
+                .uri(format!("/v1/history/resources/{current_resource_id}?view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2114,7 +2114,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/resources/{current_resource_id}?scope=surface"
+                    "/v1/history/resources/{current_resource_id}?scope=surface&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2132,7 +2132,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/resources/{current_resource_id}?scope=resource"
+                    "/v1/history/resources/{current_resource_id}?scope=resource&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2150,7 +2150,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=surface"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=surface&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2174,7 +2174,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=resource"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&scope=resource&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2196,7 +2196,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2226,7 +2226,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2246,7 +2246,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2261,7 +2261,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}"
+                    "/v1/history/addresses/{registrant}?namespace=ens&relation=registrant&page_size=2&cursor={cursor}&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2290,7 +2290,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{controller}?namespace=ens&relation=effective_controller"
+                    "/v1/history/addresses/{controller}?namespace=ens&relation=effective_controller&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2313,7 +2313,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let missing_name_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/ens/missing-v2.eth")
+                .uri("/v1/history/names/ens/missing-v2.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2331,7 +2331,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let missing_resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{missing_resource_id}"))
+                .uri(format!("/v1/history/resources/{missing_resource_id}?view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2348,7 +2348,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let unsupported_name_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/unknown/current-v2.eth")
+                .uri("/v1/history/names/unknown/current-v2.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2366,7 +2366,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{registrant}?namespace=unknown"
+                    "/v1/history/addresses/{registrant}?namespace=unknown&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2567,7 +2567,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     let name_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/history/names/basenames/alice.base.eth")
+                .uri("/v1/history/names/basenames/alice.base.eth?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2599,7 +2599,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{current_resource_id}"))
+                .uri(format!("/v1/history/resources/{current_resource_id}?view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2620,7 +2620,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?namespace=basenames&relation=registrant"
+                    "/v1/history/addresses/{address}?namespace=basenames&relation=registrant&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2839,7 +2839,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?relation=effective_controller&scope=surface"
+                    "/v1/history/addresses/{address}?relation=effective_controller&scope=surface&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2860,7 +2860,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?relation=effective_controller&scope=resource"
+                    "/v1/history/addresses/{address}?relation=effective_controller&scope=resource&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2881,7 +2881,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/history/addresses/{address}?relation=effective_controller&scope=both"
+                    "/v1/history/addresses/{address}?relation=effective_controller&scope=both&view=full"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2912,7 +2912,7 @@ async fn get_resource_history_returns_not_found_when_anchor_is_missing() -> Resu
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}"))
+                .uri(format!("/v1/history/resources/{resource_id}?view=full"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2996,13 +2996,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     );
     assert_eq!(payload.coverage.enumeration_basis, "resource_permissions");
     assert_eq!(payload.coverage.unsupported_reason, None);
-    assert_eq!(
-        payload
-            .provenance
-            .get("derivation_kind")
-            .and_then(Value::as_str),
-        Some("permissions_current_rebuild")
-    );
+    assert!(payload.provenance.is_null());
 
     let resource_row = payload
         .data

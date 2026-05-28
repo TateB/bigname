@@ -717,7 +717,7 @@ fn name_surface_on_chain(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: chain_id.to_owned(),

@@ -7,6 +7,10 @@ use sqlx::types::{JsonValue, time::OffsetDateTime};
 
 use crate::pagination::HistoryPageResponse;
 
+fn json_value_is_null(value: &JsonValue) -> bool {
+    value.is_null()
+}
+
 #[derive(Serialize)]
 pub(crate) struct HealthResponse {
     pub(crate) service: &'static str,
@@ -29,80 +33,70 @@ pub(crate) struct HealthDatabaseResponse {
     pub(crate) error: Option<&'static str>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ForwardIdentityBatchInput {
-    pub(crate) names: Vec<String>,
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityLookupInput {
+    pub(crate) profile: Option<String>,
+    pub(crate) namespace: Option<String>,
+    pub(crate) inputs: Vec<IdentityLookupInputItem>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseIdentityBatchInput {
-    pub(crate) inputs: Vec<ReverseIdentityBatchInputItem>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseIdentityBatchInputItem {
-    pub(crate) address: String,
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityLookupInputItem {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) name: Option<String>,
+    pub(crate) address: Option<String>,
     pub(crate) coin_type: Option<u64>,
-    pub(crate) roles: Option<String>,
+    pub(crate) roles: Option<Vec<String>>,
     pub(crate) page_size: Option<u64>,
-    pub(crate) page_cursor: Option<String>,
+    pub(crate) cursor: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct IdentityNameResponse {
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResponse {
+    pub(crate) results: Vec<IdentityLookupResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResult {
+    pub(crate) id: String,
+    pub(crate) kind: String,
     pub(crate) status: String,
-    pub(crate) record: Option<NameRecordResponse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ForwardIdentityBatchResponse {
-    pub(crate) results: Vec<ForwardIdentityBatchResult>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ForwardIdentityBatchResult {
-    pub(crate) input: ForwardIdentityBatchResultInput,
-    pub(crate) record: Option<NameRecordResponse>,
-    pub(crate) status: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ForwardIdentityBatchResultInput {
-    pub(crate) name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseNamesResponse {
-    pub(crate) input: ReverseNamesInputResponse,
-    pub(crate) records: Vec<ReverseNameRecordResponse>,
-    pub(crate) pagination: IdentityPaginationResponse,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseIdentityBatchResponse {
-    pub(crate) results: Vec<ReverseIdentityBatchResult>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseIdentityBatchResult {
-    pub(crate) input: ReverseNamesInputResponse,
-    pub(crate) records: Vec<ReverseNameRecordResponse>,
-    pub(crate) pagination: IdentityPaginationResponse,
-    pub(crate) status: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseNamesInputResponse {
-    pub(crate) address: String,
-    pub(crate) coin_type: u64,
-    pub(crate) roles: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct IdentityPaginationResponse {
+    pub(crate) input: IdentityLookupResultInput,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) next_page_cursor: Option<String>,
+    pub(crate) normalization: Option<NormalizationInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) record: Option<Option<NativeIdentityRecordResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) records: Option<Vec<NativeIdentityRecordResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) page: Option<IdentityLookupPageResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResultInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) coin_type: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) roles: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct NormalizationInfo {
+    pub(crate) changed: bool,
+    pub(crate) input_name: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupPageResponse {
+    pub(crate) next_cursor: Option<String>,
     pub(crate) total_count: Option<u64>,
     pub(crate) has_more: bool,
 }
@@ -110,6 +104,8 @@ pub(crate) struct IdentityPaginationResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct NameRecordResponse {
     pub(crate) name: String,
+    pub(crate) normalized_name: String,
+    pub(crate) corrected_input_normalization: bool,
     pub(crate) namehash: String,
     pub(crate) owner_address: Option<String>,
     pub(crate) manager_address: Option<String>,
@@ -126,11 +122,34 @@ pub(crate) struct NameRecordResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ReverseNameRecordResponse {
-    #[serde(flatten)]
-    pub(crate) record: NameRecordResponse,
-    pub(crate) is_primary: bool,
+pub(crate) struct NativeIdentityRecordResponse {
+    pub(crate) name: String,
+    pub(crate) namespace: String,
+    pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) manager_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) primary_address: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) coin_type_addresses: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) text_records: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolver_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expiration: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) token_id: Option<String>,
+    pub(crate) network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) is_primary: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) relation_facets: Vec<String>,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unsupported_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -143,6 +162,11 @@ pub(crate) struct IdentityAsOfResponse {
 pub(crate) struct IndexingStatusResponse {
     pub(crate) status: String,
     pub(crate) chains: BTreeMap<String, IndexingStatusChainResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PublicStatusResponse {
+    pub(crate) data: IndexingStatusResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,6 +268,7 @@ pub(crate) struct NameResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: JsonValue,
     pub(crate) chain_positions: JsonValue,
@@ -256,10 +281,15 @@ pub(crate) struct ResolutionResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: Option<JsonValue>,
     pub(crate) verified_state: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) coverage: JsonValue,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) chain_positions: JsonValue,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) consistency: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) last_updated: String,
 }
 
@@ -268,14 +298,13 @@ pub(crate) struct PrimaryNameResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: Option<JsonValue>,
     pub(crate) verified_state: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: JsonValue,
     pub(crate) chain_positions: JsonValue,
     pub(crate) consistency: String,
     pub(crate) last_updated: String,
 }
-
-pub(crate) type ResolverResponse = NameResponse;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PrimaryNameTupleState {
@@ -288,7 +317,29 @@ pub(crate) enum PrimaryNameTupleState {
 pub(crate) struct PrimaryNameLookupState {
     pub(crate) tuple_state: PrimaryNameTupleState,
     pub(crate) normalized_claim_name: Option<String>,
+    pub(crate) on_demand_claim: OnDemandPrimaryNameClaimState,
+    pub(crate) on_demand_verified: OnDemandPrimaryNameVerificationState,
     pub(crate) persisted_verified: Option<PersistedPrimaryNameVerifiedReadback>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OnDemandPrimaryNameClaimState {
+    NotAttempted,
+    Unavailable,
+    NotFound,
+    Found(OnDemandPrimaryNameClaim),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnDemandPrimaryNameClaim {
+    pub(crate) normalized_name: String,
+    pub(crate) resolver_address: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OnDemandPrimaryNameVerificationState {
+    NotAttempted,
+    Verified(JsonValue),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,6 +354,7 @@ pub(crate) struct HistoryResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -316,6 +368,7 @@ pub(crate) struct ChildrenResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -329,6 +382,7 @@ pub(crate) struct AddressNamesResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -367,6 +421,7 @@ pub(crate) struct ResourcePermissionsResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,

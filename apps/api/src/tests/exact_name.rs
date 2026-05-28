@@ -187,30 +187,7 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
         Some("unsupported")
     );
 
-    let provenance = payload
-        .provenance
-        .as_object()
-        .expect("provenance must be an object");
-    assert_eq!(
-        provenance.get("normalized_event_ids"),
-        Some(&json!(["101", "102"]))
-    );
-    assert_eq!(
-        provenance.get("derivation_kind").and_then(Value::as_str),
-        Some("projection_apply")
-    );
-    assert_eq!(provenance.get("execution_trace_id"), Some(&Value::Null));
-    assert_eq!(
-        provenance.get("manifest_versions"),
-        Some(&json!([
-            {
-                "manifest_version": 3,
-                "source_family": "ens_v1_registry",
-                "chain": "ethereum-mainnet",
-                "deployment_epoch": "ens_v1"
-            }
-        ]))
-    );
+    assert!(payload.provenance.is_null());
 
     let coverage = payload
         .coverage
@@ -499,7 +476,8 @@ async fn get_coverage_returns_declared_state_explain_with_shared_top_level_cover
 
     assert_eq!(coverage_payload.data, name_payload.data);
     assert_eq!(coverage_payload.coverage, name_payload.coverage);
-    assert_eq!(coverage_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(coverage_payload.provenance.is_object());
     assert_eq!(
         coverage_payload.chain_positions,
         name_payload.chain_positions
@@ -593,7 +571,8 @@ async fn get_surface_binding_explain_reuses_exact_name_envelope_fields() -> Resu
 
     assert_eq!(explain_payload.data, name_payload.data);
     assert_eq!(explain_payload.coverage, name_payload.coverage);
-    assert_eq!(explain_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(explain_payload.provenance.is_object());
     assert_eq!(
         explain_payload.chain_positions,
         name_payload.chain_positions
@@ -697,7 +676,8 @@ async fn get_authority_control_explain_reuses_exact_name_envelope_fields() -> Re
 
     assert_eq!(explain_payload.data, name_payload.data);
     assert_eq!(explain_payload.coverage, name_payload.coverage);
-    assert_eq!(explain_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(explain_payload.provenance.is_object());
     assert_eq!(
         explain_payload.chain_positions,
         name_payload.chain_positions
@@ -1023,7 +1003,8 @@ async fn get_coverage_reads_shared_basenames_exact_name_coverage() -> Result<()>
 
     assert_eq!(coverage_payload.data, name_payload.data);
     assert_eq!(coverage_payload.coverage, name_payload.coverage);
-    assert_eq!(coverage_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(coverage_payload.provenance.is_object());
     assert_eq!(
         coverage_payload.chain_positions,
         name_payload.chain_positions
@@ -1107,7 +1088,8 @@ async fn get_basenames_exact_name_explains_reuse_projection_envelope_fields() ->
 
     assert_eq!(surface_payload.data, name_payload.data);
     assert_eq!(surface_payload.coverage, name_payload.coverage);
-    assert_eq!(surface_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(surface_payload.provenance.is_object());
     assert_eq!(
         surface_payload.chain_positions,
         name_payload.chain_positions
@@ -1128,7 +1110,8 @@ async fn get_basenames_exact_name_explains_reuse_projection_envelope_fields() ->
 
     assert_eq!(authority_payload.data, name_payload.data);
     assert_eq!(authority_payload.coverage, name_payload.coverage);
-    assert_eq!(authority_payload.provenance, name_payload.provenance);
+    assert!(name_payload.provenance.is_null());
+    assert!(authority_payload.provenance.is_object());
     assert_eq!(
         authority_payload.chain_positions,
         name_payload.chain_positions
@@ -1202,7 +1185,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens_v2_sepolia_dev",
             11,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registrar_manifest_id = database
@@ -1213,7 +1196,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens_v2_sepolia_dev",
             11,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database

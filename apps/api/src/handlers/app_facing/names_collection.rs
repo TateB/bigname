@@ -53,48 +53,4 @@ pub(super) async fn names(
     )))
 }
 
-pub(super) async fn address_names_count(
-    Path(address): Path<String>,
-    Query(query): Query<AddressNamesCountQuery>,
-    State(state): State<AppState>,
-) -> ApiResult<Json<AddressNamesCountResponse>> {
-    let address = parse_address_filter_value("address", &address)?;
-    let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
-    let relation = parse_app_relation(query.relation.as_deref())?;
-    let prefix = parse_optional_nonempty_query_value(query.prefix, "prefix")?;
-    let contains = parse_optional_nonempty_query_value(query.contains, "contains")?;
-    let contains_nocase =
-        parse_optional_nonempty_query_value(query.contains_nocase, "contains_nocase")?;
-    let resolver = parse_optional_address_filter("resolver", query.resolver.as_deref())?;
-
-    let count_filter = bigname_storage::AddressNamesCurrentCountFilter {
-        address: address.clone(),
-        namespace: namespace.clone(),
-        relation,
-        prefix,
-        contains,
-        contains_nocase,
-        resolver,
-    };
-    let count =
-        bigname_storage::count_address_names_current_for_app_filter(&state.pool, &count_filter)
-            .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    filter = ?count_filter,
-                    error = ?load_error,
-                    "failed to count app-facing address names"
-                );
-                ApiError::internal_error("failed to count address names")
-            })?;
-
-    Ok(Json(build_address_names_count_response(
-        &address,
-        namespace.as_deref(),
-        relation.as_str(),
-        count,
-    )))
-}
-
 include!("names_collection_support.rs");

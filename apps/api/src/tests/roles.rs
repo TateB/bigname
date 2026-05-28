@@ -50,6 +50,19 @@ async fn resource_lookup_resolves_name_current_resource_identity() -> Result<()>
         json!(["resource_hex"])
     );
 
+    let spaced_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resources/lookup?namespace=ens&name=%20alice.eth%20")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource lookup with whitespace-padded name failed")?;
+    assert_eq!(spaced_response.status(), StatusCode::NOT_FOUND);
+    let spaced_payload: ErrorResponse = read_json(spaced_response).await?;
+    assert_eq!(spaced_payload.error.code, "not_found");
+
     database.cleanup().await?;
     Ok(())
 }

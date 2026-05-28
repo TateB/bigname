@@ -136,28 +136,34 @@ async fn rebuild_one_primary_name(
     })
 }
 
-fn primary_name_row(
+pub(super) fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
 ) -> Result<PrimaryNameCurrentSnapshot> {
-    let (claim_status, raw_claim_name) = match claim_observation
-        .and_then(|observation| observation.raw_name.as_deref())
-    {
-        Some(raw_name) if raw_name.trim().is_empty() => (PrimaryNameClaimStatus::NotFound, None),
-        Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
-            (PrimaryNameClaimStatus::Success, None)
+    primary_name_row_with_provenance_extensions(tuple, claim_observation, [])
+}
+
+pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
+    tuple: &ReverseClaimTuple,
+    claim_observation: Option<&NameClaimObservation>,
+    extensions: [(&str, Value); N],
+) -> Result<PrimaryNameCurrentSnapshot> {
+    let raw_claim = claim_observation.and_then(|observation| observation.raw_name.as_deref());
+    let normalized_claim = raw_claim
+        .filter(|raw_name| !raw_claim_name_source_is_blank(raw_name))
+        .and_then(|raw_name| bigname_domain::normalization::normalize_name(raw_name).ok());
+    let (claim_status, raw_claim_name) = match raw_claim {
+        Some(raw_name) if raw_claim_name_source_is_blank(raw_name) => {
+            (PrimaryNameClaimStatus::NotFound, None)
         }
+        Some(raw_name) if normalized_claim.is_some() => (PrimaryNameClaimStatus::Success, None),
         Some(raw_name) => (
             PrimaryNameClaimStatus::InvalidName,
             Some(raw_name.to_owned()),
         ),
         None => (PrimaryNameClaimStatus::NotFound, None),
     };
-
-    let normalized_claim_name = claim_observation
-        .and_then(|observation| observation.raw_name.as_deref())
-        .filter(|_| claim_status == PrimaryNameClaimStatus::Success)
-        .map(normalize_claim_name);
+    let normalized_claim_name = normalized_claim.map(|name| name.normalized_name);
 
     Ok(PrimaryNameCurrentSnapshot {
         row: PrimaryNameCurrentRow {
@@ -166,22 +172,35 @@ fn primary_name_row(
             coin_type: tuple.key.coin_type.clone(),
             claim_status,
             raw_claim_name,
-            claim_provenance: build_claim_provenance(tuple, claim_status, claim_observation)?,
+            claim_provenance: build_claim_provenance(
+                tuple,
+                claim_status,
+                claim_observation,
+                extensions,
+            )?,
         },
         normalized_claim_name,
     })
 }
 
-fn build_claim_provenance(
+fn raw_claim_name_source_is_blank(raw_name: &str) -> bool {
+    raw_name.is_empty() || raw_name.chars().all(char::is_whitespace)
+}
+
+fn build_claim_provenance<'a>(
     tuple: &ReverseClaimTuple,
     claim_status: PrimaryNameClaimStatus,
     claim_observation: Option<&NameClaimObservation>,
+    extensions: impl IntoIterator<Item = (&'a str, Value)>,
 ) -> Result<Value> {
     let mut claim_provenance = tuple
         .claim_provenance
         .as_object()
         .cloned()
         .context("reverse-claim claim_provenance must be a JSON object")?;
+    for (key, value) in extensions {
+        claim_provenance.insert(key.to_owned(), value);
+    }
     claim_provenance.insert(
         VERIFIED_PRIMARY_NAME_LOOKUP_KEY.to_owned(),
         verified_primary_name_lookup_hook(&tuple.key),
@@ -214,28 +233,6 @@ fn verified_primary_name_invalidation_hook(
         );
     }
     Value::Object(invalidation)
-}
-
-fn claim_name_looks_normalizable(raw_name: &str) -> bool {
-    if raw_name.is_empty()
-        || raw_name.trim() != raw_name
-        || raw_name.len() > 255
-        || !raw_name.is_ascii()
-    {
-        return false;
-    }
-
-    raw_name.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
-    })
-}
-
-fn normalize_claim_name(raw_name: &str) -> String {
-    raw_name.to_ascii_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

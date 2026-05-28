@@ -25,7 +25,7 @@
   },
   "rollback_gate": [
     "scripts/rollback-smoke",
-    "stable compact record summary and auto declared/verified selection"
+    "stable compact record summary and explicit unsupported verified mode"
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",

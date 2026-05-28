@@ -214,6 +214,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.broad_runtime_refresh_enabled,
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,
+        args.event_silent_reverse_resolver_addresses,
     )
     .await
 }

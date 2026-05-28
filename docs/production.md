@@ -13,6 +13,7 @@ Public traffic terminates at Caddy, defined by `docker-compose.public.yml` and
 The public edge exposes the same read-only API surface that the `bigname-api`
 process serves:
 
+- `GET /`
 - `GET /docs`
 - `GET /openapi.json`
 - `GET /healthz`
@@ -73,6 +74,7 @@ curl -fsS http://127.0.0.1:3000/healthz
 Check the public edge:
 
 ```sh
+curl -fsS -I http://127.0.0.1/
 curl -fsS -I http://127.0.0.1/docs
 curl -fsS -I http://127.0.0.1/openapi.json
 ```

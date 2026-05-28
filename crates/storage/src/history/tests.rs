@@ -163,7 +163,7 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
         dns_encoded_name: vec![5, b'a', b'l', b'i', b'c', b'e'],
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec!["labelhash:alice".to_owned()],
-        normalizer_version: "uts46-v1".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: "ethereum-mainnet".to_owned(),

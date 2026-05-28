@@ -118,7 +118,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     let database = TestDatabase::new().await?;
     seed_replay_inputs(database.pool()).await?;
 
-    let first_summary = rebuild_all_current_projections(database.pool(), None).await?;
+    let first_summary = rebuild_all_current_projections(database.pool(), None, None).await?;
     assert_eq!(
         first_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER
@@ -148,7 +148,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
         );
     }
 
-    let second_summary = rebuild_all_current_projections(database.pool(), None).await?;
+    let second_summary = rebuild_all_current_projections(database.pool(), None, None).await?;
     assert_eq!(
         second_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER
@@ -157,7 +157,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     let second_snapshot = load_api_visible_projection_snapshot(database.pool()).await?;
     assert_eq!(first_snapshot, second_snapshot);
 
-    let third_summary = rebuild_all_current_projections(database.pool(), None).await?;
+    let third_summary = rebuild_all_current_projections(database.pool(), None, None).await?;
     assert_eq!(
         third_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER
@@ -168,7 +168,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
 
     let target_block = Some(108);
     let targeted_summary =
-        rebuild_pending_all_current_projections(database.pool(), target_block, None).await?;
+        rebuild_pending_all_current_projections(database.pool(), target_block, None, None).await?;
     assert_eq!(
         targeted_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER
@@ -190,7 +190,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     }
 
     let skipped_summary =
-        rebuild_pending_all_current_projections(database.pool(), target_block, None).await?;
+        rebuild_pending_all_current_projections(database.pool(), target_block, None, None).await?;
     assert_eq!(
         skipped_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER
@@ -204,7 +204,7 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     );
 
     let advanced_summary =
-        rebuild_pending_all_current_projections(database.pool(), Some(109), None).await?;
+        rebuild_pending_all_current_projections(database.pool(), Some(109), None, None).await?;
     assert_eq!(
         advanced_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER

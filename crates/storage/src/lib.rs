@@ -34,12 +34,18 @@ use tracing::info;
 
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
-    AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
+    AddressNamesCurrentAddressReplacement, AddressNamesCurrentCountFilter,
+    AddressNamesCurrentCursor, AddressNamesCurrentDedupe, AddressNamesCurrentFullRebuild,
     AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
+    begin_address_names_current_address_replacement, begin_address_names_current_full_rebuild,
     clear_address_names_current, collapse_address_name_current_rows,
     count_address_names_current_for_app_filter, delete_address_names_current,
-    load_address_names_current, load_address_names_current_including_noncanonical,
-    load_address_names_current_page, upsert_address_names_current_rows,
+    drop_address_names_current_address_replacement, drop_address_names_current_full_rebuild,
+    insert_address_names_current_address_replacement_rows,
+    insert_address_names_current_full_rebuild_rows, load_address_names_current,
+    load_address_names_current_including_noncanonical, load_address_names_current_page,
+    publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
+    rebuild_address_names_current_identity_sidecars, upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
@@ -105,9 +111,11 @@ pub use identity::{
 pub use identity_facade::{
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
-    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_records_by_names,
-    load_indexing_status, load_reverse_identity_records,
+    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityFeedGroup, ReverseIdentityFeedInput,
+    ReverseIdentityFeedRecordRow, ReverseIdentityGroup, ReverseIdentityRecordRow,
+    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_name_feed_records_by_names,
+    load_identity_records_by_names, load_indexing_status, load_reverse_identity_feed_records,
+    load_reverse_identity_records,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
@@ -177,13 +185,13 @@ pub use record_inventory::{
     upsert_record_inventory_current_rows,
 };
 pub use resolution_support::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
-    ETHEREUM_MAINNET_CHAIN_ID, SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass,
-    VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition,
-    VerifiedResolutionSupportBoundary, build_resolution_execution_cache_key,
-    build_resolution_requested_chain_positions, classify_supported_resolution_topology,
-    is_resolution_avatar_record, normalized_resolution_request_key,
-    normalized_resolution_request_key_from_record_keys,
+    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE,
+    ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
+    SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass, VerifiedResolutionRecord,
+    VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
+    build_resolution_execution_cache_key, build_resolution_requested_chain_positions,
+    classify_supported_resolution_topology, is_resolution_avatar_record,
+    normalized_resolution_request_key, normalized_resolution_request_key_from_record_keys,
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,
     resolution_execution_cache_lookup_records, resolution_record_inventory_lookup_key,

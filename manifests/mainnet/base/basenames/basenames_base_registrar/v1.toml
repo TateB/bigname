@@ -6,7 +6,7 @@ source_family = "basenames_base_registrar"
 chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
 rollout_status = "active"
-normalizer_version = "uts46-v1"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
 

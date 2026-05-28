@@ -1,9 +1,11 @@
 //! ENS verified-resolution exact-surface execution persistence bootstrap.
 
+mod ens_primary_name;
 mod ens_resolution;
 mod ens_resolution_abi;
 mod ens_resolution_call;
 mod ens_resolution_ccip;
+mod ens_reverse_names;
 mod ens_text_records;
 mod json_helpers;
 mod persistence;
@@ -16,9 +18,20 @@ pub use bigname_storage::{
     CanonicalityState, ExecutionTraceStep, load_execution_outcome, load_execution_trace,
     load_raw_call_snapshots_by_block_hash,
 };
+pub use ens_primary_name::{
+    EnsForwardAddressLookupRequest, OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError,
+    OnDemandEnsPrimaryNameErrorKind, OnDemandEnsPrimaryNameRequest,
+    OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameVerificationRequest,
+    lookup_ens_forward_address_at_block, lookup_ens_reverse_primary_name,
+    verify_ens_primary_name_forward_address,
+};
 pub use ens_resolution::{
     EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,
     OnDemandEnsResolutionRequest, execute_ens_universal_resolver_verified_resolution,
+};
+pub use ens_reverse_names::{
+    EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult,
+    execute_ens_reverse_name_multicall,
 };
 pub use ens_text_records::{
     EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult,
@@ -41,6 +54,7 @@ pub const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;
 pub const BASE_MAINNET_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
+pub const ENS_REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e";
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
 pub const BASENAMES_EXECUTION_SOURCE_FAMILY: &str = "basenames_execution";

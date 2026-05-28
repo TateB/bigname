@@ -95,7 +95,7 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
         dns_encoded_name: vec![5, b'a', b'l', b'i', b'c', b'e'],
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec!["labelhash:alice".to_owned()],
-        normalizer_version: "uts46-v1".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: "ethereum-mainnet".to_owned(),
@@ -157,7 +157,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
             dns_encoded_name: b"alice.base.eth".to_vec(),
             namehash: "namehash:alice.base.eth".to_owned(),
             labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -448,7 +448,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
             dns_encoded_name: normalized_name.as_bytes().to_vec(),
             namehash: format!("namehash:{normalized_name}"),
             labelhashes: vec![format!("labelhash:{normalized_name}")],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -1121,7 +1121,7 @@ async fn seed_raw_fact_replay_probe(
             "ens_v1",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let contract_instance_id = Uuid::from_u128(0xc0a05);
@@ -1270,7 +1270,7 @@ async fn seed_basenames_l2_resolver_profile_gate(
             "basenames_v1",
             71,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_manifest_id = database
@@ -1281,7 +1281,7 @@ async fn seed_basenames_l2_resolver_profile_gate(
             "basenames_v1",
             72,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_contract_instance_id = Uuid::from_u128(0xc95f);
@@ -2078,7 +2078,7 @@ fn collection_name_surface(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id,
@@ -2845,7 +2845,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
             dns_encoded_name: normalized_name.as_bytes().to_vec(),
             namehash: format!("namehash:{normalized_name}"),
             labelhashes: vec![format!("labelhash:{normalized_name}")],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "ethereum-sepolia".to_owned(),
@@ -3046,7 +3046,7 @@ fn ens_v2_history_name_surface(logical_name_id: &str, block_number: i64) -> Name
         dns_encoded_name: normalized_name.as_bytes().to_vec(),
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec![format!("labelhash:{normalized_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: ENSV2_HISTORY_CHAIN_ID.to_owned(),
@@ -4799,7 +4799,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
                 dns_encoded_name: vec![3, b'e', b't', b'h'],
                 namehash: "namehash:eth".to_owned(),
                 labelhashes: vec!["labelhash:eth".to_owned()],
-                normalizer_version: "uts46-v1".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "ethereum-mainnet".to_owned(),
@@ -4959,7 +4959,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             dns_encoded_name: b"alice.base.eth".to_vec(),
             namehash: "namehash:alice.base.eth".to_owned(),
             labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: "base-mainnet".to_owned(),
@@ -5168,7 +5168,7 @@ async fn seed_supported_basenames_rebuild_inputs(
             "basenames_v1",
             2,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -6325,7 +6325,7 @@ fn primary_name_execution_trace(
                         }
                     }),
                     step_payload: json!({
-                        "normalizer_version": "uts46-v1",
+                        "normalizer_version": "ensip15@ens-normalize-0.1.1",
                         "error": "claim_name_not_normalizable",
                     }),
                 },

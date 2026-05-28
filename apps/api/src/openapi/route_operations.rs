@@ -6,14 +6,13 @@ use crate::routes::{
     ApiRouteMethod, ApiRouteParameter,
 };
 use crate::{
-    AppState, Router, address_history, address_names, address_names_count, coverage_current, events,
+    AppState, Router, address_history, address_names, coverage_current, events,
     explain_authority_control_current, explain_resolution_execution_current,
-    explain_surface_binding_current, get, health, identity_address_names,
-    identity_address_names_batch, identity_name, identity_names_batch, indexing_status,
-    name_children, name_current, name_history, name_records, name_roles, names,
-    namespace_manifests, namespace_metadata, post, primary_names, resolution_current,
-    resolve_current, resolve_records, resolver_current, resolver_overview, resource_history,
-    resource_lookup, resource_permissions, roles,
+    explain_surface_binding_current, get, health, identity_lookup, name_children, name_current,
+    name_profile,
+    name_history, name_records, name_roles, names, namespace_manifests, namespace_metadata, post,
+    primary_names, public_status, resolver_overview, resource_history, resource_lookup, resource_permissions,
+    roles,
 };
 
 use super::responses::{OpenApiOperationExt, openapi_json_get_operation};
@@ -29,12 +28,9 @@ impl ApiRouteDefinition {
     fn register_get(self, router: Router<AppState>) -> Router<AppState> {
         match self.id {
             ApiRouteId::Health => router.route(self.path, get(health)),
-            ApiRouteId::IndexingStatus => router.route(self.path, get(indexing_status)),
-            ApiRouteId::IdentityName => router.route(self.path, get(identity_name)),
-            ApiRouteId::IdentityAddressNames => router.route(self.path, get(identity_address_names)),
+            ApiRouteId::PublicStatus => router.route(self.path, get(public_status)),
             ApiRouteId::Names => router.route(self.path, get(names)),
             ApiRouteId::AddressNames => router.route(self.path, get(address_names)),
-            ApiRouteId::AddressNamesCount => router.route(self.path, get(address_names_count)),
             ApiRouteId::AddressHistory => router.route(self.path, get(address_history)),
             ApiRouteId::PrimaryNames => router.route(self.path, get(primary_names)),
             ApiRouteId::Coverage => router.route(self.path, get(coverage_current)),
@@ -50,30 +46,24 @@ impl ApiRouteDefinition {
             ApiRouteId::NamespaceMetadata => router.route(self.path, get(namespace_metadata)),
             ApiRouteId::NameChildren => router.route(self.path, get(name_children)),
             ApiRouteId::NameCurrent => router.route(self.path, get(name_current)),
+            ApiRouteId::NameProfile => router.route(self.path, get(name_profile)),
             ApiRouteId::NameRecords => router.route(self.path, get(name_records)),
             ApiRouteId::NameRoles => router.route(self.path, get(name_roles)),
             ApiRouteId::Events => router.route(self.path, get(events)),
             ApiRouteId::Roles => router.route(self.path, get(roles)),
             ApiRouteId::ResourceLookup => router.route(self.path, get(resource_lookup)),
-            ApiRouteId::ResolveCurrent => router.route(self.path, get(resolve_current)),
-            ApiRouteId::ResolveRecords => router.route(self.path, get(resolve_records)),
-            ApiRouteId::ResolutionCurrent => router.route(self.path, get(resolution_current)),
-            ApiRouteId::ResolverCurrent => router.route(self.path, get(resolver_current)),
             ApiRouteId::ResolverOverview => router.route(self.path, get(resolver_overview)),
             ApiRouteId::NameHistory => router.route(self.path, get(name_history)),
             ApiRouteId::ResourceHistory => router.route(self.path, get(resource_history)),
             ApiRouteId::ResourcePermissions => router.route(self.path, get(resource_permissions)),
             ApiRouteId::NamespaceManifests => router.route(self.path, get(namespace_manifests)),
-            ApiRouteId::IdentityNamesBatch | ApiRouteId::IdentityAddressNamesBatch => router,
+            ApiRouteId::IdentityLookup => router,
         }
     }
 
     fn register_post(self, router: Router<AppState>) -> Router<AppState> {
         match self.id {
-            ApiRouteId::IdentityNamesBatch => router.route(self.path, post(identity_names_batch)),
-            ApiRouteId::IdentityAddressNamesBatch => {
-                router.route(self.path, post(identity_address_names_batch))
-            }
+            ApiRouteId::IdentityLookup => router.route(self.path, post(identity_lookup)),
             _ => router,
         }
     }
@@ -162,9 +152,11 @@ impl ApiParameterSchema {
             Self::String => json!({ "type": "string" }),
             Self::Boolean => json!({ "type": "boolean" }),
             Self::UuidString => json!({ "type": "string", "format": "uuid" }),
-            Self::StringPattern(pattern) => json!({ "type": "string", "pattern": pattern }),
             Self::StringEnum(values) => json!({ "type": "string", "enum": values }),
             Self::StringDefault(default) => json!({ "type": "string", "default": default }),
+            Self::StringPatternDefault { pattern, default } => {
+                json!({ "type": "string", "pattern": pattern, "default": default })
+            }
             Self::StringEnumDefault { values, default } => {
                 json!({ "type": "string", "enum": values, "default": default })
             }

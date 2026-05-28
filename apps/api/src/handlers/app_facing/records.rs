@@ -19,25 +19,6 @@ pub(super) async fn name_records(
     ))
 }
 
-pub(super) async fn resolve_records(
-    Path(name): Path<String>,
-    Query(query): Query<NameRecordsQuery>,
-    State(state): State<AppState>,
-) -> ApiResult<Json<CompactNameRecordsResponse>> {
-    let namespace = infer_resolution_namespace(&name);
-
-    Ok(Json(
-        compact_name_records_response_for_name(
-            &state,
-            namespace,
-            &name,
-            query,
-            CompactNameRecordsDefaultMode::Auto,
-        )
-        .await?,
-    ))
-}
-
 include!("records_warmup.rs");
 
 async fn compact_name_records_response_for_name(

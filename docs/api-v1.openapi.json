@@ -1,69 +1,6 @@
 {
   "components": {
     "schemas": {
-      "AddressNamesCountData": {
-        "properties": {
-          "address": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          },
-          "count": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          },
-          "namespace": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          },
-          "relation": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "address",
-          "count"
-        ],
-        "type": "object"
-      },
-      "AddressNamesCountResponse": {
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/AddressNamesCountData"
-          },
-          "meta": {
-            "$ref": "#/components/schemas/CompactMeta"
-          }
-        },
-        "required": [
-          "data"
-        ],
-        "type": "object"
-      },
       "CapabilityFlag": {
         "properties": {
           "notes": {
@@ -155,7 +92,6 @@
           "data",
           "declared_state",
           "verified_state",
-          "provenance",
           "coverage",
           "chain_positions",
           "consistency",
@@ -777,72 +713,10 @@
           "data",
           "declared_state",
           "verified_state",
-          "provenance",
           "coverage",
           "chain_positions",
           "consistency",
           "last_updated"
-        ],
-        "type": "object"
-      },
-      "ForwardIdentityBatchInput": {
-        "additionalProperties": false,
-        "properties": {
-          "names": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 1000,
-            "type": "array"
-          }
-        },
-        "required": [
-          "names"
-        ],
-        "type": "object"
-      },
-      "ForwardIdentityBatchResponse": {
-        "properties": {
-          "results": {
-            "items": {
-              "properties": {
-                "input": {
-                  "properties": {
-                    "name": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "name"
-                  ],
-                  "type": "object"
-                },
-                "record": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/NameRecord"
-                    },
-                    {
-                      "$ref": "#/components/schemas/NullValue"
-                    }
-                  ]
-                },
-                "status": {
-                  "$ref": "#/components/schemas/IdentityStatus"
-                }
-              },
-              "required": [
-                "input",
-                "record",
-                "status"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "results"
         ],
         "type": "object"
       },
@@ -895,61 +769,199 @@
         ],
         "type": "object"
       },
-      "IdentityAsOf": {
+      "IdentityLookupInput": {
+        "additionalProperties": false,
         "properties": {
-          "as_of_timestamp": {
-            "format": "date-time",
+          "inputs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "coin_type": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "name",
+                    "address"
+                  ],
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "page_size": {
+                  "default": 1,
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "roles": {
+                  "items": {
+                    "enum": [
+                      "owned",
+                      "managed",
+                      "registrant",
+                      "effective_controller",
+                      "both",
+                      "any"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "id",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          "namespace": {
+            "default": "public",
+            "enum": [
+              "auto",
+              "public",
+              "ens",
+              "basenames"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "default": "detail",
+            "enum": [
+              "feed",
+              "detail",
+              "shadow"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "IdentityLookupPage": {
+        "additionalProperties": false,
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ]
           },
-          "chain_positions": {}
-        },
-        "required": [
-          "chain_positions",
-          "as_of_timestamp"
-        ],
-        "type": "object"
-      },
-      "IdentityNameResponse": {
-        "properties": {
-          "record": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/NameRecord"
-              },
-              {
-                "$ref": "#/components/schemas/NullValue"
-              }
-            ]
-          },
-          "status": {
-            "$ref": "#/components/schemas/IdentityStatus"
-          }
-        },
-        "required": [
-          "status",
-          "record"
-        ],
-        "type": "object"
-      },
-      "IdentityPagination": {
-        "properties": {
-          "has_more": {
-            "type": "boolean"
-          },
-          "next_page_cursor": {
-            "type": "string"
-          },
           "total_count": {
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
+          "next_cursor",
           "total_count",
           "has_more"
+        ],
+        "type": "object"
+      },
+      "IdentityLookupResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "input": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "coin_type": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "enum": [
+                    "name",
+                    "address"
+                  ],
+                  "type": "string"
+                },
+                "normalization": {
+                  "$ref": "#/components/schemas/NormalizationInfo"
+                },
+                "page": {
+                  "$ref": "#/components/schemas/IdentityLookupPage"
+                },
+                "record": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/NativeIdentityRecord"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NullValue"
+                    }
+                  ]
+                },
+                "records": {
+                  "items": {
+                    "$ref": "#/components/schemas/NativeIdentityRecord"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "status",
+                "input"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
         ],
         "type": "object"
       },
@@ -958,7 +970,8 @@
           "success",
           "not_found",
           "unsupported",
-          "stale"
+          "stale",
+          "unnormalizable_input"
         ],
         "type": "string"
       },
@@ -1043,95 +1056,64 @@
         "additionalProperties": true,
         "type": "object"
       },
-      "NameRecord": {
+      "NameProfileResponse": {
         "properties": {
-          "as_of": {
-            "$ref": "#/components/schemas/IdentityAsOf"
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
           },
-          "coin_type_addresses": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
           },
-          "expiration": {
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProfileNameData"
+              },
+              {
+                "$ref": "#/components/schemas/ExactNameData"
+              }
+            ]
+          },
+          "declared_state": {
+            "additionalProperties": true,
             "type": [
-              "integer",
+              "object",
               "null"
             ]
           },
-          "manager_address": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
+          "last_updated": {
+            "format": "date-time",
             "type": "string"
           },
-          "namehash": {
-            "type": "string"
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
           },
-          "network": {
-            "type": "string"
-          },
-          "owner_address": {
+          "verified_state": {
+            "additionalProperties": true,
             "type": [
-              "string",
+              "object",
               "null"
             ]
-          },
-          "primary_address": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "resolver_address": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "$ref": "#/components/schemas/IdentityStatus"
-          },
-          "text_records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "token_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "unsupported_fields": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           }
         },
         "required": [
-          "name",
-          "namehash",
-          "owner_address",
-          "manager_address",
-          "primary_address",
-          "coin_type_addresses",
-          "text_records",
-          "resolver_address",
-          "expiration",
-          "token_id",
-          "network",
-          "as_of",
-          "status",
-          "unsupported_fields"
+          "data",
+          "declared_state",
+          "verified_state"
         ],
         "type": "object"
+      },
+      "NameRecordStatus": {
+        "enum": [
+          "success",
+          "not_found",
+          "unsupported",
+          "stale"
+        ],
+        "type": "string"
       },
       "NamespaceData": {
         "properties": {
@@ -1229,7 +1211,6 @@
           "data",
           "declared_state",
           "verified_state",
-          "provenance",
           "coverage",
           "chain_positions",
           "consistency",
@@ -1302,11 +1283,113 @@
           "data",
           "declared_state",
           "verified_state",
-          "provenance",
           "coverage",
           "chain_positions",
           "consistency",
           "last_updated"
+        ],
+        "type": "object"
+      },
+      "NativeIdentityRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "coin_type_addresses": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "expiration": {
+            "type": "integer"
+          },
+          "is_primary": {
+            "type": "boolean"
+          },
+          "manager_address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "owner_address": {
+            "type": "string"
+          },
+          "primary_address": {
+            "type": "string"
+          },
+          "relation_facets": {
+            "items": {
+              "enum": [
+                "owned",
+                "managed",
+                "registrant",
+                "effective_controller"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resolver_address": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/NameRecordStatus"
+          },
+          "text_records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "token_id": {
+            "type": "string"
+          },
+          "unsupported_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namehash",
+          "network",
+          "status"
+        ],
+        "type": "object"
+      },
+      "NormalizationInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "changed": {
+            "type": "boolean"
+          },
+          "input_name": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "case_normalized",
+              "invalid_normalized_name"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "changed",
+          "input_name",
+          "reason"
         ],
         "type": "object"
       },
@@ -1502,7 +1585,6 @@
           "data",
           "declared_state",
           "verified_state",
-          "provenance",
           "coverage",
           "chain_positions",
           "consistency",
@@ -1554,6 +1636,34 @@
         ],
         "type": "object"
       },
+      "ProfileNameData": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "resource_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namehash",
+          "resource_id"
+        ],
+        "type": "object"
+      },
       "Provenance": {
         "properties": {
           "derivation_kind": {
@@ -1586,6 +1696,18 @@
           "manifest_versions",
           "execution_trace_id",
           "derivation_kind"
+        ],
+        "type": "object"
+      },
+      "PublicStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/IndexingStatusResponse"
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -1628,12 +1750,7 @@
         "required": [
           "data",
           "declared_state",
-          "verified_state",
-          "provenance",
-          "coverage",
-          "chain_positions",
-          "consistency",
-          "last_updated"
+          "verified_state"
         ],
         "type": "object"
       },
@@ -1732,46 +1849,6 @@
         ],
         "type": "object"
       },
-      "ResolverResponse": {
-        "properties": {
-          "chain_positions": {
-            "$ref": "#/components/schemas/ChainPositions"
-          },
-          "consistency": {
-            "$ref": "#/components/schemas/Consistency"
-          },
-          "coverage": {
-            "$ref": "#/components/schemas/CoverageResponse"
-          },
-          "data": {
-            "$ref": "#/components/schemas/ResolverData"
-          },
-          "declared_state": {
-            "$ref": "#/components/schemas/JsonObject"
-          },
-          "last_updated": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "provenance": {
-            "$ref": "#/components/schemas/Provenance"
-          },
-          "verified_state": {
-            "$ref": "#/components/schemas/NullValue"
-          }
-        },
-        "required": [
-          "data",
-          "declared_state",
-          "verified_state",
-          "provenance",
-          "coverage",
-          "chain_positions",
-          "consistency",
-          "last_updated"
-        ],
-        "type": "object"
-      },
       "ResourceLookupData": {
         "properties": {
           "name": {
@@ -1845,173 +1922,6 @@
         },
         "required": [
           "data"
-        ],
-        "type": "object"
-      },
-      "ReverseIdentityBatchInput": {
-        "additionalProperties": false,
-        "properties": {
-          "inputs": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "address": {
-                  "type": "string"
-                },
-                "coin_type": {
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "page_cursor": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "page_size": {
-                  "default": 1,
-                  "description": "Per-input reverse page size. Defaults to 1 for batched feed rendering; pass a larger value for profile-style expansion.",
-                  "maximum": 200,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "roles": {
-                  "default": "BOTH",
-                  "enum": [
-                    "OWNED",
-                    "MANAGED",
-                    "BOTH"
-                  ],
-                  "type": "string"
-                }
-              },
-              "required": [
-                "address",
-                "coin_type"
-              ],
-              "type": "object"
-            },
-            "maxItems": 1000,
-            "type": "array"
-          }
-        },
-        "required": [
-          "inputs"
-        ],
-        "type": "object"
-      },
-      "ReverseIdentityBatchResponse": {
-        "properties": {
-          "results": {
-            "items": {
-              "properties": {
-                "input": {
-                  "$ref": "#/components/schemas/ReverseNamesInput"
-                },
-                "pagination": {
-                  "$ref": "#/components/schemas/IdentityPagination"
-                },
-                "records": {
-                  "items": {
-                    "$ref": "#/components/schemas/ReverseNameRecord"
-                  },
-                  "type": "array"
-                },
-                "status": {
-                  "$ref": "#/components/schemas/IdentityStatus"
-                }
-              },
-              "required": [
-                "input",
-                "records",
-                "pagination",
-                "status"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "results"
-        ],
-        "type": "object"
-      },
-      "ReverseNameRecord": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/NameRecord"
-          },
-          {
-            "properties": {
-              "is_primary": {
-                "type": "boolean"
-              },
-              "relation_facets": {
-                "items": {
-                  "enum": [
-                    "OWNED",
-                    "MANAGED",
-                    "REGISTRANT",
-                    "EFFECTIVE_CONTROLLER"
-                  ],
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "is_primary",
-              "relation_facets"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "ReverseNamesInput": {
-        "properties": {
-          "address": {
-            "type": "string"
-          },
-          "coin_type": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "roles": {
-            "enum": [
-              "OWNED",
-              "MANAGED",
-              "BOTH"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "address",
-          "coin_type",
-          "roles"
-        ],
-        "type": "object"
-      },
-      "ReverseNamesResponse": {
-        "properties": {
-          "input": {
-            "$ref": "#/components/schemas/ReverseNamesInput"
-          },
-          "pagination": {
-            "$ref": "#/components/schemas/IdentityPagination"
-          },
-          "records": {
-            "items": {
-              "$ref": "#/components/schemas/ReverseNameRecord"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "input",
-          "records",
-          "pagination"
         ],
         "type": "object"
       },
@@ -2216,122 +2126,6 @@
           }
         },
         "summary": "Address-to-surface collection",
-        "tags": [
-          "Collections"
-        ]
-      }
-    },
-    "/v1/addresses/{address}/names/count": {
-      "get": {
-        "operationId": "address_names_count",
-        "parameters": [
-          {
-            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
-            "in": "path",
-            "name": "address",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Optional namespace filter.",
-            "in": "query",
-            "name": "namespace",
-            "required": false,
-            "schema": {
-              "enum": [
-                "ens",
-                "basenames"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Optional app-facing relation facet filter.",
-            "in": "query",
-            "name": "relation",
-            "required": false,
-            "schema": {
-              "enum": [
-                "token_holder",
-                "registrant",
-                "effective_controller",
-                "any"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Normalized-name prefix search filter.",
-            "in": "query",
-            "name": "prefix",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Normalized-name contains search filter.",
-            "in": "query",
-            "name": "contains",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Case-insensitive normalized-name contains search filter.",
-            "in": "query",
-            "name": "contains_nocase",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Current declared resolver address filter.",
-            "in": "query",
-            "name": "resolver",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddressNamesCountResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "App-facing count for address relation filters",
         "tags": [
           "Collections"
         ]
@@ -3024,7 +2818,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "full",
+              "default": "compact",
               "enum": [
                 "compact",
                 "full"
@@ -3153,7 +2947,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "full",
+              "default": "compact",
               "enum": [
                 "compact",
                 "full"
@@ -3280,7 +3074,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "full",
+              "default": "compact",
               "enum": [
                 "compact",
                 "full"
@@ -3372,112 +3166,15 @@
         ]
       }
     },
-    "/v1/identity/addresses/{address}/names": {
-      "get": {
-        "operationId": "identity_address_names",
-        "parameters": [
-          {
-            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
-            "in": "path",
-            "name": "address",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Required decimal SLIP-44 / ENSIP-11 coin type.",
-            "in": "query",
-            "name": "coin_type",
-            "required": true,
-            "schema": {
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Reverse identity relation filter.",
-            "in": "query",
-            "name": "roles",
-            "required": false,
-            "schema": {
-              "default": "BOTH",
-              "enum": [
-                "OWNED",
-                "MANAGED",
-                "BOTH"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Optional page size. When supplied it must be between 1 and 200.",
-            "in": "query",
-            "name": "page_size",
-            "required": false,
-            "schema": {
-              "maximum": 200,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Identity façade pagination cursor.",
-            "in": "query",
-            "name": "page_cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReverseNamesResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Partner-compatible reverse identity lookup",
-        "tags": [
-          "Identity"
-        ]
-      }
-    },
-    "/v1/identity/addresses:names:batch": {
+    "/v1/identity:lookup": {
       "post": {
-        "operationId": "identity_address_names_batch",
+        "operationId": "identity_lookup",
         "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReverseIdentityBatchInput"
+                "$ref": "#/components/schemas/IdentityLookupInput"
               }
             }
           },
@@ -3488,7 +3185,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReverseIdentityBatchResponse"
+                  "$ref": "#/components/schemas/IdentityLookupResponse"
                 }
               }
             },
@@ -3515,111 +3212,7 @@
             "description": "Internal error"
           }
         },
-        "summary": "Partner-compatible batched reverse identity lookup",
-        "tags": [
-          "Identity"
-        ]
-      }
-    },
-    "/v1/identity/names/{name}": {
-      "get": {
-        "operationId": "identity_name",
-        "parameters": [
-          {
-            "description": "Normalized name within the namespace.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdentityNameResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Partner-compatible forward identity lookup",
-        "tags": [
-          "Identity"
-        ]
-      }
-    },
-    "/v1/identity/names:batch": {
-      "post": {
-        "operationId": "identity_names_batch",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ForwardIdentityBatchInput"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForwardIdentityBatchResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Partner-compatible batched forward identity lookup",
+        "summary": "Native slim identity lookup",
         "tags": [
           "Identity"
         ]
@@ -4592,11 +4185,12 @@
             }
           },
           {
-            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "description": "Primary-name namespace. Defaults to ENS for the app fast path.",
             "in": "query",
             "name": "namespace",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "ens",
               "enum": [
                 "ens",
                 "basenames"
@@ -4605,11 +4199,12 @@
             }
           },
           {
-            "description": "Required `coin_type` selector for the requested primary-name tuple.",
+            "description": "`coin_type` selector. Defaults to 60 for the app fast path.",
             "in": "query",
             "name": "coin_type",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "60",
               "pattern": "^[0-9]+$",
               "type": "string"
             }
@@ -4678,25 +4273,12 @@
         ]
       }
     },
-    "/v1/resolutions/{namespace}/{name}": {
+    "/v1/profiles/names/{name}": {
       "get": {
-        "operationId": "resolution_current",
+        "operationId": "name_profile",
         "parameters": [
           {
-            "description": "Supported namespace identifier.",
-            "in": "path",
-            "name": "namespace",
-            "required": true,
-            "schema": {
-              "enum": [
-                "ens",
-                "basenames"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Normalized name within the namespace.",
+            "description": "Name input normalized before namespace inference.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -4705,7 +4287,7 @@
             }
           },
           {
-            "description": "Point-in-time selector for the exact-name snapshot used by resolution joins. Mutually exclusive with `chain_positions`.",
+            "description": "Point-in-time selector for the exact-name snapshot used by the profile read. Mutually exclusive with `chain_positions`.",
             "in": "query",
             "name": "at",
             "required": false,
@@ -4738,12 +4320,12 @@
             }
           },
           {
-            "description": "Resolution read mode.",
+            "description": "Full profile read mode. Defaults to `both` so app callers get declared profile state plus verified record results when supported.",
             "in": "query",
             "name": "mode",
             "required": false,
             "schema": {
-              "default": "declared",
+              "default": "both",
               "enum": [
                 "declared",
                 "verified",
@@ -4753,15 +4335,19 @@
             }
           },
           {
-            "description": "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-            "explode": false,
+            "description": "Compact response metadata selector.",
             "in": "query",
-            "name": "records",
+            "name": "meta",
             "required": false,
             "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
               "type": "string"
-            },
-            "style": "form"
+            }
           }
         ],
         "responses": {
@@ -4769,7 +4355,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ResolutionResponse"
+                  "$ref": "#/components/schemas/NameProfileResponse"
                 }
               }
             },
@@ -4816,332 +4402,9 @@
             "description": "Internal error"
           }
         },
-        "summary": "Resolution topology, inventory, and verified reads",
+        "summary": "App-facing inferred-name full profile with declared and verified record results",
         "tags": [
-          "Resolution"
-        ]
-      }
-    },
-    "/v1/resolve/{name}": {
-      "get": {
-        "operationId": "resolve_current",
-        "parameters": [
-          {
-            "description": "Normalized name within the namespace.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Resolution read mode.",
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "default": "declared",
-              "enum": [
-                "declared",
-                "verified",
-                "both"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-            "explode": false,
-            "in": "query",
-            "name": "records",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "style": "form"
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResolutionResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Requested resource was not found"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Namespace-inferred resolution topology, inventory, and verified reads",
-        "tags": [
-          "Resolution"
-        ]
-      }
-    },
-    "/v1/resolve/{name}/records": {
-      "get": {
-        "operationId": "resolve_records",
-        "parameters": [
-          {
-            "description": "Normalized name within the namespace.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Compact records read mode. `auto` uses declared cache when it can satisfy the requested values from replayable state, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "default": "auto",
-              "enum": [
-                "auto",
-                "declared",
-                "verified",
-                "both"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Requested text record keys.",
-            "explode": false,
-            "in": "query",
-            "name": "texts",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "style": "form"
-          },
-          {
-            "description": "Whether to return projected known text-key inventory.",
-            "in": "query",
-            "name": "known_text_keys",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "Whether to request the avatar text convenience field.",
-            "in": "query",
-            "name": "avatar",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "Whether to request the content-hash selector.",
-            "in": "query",
-            "name": "content_hash",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "Requested textual coin-type selector keys.",
-            "explode": false,
-            "in": "query",
-            "name": "coin_types",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "style": "form"
-          },
-          {
-            "description": "Optional compact record sections.",
-            "explode": false,
-            "in": "query",
-            "name": "include",
-            "required": false,
-            "schema": {
-              "default": "resolver_address,known_text_keys,avatar,content_hash,coins",
-              "enum": [
-                "resolver_address",
-                "known_text_keys",
-                "avatar",
-                "content_hash",
-                "coins"
-              ],
-              "type": "string"
-            },
-            "style": "form"
-          },
-          {
-            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
-            "in": "query",
-            "name": "view",
-            "required": false,
-            "schema": {
-              "default": "compact",
-              "enum": [
-                "compact"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "Compact response metadata selector.",
-            "in": "query",
-            "name": "meta",
-            "required": false,
-            "schema": {
-              "default": "summary",
-              "enum": [
-                "none",
-                "summary",
-                "full"
-              ],
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CompactNameRecordsResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid request"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Requested resource was not found"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Namespace-inferred compact resolver records",
-        "tags": [
-          "Resolution"
-        ]
-      }
-    },
-    "/v1/resolvers/{chain_id}/{resolver_address}": {
-      "get": {
-        "operationId": "resolver_current",
-        "parameters": [
-          {
-            "description": "Resolver chain identifier.",
-            "in": "path",
-            "name": "chain_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Resolver address anchor. Addresses are normalized to lowercase.",
-            "in": "path",
-            "name": "resolver_address",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResolverResponse"
-                }
-              }
-            },
-            "description": "Successful response"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Requested resource was not found"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Internal error"
-          }
-        },
-        "summary": "Resolver overview",
-        "tags": [
-          "Resolvers"
+          "Names"
         ]
       }
     },
@@ -5186,15 +4449,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -5268,7 +4530,7 @@
         "operationId": "resource_lookup",
         "parameters": [
           {
-            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "description": "Required namespace identifier.",
             "in": "query",
             "name": "namespace",
             "required": true,
@@ -5598,16 +4860,16 @@
         ]
       }
     },
-    "/v1/status/indexing": {
+    "/v1/status": {
       "get": {
-        "operationId": "indexing_status",
+        "operationId": "status",
         "parameters": [],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IndexingStatusResponse"
+                  "$ref": "#/components/schemas/PublicStatusResponse"
                 }
               }
             },

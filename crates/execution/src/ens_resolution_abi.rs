@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
 use alloy_sol_types::{SolCall, sol};
 use anyhow::{Context, Result, bail};
+use bigname_domain::normalization::normalize_name;
 use bigname_storage::SupportedVerifiedResolutionRecordKey;
 
 mod abi {
@@ -46,38 +47,23 @@ pub(crate) fn selector_hex(selector: [u8; 4]) -> String {
 }
 
 pub(crate) fn dns_encode_name(name: &str) -> Result<Vec<u8>> {
-    let normalized = name.trim_matches('.');
-    if normalized.is_empty() {
+    if name.is_empty() {
         return Ok(vec![0]);
     }
 
-    let mut encoded = Vec::new();
-    for label in normalized.split('.') {
-        if label.is_empty() {
-            bail!("ENS name {name} contains an empty label");
-        }
-        let bytes = label.as_bytes();
-        if bytes.len() > 63 {
-            bail!("ENS name {name} contains a label longer than 63 bytes");
-        }
-        encoded.push(bytes.len() as u8);
-        encoded.extend_from_slice(bytes);
-    }
-    encoded.push(0);
-    Ok(encoded)
+    normalize_name(name)
+        .map(|normalized| normalized.dns_encoded_name)
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) fn namehash(name: &str) -> Result<[u8; 32]> {
-    let normalized = name.trim_matches('.');
     let mut node = [0_u8; 32];
-    if normalized.is_empty() {
+    if name.is_empty() {
         return Ok(node);
     }
 
-    for label in normalized.split('.').rev() {
-        if label.is_empty() {
-            bail!("ENS name {name} contains an empty label");
-        }
+    let normalized = normalize_name(name).map_err(anyhow::Error::from)?;
+    for label in normalized.normalized_labels.iter().rev() {
         let mut combined = [0_u8; 64];
         combined[..32].copy_from_slice(&node);
         combined[32..].copy_from_slice(keccak256(label.as_bytes()).as_slice());
@@ -239,6 +225,16 @@ mod tests {
             dns_encode_name("alice.eth").expect("name must encode"),
             b"\x05alice\x03eth\0".to_vec()
         );
+    }
+
+    #[test]
+    fn ens_name_helpers_use_shared_normalization_without_trimming() {
+        assert_eq!(
+            dns_encode_name("Alice.eth").expect("name must normalize"),
+            b"\x05alice\x03eth\0".to_vec()
+        );
+        assert!(dns_encode_name(".alice.eth").is_err());
+        assert!(namehash("alice.eth.").is_err());
     }
 
     #[test]

@@ -51,7 +51,10 @@ pub(super) fn apply_registry_observation(
                 return Ok(());
             };
             let key = (reference.emitting_address.clone(), token_id.clone());
-            let name = observe_name(&reference.namespace, &full_name, &reference, &label)?;
+            let Ok(name) = observe_name(&reference.namespace, &full_name, &reference, &label)
+            else {
+                return Ok(());
+            };
             let state = RegistryNameState {
                 token_id,
                 labelhash,
@@ -111,7 +114,10 @@ pub(super) fn apply_registry_observation(
                 return Ok(());
             };
             let key = (reference.emitting_address.clone(), token_id.clone());
-            let name = observe_name(&reference.namespace, &full_name, &reference, &label)?;
+            let Ok(name) = observe_name(&reference.namespace, &full_name, &reference, &label)
+            else {
+                return Ok(());
+            };
             context.states_by_registry_token.insert(
                 key,
                 RegistryNameState {

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bigname_domain::normalization::normalize_label_under_suffix;
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -69,11 +70,9 @@ pub(super) async fn build_registrar_event(
 
     let link = load_registry_resource_link(pool, &raw_log.namespace, &token_id).await?;
     let logical_name_id = link.logical_name_id.or_else(|| {
-        Some(format!(
-            "{}:{}.eth",
-            raw_log.namespace,
-            label.to_ascii_lowercase()
-        ))
+        normalize_label_under_suffix(&label, &["eth"])
+            .ok()
+            .map(|name| format!("{}:{}", raw_log.namespace, name.normalized_name))
     });
     let mut after_state = after_state;
     if let Some(object) = after_state.as_object_mut() {

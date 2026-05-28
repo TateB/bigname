@@ -7,41 +7,59 @@
     <style>
       :root {
         color-scheme: light dark;
-        --bg: #f8fafc;
+        --bg: #f5f7fb;
         --panel: #ffffff;
+        --panel-strong: #f8fafc;
         --text: #101828;
         --muted: #667085;
         --line: #d0d5dd;
         --soft: #eef2f6;
         --accent: #0f766e;
+        --accent-strong: #0f4f4a;
         --accent-soft: #ccfbf1;
+        --blue: #175cd3;
+        --blue-soft: #d1e9ff;
+        --purple: #6941c6;
+        --purple-soft: #ebe9fe;
         --danger: #b42318;
         --ok: #067647;
         --warn: #b54708;
         --code-bg: #111827;
         --code-text: #f9fafb;
+        --shadow: 0 1px 2px rgb(16 24 40 / 0.06);
       }
 
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #111827;
+          --bg: #0f172a;
           --panel: #182230;
+          --panel-strong: #111827;
           --text: #f9fafb;
           --muted: #98a2b3;
           --line: #344054;
           --soft: #202939;
           --accent: #5eead4;
+          --accent-strong: #99f6e4;
           --accent-soft: #134e4a;
+          --blue: #84caff;
+          --blue-soft: #12386b;
+          --purple: #bdb4fe;
+          --purple-soft: #2e1065;
           --danger: #f97066;
           --ok: #47cd89;
           --warn: #fdb022;
           --code-bg: #0b1220;
           --code-text: #f9fafb;
+          --shadow: none;
         }
       }
 
       * {
         box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
       }
 
       body {
@@ -54,28 +72,58 @@
         line-height: 1.5;
       }
 
+      a {
+        color: inherit;
+      }
+
       header {
         border-bottom: 1px solid var(--line);
         background: var(--panel);
       }
 
-      main,
-      .topbar {
-        width: min(1180px, calc(100vw - 32px));
+      .topbar,
+      .layout {
+        width: min(1360px, calc(100vw - 32px));
         margin: 0 auto;
       }
 
       .topbar {
         display: grid;
-        gap: 16px;
-        padding: 28px 0;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 460px);
+        gap: 24px;
+        align-items: end;
+        padding: 26px 0 22px;
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: var(--accent-strong);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        letter-spacing: 0;
       }
 
       h1 {
-        margin: 0;
-        font-size: 28px;
-        font-weight: 700;
-        letter-spacing: 0;
+        font-size: 30px;
+        font-weight: 760;
+      }
+
+      h2 {
+        font-size: 18px;
+        font-weight: 760;
+      }
+
+      h3 {
+        font-size: 14px;
+        font-weight: 760;
       }
 
       .meta,
@@ -84,8 +132,15 @@
       .error,
       .description,
       .hint,
-      .metric-label {
+      .metric-label,
+      .section-description,
+      .sidebar-meta,
+      .route-count {
         color: var(--muted);
+      }
+
+      .meta {
+        margin-top: 4px;
       }
 
       .toolbar {
@@ -127,9 +182,59 @@
         line-height: 1.45;
       }
 
+      .body-panel,
+      .schema-panel {
+        display: grid;
+        gap: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 12px;
+      }
+
+      .body-panel-title,
+      .schema-panel-title {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .body-controls {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .body-group {
+        display: grid;
+        gap: 12px;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      .body-group legend {
+        padding: 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .body-preview {
+        min-height: 120px;
+      }
+
+      .schema-table {
+        font-size: 13px;
+      }
+
       .json-link,
       .send-button,
-      .clear-button {
+      .clear-button,
+      .docs-link {
         border: 1px solid var(--line);
         border-radius: 8px;
         color: var(--text);
@@ -139,12 +244,19 @@
         white-space: nowrap;
       }
 
+      .json-link:hover,
+      .clear-button:hover,
+      .docs-link:hover,
+      .sidebar-link:hover {
+        border-color: var(--accent);
+      }
+
       .send-button {
         border-color: var(--accent);
         background: var(--accent);
         color: #ffffff;
         cursor: pointer;
-        font-weight: 700;
+        font-weight: 760;
       }
 
       .send-button:disabled {
@@ -156,17 +268,127 @@
         cursor: pointer;
       }
 
-      main {
+      .layout {
         display: grid;
-        gap: 16px;
-        padding: 24px 0 48px;
+        grid-template-columns: 300px minmax(0, 1fr);
+        gap: 22px;
+        align-items: start;
+        padding: 24px 0 52px;
       }
 
+      .sidebar {
+        position: sticky;
+        top: 16px;
+        display: grid;
+        gap: 14px;
+        max-height: calc(100vh - 32px);
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        padding: 14px;
+      }
+
+      .sidebar-header {
+        display: grid;
+        gap: 4px;
+        padding: 2px 2px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .sidebar-list {
+        display: grid;
+        gap: 6px;
+      }
+
+      .sidebar-link {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 8px 10px;
+        text-decoration: none;
+      }
+
+      .sidebar-link strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+      }
+
+      .route-count {
+        font-size: 12px;
+      }
+
+      .content {
+        display: grid;
+        gap: 22px;
+        min-width: 0;
+      }
+
+      .overview {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .overview-item,
+      .section-block,
       section.operation {
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .overview-item {
+        padding: 14px;
+      }
+
+      .overview-label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .overview-value {
+        display: block;
+        margin-top: 4px;
+        font-size: 18px;
+        font-weight: 760;
+      }
+
+      .section-block {
         overflow: hidden;
+      }
+
+      .section-heading {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: start;
+        padding: 18px;
+        background: var(--panel-strong);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .section-description {
+        margin-top: 4px;
+      }
+
+      .section-routes {
+        display: grid;
+        gap: 14px;
+        padding: 14px;
+      }
+
+      section.operation {
+        overflow: hidden;
+        box-shadow: none;
       }
 
       .operation-header {
@@ -174,16 +396,16 @@
         grid-template-columns: auto minmax(0, 1fr);
         gap: 12px;
         align-items: start;
-        padding: 18px;
+        padding: 16px;
       }
 
       .method {
         border-radius: 6px;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-strong);
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 12px;
-        font-weight: 700;
+        font-weight: 760;
         padding: 4px 8px;
         text-transform: uppercase;
       }
@@ -191,6 +413,11 @@
       .method.post {
         background: #ecfdf3;
         color: #067647;
+      }
+
+      .method.get {
+        background: var(--blue-soft);
+        color: var(--blue);
       }
 
       @media (prefers-color-scheme: dark) {
@@ -208,7 +435,7 @@
 
       .path {
         font-size: 15px;
-        font-weight: 650;
+        font-weight: 700;
       }
 
       .summary {
@@ -232,12 +459,12 @@
 
       details {
         border-top: 1px solid var(--line);
-        padding: 0 18px 16px;
+        padding: 0 16px 16px;
       }
 
       summary {
         cursor: pointer;
-        font-weight: 650;
+        font-weight: 700;
         padding: 14px 0;
       }
 
@@ -257,7 +484,7 @@
 
       th {
         color: var(--muted);
-        font-weight: 650;
+        font-weight: 700;
       }
 
       code {
@@ -297,7 +524,7 @@
       .status-code {
         color: var(--warn);
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-weight: 700;
+        font-weight: 760;
       }
 
       .try-grid {
@@ -322,7 +549,7 @@
         gap: 8px;
         min-height: 20px;
         font-size: 13px;
-        font-weight: 650;
+        font-weight: 700;
       }
 
       .field-label span {
@@ -366,7 +593,7 @@
         display: block;
         color: var(--text);
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-weight: 700;
+        font-weight: 760;
       }
 
       .metric-value.ok {
@@ -397,17 +624,36 @@
         color: var(--danger);
       }
 
-      @media (max-width: 760px) {
-        main,
-        .topbar {
+      @media (max-width: 980px) {
+        .topbar,
+        .layout {
           width: min(100vw - 20px, 1180px);
         }
 
+        .topbar,
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+          max-height: none;
+        }
+
+        .overview {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 760px) {
         .toolbar,
         .operation-header,
         .response-list li,
         .field-grid,
-        .metrics {
+        .body-controls,
+        .metrics,
+        .overview,
+        .section-heading {
           grid-template-columns: 1fr;
         }
 
@@ -421,24 +667,39 @@
     <header>
       <div class="topbar">
         <div>
+          <p class="eyebrow">Public read contract</p>
           <h1 id="title">bigname API docs</h1>
           <div class="meta" id="meta">Loading OpenAPI document...</div>
         </div>
         <div class="toolbar">
-          <input id="filter" type="search" autocomplete="off" placeholder="Filter routes">
+          <input id="filter" type="search" autocomplete="off" placeholder="Filter routes, fields, or categories">
           <a class="json-link" href="/openapi.json">OpenAPI JSON</a>
         </div>
       </div>
     </header>
-    <main id="content">
-      <div class="empty">Loading routes...</div>
-    </main>
+
+    <div class="layout">
+      <aside class="sidebar" aria-label="API sections">
+        <div class="sidebar-header">
+          <h2>Sections</h2>
+          <div class="sidebar-meta" id="sidebar-meta">Loading...</div>
+        </div>
+        <nav class="sidebar-list" id="sidebar-list"></nav>
+      </aside>
+
+      <main class="content" id="content">
+        <div class="empty">Loading routes...</div>
+      </main>
+    </div>
+
     <script>
       const specUrl = "/openapi.json";
       const content = document.getElementById("content");
       const title = document.getElementById("title");
       const meta = document.getElementById("meta");
       const filter = document.getElementById("filter");
+      const sidebarList = document.getElementById("sidebar-list");
+      const sidebarMeta = document.getElementById("sidebar-meta");
       let spec = null;
 
       const methodOrder = {
@@ -452,19 +713,119 @@
         trace: 7
       };
 
+      const categoryDefinitions = [
+        {
+          id: "identity-status",
+          title: "Native Identity And Status",
+          description: "Latency-critical identity lookups and projection freshness for partner feeds and app surfaces.",
+          matches: [
+            /^\/v1\/identity:lookup$/,
+            /^\/v1\/status$/
+          ]
+        },
+        {
+          id: "canonical-reads",
+          title: "Canonical Product Reads",
+          description: "Stable name, address, primary-name, permissions, and event reads for app and explorer screens.",
+          matches: [
+            /^\/v1\/names$/,
+            /^\/v1\/names\/\{namespace\}\/\{name\}$/,
+            /^\/v1\/profiles\/names\/\{name\}$/,
+            /^\/v1\/names\/\{namespace\}\/\{name\}\/records$/,
+            /^\/v1\/names\/\{namespace\}\/\{name\}\/children$/,
+            /^\/v1\/addresses\/\{address\}\/names$/,
+            /^\/v1\/primary-names\/\{address\}$/,
+            /^\/v1\/resources\/\{resource_id\}\/permissions$/,
+            /^\/v1\/events$/
+          ]
+        },
+        {
+          id: "diagnostics",
+          title: "Coverage And Explain",
+          description: "Completeness, derivation, and execution diagnostics separated from normal read paths.",
+          matches: [
+            /^\/v1\/coverage\//,
+            /^\/v1\/explain\//
+          ]
+        },
+        {
+          id: "metadata-control",
+          title: "Metadata And Health",
+          description: "Namespace metadata, manifest publication, and process/database liveness.",
+          matches: [
+            /^\/v1\/namespaces\//,
+            /^\/v1\/manifests\//,
+            /^\/healthz$/
+          ]
+        },
+        {
+          id: "explorer-audit",
+          title: "Explorer And Audit",
+          description: "Specialist history and role views that remain outside the partner latency path.",
+          matches: [
+            /^\/v1\/history\//,
+            /^\/v1\/names\/\{namespace\}\/\{name\}\/roles$/,
+            /^\/v1\/resources\/lookup$/,
+            /^\/v1\/resolvers\/\{chain_id\}\/\{resolver_address\}\/overview$/,
+            /^\/v1\/roles$/
+          ]
+        }
+      ];
+
       const sampleValues = {
         address: "0x8e8Db5CcEF88cca9d624701Db544989C996E3216",
+        chain_id: "ethereum-mainnet",
         coin_type: "60",
-        consistency: "canonical",
-        include: "values",
+        consistency: "head",
+        id: "name-1",
         mode: "declared",
         name: "taytems.eth",
         namespace: "ens",
         page_size: "10",
         records: "addr:60",
-        relation: "both",
-        roles: "BOTH",
+        resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41",
+        resource_id: "fb0f5c88-c7a5-5215-a3a4-819975a35c1b",
         view: "compact"
+      };
+
+      const routeParameterSamples = {
+        "/v1/events": {
+          namespace: "ens",
+          name: "taytems.eth"
+        },
+        "/v1/history/addresses/{address}": {
+          view: "compact"
+        },
+        "/v1/names": {
+          namespace: "ens",
+          name: "taytems.eth"
+        },
+        "/v1/profiles/names/{name}": {
+          mode: "both"
+        },
+        "/v1/roles": {
+          namespace: "ens",
+          name: "taytems.eth"
+        }
+      };
+
+      const requestBodySamples = {
+        "/v1/identity:lookup": {
+          profile: "feed",
+          namespace: "ens",
+          inputs: [
+            {
+              id: "name-1",
+              kind: "name",
+              name: "taytems.eth"
+            }
+          ]
+        }
+      };
+
+      const disabledTryRoutes = {
+        "/v1/history/addresses/{address}":
+          "Address history is an audit fan-in path and is intentionally not run from the embedded console."
       };
 
       function text(value) {
@@ -474,6 +835,13 @@
       function appendText(parent, value) {
         parent.textContent = text(value);
         return parent;
+      }
+
+      function slug(value) {
+        return text(value)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "route";
       }
 
       function schemaLabel(schema) {
@@ -498,7 +866,7 @@
         if (!resolved) return "";
         if (resolved.example !== undefined) return resolved.example;
         if (resolved.default !== undefined) return resolved.default;
-        if (resolved.enum?.length) return resolved.enum[resolved.enum.length - 1];
+        if (resolved.enum?.length) return resolved.enum[0];
         if (sampleValues[propertyName] !== undefined) {
           const kind = Array.isArray(resolved.type) ? resolved.type[0] : resolved.type;
           if (kind === "integer" || kind === "number") return Number(sampleValues[propertyName]);
@@ -531,30 +899,130 @@
         return operation.requestBody?.content?.["application/json"]?.schema || null;
       }
 
+      function cloneJson(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      function sampleForRequestBody(entry, schema) {
+        if (requestBodySamples[entry.path]) return cloneJson(requestBodySamples[entry.path]);
+        return sampleForSchema(schema);
+      }
+
+      function parameterSample(entry, parameter) {
+        return routeParameterSamples[entry.path]?.[parameter.name] ?? sampleValues[parameter.name];
+      }
+
+      function initialParameterValue(entry, parameter) {
+        const schema = resolveRef(parameter.schema || {});
+        const sample = parameterSample(entry, parameter);
+        if (parameter.example !== undefined) return parameter.example;
+        if (sample !== undefined && routeParameterSamples[entry.path]?.[parameter.name] !== undefined) {
+          return sample;
+        }
+        if (parameter.schema?.default !== undefined) return parameter.schema.default;
+        if (parameter.in === "path" || parameter.required) {
+          if (sample !== undefined) return sample;
+          if (schema.enum?.length) return schema.enum[0];
+        }
+        if (parameter.name === "page_size" && sample !== undefined) return sample;
+        return "";
+      }
+
       function operationEntries(paths) {
         return Object.entries(paths || {})
           .flatMap(([path, item]) => Object.entries(item || {})
             .filter(([method]) => methodOrder[method] !== undefined)
             .map(([method, operation]) => ({ path, method, operation })))
           .sort((left, right) => {
+            const categoryOrder = categoryIndex(left.path) - categoryIndex(right.path);
+            if (categoryOrder !== 0) return categoryOrder;
             const pathOrder = left.path.localeCompare(right.path);
             if (pathOrder !== 0) return pathOrder;
             return methodOrder[left.method] - methodOrder[right.method];
           });
       }
 
+      function categoryForPath(path) {
+        return categoryDefinitions.find((category) =>
+          category.matches.some((pattern) => pattern.test(path))
+        ) || {
+          id: "other",
+          title: "Other",
+          description: "Routes that are published by OpenAPI but not assigned to a docs section.",
+          matches: []
+        };
+      }
+
+      function categoryIndex(path) {
+        const category = categoryForPath(path);
+        const index = categoryDefinitions.findIndex((candidate) => candidate.id === category.id);
+        return index === -1 ? categoryDefinitions.length : index;
+      }
+
       function matchesFilter(entry, term) {
         if (!term) return true;
         const operation = entry.operation || {};
+        const category = categoryForPath(entry.path);
+        const parameterNames = (operation.parameters || []).map((parameter) => parameter.name);
         const haystack = [
           entry.method,
           entry.path,
           operation.summary,
           operation.description,
           operation.operationId,
-          ...(operation.tags || [])
+          category.title,
+          category.description,
+          ...(operation.tags || []),
+          ...parameterNames
         ].join(" ").toLowerCase();
         return haystack.includes(term);
+      }
+
+      function groupEntries(entries) {
+        const grouped = new Map();
+        entries.forEach((entry) => {
+          const category = categoryForPath(entry.path);
+          if (!grouped.has(category.id)) grouped.set(category.id, { category, entries: [] });
+          grouped.get(category.id).entries.push(entry);
+        });
+        return [...grouped.values()].sort((left, right) => {
+          return categoryIndex(left.entries[0].path) - categoryIndex(right.entries[0].path);
+        });
+      }
+
+      function renderOverview(allEntries) {
+        const overview = document.createElement("div");
+        overview.className = "overview";
+        const values = [
+          ["routes", allEntries.length],
+          ["sections", groupEntries(allEntries).length],
+          ["native route", "/v1/identity:lookup"],
+          ["schema", spec.openapi || "OpenAPI"]
+        ];
+        values.forEach(([label, value]) => {
+          const item = document.createElement("div");
+          item.className = "overview-item";
+          item.appendChild(appendText(document.createElement("span"), label));
+          item.lastChild.className = "overview-label";
+          item.appendChild(appendText(document.createElement("span"), value));
+          item.lastChild.className = "overview-value";
+          overview.appendChild(item);
+        });
+        return overview;
+      }
+
+      function renderSidebar(groups) {
+        sidebarList.replaceChildren();
+        groups.forEach(({ category, entries }) => {
+          const link = document.createElement("a");
+          link.className = "sidebar-link";
+          link.href = `#${category.id}`;
+          link.appendChild(appendText(document.createElement("strong"), category.title));
+          link.appendChild(appendText(document.createElement("span"), entries.length));
+          link.lastChild.className = "route-count";
+          sidebarList.appendChild(link);
+        });
+        sidebarMeta.textContent = `${groups.reduce((sum, group) => sum + group.entries.length, 0)} visible routes`;
       }
 
       function renderTable(parameters) {
@@ -639,7 +1107,7 @@
           if (resolved.maximum !== undefined) input.max = String(resolved.maximum);
         }
 
-        input.value = parameter.example || parameter.schema?.default || sampleValues[parameter.name] || "";
+        input.value = initialParameterValue(state.entry, parameter);
         input.dataset.name = parameter.name;
         input.dataset.location = parameter.in;
         input.dataset.required = parameter.required ? "true" : "false";
@@ -653,6 +1121,206 @@
         hint.textContent = schemaLabel(schema);
         field.appendChild(hint);
         return field;
+      }
+
+      function schemaRows(schema, path = "body", required = true, rows = []) {
+        const resolved = resolveRef(schema);
+        if (!resolved) return rows;
+        const notes = [];
+        if (resolved.default !== undefined) notes.push(`default ${JSON.stringify(resolved.default)}`);
+        if (resolved.enum?.length) notes.push(`one of ${resolved.enum.join(", ")}`);
+        if (resolved.minimum !== undefined) notes.push(`min ${resolved.minimum}`);
+        if (resolved.maximum !== undefined) notes.push(`max ${resolved.maximum}`);
+        if (resolved.maxItems !== undefined) notes.push(`max ${resolved.maxItems} items`);
+        rows.push({
+          path,
+          type: schemaLabel(schema) || schemaLabel(resolved),
+          required: required ? "yes" : "no",
+          notes: notes.join("; ")
+        });
+
+        if (resolved.type === "object" || resolved.properties) {
+          const requiredFields = new Set(resolved.required || []);
+          Object.entries(resolved.properties || {}).forEach(([key, value]) => {
+            schemaRows(value, `${path}.${key}`, requiredFields.has(key), rows);
+          });
+        } else if (resolved.type === "array") {
+          schemaRows(resolved.items || {}, `${path}[0]`, true, rows);
+        }
+        return rows;
+      }
+
+      function renderRequestBodySchema(schema) {
+        const details = document.createElement("details");
+        details.open = true;
+        details.className = "schema-panel";
+        details.appendChild(appendText(document.createElement("summary"), "Request body schema"));
+        const table = document.createElement("table");
+        table.className = "schema-table";
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        ["Field", "Type", "Required", "Notes"].forEach((label) => {
+          headRow.appendChild(appendText(document.createElement("th"), label));
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        schemaRows(schema).forEach((row) => {
+          const tr = document.createElement("tr");
+          [row.path, row.type, row.required, row.notes].forEach((value, index) => {
+            const cell = document.createElement("td");
+            const node = index < 2 ? document.createElement("code") : cell;
+            appendText(node, value);
+            if (node !== cell) cell.appendChild(node);
+            tr.appendChild(cell);
+          });
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        details.appendChild(table);
+        return details;
+      }
+
+      function getBodyValue(root, path) {
+        return path.reduce((value, segment) => value?.[segment], root);
+      }
+
+      function setBodyValue(root, path, value) {
+        let target = root;
+        for (let index = 0; index < path.length - 1; index += 1) {
+          const segment = path[index];
+          const nextSegment = path[index + 1];
+          if (target[segment] === undefined) {
+            target[segment] = typeof nextSegment === "number" ? [] : {};
+          }
+          target = target[segment];
+        }
+        const last = path[path.length - 1];
+        if (value === undefined) {
+          if (Array.isArray(target)) target.splice(last, 1);
+          else delete target[last];
+        } else {
+          target[last] = value;
+        }
+      }
+
+      function bodyInputValue(input, schema, required) {
+        const resolved = resolveRef(schema);
+        if (resolved.type === "boolean") return input.checked;
+        const raw = input.value.trim();
+        if (!raw && !required) return undefined;
+        if (resolved.type === "integer") return Number.parseInt(raw || "0", 10);
+        if (resolved.type === "number") return Number(raw || "0");
+        return raw;
+      }
+
+      function updateBodyPreview(state) {
+        if (!state.bodyPreview) return;
+        state.bodyPreview.textContent = JSON.stringify(state.bodyValue, null, 2);
+      }
+
+      function renderBodyPrimitive(schema, state, path, label, required) {
+        const resolved = resolveRef(schema);
+        const field = document.createElement("label");
+        field.className = "field";
+        const labelNode = document.createElement("div");
+        labelNode.className = "field-label";
+        labelNode.appendChild(appendText(document.createElement("strong"), label));
+        labelNode.appendChild(appendText(document.createElement("span"), required ? "required" : "optional"));
+        field.appendChild(labelNode);
+
+        let input;
+        if (resolved.enum?.length) {
+          input = document.createElement("select");
+          input.className = "field-select";
+          if (!required) {
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "";
+            input.appendChild(empty);
+          }
+          resolved.enum.forEach((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement("input");
+          input.className = "field-input";
+          input.type = resolved.type === "integer" || resolved.type === "number" ? "number" : "text";
+          if (resolved.type === "boolean") input.type = "checkbox";
+          if (resolved.minimum !== undefined) input.min = String(resolved.minimum);
+          if (resolved.maximum !== undefined) input.max = String(resolved.maximum);
+        }
+
+        const value = getBodyValue(state.bodyValue, path);
+        if (input.type === "checkbox") input.checked = Boolean(value);
+        else input.value = value ?? "";
+        input.addEventListener("input", () => {
+          setBodyValue(state.bodyValue, path, bodyInputValue(input, schema, required));
+          updateBodyPreview(state);
+        });
+        input.addEventListener("change", () => {
+          setBodyValue(state.bodyValue, path, bodyInputValue(input, schema, required));
+          updateBodyPreview(state);
+        });
+        field.appendChild(input);
+
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = schemaLabel(schema) || schemaLabel(resolved);
+        field.appendChild(hint);
+        return field;
+      }
+
+      function renderBodyControls(schema, state, path = [], label = "body", required = true) {
+        const resolved = resolveRef(schema);
+        if (resolved.type === "object" || resolved.properties) {
+          const group = document.createElement("fieldset");
+          group.className = "body-group";
+          group.appendChild(appendText(document.createElement("legend"), label));
+          const controls = document.createElement("div");
+          controls.className = "body-controls";
+          const requiredFields = new Set(resolved.required || []);
+          Object.entries(resolved.properties || {}).forEach(([key, value]) => {
+            controls.appendChild(renderBodyControls(value, state, path.concat(key), key, requiredFields.has(key)));
+          });
+          group.appendChild(controls);
+          return group;
+        }
+
+        if (resolved.type === "array") {
+          const group = document.createElement("fieldset");
+          group.className = "body-group";
+          group.appendChild(appendText(document.createElement("legend"), `${label}[0]`));
+          group.appendChild(renderBodyControls(resolved.items || {}, state, path.concat(0), `${label}[0]`, required));
+          return group;
+        }
+
+        return renderBodyPrimitive(schema, state, path, label, required);
+      }
+
+      function renderRequestBodyBuilder(entry, schema, state) {
+        state.bodyValue = sampleForRequestBody(entry, schema);
+        const panel = document.createElement("div");
+        panel.className = "body-panel";
+        const title = document.createElement("div");
+        title.className = "body-panel-title";
+        title.appendChild(appendText(document.createElement("h3"), "Body builder"));
+        title.appendChild(appendText(document.createElement("span"), "application/json"));
+        title.lastChild.className = "hint";
+        panel.appendChild(title);
+        panel.appendChild(renderBodyControls(schema, state));
+        const previewLabel = document.createElement("div");
+        previewLabel.className = "field-label";
+        previewLabel.appendChild(appendText(document.createElement("strong"), "JSON preview"));
+        panel.appendChild(previewLabel);
+        state.bodyPreview = document.createElement("pre");
+        state.bodyPreview.className = "body-preview";
+        panel.appendChild(state.bodyPreview);
+        updateBodyPreview(state);
+        return panel;
       }
 
       function buildUrl(entry, inputs) {
@@ -710,7 +1378,10 @@
 
         let body;
         const headers = { accept: "application/json" };
-        if (state.bodyInput) {
+        if (state.bodyValue !== undefined) {
+          body = JSON.stringify(state.bodyValue);
+          headers["content-type"] = "application/json";
+        } else if (state.bodyInput) {
           const rawBody = state.bodyInput.value.trim();
           if (rawBody) {
             try {
@@ -787,18 +1458,28 @@
 
       function renderTryConsole(entry) {
         const operation = entry.operation || {};
+        const disabledReason = disabledTryRoutes[entry.path];
         const state = {
           entry,
           inputs: [],
           bodyInput: null,
+          bodyPreview: null,
+          bodyValue: undefined,
           button: null,
           preview: document.createElement("div"),
           result: document.createElement("div")
         };
 
         const details = document.createElement("details");
-        details.open = operation.parameters?.length > 0 || requestBodySchema(operation);
+        details.open = entry.path === "/v1/identity:lookup" || operation.parameters?.length > 0 || requestBodySchema(operation);
         details.appendChild(appendText(document.createElement("summary"), "Try request"));
+
+        if (disabledReason) {
+          const disabled = appendText(document.createElement("div"), disabledReason);
+          disabled.className = "empty";
+          details.appendChild(disabled);
+          return details;
+        }
 
         const grid = document.createElement("div");
         grid.className = "try-grid";
@@ -813,20 +1494,8 @@
 
         const bodySchema = requestBodySchema(operation);
         if (bodySchema) {
-          const field = document.createElement("label");
-          field.className = "field";
-          const label = document.createElement("div");
-          label.className = "field-label";
-          label.appendChild(appendText(document.createElement("strong"), "Body"));
-          label.appendChild(appendText(document.createElement("span"), "application/json"));
-          field.appendChild(label);
-          const textarea = document.createElement("textarea");
-          textarea.className = "body-input";
-          textarea.spellcheck = false;
-          textarea.value = JSON.stringify(sampleForSchema(bodySchema), null, 2);
-          state.bodyInput = textarea;
-          field.appendChild(textarea);
-          grid.appendChild(field);
+          grid.appendChild(renderRequestBodySchema(bodySchema));
+          grid.appendChild(renderRequestBodyBuilder(entry, bodySchema, state));
         }
 
         state.preview.className = "url-preview";
@@ -857,6 +1526,7 @@
         const operation = entry.operation || {};
         const section = document.createElement("section");
         section.className = "operation";
+        section.id = `${entry.method}-${slug(entry.path)}`;
 
         const header = document.createElement("div");
         header.className = "operation-header";
@@ -905,16 +1575,43 @@
         return section;
       }
 
+      function renderGroup(group) {
+        const block = document.createElement("section");
+        block.className = "section-block";
+        block.id = group.category.id;
+
+        const heading = document.createElement("div");
+        heading.className = "section-heading";
+        const copy = document.createElement("div");
+        copy.appendChild(appendText(document.createElement("h2"), group.category.title));
+        copy.appendChild(appendText(document.createElement("div"), group.category.description));
+        copy.lastChild.className = "section-description";
+        heading.appendChild(copy);
+        heading.appendChild(appendText(document.createElement("span"), `${group.entries.length} routes`));
+        heading.lastChild.className = "route-count";
+        block.appendChild(heading);
+
+        const routes = document.createElement("div");
+        routes.className = "section-routes";
+        group.entries.forEach((entry) => routes.appendChild(renderOperation(entry)));
+        block.appendChild(routes);
+        return block;
+      }
+
       function render() {
         const term = filter.value.trim().toLowerCase();
-        const entries = operationEntries(spec.paths).filter((entry) => matchesFilter(entry, term));
+        const allEntries = operationEntries(spec.paths);
+        const entries = allEntries.filter((entry) => matchesFilter(entry, term));
+        const groups = groupEntries(entries);
         content.replaceChildren();
+        renderSidebar(groups);
         if (entries.length === 0) {
           content.appendChild(appendText(document.createElement("div"), "No routes match the current filter."));
           content.lastChild.className = "empty";
           return;
         }
-        entries.forEach((entry) => content.appendChild(renderOperation(entry)));
+        content.appendChild(renderOverview(allEntries));
+        groups.forEach((group) => content.appendChild(renderGroup(group)));
       }
 
       async function load() {
@@ -923,10 +1620,13 @@
           if (!response.ok) throw new Error(`OpenAPI request failed with ${response.status}`);
           spec = await response.json();
           title.textContent = spec.info?.title || "OpenAPI docs";
-          meta.textContent = `${spec.openapi || "OpenAPI"} | ${spec.info?.version || "unversioned"} | ${operationEntries(spec.paths).length} routes`;
+          const entries = operationEntries(spec.paths);
+          meta.textContent = `${spec.openapi || "OpenAPI"} | ${spec.info?.version || "unversioned"} | ${entries.length} routes`;
           render();
         } catch (error) {
           content.replaceChildren();
+          sidebarList.replaceChildren();
+          sidebarMeta.textContent = "Unavailable";
           const failure = appendText(document.createElement("div"), error.message || "Unable to load OpenAPI document.");
           failure.className = "error";
           content.appendChild(failure);

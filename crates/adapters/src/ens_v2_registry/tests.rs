@@ -831,6 +831,29 @@ fn ens_v2_subregistry_change_omits_unadmitted_endpoint_id() -> Result<()> {
 }
 
 #[test]
+fn ens_v2_lifecycle_skips_unnormalizable_labels_without_aborting() -> Result<()> {
+    let registry = "0x00000000000000000000000000000000000000aa".to_owned();
+    let contract_instance_id = Uuid::from_u128(0x1235);
+    let token = "0x00000000000000000000000000000000000000000000000000000000000000a2".to_owned();
+    let mut harness = RegistryHarness::new(&registry, contract_instance_id, "eth");
+
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: token.clone(),
+        labelhash: labelhash("Ni\u{200d}ck"),
+        label: "Ni\u{200d}ck".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(&registry, contract_instance_id, 10, 0),
+    })?;
+
+    assert!(harness.states_by_registry_token.is_empty());
+    assert!(harness.graph_events.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn ens_v2_subregistry_zero_and_swap_deactivate_stale_child_suffixes() -> Result<()> {
     let registry = "0x00000000000000000000000000000000000000aa".to_owned();
     let child_one = "0x00000000000000000000000000000000000000c1".to_owned();
@@ -992,7 +1015,7 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
             $2,
             'ens_v2_registry_scope_test',
             'active',
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.1',
             $3,
             $4::JSONB
         )
@@ -1022,7 +1045,7 @@ fn test_registry_manifest_payload(chain: &str) -> Value {
         "chain": chain,
         "deployment_epoch": "ens_v2_registry_scope_test",
         "rollout_status": "active",
-        "normalizer_version": "uts46-v1",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
         "capability_flags": {},
         "roots": [],
         "contracts": [],
@@ -1179,7 +1202,7 @@ fn test_active_emitter(
         namespace: "ens".to_owned(),
         source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
         manifest_version: 1,
-        normalizer_version: "uts46-v1".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         role: Some("registry".to_owned()),
         source: WatchedContractSource::ManifestContract,
         source_rank: source_rank(WatchedContractSource::ManifestContract),

@@ -255,7 +255,7 @@ async fn sync_manifest_normalized_events_is_idempotent() -> Result<()> {
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v2",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v2_registry_l1/1.toml",
         },
     )
@@ -269,7 +269,7 @@ async fn sync_manifest_normalized_events_is_idempotent() -> Result<()> {
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v2_shadow",
             rollout_status: "draft",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v2_registry_l1/2.toml",
         },
     )
@@ -472,7 +472,7 @@ async fn sync_manifest_normalized_events_skips_inactive_manifests() -> Result<()
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v2",
             rollout_status: "active",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v2_registry_l1/1.toml",
         },
     )
@@ -486,7 +486,7 @@ async fn sync_manifest_normalized_events_skips_inactive_manifests() -> Result<()
             chain: "ethereum-mainnet",
             deployment_epoch: "ens_v2_shadow",
             rollout_status: "deprecated",
-            normalizer_version: "uts46-v1",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
             file_path: "manifests/ens/ens_v2_registry_l1/2.toml",
         },
     )

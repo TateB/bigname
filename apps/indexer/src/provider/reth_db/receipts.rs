@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use alloy_consensus::{Transaction as _, TxReceipt as _};
+use alloy_consensus::{Transaction as _, TxReceipt as _, transaction::SignerRecoverable as _};
 use anyhow::{Context, Result, bail};
 use reth_ethereum::provider::{
     BlockBodyIndicesProvider, BlockHashReader, ReceiptProvider, TransactionsProvider,
@@ -92,11 +92,14 @@ impl RethDbReader {
                             "Reth DB did not return transaction id {transaction_id} for block {block_hash}"
                         )
                     })?;
-                let sender = factory.transaction_sender(transaction_id)?.with_context(|| {
-                    format!(
-                        "Reth DB did not return sender for transaction id {transaction_id} in block {block_hash}"
-                    )
-                })?;
+                let sender = match factory.transaction_sender(transaction_id)? {
+                    Some(sender) => sender,
+                    None => transaction.recover_signer_unchecked().with_context(|| {
+                        format!(
+                            "Reth DB did not return sender for transaction id {transaction_id} in block {block_hash}, and signature recovery failed"
+                        )
+                    })?,
+                };
                 let transaction_hash = hash_hex(*transaction.tx_hash());
                 let creates_contract = transaction.is_create();
                 let nonce = transaction.nonce();

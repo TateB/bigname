@@ -330,6 +330,49 @@ async fn json_rpc_provider_resolves_block_numbers_to_hashes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn json_rpc_provider_accepts_hash_only_transactions_for_block_headers() -> Result<()> {
+    let requested_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let result = match method {
+            "eth_getBlockByNumber" => {
+                assert_eq!(params.first().and_then(Value::as_str), Some("0x2a"));
+                assert_eq!(params.get(1), Some(&Value::Bool(false)));
+                let mut block = rpc_block_payload(requested_hash, ZERO_HASH, 42, None);
+                block["transactions"] =
+                    json!(["0x1111111111111111111111111111111111111111111111111111111111111111"]);
+                block
+            }
+            _ => panic!("unexpected RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result
+        })
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let block_hash = provider.fetch_block_hash_by_number(42).await?;
+    assert_eq!(block_hash, requested_hash);
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_fetches_chain_heads_via_tag_hash_discovery() -> Result<()> {
     let canonical_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let canonical_parent = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

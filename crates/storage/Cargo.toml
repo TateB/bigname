@@ -16,6 +16,8 @@ sqlx = { workspace = true, features = ["time"] }
 tracing.workspace = true
 uuid.workspace = true
 
+bigname-domain.workspace = true
+
 [dev-dependencies]
 bigname-test-support.workspace = true
 tokio.workspace = true

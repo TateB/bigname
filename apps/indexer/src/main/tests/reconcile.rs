@@ -591,7 +591,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_registrar_l1/v1.toml',
                 DEFAULT
             )
@@ -742,7 +742,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
                 DEFAULT
             )
@@ -950,7 +950,7 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
                 'base-mainnet',
                 'basenames_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/basenames/basenames_base_primary/v1.toml',
                 DEFAULT
             )
@@ -1109,7 +1109,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_reverse_l1/v1.toml',
                     DEFAULT
                 ),
@@ -1121,7 +1121,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
                     DEFAULT
                 ),
@@ -1133,7 +1133,7 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_resolver_l1/v1.toml',
                     DEFAULT
                 )
@@ -1352,7 +1352,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_primary/v1.toml',
                     DEFAULT
                 ),
@@ -1364,7 +1364,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
                     DEFAULT
                 ),
@@ -1376,7 +1376,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
                     DEFAULT
                 )
@@ -1601,7 +1601,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_registrar_l1/v1.toml',
                 DEFAULT
             )
@@ -1632,7 +1632,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_registry_l1/v1.toml',
                 DEFAULT
             )
@@ -1665,7 +1665,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
                 'ethereum-mainnet',
                 'ens_v1',
                 'active',
-                'uts46-v1',
+                'ensip15@ens-normalize-0.1.1',
                 'manifests/ens/ens_v1_resolver_l1/v1.toml',
                 DEFAULT
             )
@@ -2053,7 +2053,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_registrar_l1/v1.toml',
                     DEFAULT
                 ),
@@ -2065,7 +2065,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
                     DEFAULT
                 ),
@@ -2077,7 +2077,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
                     'ethereum-mainnet',
                     'ens_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v1_resolver_l1/v1.toml',
                     DEFAULT
                 )
@@ -2397,7 +2397,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
                     DEFAULT
                 ),
@@ -2409,7 +2409,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
                     DEFAULT
                 ),
@@ -2421,7 +2421,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
                     DEFAULT
                 )
@@ -2754,7 +2754,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                     'ethereum-mainnet',
                     'ens_v2',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v2_registry_l1/v1.toml',
                     DEFAULT
                 ),
@@ -2766,7 +2766,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                     'ethereum-mainnet',
                     'ens_v2',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/ens/ens_v2_resolver_l1/v1.toml',
                     DEFAULT
                 )
@@ -3281,7 +3281,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
                     DEFAULT
                 ),
@@ -3293,7 +3293,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
                     DEFAULT
                 ),
@@ -3305,7 +3305,7 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
                     'base-mainnet',
                     'basenames_v1',
                     'active',
-                    'uts46-v1',
+                    'ensip15@ens-normalize-0.1.1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
                     DEFAULT
                 )

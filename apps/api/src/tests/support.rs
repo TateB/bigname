@@ -1113,81 +1113,6 @@ impl TestDatabase {
         Ok(())
     }
 
-    async fn rebuild_resolver_current(
-        &self,
-        chain_id: Option<&str>,
-        resolver_address: Option<&str>,
-    ) -> Result<()> {
-        match (chain_id, resolver_address) {
-            (Some(_), Some(_)) | (None, None) => {}
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "resolver_current rebuild requires both chain_id and resolver_address when targeting one resolver"
-                ));
-            }
-        }
-
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API worker resolver rebuild")?;
-        let rebuild_database_url = base_options
-            .database(&self.database_name)
-            .to_url_lossy()
-            .to_string();
-        let chain_id = chain_id.map(str::to_owned);
-        let resolver_address = resolver_address.map(str::to_owned);
-        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/worker/Cargo.toml");
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _guard = WORKER_CARGO_LOCK
-                .lock()
-                .expect("worker cargo lock must not be poisoned");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-            let mut command = std::process::Command::new(cargo);
-            command
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(worker_manifest_path)
-                .arg("--")
-                .arg("resolver-current")
-                .arg("rebuild")
-                .arg("--database-url")
-                .arg(&rebuild_database_url);
-            if let (Some(chain_id), Some(resolver_address)) =
-                (chain_id.as_deref(), resolver_address.as_deref())
-            {
-                command.arg("--chain-id").arg(chain_id);
-                command.arg("--resolver-address").arg(resolver_address);
-            }
-
-            let output = command.output().with_context(|| {
-                format!(
-                    "failed to invoke worker resolver_current rebuild for {}",
-                    resolver_address.as_deref().unwrap_or("all")
-                )
-            })?;
-
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "worker resolver_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
-                    resolver_address.as_deref().unwrap_or("all"),
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-        .context("worker resolver_current rebuild task panicked")??;
-
-        Ok(())
-    }
-
     async fn seed_basenames_exact_name_rebuild_inputs(
         &self,
         logical_name_id: &str,
@@ -1219,7 +1144,7 @@ impl TestDatabase {
                 dns_encoded_name: b"alice.base.eth".to_vec(),
                 namehash: "namehash:alice.base.eth".to_owned(),
                 labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "base-mainnet".to_owned(),
@@ -1402,7 +1327,7 @@ impl TestDatabase {
                 dns_encoded_name: normalized_name.as_bytes().to_vec(),
                 namehash: format!("namehash:{normalized_name}"),
                 labelhashes: vec![format!("labelhash:{normalized_name}")],
-                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "base-mainnet".to_owned(),
@@ -1748,7 +1673,7 @@ impl TestDatabase {
                 dns_encoded_name: normalized_name.as_bytes().to_vec(),
                 namehash: format!("namehash:{normalized_name}"),
                 labelhashes: vec![format!("labelhash:{normalized_name}")],
-                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
                 normalization_warnings: json!([]),
                 normalization_errors: json!([]),
                 chain_id: "ethereum-sepolia".to_owned(),
@@ -2474,7 +2399,7 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
         dns_encoded_name: vec![5, b'a', b'l', b'i', b'c', b'e'],
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec!["labelhash:alice".to_owned()],
-        normalizer_version: "uts46-v1".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id: chain_id.to_owned(),
@@ -3630,7 +3555,7 @@ fn primary_name_execution_trace(
                         }
                     }),
                     step_payload: json!({
-                        "normalizer_version": "uts46-v1",
+                        "normalizer_version": "ensip15@ens-normalize-0.1.1",
                         "error": "claim_name_not_normalizable"
                     }),
                 },
@@ -3796,7 +3721,7 @@ fn collection_name_surface(
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
         labelhashes: vec![format!("labelhash:{display_name}")],
-        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
         chain_id,

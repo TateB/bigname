@@ -79,6 +79,14 @@ pub async fn mark_raw_block_facts_range_orphaned(
         &block_hashes,
     )
     .await?;
+    mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "event_silent_resolver_call_observations",
+        "observed_at",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
 
     transaction
         .commit()
