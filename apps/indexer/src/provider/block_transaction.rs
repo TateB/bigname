@@ -97,12 +97,35 @@ impl JsonRpcProvider {
     }
 
     async fn fetch_chain_head_hashes(&self) -> Result<ProviderHeadHashSnapshot> {
-        let canonical = self
-            .fetch_head_hash_by_tag("latest")
-            .await?
-            .context("provider did not return a latest block")?;
-        let safe = self.fetch_head_hash_by_tag("safe").await?;
-        let finalized = self.fetch_head_hash_by_tag("finalized").await?;
+        let tags = ["latest", "safe", "finalized"];
+        let calls = tags
+            .iter()
+            .map(|tag| JsonRpcBatchCall {
+                method: "eth_getBlockByNumber",
+                params: vec![Value::String((*tag).to_owned()), Value::Bool(false)],
+            })
+            .collect::<Vec<_>>();
+        let mut results = self.fetch_json_rpc_batch_results(calls).await?.into_iter();
+
+        let canonical = head_hash_from_tag_result(
+            "latest",
+            results
+                .next()
+                .context("provider omitted latest head hash result")?,
+        )?
+        .context("provider did not return a latest block")?;
+        let safe = head_hash_from_tag_result(
+            "safe",
+            results
+                .next()
+                .context("provider omitted safe head hash result")?,
+        )?;
+        let finalized = head_hash_from_tag_result(
+            "finalized",
+            results
+                .next()
+                .context("provider omitted finalized head hash result")?,
+        )?;
 
         Ok(ProviderHeadHashSnapshot {
             canonical,
@@ -451,16 +474,6 @@ impl JsonRpcProvider {
         Ok(())
     }
 
-    async fn fetch_head_hash_by_tag(&self, tag: &str) -> Result<Option<String>> {
-        self.fetch_json_rpc_result(
-            "eth_getBlockByNumber",
-            vec![Value::String(tag.to_owned()), Value::Bool(false)],
-        )
-        .await?
-        .map(|value| block_hash_from_value(&value))
-        .transpose()
-    }
-
     async fn fetch_blocks_by_hashes<I>(&self, hashes: I) -> Result<BTreeMap<String, ProviderBlock>>
     where
         I: IntoIterator<Item = Option<String>>,
@@ -487,4 +500,13 @@ impl JsonRpcProvider {
             .map(ProviderBlock::from_value)
             .transpose()
     }
+}
+
+fn head_hash_from_tag_result(tag: &str, result: Option<Value>) -> Result<Option<String>> {
+    result
+        .map(|value| {
+            block_hash_from_value(&value)
+                .with_context(|| format!("failed to decode {tag} block hash from provider result"))
+        })
+        .transpose()
 }

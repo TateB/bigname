@@ -1,3 +1,5 @@
+#[path = "backfill/coinbase_sql.rs"]
+mod coinbase_sql;
 #[path = "backfill/concurrent_execution.rs"]
 mod concurrent_execution;
 #[path = "backfill/failure_recording.rs"]
@@ -10,22 +12,33 @@ mod range_resolution;
 mod reservation_execution;
 #[path = "backfill/selection.rs"]
 mod selection;
+#[path = "backfill/source.rs"]
+mod source;
 
 use anyhow::{Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
+use clap::ValueEnum;
 use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::HeaderAuditMode;
 
+pub(crate) use coinbase_sql::{
+    CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
+    DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,
+};
 pub(crate) use concurrent_execution::run_resumable_hash_pinned_backfill_job_concurrently;
 #[allow(unused_imports)]
-pub(crate) use fetching::run_hash_pinned_backfill_range;
+pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_backfill_range};
 #[cfg(test)]
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
     create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
-    run_resumable_hash_pinned_backfill_job,
+    run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
+};
+pub(crate) use source::{
+    BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
+    HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +63,96 @@ impl BackfillBlockRange {
             from_block,
             to_block,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub(crate) enum BackfillSourceKind {
+    #[default]
+    HashPinned,
+    CoinbaseSql,
+    Auto,
+}
+
+impl BackfillSourceKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::HashPinned => "hash-pinned",
+            Self::CoinbaseSql => "coinbase-sql",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CoinbaseSqlValidationMode {
+    #[default]
+    Full,
+    Sample,
+}
+
+impl CoinbaseSqlValidationMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Sample => "sample",
+        }
+    }
+}
+
+pub(crate) const DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS: i64 = 1_024;
+pub(crate) const DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS: i64 = 8_192;
+pub(crate) const DEFAULT_COINBASE_SQL_PAGE_LIMIT: usize = 50_000;
+pub(crate) const DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT: usize = 10_000;
+pub(crate) const DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS: u64 = 30;
+pub(crate) const DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS: u32 = 5;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CoinbaseSqlBackfillConfig {
+    pub(crate) initial_window_blocks: i64,
+    pub(crate) max_window_blocks: i64,
+    pub(crate) page_limit: usize,
+    pub(crate) sql_char_limit: usize,
+    pub(crate) query_timeout_secs: u64,
+    pub(crate) rate_limit_qps: u32,
+    pub(crate) validation_mode: CoinbaseSqlValidationMode,
+}
+
+impl CoinbaseSqlBackfillConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.initial_window_blocks <= 0 {
+            bail!(
+                "Coinbase SQL initial window blocks must be positive, got {}",
+                self.initial_window_blocks
+            );
+        }
+        if self.max_window_blocks <= 0 {
+            bail!(
+                "Coinbase SQL max window blocks must be positive, got {}",
+                self.max_window_blocks
+            );
+        }
+        if self.initial_window_blocks > self.max_window_blocks {
+            bail!(
+                "Coinbase SQL initial window blocks {} cannot exceed max window blocks {}",
+                self.initial_window_blocks,
+                self.max_window_blocks
+            );
+        }
+        if self.page_limit == 0 {
+            bail!("Coinbase SQL page limit must be positive");
+        }
+        if self.sql_char_limit == 0 {
+            bail!("Coinbase SQL query character limit must be positive");
+        }
+        if self.query_timeout_secs == 0 {
+            bail!("Coinbase SQL query timeout must be positive");
+        }
+        if self.rate_limit_qps == 0 {
+            bail!("Coinbase SQL rate limit qps must be positive");
+        }
+
+        Ok(())
     }
 }
 

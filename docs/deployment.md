@@ -105,10 +105,12 @@ Deployments with a same-host Reth database can layer
 `BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
 `BIGNAME_INDEXER_RETH_DATADIR_CONTAINER` to the in-container mount path, and
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to comma-delimited `<chain>=<path>`
-entries that use that in-container path. The override clears
-`BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain still has only
-one provider source. Reth DB sources remain operational intake sources; they do
-not replace bigname raw facts or normalized-event `raw_fact_ref` identities.
+entries that use that in-container path. `BIGNAME_INDEXER_CHAIN_RPC_URLS` may
+still provide RPC sources for other active watched chains, for example
+Base Mainnet while Ethereum Mainnet uses same-host Reth. Do not configure the
+same chain in both settings; duplicate provider sources fail at startup. Reth
+DB sources remain operational intake sources; they do not replace bigname raw
+facts or normalized-event `raw_fact_ref` identities.
 The repository Dockerfile builds `bigname-indexer` with the
 `bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider
 path available. Custom images that omit that feature fail fast when
@@ -139,6 +141,7 @@ chunk immediately for small ranges and enable broad runtime refreshes.
 ```sh
 BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
 BIGNAME_INDEXER_RETH_DATADIR_CONTAINER=/reth-data \
+BIGNAME_INDEXER_CHAIN_RPC_URLS=base-mainnet=http://host.docker.internal:9545 \
 BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=ethereum-mainnet=/reth-data \
 BIGNAME_INDEXER_RETH_DB_USER=0:0 \
 BIGNAME_INDEXER_RETH_DB_NOFILE_SOFT=1048576 \
@@ -189,6 +192,36 @@ each materialized push with
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
 as a fallback.
+
+Manual Base historical backfills can select Coinbase CDP SQL with
+`BIGNAME_INDEXER_BACKFILL_SOURCE=coinbase-sql` or allow Base-only automatic
+selection with `BIGNAME_INDEXER_BACKFILL_SOURCE=auto` plus
+`BIGNAME_INDEXER_COINBASE_SQL_URLS=base-mainnet=default`. The `default` URL is
+the CDP SQL `/run` endpoint; custom URLs must use `https://` because the runner
+sends generated bearer JWTs. Configure `COINBASE_CDP_SQL_API_KEY_ID` and
+`COINBASE_CDP_SQL_API_KEY_SECRET`, or override the env var names with
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV` and
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV`. The runner keeps the Secret
+API Key material in env and generates a fresh CDP REST bearer JWT for each SQL
+request, so operators should not paste a short-lived JWT into the server
+configuration. This source is backfill-only and finite-range-only: it is
+unavailable to `run` live following, `ops-catchup`, repair, chain-head
+promotion, and checkpoint promotion. Operators must still configure
+`BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
+the same Base chain so the validation provider owns block hashes, headers,
+canonicality evidence, code observations, and transaction/receipt fills. The
+Coinbase SQL runner respects `BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
+`BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; row, query length, and timeout
+defaults match the [CDP SQL REST API reference](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/onchain-data/run-sql-query),
+while the QPS default is a conservative per-process guardrail and remains
+operator-configurable if product limits change. The default validation mode is
+`full`, so the validation provider fetches the same address/topic log span and
+fails the range if Coinbase SQL omitted or added a selected log identity.
+`sample` is accepted for CLI compatibility with the intended rollout shape, but
+this first slice treats it conservatively as the same completeness check.
+
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by

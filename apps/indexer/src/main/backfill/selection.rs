@@ -5,13 +5,13 @@ use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 use crate::provider::{ProviderLog, ProviderResolvedBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct BackfillLogRangeRequest {
-    pub(super) start_index: usize,
-    pub(super) end_index: usize,
-    pub(super) addresses: Vec<String>,
+pub(crate) struct BackfillLogRangeRequest {
+    pub(crate) start_index: usize,
+    pub(crate) end_index: usize,
+    pub(crate) addresses: Vec<String>,
 }
 
-pub(super) fn selected_log_range_requests(
+pub(crate) fn selected_log_range_requests(
     source_plan: &WatchedSourceSelectorPlan,
     resolved_blocks: &[ProviderResolvedBlock],
 ) -> Vec<BackfillLogRangeRequest> {

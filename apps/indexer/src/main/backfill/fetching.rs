@@ -25,6 +25,8 @@ use crate::{
 
 #[path = "fetching/canonicality.rs"]
 mod canonicality;
+#[path = "fetching/historical.rs"]
+mod historical;
 #[path = "fetching/log_ranges.rs"]
 mod log_ranges;
 #[path = "fetching/sparse.rs"]
@@ -38,6 +40,7 @@ use super::{
 use crate::source_scope::SourceScope;
 
 pub(super) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
+pub(crate) use historical::materialize_historical_payload_range;
 use log_ranges::{
     fetch_backfill_logs_by_safe_ranges, selected_addresses_for_materialized_block,
     uses_topic_first_source_family_scan,

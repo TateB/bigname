@@ -3,7 +3,13 @@ use std::path::PathBuf;
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
-use crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+use crate::backfill::{
+    BackfillSourceKind, CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
+    DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV, DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+    DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+    DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+    DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS, DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+};
 use crate::bootstrap_backfill::{
     DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS, DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
 };
@@ -160,6 +166,74 @@ pub(crate) struct BackfillArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(
+        long = "backfill-source",
+        env = "BIGNAME_INDEXER_BACKFILL_SOURCE",
+        value_enum,
+        default_value = "hash-pinned"
+    )]
+    pub(crate) backfill_source: BackfillSourceKind,
+    #[arg(
+        long = "coinbase-sql-url",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) coinbase_sql_urls: Vec<String>,
+    #[arg(
+        long = "coinbase-sql-api-key-id-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_ID_ENV
+    )]
+    pub(crate) coinbase_sql_api_key_id_env: String,
+    #[arg(
+        long = "coinbase-sql-api-key-secret-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV
+    )]
+    pub(crate) coinbase_sql_api_key_secret_env: String,
+    #[arg(
+        long = "coinbase-sql-initial-window-blocks",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_INITIAL_WINDOW_BLOCKS",
+        default_value_t = DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS
+    )]
+    pub(crate) coinbase_sql_initial_window_blocks: i64,
+    #[arg(
+        long = "coinbase-sql-max-window-blocks",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_MAX_WINDOW_BLOCKS",
+        default_value_t = DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS
+    )]
+    pub(crate) coinbase_sql_max_window_blocks: i64,
+    #[arg(
+        long = "coinbase-sql-page-limit",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT",
+        default_value_t = DEFAULT_COINBASE_SQL_PAGE_LIMIT
+    )]
+    pub(crate) coinbase_sql_page_limit: usize,
+    #[arg(
+        long = "coinbase-sql-query-char-limit",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT",
+        default_value_t = DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT
+    )]
+    pub(crate) coinbase_sql_query_char_limit: usize,
+    #[arg(
+        long = "coinbase-sql-query-timeout-secs",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS",
+        default_value_t = DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS
+    )]
+    pub(crate) coinbase_sql_query_timeout_secs: u64,
+    #[arg(
+        long = "coinbase-sql-rate-limit-qps",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS",
+        default_value_t = DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS
+    )]
+    pub(crate) coinbase_sql_rate_limit_qps: u32,
+    #[arg(
+        long = "coinbase-sql-validation-mode",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_VALIDATION_MODE",
+        value_enum,
+        default_value = "full"
+    )]
+    pub(crate) coinbase_sql_validation_mode: CoinbaseSqlValidationMode,
     #[arg(long)]
     pub(crate) chain: String,
     #[arg(long)]

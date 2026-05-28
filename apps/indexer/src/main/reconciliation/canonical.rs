@@ -4,7 +4,7 @@ use bigname_storage::{
     chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
     upsert_chain_lineage_blocks,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
@@ -27,9 +27,12 @@ use super::{
     },
 };
 
+#[path = "canonical/checkpoints.rs"]
+mod checkpoints;
 #[path = "canonical/orphaning.rs"]
 mod orphaning;
 
+use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
 use orphaning::orphan_reorg_losing_branch_payloads;
 
 const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
@@ -231,16 +234,48 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         )
         .await?;
     }
+    let fetched_checkpoint_ancestor_count = fill_checkpoint_ancestor_path(
+        pool,
+        provider,
+        &task.chain,
+        heads,
+        &canonical,
+        header_audit_mode,
+    )
+    .await?;
+    if fetched_checkpoint_ancestor_count > 0 {
+        info!(
+            service = "indexer",
+            chain = %task.chain,
+            fetched_checkpoint_ancestor_count,
+            "checkpoint ancestor path fetched for provider heads"
+        );
+    }
 
     let canonical_update = canonical.canonical.clone();
-    let (safe_update, finalized_update) = if canonical_update.is_some() {
-        (
-            heads.safe.as_ref().map(provider_block_to_checkpoint_ref),
-            heads
-                .finalized
-                .as_ref()
-                .map(provider_block_to_checkpoint_ref),
+    let (safe_update, finalized_update) = if let Some(canonical_update) = &canonical_update {
+        let safe_update = checkpoint_update_for_head(
+            pool,
+            &task.chain,
+            "safe",
+            task.checkpoint.safe_block_hash.as_deref(),
+            task.checkpoint.safe_block_number,
+            canonical_update,
+            heads.safe.as_ref(),
         )
+        .await?;
+        let finalized_update = checkpoint_update_for_head(
+            pool,
+            &task.chain,
+            "finalized",
+            task.checkpoint.finalized_block_hash.as_deref(),
+            task.checkpoint.finalized_block_number,
+            canonical_update,
+            heads.finalized.as_ref(),
+        )
+        .await?;
+
+        (safe_update, finalized_update)
     } else {
         (None, None)
     };

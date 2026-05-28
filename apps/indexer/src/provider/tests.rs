@@ -382,45 +382,53 @@ async fn json_rpc_provider_fetches_chain_heads_via_tag_hash_discovery() -> Resul
     let request_log = Arc::clone(&requests);
 
     let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
-        let method = body
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let first_param = body
-            .get("params")
-            .and_then(Value::as_array)
-            .and_then(|params| params.first())
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        request_log
-            .lock()
-            .expect("request log must not be poisoned")
-            .push((method.to_owned(), first_param.to_owned()));
+        let response_for_request = |request: &Value| {
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let first_param = request
+                .get("params")
+                .and_then(Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push((method.to_owned(), first_param.to_owned()));
 
-        let result = match (method, first_param) {
-            ("eth_getBlockByNumber", "latest") => json!({
-                "hash": canonical_hash.to_ascii_uppercase(),
-            }),
-            ("eth_getBlockByNumber", "safe") => json!({
-                "hash": safe_hash,
-            }),
-            ("eth_getBlockByNumber", "finalized") => json!({
-                "hash": safe_hash,
-            }),
-            ("eth_getBlockByHash", hash) if hash == canonical_hash => {
-                rpc_block_payload(canonical_hash, canonical_parent, 43, Some("0x0102"))
-            }
-            ("eth_getBlockByHash", hash) if hash == safe_hash => {
-                rpc_block_payload(safe_hash, safe_parent, 42, None)
-            }
-            _ => panic!("unexpected RPC request: {body}"),
+            let result = match (method, first_param) {
+                ("eth_getBlockByNumber", "latest") => json!({
+                    "hash": canonical_hash.to_ascii_uppercase(),
+                }),
+                ("eth_getBlockByNumber", "safe") => json!({
+                    "hash": safe_hash,
+                }),
+                ("eth_getBlockByNumber", "finalized") => json!({
+                    "hash": safe_hash,
+                }),
+                ("eth_getBlockByHash", hash) if hash == canonical_hash => {
+                    rpc_block_payload(canonical_hash, canonical_parent, 43, Some("0x0102"))
+                }
+                ("eth_getBlockByHash", hash) if hash == safe_hash => {
+                    rpc_block_payload(safe_hash, safe_parent, 42, None)
+                }
+                _ => panic!("unexpected RPC request: {request}"),
+            };
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(Value::Null),
+                "result": result
+            })
         };
 
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": result
-        })
+        if let Some(batch) = body.as_array() {
+            Value::Array(batch.iter().map(response_for_request).collect())
+        } else {
+            response_for_request(&body)
+        }
     }))
     .await?;
     let provider = JsonRpcProvider::new(&url)?;

@@ -1,5 +1,8 @@
 use std::io::{self, Write};
 
+#[path = "reservation_execution/coinbase_sql.rs"]
+mod coinbase_sql_execution;
+
 use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
@@ -21,13 +24,17 @@ use crate::{
 };
 
 use super::{
-    BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
+    BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
+    CoinbaseSqlBackfillConfig,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
 
+pub(crate) use coinbase_sql_execution::run_resumable_coinbase_sql_backfill_job;
+
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
+pub(crate) const COINBASE_SQL_BACKFILL_SCAN_MODE: &str = "coinbase_sql_hash_pinned_logs_v1";
 pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
 pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
@@ -56,6 +63,36 @@ pub(crate) async fn create_hash_pinned_backfill_job_with_ranges(
             chain_id: source_plan.watched_chain_plan.chain.clone(),
             source_identity: backfill_job_source_identity_payload(source_plan)?,
             scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
+            range_start_block_number: config.range.from_block,
+            range_end_block_number: config.range.to_block,
+            idempotency_key: config.idempotency_key.clone(),
+            ranges,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn create_coinbase_sql_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    _coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<BackfillJobRecord> {
+    let ranges = vec![BackfillRangeSpec {
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+    }];
+    create_backfill_job(
+        pool,
+        &BackfillJobCreate {
+            deployment_profile: config.deployment_profile.clone(),
+            chain_id: source_plan.watched_chain_plan.chain.clone(),
+            source_identity: coinbase_sql_backfill_job_source_identity_payload(
+                source_plan,
+                topic_plan,
+            )?,
+            scan_mode: COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned(),
             range_start_block_number: config.range.from_block,
             range_end_block_number: config.range.to_block,
             idempotency_key: config.idempotency_key.clone(),
@@ -129,6 +166,39 @@ pub(crate) fn backfill_job_source_identity_payload(
             "source_identity_hash".to_owned(),
             Value::String(source_identity_hash),
         );
+    Ok(payload)
+}
+
+fn coinbase_sql_backfill_job_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<Value> {
+    let mut payload = backfill_job_source_identity_payload(source_plan)?;
+    let object = payload
+        .as_object_mut()
+        .context("backfill source identity payload must be an object")?;
+    object.insert(
+        "backfill_provider".to_owned(),
+        Value::String("coinbase_cdp_sql".to_owned()),
+    );
+    object.insert(
+        "scan_mode".to_owned(),
+        Value::String(COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned()),
+    );
+    object.insert(
+        "coinbase_sql_plan_version".to_owned(),
+        Value::String("base_logs_v1".to_owned()),
+    );
+    object.insert("validation_provider_required".to_owned(), Value::Bool(true));
+    object.insert(
+        "topic_filtering".to_owned(),
+        Value::String("manifest_abi_topic0_union_v1".to_owned()),
+    );
+    object.insert(
+        "coinbase_sql_topic_plan".to_owned(),
+        topic_plan.source_identity_payload()?,
+    );
+
     Ok(payload)
 }
 

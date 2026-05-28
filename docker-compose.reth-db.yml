@@ -15,7 +15,7 @@ services:
     pid: host
     user: ${BIGNAME_INDEXER_RETH_DB_USER:-0:0}
     environment:
-      BIGNAME_INDEXER_CHAIN_RPC_URLS: ""
+      BIGNAME_INDEXER_CHAIN_RPC_URLS: ${BIGNAME_INDEXER_CHAIN_RPC_URLS:-}
       BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES: ${BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES:?set BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES, for example ethereum-mainnet=/reth-data}
     ulimits:
       nofile:

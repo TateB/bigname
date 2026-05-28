@@ -6,8 +6,6 @@ use alloy_json_rpc::{
 };
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::Request;
 use serde_json::Value;
 
 use super::{
@@ -147,21 +145,19 @@ impl JsonRpcProvider {
         let payload = payload
             .serialize()
             .context("failed to encode JSON-RPC request payload")?;
-        let request = Request::post(self.endpoint.clone())
+        let response = self
+            .client
+            .post(self.endpoint.clone())
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::copy_from_slice(payload.get().as_bytes())))
-            .context("failed to build JSON-RPC request")?;
-        let response =
-            self.client.request(request).await.with_context(|| {
-                format!("failed to send JSON-RPC request for {request_context}")
-            })?;
+            .body(payload.get().to_owned())
+            .send()
+            .await
+            .with_context(|| format!("failed to send JSON-RPC request for {request_context}"))?;
         let status = response.status();
         let body = response
-            .into_body()
-            .collect()
+            .bytes()
             .await
-            .context("failed to read JSON-RPC response body")?
-            .to_bytes();
+            .context("failed to read JSON-RPC response body")?;
 
         if !status.is_success() {
             let response_body = String::from_utf8_lossy(&body);

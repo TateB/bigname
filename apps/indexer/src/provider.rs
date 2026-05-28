@@ -1,13 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::Uri;
-use hyper_util::{
-    client::legacy::{Client, connect::HttpConnector},
-    rt::TokioExecutor,
-};
+use reqwest::Url;
 #[cfg(test)]
 use serde_json::json;
 
@@ -239,23 +233,19 @@ pub(crate) trait ChainProviderOps {
 
 #[derive(Clone)]
 pub struct JsonRpcProvider {
-    endpoint: Uri,
-    client: Client<HttpConnector, Full<Bytes>>,
+    endpoint: Url,
+    client: reqwest::Client,
 }
 
 impl JsonRpcProvider {
     pub fn new(endpoint: &str) -> Result<Self> {
-        let endpoint = endpoint
-            .parse::<Uri>()
+        let endpoint = Url::parse(endpoint)
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
-        if endpoint.scheme_str() != Some("http") {
-            bail!(
-                "unsupported RPC endpoint scheme for {endpoint}; bootstrap head fetch currently supports only http:// URLs"
-            );
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("unsupported RPC endpoint scheme for {endpoint}; expected http:// or https://");
         }
 
-        let connector = HttpConnector::new();
-        let client = Client::builder(TokioExecutor::new()).build(connector);
+        let client = reqwest::Client::new();
 
         Ok(Self { endpoint, client })
     }
