@@ -49,6 +49,9 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     let sql = build_query(&pack, None, 50_000)?;
 
     assert!(sql.contains("WITH active_transactions AS"));
+    assert!(sql.contains("event_log_rows AS"));
+    assert!(sql.contains("encoded_log_rows AS"));
+    assert!(sql.contains("block_logs AS"));
     assert!(sql.contains("FROM base.events l"));
     assert!(sql.contains("FROM base.encoded_logs l"));
     assert!(sql.contains("JOIN active_transactions t"));
@@ -60,10 +63,37 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     assert!(sql.contains("l.topics[1] IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')"));
     assert!(sql.contains("toString(action) IN ('1', 'added')"));
     assert!(sql.contains("toString(l.action) IN ('-1', 'removed')"));
-    assert!(sql.contains("row_number() OVER"));
     assert!(sql.contains("AND t.block_hash = l.block_hash"));
-    assert!(sql.contains("HAVING sum(action) > 0"));
+    assert!(sql.contains("WHERE t.action_sum > 0"));
+    assert!(sql.contains("WHERE l.action_sum > 0"));
+    assert!(sql.contains("SELECT count(*)"));
+    assert!(sql.contains("FROM block_logs b"));
+    assert!(sql.contains("b.transaction_log_index <= l.transaction_log_index"));
+    assert!(!sql.contains("HAVING"));
+    assert!(!sql.contains("row_number()"));
+    assert!(!sql.contains(" OVER "));
+    assert!(!sql.contains("l.address IN"));
     assert!(sql.contains("ORDER BY l.block_number, l.transaction_index, l.log_index"));
+
+    let active_logs_pos = sql
+        .find("active_logs AS")
+        .expect("query should build active logs before indexing");
+    let indexed_logs_pos = sql
+        .find("indexed_logs AS")
+        .expect("query should build indexed logs before final filtering");
+    let active_logs_section = &sql[active_logs_pos..indexed_logs_pos];
+    assert!(!active_logs_section.contains("emitting_address IN"));
+    assert!(!active_logs_section.contains("topics[1] IN"));
+    assert!(
+        sql.find("l.emitting_address IN")
+            .expect("address filter should be present")
+            > indexed_logs_pos
+    );
+    assert!(
+        sql.find("l.topics[1] IN")
+            .expect("topic filter should be present")
+            > indexed_logs_pos
+    );
     Ok(())
 }
 
@@ -75,7 +105,7 @@ fn query_splitter_keeps_queries_under_character_budget() -> Result<()> {
     let topic0s = (0..8)
         .map(|index| format!("0x{index:064x}"))
         .collect::<Vec<_>>();
-    let char_limit = 5_000;
+    let char_limit = 6_000;
     let packs = build_or_split_filter_pack(pack(addresses, topic0s), char_limit, 50_000)?;
 
     assert!(packs.len() > 1);

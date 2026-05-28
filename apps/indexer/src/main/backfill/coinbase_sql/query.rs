@@ -34,32 +34,21 @@ pub(super) fn build_query(
     }
 
     let mut final_selection_predicates = Vec::new();
-    let mut source_selection_predicates = Vec::new();
     if !pack.scan_all_emitters {
         let address_predicate = format!(
             "l.emitting_address IN ({})",
             sql_string_literals(&pack.addresses)
         );
         final_selection_predicates.push(address_predicate);
-        source_selection_predicates.push(format!(
-            "l.address IN ({})",
-            sql_string_literals(&pack.addresses)
-        ));
     }
     if !pack.topic0s.is_empty() {
         let topic_predicate = format!("l.topics[1] IN ({})", sql_string_literals(&pack.topic0s));
-        final_selection_predicates.push(topic_predicate.clone());
-        source_selection_predicates.push(topic_predicate);
+        final_selection_predicates.push(topic_predicate);
     }
     let final_selection_predicates = if final_selection_predicates.is_empty() {
         "1 = 1".to_owned()
     } else {
         final_selection_predicates.join("\n  AND ")
-    };
-    let source_selection_predicates = if source_selection_predicates.is_empty() {
-        "1 = 1".to_owned()
-    } else {
-        source_selection_predicates.join("\n  AND ")
     };
     let mut output_predicates = vec![format!(
         "l.block_number BETWEEN {} AND {}",
@@ -82,20 +71,28 @@ pub(super) fn build_query(
     Ok(format!(
         r#"WITH active_transactions AS (
   SELECT
-    block_number,
-    block_hash,
-    transaction_hash,
-    transaction_index
-  FROM {network}.transactions
-  WHERE block_number BETWEEN {from_block} AND {to_block}
-  GROUP BY
-    block_number,
-    block_hash,
-    transaction_hash,
-    transaction_index
-  HAVING sum({tx_action_expr}) > 0
+    t.block_number AS block_number,
+    t.block_hash AS block_hash,
+    t.transaction_hash AS transaction_hash,
+    t.transaction_index AS transaction_index
+  FROM (
+    SELECT
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index,
+      sum({tx_action_expr}) AS action_sum
+    FROM {network}.transactions
+    WHERE block_number BETWEEN {from_block} AND {to_block}
+    GROUP BY
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index
+  ) t
+  WHERE t.action_sum > 0
 ),
-all_log_rows AS (
+event_log_rows AS (
   SELECT
     l.block_number AS block_number,
     l.block_hash AS block_hash,
@@ -111,8 +108,8 @@ all_log_rows AS (
    AND t.block_hash = l.block_hash
    AND t.transaction_hash = l.transaction_hash
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND {source_selection_predicates}
-  UNION ALL
+),
+encoded_log_rows AS (
   SELECT
     l.block_number AS block_number,
     l.block_hash AS block_hash,
@@ -128,41 +125,83 @@ all_log_rows AS (
    AND t.block_hash = l.block_hash
    AND t.transaction_hash = l.transaction_hash
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND {source_selection_predicates}
 ),
 active_logs AS (
   SELECT
-    block_number,
-    block_hash,
-    transaction_hash,
-    transaction_index,
-    transaction_log_index,
-    emitting_address,
-    topics
-  FROM all_log_rows
+    log_rows.block_number AS block_number,
+    log_rows.block_hash AS block_hash,
+    log_rows.transaction_hash AS transaction_hash,
+    log_rows.transaction_index AS transaction_index,
+    log_rows.transaction_log_index AS transaction_log_index,
+    log_rows.emitting_address AS emitting_address,
+    log_rows.topics AS topics,
+    sum(log_rows.action) AS action_sum
+  FROM (
+    SELECT
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index,
+      transaction_log_index,
+      emitting_address,
+      topics,
+      action
+    FROM event_log_rows
+    UNION ALL
+    SELECT
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index,
+      transaction_log_index,
+      emitting_address,
+      topics,
+      action
+    FROM encoded_log_rows
+  ) log_rows
   GROUP BY
-    block_number,
-    block_hash,
-    transaction_hash,
-    transaction_index,
-    transaction_log_index,
-    emitting_address,
-    topics
-  HAVING sum(action) > 0
+    log_rows.block_number,
+    log_rows.block_hash,
+    log_rows.transaction_hash,
+    log_rows.transaction_index,
+    log_rows.transaction_log_index,
+    log_rows.emitting_address,
+    log_rows.topics
+),
+block_logs AS (
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    l.transaction_index AS transaction_index,
+    l.transaction_log_index AS transaction_log_index,
+    l.emitting_address AS emitting_address,
+    l.topics AS topics
+  FROM active_logs l
+  WHERE l.action_sum > 0
 ),
 indexed_logs AS (
   SELECT
-    block_number,
-    block_hash,
-    transaction_hash,
-    transaction_index,
-    row_number() OVER (
-      PARTITION BY block_number, block_hash
-      ORDER BY transaction_index, transaction_log_index
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    l.transaction_index AS transaction_index,
+    (
+      SELECT count(*)
+      FROM block_logs b
+      WHERE b.block_number = l.block_number
+        AND b.block_hash = l.block_hash
+        AND (
+          b.transaction_index < l.transaction_index
+          OR (
+            b.transaction_index = l.transaction_index
+            AND b.transaction_log_index <= l.transaction_log_index
+          )
+        )
     ) - 1 AS log_index,
-    emitting_address,
-    topics
-  FROM active_logs
+    l.emitting_address AS emitting_address,
+    l.topics AS topics
+  FROM block_logs l
 )
 SELECT
   l.block_number AS block_number,
@@ -182,7 +221,6 @@ LIMIT {limit}"#,
         tx_action_expr = tx_action_expr,
         log_action_expr = log_action_expr,
         output_predicates = output_predicates.join("\n  AND "),
-        source_selection_predicates = source_selection_predicates,
         final_selection_predicates = final_selection_predicates
     ))
 }

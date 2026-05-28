@@ -56,6 +56,7 @@ impl CoinbaseSqlAuth {
     }
 
     pub(super) fn bearer_token(&self) -> Result<String> {
+        ensure_jwt_crypto_provider();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before Unix epoch; cannot build Coinbase SQL JWT")?
@@ -75,6 +76,11 @@ impl CoinbaseSqlAuth {
         encode(&header, &claims, self.signing_key.encoding_key())
             .context("failed to generate Coinbase SQL bearer token from Secret API Key")
     }
+}
+
+fn ensure_jwt_crypto_provider() {
+    // All-feature builds also pull jsonwebtoken's aws_lc_rs backend through Reth.
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
 }
 
 fn read_secret_env(env_name: &str, label: &str) -> Result<String> {
