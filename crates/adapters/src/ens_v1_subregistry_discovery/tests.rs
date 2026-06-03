@@ -824,6 +824,109 @@ async fn checkpointed_subregistry_replay_full_reconciles_missing_staged_edges() 
 }
 
 #[tokio::test]
+async fn checkpointed_subregistry_replay_reaches_recursive_emitters_discovered_in_target()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let eth_owner = "0x00000000000000000000000000000000000000CC";
+    let sub_owner = "0x00000000000000000000000000000000000000DD";
+    let eth_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let sub_block_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        eth_block_hash,
+        42,
+        registry_address,
+        eth_owner,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let eth_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: sub_block_hash,
+            block_number: 43,
+            emitting_address: eth_owner,
+            owner: sub_owner,
+            parent_node: &eth_node,
+            label: "sub",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_recursive_emitters".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 43,
+    };
+    let replay = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(replay.scanned_log_count, 2);
+    assert_eq!(replay.matched_log_count, 2);
+    assert_eq!(replay.active_observation_count, 2);
+    assert_eq!(replay.active_edge_count, 2);
+    assert_eq!(
+        replay.inserted_edge_count, 0,
+        "the public replay summary is from the final fixed-point pass"
+    );
+    assert_eq!(replay.deactivated_edge_count, 0);
+    assert_eq!(replay.total_normalized_event_count, 2);
+    assert_eq!(replay.total_normalized_event_inserted_count, 2);
+
+    let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(&discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    assert_eq!(
+        watched_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x00000000000000000000000000000000000000cc".to_owned(),
+                "0x00000000000000000000000000000000000000dd".to_owned(),
+                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 2,
+        }]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;

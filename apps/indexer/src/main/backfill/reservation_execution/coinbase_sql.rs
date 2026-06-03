@@ -24,7 +24,7 @@ use crate::backfill::{
         BackfillCanonicalityEvidence, fill_log_payloads_from_validation_provider,
         load_backfill_canonicality_evidence, materialize_historical_payload_range,
     },
-    range_resolution::{resolve_backfill_block_numbers, resolve_backfill_range},
+    range_resolution::resolve_backfill_range,
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
 
@@ -397,7 +397,7 @@ async fn run_coinbase_sql_backfill_window(
                 coinbase_config.validation_mode,
                 &historical_payload,
             );
-            let block_numbers = historical_payload
+            let sample_block_numbers = historical_payload
                 .logs_by_block
                 .keys()
                 .copied()
@@ -412,7 +412,7 @@ async fn run_coinbase_sql_backfill_window(
             ensure_coinbase_sql_sample_validation_size(
                 range,
                 historical_payload_log_count(&historical_payload),
-                block_numbers.len(),
+                sample_block_numbers.len(),
                 logs_need_validation_provider_payload,
                 decoded_payload_log_limit,
             )?;
@@ -422,11 +422,17 @@ async fn run_coinbase_sql_backfill_window(
                 chain = %source_plan.watched_chain_plan.chain,
                 from_block = range.from_block,
                 to_block = range.to_block,
-                sample_block_count = block_numbers.len(),
-                "Coinbase SQL sample validation block resolution started"
+                sample_block_count = sample_block_numbers.len(),
+                "Coinbase SQL sample validation range resolution started"
             );
-            let resolved_blocks =
-                resolve_backfill_block_numbers(validation_provider, &block_numbers, range).await?;
+            let resolved_blocks = resolve_backfill_range(validation_provider, range)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to resolve validation-provider block range for sampled Coinbase SQL range {}..={}",
+                        range.from_block, range.to_block
+                    )
+                })?;
             ensure_coinbase_sql_logs_match_resolved_blocks(
                 &historical_payload.logs_by_block,
                 &resolved_blocks,
@@ -439,33 +445,13 @@ async fn run_coinbase_sql_backfill_window(
                     chain = %source_plan.watched_chain_plan.chain,
                     from_block = range.from_block,
                     to_block = range.to_block,
-                    validation_range_block_count = range
-                        .to_block
-                        .saturating_sub(range.from_block)
-                        .saturating_add(1),
-                    "Coinbase SQL sample validation range resolution started"
-                );
-                let validation_resolved_blocks = resolve_backfill_range(validation_provider, range)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to resolve validation-provider block range for sampled Coinbase SQL range {}..={}",
-                            range.from_block, range.to_block
-                        )
-                    })?;
-                info!(
-                    service = "indexer",
-                    command = "backfill",
-                    chain = %source_plan.watched_chain_plan.chain,
-                    from_block = range.from_block,
-                    to_block = range.to_block,
-                    resolved_block_count = validation_resolved_blocks.len(),
+                    resolved_block_count = resolved_blocks.len(),
                     "Coinbase SQL sample validation log payload fill started"
                 );
                 let payload_fill_started = Instant::now();
                 historical_payload.logs_by_block = fill_log_payloads_from_validation_provider(
                     validation_provider,
-                    &validation_resolved_blocks,
+                    &resolved_blocks,
                     historical_payload.logs_by_block,
                     &historical_payload.validation_filters,
                     coinbase_config.validation_mode,

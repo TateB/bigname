@@ -37,8 +37,8 @@ pub(super) struct StagedSubregistryState {
 
 #[derive(Clone, Debug)]
 pub(super) struct SubregistryReplayCheckpoint {
-    context: ReplayAdapterCheckpointContext,
-    chain: String,
+    pub(super) context: ReplayAdapterCheckpointContext,
+    pub(super) chain: String,
     status: String,
     last_position: Option<RegistryRawLogPosition>,
     scanned_log_count: usize,
@@ -576,7 +576,7 @@ fn checkpoint_from_row(
     })
 }
 
-async fn delete_checkpoint(
+pub(super) async fn delete_checkpoint(
     pool: &PgPool,
     chain: &str,
     context: &ReplayAdapterCheckpointContext,
