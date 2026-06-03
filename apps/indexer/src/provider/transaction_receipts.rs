@@ -11,6 +11,10 @@ use super::{
     ProviderTransaction, ProviderTransactionReceiptBundle, ProviderTransactionReceiptRequest,
     provider_batch_item_limit, provider_batch_request_concurrency, request::JsonRpcBatchCall,
 };
+use validation::{fallback_receipts_by_key, fallback_transactions_by_key};
+
+mod validation;
+pub(super) use validation::validate_transaction_receipt_pair;
 
 struct FallbackBlockPayload {
     transactions_by_key: BTreeMap<(String, i64), ProviderTransaction>,
@@ -128,9 +132,30 @@ impl JsonRpcProvider {
                 });
         }
         let resolved_blocks = resolved_by_block.into_values().collect::<Vec<_>>();
-        let block_payloads = self
+        let block_payloads = match self
             .fetch_selected_transaction_receipt_fallback_blocks(&resolved_blocks)
-            .await?;
+            .await
+        {
+            Ok(block_payloads) => block_payloads,
+            Err(error) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    selected_transaction_receipt_fallback_count = requests.len(),
+                    "block-scoped selected transaction/receipt fallback failed; retrying direct lookup"
+                );
+                let retry_bundles = self
+                    .recover_selected_transaction_receipt_pairs_by_direct_retry(requests)
+                    .await?;
+                return retry_bundles
+                    .into_iter()
+                    .map(|bundle| {
+                        bundle.context(
+                            "provider block fallback and direct retry did not return selected transaction/receipt pair",
+                        )
+                    })
+                    .collect();
+            }
+        };
         let mut selected_bundles = vec![None; requests.len()];
         let mut direct_retry_requests = Vec::new();
 
@@ -169,14 +194,8 @@ impl JsonRpcProvider {
                 .map(|(_, request)| request.clone())
                 .collect::<Vec<_>>();
             let retry_bundles = self
-                .fetch_transaction_receipt_pairs_by_direct_retry(&retry_only_requests)
+                .recover_selected_transaction_receipt_pairs_by_direct_retry(&retry_only_requests)
                 .await?;
-            let retry_bundles = self
-                .fill_missing_transaction_receipt_pairs_from_fallback(
-                    retry_only_requests,
-                    retry_bundles,
-                )
-                .await;
             for ((request_index, request), retry_bundle) in
                 direct_retry_requests.into_iter().zip(retry_bundles)
             {
@@ -194,6 +213,18 @@ impl JsonRpcProvider {
             .into_iter()
             .map(|bundle| bundle.context("provider omitted selected transaction/receipt pair"))
             .collect()
+    }
+
+    async fn recover_selected_transaction_receipt_pairs_by_direct_retry(
+        &self,
+        requests: &[ProviderTransactionReceiptRequest],
+    ) -> Result<Vec<Option<ProviderTransactionReceiptBundle>>> {
+        let retry_bundles = self
+            .fetch_transaction_receipt_pairs_by_direct_retry(requests)
+            .await?;
+        Ok(self
+            .fill_missing_transaction_receipt_pairs_from_fallback(requests.to_vec(), retry_bundles)
+            .await)
     }
 
     async fn fetch_selected_transaction_receipt_fallback_blocks(
@@ -544,172 +575,4 @@ impl JsonRpcProvider {
             .map(|result| result.context("JSON-RPC batch worker omitted a result"))
             .collect()
     }
-}
-
-fn fallback_transactions_by_key(
-    resolved_block: &ProviderResolvedBlock,
-    transactions: Vec<ProviderTransaction>,
-) -> Result<BTreeMap<(String, i64), ProviderTransaction>> {
-    let mut transactions_by_key = BTreeMap::new();
-    for transaction in transactions {
-        if transaction.block_hash != resolved_block.block_hash {
-            bail!(
-                "provider returned fallback transaction {} for block {} with mismatched block hash {}",
-                transaction.transaction_hash,
-                resolved_block.block_hash,
-                transaction.block_hash
-            );
-        }
-        if transaction.block_number != resolved_block.block_number {
-            bail!(
-                "provider returned fallback transaction {} for block {} with mismatched block number {}",
-                transaction.transaction_hash,
-                resolved_block.block_hash,
-                transaction.block_number
-            );
-        }
-        let key = (
-            transaction.transaction_hash.clone(),
-            transaction.transaction_index,
-        );
-        if transactions_by_key.insert(key, transaction).is_some() {
-            bail!(
-                "provider returned duplicate fallback transaction in block {}",
-                resolved_block.block_hash
-            );
-        }
-    }
-
-    Ok(transactions_by_key)
-}
-
-fn fallback_receipts_by_key(
-    resolved_block: &ProviderResolvedBlock,
-    receipts: Vec<ProviderReceipt>,
-) -> Result<BTreeMap<(String, i64), ProviderReceipt>> {
-    let mut receipts_by_key = BTreeMap::new();
-    for receipt in receipts {
-        if receipt.block_hash != resolved_block.block_hash {
-            bail!(
-                "provider returned fallback receipt {} for block {} with mismatched block hash {}",
-                receipt.transaction_hash,
-                resolved_block.block_hash,
-                receipt.block_hash
-            );
-        }
-        if receipt.block_number != resolved_block.block_number {
-            bail!(
-                "provider returned fallback receipt {} for block {} with mismatched block number {}",
-                receipt.transaction_hash,
-                resolved_block.block_hash,
-                receipt.block_number
-            );
-        }
-        let key = (receipt.transaction_hash.clone(), receipt.transaction_index);
-        if receipts_by_key.insert(key, receipt).is_some() {
-            bail!(
-                "provider returned duplicate fallback receipt in block {}",
-                resolved_block.block_hash
-            );
-        }
-    }
-
-    Ok(receipts_by_key)
-}
-
-pub(super) fn validate_transaction_receipt_pair(
-    request: &ProviderTransactionReceiptRequest,
-    transaction: &ProviderTransaction,
-    receipt: &ProviderReceipt,
-) -> Result<()> {
-    validate_transaction_request_scope(request, transaction)?;
-    validate_receipt_request_scope(request, receipt)?;
-
-    if receipt.transaction_hash != transaction.transaction_hash {
-        bail!(
-            "provider returned receipt {} for transaction {}",
-            receipt.transaction_hash,
-            transaction.transaction_hash
-        );
-    }
-
-    Ok(())
-}
-
-fn validate_transaction_request_scope(
-    request: &ProviderTransactionReceiptRequest,
-    transaction: &ProviderTransaction,
-) -> Result<()> {
-    if transaction.transaction_hash != request.transaction_hash {
-        bail!(
-            "provider returned transaction {} for requested transaction {}",
-            transaction.transaction_hash,
-            request.transaction_hash
-        );
-    }
-    if transaction.block_hash != request.block_hash {
-        bail!(
-            "provider returned transaction {} for block {} with mismatched block hash {}",
-            transaction.transaction_hash,
-            request.block_hash,
-            transaction.block_hash
-        );
-    }
-    if transaction.block_number != request.block_number {
-        bail!(
-            "provider returned transaction {} for block {} with mismatched block number {}",
-            transaction.transaction_hash,
-            request.block_hash,
-            transaction.block_number
-        );
-    }
-    if transaction.transaction_index != request.transaction_index {
-        bail!(
-            "provider returned transaction {} with index {}; expected {}",
-            transaction.transaction_hash,
-            transaction.transaction_index,
-            request.transaction_index
-        );
-    }
-
-    Ok(())
-}
-
-fn validate_receipt_request_scope(
-    request: &ProviderTransactionReceiptRequest,
-    receipt: &ProviderReceipt,
-) -> Result<()> {
-    if receipt.transaction_hash != request.transaction_hash {
-        bail!(
-            "provider returned receipt {} for requested transaction {}",
-            receipt.transaction_hash,
-            request.transaction_hash
-        );
-    }
-    if receipt.block_hash != request.block_hash {
-        bail!(
-            "provider returned receipt {} for block {} with mismatched block hash {}",
-            receipt.transaction_hash,
-            request.block_hash,
-            receipt.block_hash
-        );
-    }
-    if receipt.block_number != request.block_number {
-        bail!(
-            "provider returned receipt {} for block {} with mismatched block number {}",
-            receipt.transaction_hash,
-            request.block_hash,
-            receipt.block_number
-        );
-    }
-    if receipt.transaction_index != request.transaction_index {
-        bail!(
-            "provider returned receipt {} with transaction index {}; expected {}",
-            receipt.transaction_hash,
-            receipt.transaction_index,
-            request.transaction_index
-        );
-    }
-
-    Ok(())
 }

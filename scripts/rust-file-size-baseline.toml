@@ -42,18 +42,13 @@ loc = 608
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
-path = "apps/indexer/src/provider/transaction_receipts.rs"
-loc = 715
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
 path = "apps/worker/src/projection_apply/apply.rs"
 loc = 685
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
-loc = 664
+loc = 662
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

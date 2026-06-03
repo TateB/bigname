@@ -952,7 +952,7 @@ fn reverse_claim_event(
         canonicality_state: CanonicalityState::Canonical,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "BaseReverseClaimed",
+            "source_event": "ReverseClaimed",
             "address": claimed_address,
             "coin_type": ENS_NATIVE_COIN_TYPE,
             "namespace": "ens",

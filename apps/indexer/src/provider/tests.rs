@@ -2265,6 +2265,206 @@ async fn json_rpc_provider_uses_receipt_fallback_endpoint_after_primary_omits_se
 }
 
 #[tokio::test]
+async fn json_rpc_provider_uses_receipt_fallback_endpoint_when_block_receipts_error() -> Result<()>
+{
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let parent_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let tx_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let primary_requests = Arc::new(Mutex::new(Vec::new()));
+    let primary_request_log = Arc::clone(&primary_requests);
+
+    let (primary_url, primary_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let is_batch = body.is_array();
+        let requests = body
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![body.clone()]);
+        let methods = requests
+            .iter()
+            .map(|request| {
+                request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .expect("request must include a method")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        primary_request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(methods);
+
+        let responses = requests
+            .iter()
+            .map(|request| {
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .expect("request must include a method");
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                if method == "eth_getBlockReceipts" {
+                    return json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not found",
+                        },
+                    });
+                }
+
+                let result = match method {
+                    "eth_getTransactionByHash" => rpc_transaction_payload(
+                        tx_hash,
+                        block_hash,
+                        42,
+                        7,
+                        "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                    ),
+                    "eth_getTransactionReceipt" => Value::Null,
+                    "eth_getBlockByHash" => {
+                        let params = request
+                            .get("params")
+                            .and_then(Value::as_array)
+                            .expect("block request must include params");
+                        assert_eq!(params.first().and_then(Value::as_str), Some(block_hash));
+                        assert_eq!(params.get(1), Some(&Value::Bool(true)));
+                        rpc_exact_block_payload(
+                            block_hash,
+                            parent_hash,
+                            42,
+                            Some("0x0102"),
+                            vec![rpc_transaction_payload(
+                                tx_hash,
+                                block_hash,
+                                42,
+                                7,
+                                "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                            )],
+                        )
+                    }
+                    _ => panic!("unexpected selected transaction fallback request: {request}"),
+                };
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                })
+            })
+            .collect::<Vec<_>>();
+        if is_batch {
+            Value::Array(responses)
+        } else {
+            responses
+                .into_iter()
+                .next()
+                .expect("single response is present")
+        }
+    }))
+    .await?;
+    let fallback_requests = Arc::new(Mutex::new(Vec::new()));
+    let fallback_request_log = Arc::clone(&fallback_requests);
+    let (fallback_url, fallback_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let batch = body.as_array().expect("request must be batched");
+        fallback_request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(
+                batch
+                    .iter()
+                    .map(|request| {
+                        request
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .expect("batch request must include a method")
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+
+        Value::Array(
+            batch
+                .iter()
+                .map(|request| {
+                    let method = request
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .expect("batch request must include a method");
+                    let result = match method {
+                        "eth_getTransactionByHash" => rpc_transaction_payload(
+                            tx_hash,
+                            block_hash,
+                            42,
+                            7,
+                            "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                            Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                        ),
+                        "eth_getTransactionReceipt" => {
+                            rpc_receipt_payload(tx_hash, block_hash, 42, 7, None)
+                        }
+                        _ => panic!("unexpected fallback provider request: {request}"),
+                    };
+
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").cloned().unwrap_or(Value::Null),
+                        "result": result,
+                    })
+                })
+                .collect(),
+        )
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new_with_receipt_fallback(
+        &primary_url,
+        Some(reqwest::Url::parse(&fallback_url)?),
+    )?;
+
+    let bundles = provider
+        .fetch_transaction_receipt_pairs_by_hashes(&[ProviderTransactionReceiptRequest {
+            transaction_hash: tx_hash.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 42,
+            transaction_index: 7,
+        }])
+        .await?;
+
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].transaction.transaction_hash, tx_hash);
+    assert_eq!(bundles[0].receipt.transaction_hash, tx_hash);
+    assert_eq!(bundles[0].receipt.transaction_index, 7);
+
+    let primary_requests = primary_requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert!(
+        primary_requests
+            .iter()
+            .any(|methods| methods == &vec!["eth_getBlockReceipts".to_owned()]),
+        "primary provider should attempt block receipts before fallback recovery"
+    );
+    let fallback_requests = fallback_requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert_eq!(
+        fallback_requests,
+        vec![vec![
+            "eth_getTransactionByHash".to_owned(),
+            "eth_getTransactionReceipt".to_owned(),
+        ]]
+    );
+
+    primary_server.abort();
+    fallback_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_fetches_exact_block_bundle_with_block_scoped_receipts() -> Result<()> {
     let requested_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let parent_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

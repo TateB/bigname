@@ -714,6 +714,116 @@ async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expand
 }
 
 #[tokio::test]
+async fn checkpointed_subregistry_replay_full_reconciles_missing_staged_edges() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let eth_owner = "0x00000000000000000000000000000000000000CC";
+    let com_owner = "0x00000000000000000000000000000000000000DD";
+    let eth_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let com_block_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        eth_block_hash,
+        42,
+        registry_address,
+        eth_owner,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: com_block_hash,
+            block_number: 43,
+            emitting_address: registry_address,
+            owner: com_owner,
+            parent_node: ZERO_NODE,
+            label: "com",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let seeded = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(seeded.active_edge_count, 2);
+    assert_eq!(seeded.inserted_edge_count, 2);
+    assert_eq!(seeded.deactivated_edge_count, 0);
+
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: com_block_hash,
+            block_number: 43,
+            emitting_address: registry_address,
+            owner: com_owner,
+            parent_node: ZERO_NODE,
+            label: "com",
+            canonicality_state: CanonicalityState::Orphaned,
+        },
+    )
+    .await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_missing_staged_edges".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 43,
+    };
+    let replay = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(replay.scanned_log_count, 1);
+    assert_eq!(replay.matched_log_count, 1);
+    assert_eq!(replay.active_observation_count, 1);
+    assert_eq!(replay.active_edge_count, 1);
+    assert_eq!(replay.deactivated_edge_count, 1);
+
+    let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(&discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1"
+        )
+        .bind(&discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    let active_to_contract_instance_id = query_scalar::<_, Uuid>(
+        "SELECT to_contract_instance_id FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+    )
+    .bind(&discovery_source)
+    .fetch_one(database.pool())
+    .await?;
+    let eth_contract_instance_id =
+        load_contract_instance_for_address(database.pool(), "ethereum-mainnet", eth_owner).await?;
+    assert_eq!(active_to_contract_instance_id, eth_contract_instance_id);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;

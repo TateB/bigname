@@ -440,6 +440,7 @@ async fn reconcile_subregistry_discovery_from_checkpoint(
     reconciliation: &mut EnsV1SubregistryDiscoverySyncSummary,
 ) -> Result<()> {
     for discovery_source in discovery_sources {
+        let mut source_observations = Vec::new();
         let mut after_key = None::<String>;
         loop {
             let page = checkpoint
@@ -455,21 +456,18 @@ async fn reconcile_subregistry_discovery_from_checkpoint(
             };
             after_key = Some(last_key.clone());
 
-            let source_observations = page
-                .iter()
-                .map(|(_, assignment)| assignment.discovery_observation())
-                .collect::<Result<Vec<_>>>()?;
-            let source_reconciliation = reconcile_scoped_discovery_observations(
-                pool,
-                discovery_source,
-                &source_observations,
-            )
-            .await?;
-            reconciliation.active_edge_count += source_reconciliation.active_edge_count;
-            reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
-            reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
-            reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
+            source_observations.extend(
+                page.iter()
+                    .map(|(_, assignment)| assignment.discovery_observation())
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
+        let source_reconciliation =
+            reconcile_discovery_observations(pool, discovery_source, &source_observations).await?;
+        reconciliation.active_edge_count += source_reconciliation.active_edge_count;
+        reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
+        reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
+        reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
     }
     Ok(())
 }
