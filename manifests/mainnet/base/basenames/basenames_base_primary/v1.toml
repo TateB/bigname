@@ -1,5 +1,6 @@
 # Bootstrap seed for the canonical Basenames declared-primary surface on Base mainnet.
 # Address confirmed from the upstream base/basenames deployment metadata.
+# (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
 manifest_version = 1
 namespace = "basenames"
 source_family = "basenames_base_primary"
@@ -18,6 +19,9 @@ address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282"
 proxy_kind = "none"
 
 [[abi.events]]
+# Basenames emits base-specific reverse claims for declared primary-name intake.
+# (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L54 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L58 @ basenames@1809bbc)
 name = "BaseReverseClaimed"
 fragment = "event BaseReverseClaimed(address indexed addr, bytes32 indexed node)"
 emitter_roles = ["reverse_registrar"]
