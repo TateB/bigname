@@ -6,6 +6,7 @@ use bigname_storage::{
     insert_address_names_current_address_replacement_rows,
     insert_address_names_current_full_rebuild_rows,
     publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
+    replace_address_names_current_logical_names,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use sqlx::PgPool;
@@ -13,7 +14,10 @@ use tokio::task::JoinSet;
 
 use super::{
     AddressNamesCurrentRebuildSummary,
-    load::{load_current_bindings_for_address, stream_current_bindings},
+    load::{
+        load_current_bindings_for_address, load_current_bindings_for_logical_name,
+        stream_current_bindings,
+    },
     model::CurrentBindingSeed,
     projection::build_rows_for_binding,
     util::normalize_address,
@@ -30,6 +34,44 @@ pub async fn rebuild_address_names_current(
         Some(address) => rebuild_one_address(pool, address).await,
         None => rebuild_all_addresses(pool).await,
     }
+}
+
+pub async fn rebuild_address_names_current_logical_name(
+    pool: &PgPool,
+    address: &str,
+    logical_name_id: &str,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    let normalized_address = normalize_address(address);
+    let bindings = load_current_bindings_for_logical_name(pool, logical_name_id).await?;
+    let mut rows = Vec::new();
+
+    for binding in &bindings {
+        rows.extend(build_rows_for_binding(pool, binding, Some(&normalized_address)).await?);
+    }
+
+    let logical_name_ids = vec![logical_name_id.to_owned()];
+    let (deleted_row_count, inserted_row_count) = replace_address_names_current_logical_names(
+        pool,
+        &normalized_address,
+        &logical_name_ids,
+        &rows,
+    )
+    .await?;
+
+    tracing::info!(
+        projection = "address_names_current",
+        address = %normalized_address,
+        logical_name_id,
+        upserted_row_count = inserted_row_count,
+        deleted_row_count,
+        "address_names_current logical-name replacement published projection and refreshed identity sidecars"
+    );
+
+    Ok(AddressNamesCurrentRebuildSummary {
+        requested_address_count: 1,
+        upserted_row_count: inserted_row_count as usize,
+        deleted_row_count,
+    })
 }
 
 async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebuildSummary> {
@@ -116,7 +158,7 @@ async fn stage_all_address_rows(
             break;
         };
         queued_binding_count += 1;
-        spawn_address_names_rebuild_task(&mut tasks, pool, binding);
+        spawn_address_names_rebuild_task(&mut tasks, pool, binding, None);
     }
 
     while let Some(result) = tasks.join_next().await {
@@ -147,7 +189,7 @@ async fn stage_all_address_rows(
                 break;
             };
             queued_binding_count += 1;
-            spawn_address_names_rebuild_task(&mut tasks, pool, binding);
+            spawn_address_names_rebuild_task(&mut tasks, pool, binding, None);
         }
     }
 
@@ -170,9 +212,12 @@ fn spawn_address_names_rebuild_task(
     tasks: &mut JoinSet<Result<Vec<bigname_storage::AddressNameCurrentRow>>>,
     pool: &PgPool,
     binding: CurrentBindingSeed,
+    address_filter: Option<String>,
 ) {
     let pool = pool.clone();
-    tasks.spawn(async move { build_rows_for_binding(&pool, &binding, None).await });
+    tasks.spawn(
+        async move { build_rows_for_binding(&pool, &binding, address_filter.as_deref()).await },
+    );
 }
 
 async fn rebuild_one_address(
@@ -257,11 +302,29 @@ async fn stage_one_address_rows(
     normalized_address: &str,
     bindings: &[CurrentBindingSeed],
 ) -> Result<AddressNamesCurrentStagingSummary> {
+    let mut queued_binding_count = 0usize;
+    let mut completed_binding_count = 0usize;
     let mut rows = Vec::with_capacity(ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE);
     let mut upserted_row_count = 0usize;
+    let mut bindings = bindings.iter().cloned();
+    let mut tasks = JoinSet::new();
 
-    for binding in bindings {
-        let binding_rows = build_rows_for_binding(pool, binding, Some(normalized_address)).await?;
+    while tasks.len() < ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY {
+        let Some(binding) = bindings.next() else {
+            break;
+        };
+        queued_binding_count += 1;
+        spawn_address_names_rebuild_task(
+            &mut tasks,
+            pool,
+            binding,
+            Some(normalized_address.to_owned()),
+        );
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        completed_binding_count += 1;
+        let binding_rows = result??;
         rows.extend(binding_rows);
 
         if rows.len() >= ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {
@@ -270,6 +333,30 @@ async fn stage_one_address_rows(
                     .await?
                     .len();
             rows.clear();
+        }
+
+        if completed_binding_count % 5_000 == 0 {
+            tracing::info!(
+                projection = "address_names_current",
+                address = %normalized_address,
+                queued_binding_count,
+                completed_binding_count,
+                upserted_row_count,
+                "address_names_current address replacement bindings processed"
+            );
+        }
+
+        while tasks.len() < ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY {
+            let Some(binding) = bindings.next() else {
+                break;
+            };
+            queued_binding_count += 1;
+            spawn_address_names_rebuild_task(
+                &mut tasks,
+                pool,
+                binding,
+                Some(normalized_address.to_owned()),
+            );
         }
     }
 

@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
-use bigname_manifests::DiscoveryObservation;
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, types::Uuid};
@@ -229,49 +228,6 @@ impl SubregistryReplayCheckpoint {
         .await
         .context("failed to count active staged subregistry checkpoint assignments")?;
         usize::try_from(count).context("active staged assignment count overflowed usize")
-    }
-
-    pub(super) async fn load_discovery_observations(
-        &self,
-        pool: &PgPool,
-        discovery_source: &str,
-    ) -> Result<Vec<DiscoveryObservation>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT item_payload
-            FROM normalized_replay_adapter_checkpoint_items
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-              AND item_kind = $6
-              AND item_payload ->> 'discovery_source' = $7
-            ORDER BY item_key
-            "#,
-        )
-        .bind(&self.context.deployment_profile)
-        .bind(&self.chain)
-        .bind(&self.context.cursor_kind)
-        .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
-        .bind(ITEM_KIND_LATEST_ASSIGNMENT)
-        .bind(discovery_source)
-        .fetch_all(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load staged {ADAPTER} replay observations for {}/{} source {discovery_source}",
-                self.context.deployment_profile, self.chain
-            )
-        })?;
-
-        rows.into_iter()
-            .map(|row| {
-                let item_payload: Value = row.try_get("item_payload")?;
-                assignment_from_payload(&item_payload)?.discovery_observation()
-            })
-            .collect()
     }
 
     pub(super) async fn load_assignment_page(

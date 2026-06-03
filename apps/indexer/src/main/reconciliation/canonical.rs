@@ -2,7 +2,7 @@ use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
     chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
-    upsert_chain_lineage_blocks,
+    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_without_snapshots,
 };
 use tracing::{info, warn};
 
@@ -48,6 +48,7 @@ pub(crate) async fn poll_provider_heads(
         tasks,
         provider_registry,
         true,
+        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -59,6 +60,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
     adapter_sync_enabled: bool,
+    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<()> {
@@ -75,6 +77,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             task,
             provider,
             adapter_sync_enabled,
+            skip_post_replay_canonical_gap_refresh,
             header_audit_mode,
             event_silent_reverse_resolver_addresses,
         )
@@ -116,6 +119,7 @@ pub(crate) async fn reconcile_intake_chain_task(
         task,
         provider,
         true,
+        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -127,16 +131,18 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     adapter_sync_enabled: bool,
+    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let heads = provider.fetch_chain_heads().await?;
-    reconcile_fetched_heads_with_adapter_sync(
+    reconcile_fetched_heads_with_gap_policy(
         pool,
         task,
         provider,
         &heads,
         adapter_sync_enabled,
+        skip_post_replay_canonical_gap_refresh,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
     )
@@ -150,12 +156,13 @@ pub(crate) async fn reconcile_fetched_heads(
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
-    reconcile_fetched_heads_with_adapter_sync(
+    reconcile_fetched_heads_with_gap_policy(
         pool,
         task,
         provider,
         heads,
         true,
+        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -168,6 +175,29 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
     adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
+) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
+    reconcile_fetched_heads_with_gap_policy(
+        pool,
+        task,
+        provider,
+        heads,
+        adapter_sync_enabled,
+        false,
+        header_audit_mode,
+        event_silent_reverse_resolver_addresses,
+    )
+    .await
+}
+
+async fn reconcile_fetched_heads_with_gap_policy(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    adapter_sync_enabled: bool,
+    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
@@ -203,12 +233,21 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
             &canonical,
             head_change_set,
             adapter_sync_enabled,
+            skip_post_replay_canonical_gap_refresh,
             event_silent_reverse_resolver_addresses,
         )
         .await?;
     }
-    persist_reconciled_raw_code_hashes(pool, task, provider, heads, &canonical, head_change_set)
-        .await?;
+    persist_reconciled_raw_code_hashes(
+        pool,
+        task,
+        provider,
+        heads,
+        &canonical,
+        head_change_set,
+        skip_post_replay_canonical_gap_refresh,
+    )
+    .await?;
 
     if let Some(safe_head) = &heads.safe {
         upsert_chain_lineage_blocks(
@@ -373,6 +412,22 @@ pub(crate) async fn reconcile_canonical_head(
         });
     }
 
+    if let (Some(current_canonical_hash), Some(current_canonical_number)) =
+        (current_canonical_hash, current_canonical_number)
+        && let Some(reconciliation) = reconcile_contiguous_checkpoint_gap(
+            pool,
+            provider,
+            chain,
+            current_canonical_hash,
+            current_canonical_number,
+            latest_head,
+            header_audit_mode,
+        )
+        .await?
+    {
+        return Ok(reconciliation);
+    }
+
     let mut path = vec![latest_head.clone()];
     let mut cursor = latest_head.clone();
     let mut fetched_parent_count = 0usize;
@@ -430,18 +485,18 @@ pub(crate) async fn reconcile_canonical_head(
     }
 
     if common_ancestor_hash.is_none() {
-        for block in &path {
-            upsert_chain_lineage_blocks(
-                pool,
-                &[provider_block_to_lineage_with_header_audit_mode(
+        let lineage_blocks = path
+            .iter()
+            .map(|block| {
+                provider_block_to_lineage_with_header_audit_mode(
                     chain,
                     block,
                     CanonicalityState::Observed,
                     header_audit_mode,
-                )],
-            )
-            .await?;
-        }
+                )
+            })
+            .collect::<Vec<_>>();
+        upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
 
         return Ok(CanonicalReconciliation {
             status: CanonicalReconciliationStatus::AwaitingAncestor,
@@ -472,18 +527,19 @@ pub(crate) async fn reconcile_canonical_head(
         CanonicalReconciliationStatus::ReorgReconciled
     };
 
-    for block in path.iter().rev() {
-        upsert_chain_lineage_blocks(
-            pool,
-            &[provider_block_to_lineage_with_header_audit_mode(
+    let lineage_blocks = path
+        .iter()
+        .rev()
+        .map(|block| {
+            provider_block_to_lineage_with_header_audit_mode(
                 chain,
                 block,
                 CanonicalityState::Canonical,
                 header_audit_mode,
-            )],
-        )
-        .await?;
-    }
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
 
     Ok(CanonicalReconciliation {
         status,
@@ -494,6 +550,80 @@ pub(crate) async fn reconcile_canonical_head(
         raw_orphan_stop_before_hash: (status == CanonicalReconciliationStatus::ReorgReconciled)
             .then_some(common_ancestor_hash),
     })
+}
+
+async fn reconcile_contiguous_checkpoint_gap(
+    pool: &sqlx::PgPool,
+    provider: &(impl ChainProviderOps + ?Sized),
+    chain: &str,
+    current_canonical_hash: &str,
+    current_canonical_number: i64,
+    latest_head: &ProviderBlock,
+    header_audit_mode: HeaderAuditMode,
+) -> Result<Option<CanonicalReconciliation>> {
+    if latest_head.block_number <= current_canonical_number {
+        return Ok(None);
+    }
+    let gap_blocks = latest_head.block_number - current_canonical_number;
+    if gap_blocks as usize > MAX_PARENT_FETCH_DEPTH {
+        return Ok(None);
+    }
+
+    let block_numbers =
+        ((current_canonical_number + 1)..=latest_head.block_number).collect::<Vec<_>>();
+    let resolved_blocks = provider
+        .fetch_block_hashes_by_numbers(&block_numbers)
+        .await?;
+    if resolved_blocks
+        .last()
+        .map(|block| block.block_hash.as_str())
+        != Some(latest_head.block_hash.as_str())
+    {
+        return Ok(None);
+    }
+
+    let mut path = provider
+        .fetch_block_headers_by_hashes(&resolved_blocks)
+        .await?;
+    if path.first().and_then(|block| block.parent_hash.as_deref()) != Some(current_canonical_hash) {
+        return Ok(None);
+    }
+    if !path
+        .windows(2)
+        .all(|window| window[1].parent_hash.as_deref() == Some(window[0].block_hash.as_str()))
+    {
+        return Ok(None);
+    }
+
+    let lineage_blocks = path
+        .iter()
+        .map(|block| {
+            provider_block_to_lineage_with_header_audit_mode(
+                chain,
+                block,
+                CanonicalityState::Canonical,
+                header_audit_mode,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+
+    let status = if path.len() == 1 {
+        CanonicalReconciliationStatus::Appended
+    } else {
+        CanonicalReconciliationStatus::GapBackfilled
+    };
+    let fetched_parent_count = path.len().saturating_sub(1);
+    path.reverse();
+
+    Ok(Some(CanonicalReconciliation {
+        status,
+        canonical: Some(provider_block_to_checkpoint_ref(latest_head)),
+        fetched_parent_count,
+        orphaned_block_count: 0,
+        reconciled_blocks: path,
+        raw_orphan_stop_before_hash: None,
+    }))
 }
 
 pub(crate) async fn orphan_canonical_branch(

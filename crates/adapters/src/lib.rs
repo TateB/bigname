@@ -34,6 +34,7 @@ pub use ens_v1_reverse_claim::{
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,
     sync_ens_v1_subregistry_discovery, sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
+    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
 };
 pub use ens_v1_unwrapped_authority::{
     EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, decode_ens_v1_text_record_change,

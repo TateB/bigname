@@ -485,6 +485,59 @@ async fn record_inventory_snapshot_read_fails_stale_on_position_mismatch() -> Re
 }
 
 #[tokio::test]
+async fn record_inventory_snapshot_read_allows_projected_auxiliary_chain_positions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x7115);
+    seed_resources(&database, &[resource_id]).await?;
+
+    let mut expected = record_inventory_current_row(
+        resource_id,
+        "ens:alice.eth",
+        Some(923),
+        Some("RecordsChanged"),
+        21_500_021,
+        "0xrecordinventorysnapshot",
+        4,
+    );
+    expected
+        .chain_positions
+        .as_object_mut()
+        .expect("test chain_positions must be an object")
+        .insert(
+            "base".to_owned(),
+            json!({
+                "chain_id": "base-mainnet",
+                "block_number": 31_500_021,
+                "block_hash": "0xbaseinventorysnapshot",
+                "timestamp": "2026-04-18T00:15:00Z"
+            }),
+        );
+
+    upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+
+    let selected = ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_500_021,
+            "block_hash": "0xrecordinventorysnapshot",
+            "timestamp": "2026-04-18T00:15:00Z"
+        }
+    }))?;
+    assert_eq!(
+        load_record_inventory_current_for_snapshot(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+            &selected,
+        )
+        .await?,
+        SnapshotProjectionRead::Found(expected)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_snapshot_read_covers_later_snapshot_until_new_input() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x7111);

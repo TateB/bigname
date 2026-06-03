@@ -233,18 +233,30 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000ddd"
+        "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa1"
+        "0x0000000000000000000000000000000000000aa1:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa2"
+        "0x0000000000000000000000000000000000000aa2:ens:alice.eth"
     ));
+    assert_eq!(
+        load_invalidation_payload(
+            &database,
+            "address_names_current",
+            "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
+        )
+        .await?,
+        json!({
+            "address": "0x0000000000000000000000000000000000000ddd",
+            "logical_name_id": "ens:alice.eth"
+        })
+    );
     assert!(has_key(
         &invalidations,
         "primary_names_current",
@@ -317,12 +329,12 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa2"
+        "0x0000000000000000000000000000000000000aa2:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000ddd"
+        "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
     ));
 
     database.cleanup().await
@@ -658,6 +670,26 @@ async fn invalidation_generation(
     .fetch_one(database.pool())
     .await
     .context("failed to load projection invalidation generation")
+}
+
+async fn load_invalidation_payload(
+    database: &TestDatabase,
+    projection: &str,
+    projection_key: &str,
+) -> Result<Value> {
+    sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT key_payload
+        FROM projection_invalidations
+        WHERE projection = $1
+          AND projection_key = $2
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load projection invalidation payload")
 }
 
 async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {

@@ -555,6 +555,91 @@ async fn no_snapshot_resource_upsert_accepts_compatible_existing_resource() -> R
 }
 
 #[tokio::test]
+async fn no_snapshot_token_lineage_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf103);
+    let anchored_observed_at = timestamp(946_684_800);
+    let lineage = token_lineage(
+        token_lineage_id,
+        "ens",
+        "token_no_snapshot_idempotent",
+        111,
+        CanonicalityState::Canonical,
+    );
+    upsert_token_lineages_without_snapshots(database.pool(), std::slice::from_ref(&lineage))
+        .await?;
+
+    sqlx::query("UPDATE token_lineages SET observed_at = $1 WHERE token_lineage_id = $2")
+        .bind(anchored_observed_at)
+        .bind(token_lineage_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor token lineage observed_at")?;
+
+    upsert_token_lineages_without_snapshots(database.pool(), std::slice::from_ref(&lineage))
+        .await?;
+    assert_eq!(
+        load_token_lineage(database.pool(), token_lineage_id).await?,
+        Some(lineage)
+    );
+    assert_eq!(
+        load_token_lineage_observed_at(database.pool(), token_lineage_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_resource_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf104);
+    let resource_id = Uuid::from_u128(0xf105);
+    let anchored_observed_at = timestamp(946_684_800);
+
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            token_lineage_id,
+            "ens",
+            "token_resource_no_snapshot_idempotent",
+            111,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let resource = resource(
+        resource_id,
+        Some(token_lineage_id),
+        "ens",
+        "resource_no_snapshot_idempotent",
+        112,
+        CanonicalityState::Canonical,
+    );
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&resource)).await?;
+
+    sqlx::query("UPDATE resources SET observed_at = $1 WHERE resource_id = $2")
+        .bind(anchored_observed_at)
+        .bind(resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor resource observed_at")?;
+
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&resource)).await?;
+    assert_eq!(
+        load_resource(database.pool(), resource_id).await?,
+        Some(resource)
+    );
+    assert_eq!(
+        load_resource_observed_at(database.pool(), resource_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:no-snapshot-surface.eth";
@@ -600,6 +685,41 @@ async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -
     assert_eq!(
         load_name_surface(database.pool(), logical_name_id).await?,
         Some(expected_surface)
+    );
+    assert_eq!(
+        load_name_surface_observed_at(database.pool(), logical_name_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_name_surface_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:no-snapshot-surface-idempotent.eth";
+    let anchored_observed_at = timestamp(946_684_800);
+    let surface = name_surface(
+        logical_name_id,
+        "no-snapshot-surface-idempotent.eth",
+        "no-snapshot-surface-idempotent.eth",
+        "surface_no_snapshot_idempotent",
+        113,
+        CanonicalityState::Canonical,
+    );
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&surface)).await?;
+
+    sqlx::query("UPDATE name_surfaces SET observed_at = $1 WHERE logical_name_id = $2")
+        .bind(anchored_observed_at)
+        .bind(logical_name_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor name surface observed_at")?;
+
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&surface)).await?;
+    assert_eq!(
+        load_name_surface(database.pool(), logical_name_id).await?,
+        Some(surface)
     );
     assert_eq!(
         load_name_surface_observed_at(database.pool(), logical_name_id).await?,

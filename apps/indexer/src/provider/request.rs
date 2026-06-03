@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 use alloy_json_rpc::{
     Id, Request as JsonRpcRequest, RequestPacket, Response, ResponsePacket, ResponsePayload,
@@ -6,7 +6,9 @@ use alloy_json_rpc::{
 };
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
+use reqwest::Url;
 use serde_json::Value;
+use tracing::warn;
 
 use super::{
     JsonRpcProvider,
@@ -25,8 +27,18 @@ impl JsonRpcProvider {
         method: &str,
         params: Vec<Value>,
     ) -> Result<Option<Value>> {
+        self.fetch_json_rpc_result_at_endpoint(&self.endpoint, method, params)
+            .await
+    }
+
+    pub(super) async fn fetch_json_rpc_result_at_endpoint(
+        &self,
+        endpoint: &Url,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<Option<Value>> {
         Ok(self
-            .fetch_json_rpc_result_with_payload(method, params)
+            .fetch_json_rpc_result_with_payload_at_endpoint(endpoint, method, params)
             .await?
             .result)
     }
@@ -36,9 +48,19 @@ impl JsonRpcProvider {
         method: &str,
         params: Vec<Value>,
     ) -> Result<JsonRpcResultPayload> {
+        self.fetch_json_rpc_result_with_payload_at_endpoint(&self.endpoint, method, params)
+            .await
+    }
+
+    async fn fetch_json_rpc_result_with_payload_at_endpoint(
+        &self,
+        endpoint: &Url,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<JsonRpcResultPayload> {
         let request = json_rpc_request(method.to_owned(), 1, params)?;
         let body = self
-            .send_json_rpc_payload(method, RequestPacket::Single(request))
+            .send_json_rpc_payload_to_endpoint(endpoint, method, RequestPacket::Single(request))
             .await?;
 
         let fingerprint = JsonRpcPayloadFingerprint::for_body(&body)?;
@@ -55,18 +77,30 @@ impl JsonRpcProvider {
         &self,
         calls: Vec<JsonRpcBatchCall>,
     ) -> Result<Vec<Option<Value>>> {
+        self.fetch_json_rpc_batch_results_at_endpoint(&self.endpoint, calls)
+            .await
+    }
+
+    pub(super) async fn fetch_json_rpc_batch_results_at_endpoint(
+        &self,
+        endpoint: &Url,
+        calls: Vec<JsonRpcBatchCall>,
+    ) -> Result<Vec<Option<Value>>> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
 
-        match self.try_fetch_json_rpc_batch_results(&calls).await {
+        match self
+            .try_fetch_json_rpc_batch_results_at_endpoint(endpoint, &calls)
+            .await
+        {
             Ok(results) => Ok(results),
             Err(batch_error) => {
                 let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
                     let method = call.method;
                     let result = self
-                        .fetch_json_rpc_result(method, call.params)
+                        .fetch_json_rpc_result_at_endpoint(endpoint, method, call.params)
                         .await
                         .with_context(|| {
                             format!(
@@ -81,8 +115,9 @@ impl JsonRpcProvider {
         }
     }
 
-    async fn try_fetch_json_rpc_batch_results(
+    async fn try_fetch_json_rpc_batch_results_at_endpoint(
         &self,
+        endpoint: &Url,
         calls: &[JsonRpcBatchCall],
     ) -> Result<Vec<Option<Value>>> {
         let payload = RequestPacket::Batch(
@@ -98,7 +133,9 @@ impl JsonRpcProvider {
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
-        let body = self.send_json_rpc_payload("batch", payload).await?;
+        let body = self
+            .send_json_rpc_payload_to_endpoint(endpoint, "batch", payload)
+            .await?;
         let response_packet = serde_json::from_slice::<ResponsePacket>(&body)
             .context("failed to decode JSON-RPC batch response")?;
         let ResponsePacket::Batch(response_values) = response_packet else {
@@ -137,17 +174,19 @@ impl JsonRpcProvider {
         Ok(results)
     }
 
-    async fn send_json_rpc_payload(
+    async fn send_json_rpc_payload_to_endpoint(
         &self,
+        endpoint: &Url,
         request_context: &str,
         payload: RequestPacket,
     ) -> Result<Bytes> {
+        let started = Instant::now();
         let payload = payload
             .serialize()
             .context("failed to encode JSON-RPC request payload")?;
         let response = self
             .client
-            .post(self.endpoint.clone())
+            .post(endpoint.clone())
             .header("content-type", "application/json")
             .body(payload.get().to_owned())
             .send()
@@ -163,6 +202,18 @@ impl JsonRpcProvider {
             let response_body = String::from_utf8_lossy(&body);
             bail!(
                 "provider request for {request_context} failed with HTTP {status}: {response_body}"
+            );
+        }
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms >= 10_000 {
+            warn!(
+                service = "indexer",
+                component = "provider",
+                request_context,
+                status = %status,
+                response_bytes = body.len(),
+                elapsed_ms,
+                "slow JSON-RPC provider request completed"
             );
         }
 

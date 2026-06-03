@@ -339,8 +339,15 @@ resource_permission_changed_names AS (
 candidate_keys AS (
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(address.address) AS projection_key,
-        jsonb_build_object('address', lower(address.address)) AS key_payload,
+        CASE
+            WHEN ne.logical_name_id IS NOT NULL
+            THEN lower(address.address) || ':' || ne.logical_name_id
+            ELSE lower(address.address)
+        END AS projection_key,
+        jsonb_strip_nulls(jsonb_build_object(
+            'address', lower(address.address),
+            'logical_name_id', ne.logical_name_id
+        )) AS key_payload,
         ne.normalized_event_id,
         ne.change_id,
         ne.changed_at
@@ -368,8 +375,15 @@ candidate_keys AS (
 
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(address.address) AS projection_key,
-        jsonb_build_object('address', lower(address.address)) AS key_payload,
+        CASE
+            WHEN ne.logical_name_id IS NOT NULL
+            THEN lower(address.address) || ':' || ne.logical_name_id
+            ELSE lower(address.address)
+        END AS projection_key,
+        jsonb_strip_nulls(jsonb_build_object(
+            'address', lower(address.address),
+            'logical_name_id', ne.logical_name_id
+        )) AS key_payload,
         ne.normalized_event_id,
         ne.change_id,
         ne.changed_at
@@ -388,8 +402,11 @@ candidate_keys AS (
 
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(fallback.address) AS projection_key,
-        jsonb_build_object('address', lower(fallback.address)) AS key_payload,
+        lower(fallback.address) || ':' || changed.logical_name_id AS projection_key,
+        jsonb_build_object(
+            'address', lower(fallback.address),
+            'logical_name_id', changed.logical_name_id
+        ) AS key_payload,
         changed.normalized_event_id,
         changed.change_id,
         changed.changed_at

@@ -13,7 +13,7 @@ pub(super) async fn load_current_bindings_for_address(
     pool: &PgPool,
     address: &str,
 ) -> Result<Vec<CurrentBindingSeed>> {
-    let rows = sqlx::query_as::<_, CurrentBindingSeed>(&format!(
+    let rows = sqlx::query_as::<_, CurrentBindingSeed>(&current_bindings_query(
         r#"
         WITH affected_names AS (
             SELECT DISTINCT ne.logical_name_id
@@ -59,6 +59,43 @@ pub(super) async fn load_current_bindings_for_address(
               AND ne.after_state ->> 'subject' <> ''
               AND lower(ne.after_state ->> 'subject') = $1
         )
+        "#,
+    ))
+    .bind(address)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load current bindings for address_names_current address {address}")
+    })?;
+
+    Ok(rows)
+}
+
+pub(super) async fn load_current_bindings_for_logical_name(
+    pool: &PgPool,
+    logical_name_id: &str,
+) -> Result<Vec<CurrentBindingSeed>> {
+    let rows = sqlx::query_as::<_, CurrentBindingSeed>(&current_bindings_query(
+        r#"
+        WITH affected_names AS (
+            SELECT $1::TEXT AS logical_name_id
+        )
+        "#,
+    ))
+    .bind(logical_name_id)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load current bindings for address_names_current name {logical_name_id}")
+    })?;
+
+    Ok(rows)
+}
+
+fn current_bindings_query(affected_names_sql: &str) -> String {
+    format!(
+        r#"
+        {affected_names_sql}
         SELECT
             ns.logical_name_id,
             ns.namespace,
@@ -103,15 +140,8 @@ pub(super) async fn load_current_bindings_for_address(
           AND sb.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY ns.logical_name_id
         "#
-    ))
-    .bind(address)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load current bindings for address_names_current address {address}")
-    })?;
-
-    Ok(rows)
+    )
+    .replace("{CANONICAL_STATE_FILTER}", CANONICAL_STATE_FILTER)
 }
 
 pub(super) fn stream_current_bindings<'a>(

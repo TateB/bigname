@@ -44,7 +44,31 @@ fn canonical_declared_child_sources_query<'a>(
 ) -> Query<'a, Postgres, PgArguments> {
     sqlx::query(
         r#"
-        WITH ranked_v1_sources AS (
+        WITH target_v1_child_nodes AS (
+            SELECT DISTINCT candidate_ne.after_state ->> 'child_node' AS child_node
+            FROM normalized_events candidate_ne
+            JOIN name_surfaces candidate_parent
+              ON candidate_parent.namehash = candidate_ne.after_state ->> 'parent_node'
+            WHERE $5::TEXT IS NOT NULL
+              AND candidate_ne.event_kind = $1
+              AND candidate_ne.derivation_kind = $2
+              AND candidate_ne.source_family IN ($3, $4)
+              AND candidate_ne.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+              AND candidate_ne.after_state ->> 'child_node' IS NOT NULL
+              AND candidate_parent.logical_name_id = $5
+              AND candidate_parent.namespace = candidate_ne.namespace
+              AND candidate_parent.chain_id = candidate_ne.chain_id
+              AND candidate_parent.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+        ),
+        ranked_v1_sources AS (
             SELECT
                 parent.logical_name_id AS parent_logical_name_id,
                 child.logical_name_id AS child_logical_name_id,
@@ -97,6 +121,13 @@ fn canonical_declared_child_sources_query<'a>(
                     'canonical'::canonicality_state,
                     'safe'::canonicality_state,
                     'finalized'::canonicality_state
+              )
+              AND (
+                    $5::TEXT IS NULL
+                    OR ne.after_state ->> 'child_node' IN (
+                        SELECT child_node
+                        FROM target_v1_child_nodes
+                    )
               )
               AND parent.canonicality_state IN (
                     'canonical'::canonicality_state,
@@ -165,6 +196,7 @@ fn canonical_declared_child_sources_query<'a>(
               AND ne.source_family IN ($8, $9)
               AND ne.logical_name_id IS NOT NULL
               AND ne.after_state ->> 'from_contract_instance_id' IS NOT NULL
+              AND ($5::TEXT IS NULL OR ne.logical_name_id = $5)
               AND ne.canonicality_state IN (
                     'canonical'::canonicality_state,
                     'safe'::canonicality_state,

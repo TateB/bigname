@@ -1383,7 +1383,7 @@ async fn assert_dynamic_resolver_replay_scope_behavior(
     };
     let unsupported_profile_code_hash =
         "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let reverse_node = reverse_node_for_address(claimed_address);
+    let reverse_node = reverse_node_for_chain(config.chain, claimed_address);
     let block_50 = provider_block(
         "0x5050505050505050505050505050505050505050505050505050505050505050",
         Some("0x4040404040404040404040404040404040404040404040404040404040404040"),

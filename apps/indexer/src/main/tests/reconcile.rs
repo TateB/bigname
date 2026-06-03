@@ -1133,7 +1133,7 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
         63,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        logs: vec![rpc_reverse_claimed_log_payload(
+        logs: vec![rpc_base_reverse_claimed_log_payload(
             &canonical_head,
             reverse_address,
             claimed_address,
@@ -1369,7 +1369,12 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_reverse_claimed_log_payload(
+                &canonical_head,
+                reverse_address,
+                claimed_address,
+                0,
+            ),
             rpc_registry_new_resolver_log_payload_for_namehash(
                 &canonical_head,
                 registry_address,
@@ -1466,7 +1471,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
     let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
-    let reverse_node = reverse_node_for_address(claimed_address);
+    let reverse_node = base_reverse_node_for_address(claimed_address);
 
     sqlx::query(
         r#"
@@ -1614,7 +1619,12 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_base_reverse_claimed_log_payload(
+                &canonical_head,
+                reverse_address,
+                claimed_address,
+                0,
+            ),
             rpc_registry_new_resolver_log_payload_for_namehash(
                 &canonical_head,
                 registry_address,

@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockLogRequest, ProviderLog,
-    ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlockLogRequest, ProviderLog, ProviderRawPayloadCacheMetadata,
+    ProviderReceipt, ProviderResolvedBlock,
     decode::{address_hex_from_str, hash_hex_from_str, normalize_hash},
+    provider_batch_item_limit,
     request::JsonRpcBatchCall,
     types::ProviderLogFilter,
 };
@@ -77,7 +78,7 @@ impl JsonRpcProvider {
             .filter(|request| !request.addresses.is_empty())
             .collect::<Vec<_>>();
 
-        for chunk in fetch_requests.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in fetch_requests.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|request| {

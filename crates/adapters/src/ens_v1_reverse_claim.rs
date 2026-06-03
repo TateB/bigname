@@ -19,11 +19,15 @@ use anyhow::Context;
 #[cfg(test)]
 use bigname_storage::CanonicalityState;
 #[cfg(test)]
-use helpers::{hex_string, reverse_claimed_topic0, reverse_node_for_address};
+use helpers::{
+    hex_string, reverse_claimed_topic0_for_source_family, reverse_name_for_source_family,
+    reverse_node_for_source_family,
+};
 
 const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_PRIMARY: &str = "basenames_base_primary";
 const SOURCE_EVENT_REVERSE_CLAIMED: &str = "ReverseClaimed";
+const SOURCE_EVENT_BASE_REVERSE_CLAIMED: &str = "BaseReverseClaimed";
 const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const ENS_NATIVE_COIN_TYPE: &str = "60";

@@ -234,6 +234,18 @@ pub(crate) struct BackfillArgs {
         default_value = "full"
     )]
     pub(crate) coinbase_sql_validation_mode: CoinbaseSqlValidationMode,
+    #[arg(
+        long = "coinbase-sql-workers",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_WORKERS",
+        default_value_t = 1_usize
+    )]
+    pub(crate) coinbase_sql_workers: usize,
+    #[arg(
+        long = "coinbase-sql-range-blocks",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_RANGE_BLOCKS",
+        default_value_t = 0_i64
+    )]
+    pub(crate) coinbase_sql_range_blocks: i64,
     #[arg(long)]
     pub(crate) chain: String,
     #[arg(long)]

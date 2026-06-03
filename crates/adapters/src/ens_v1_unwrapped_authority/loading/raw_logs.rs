@@ -56,6 +56,10 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     if from_block > to_block {
         return Ok(0);
     }
+    let topic0_filters = source_router.topic0_filters();
+    if topic0_filters.is_empty() {
+        return Ok(0);
+    }
 
     let mut rows = sqlx::query(
         r#"
@@ -79,6 +83,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
         WHERE rl.chain_id = $1
           AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
           AND rl.topics[1] IS NOT NULL
+          AND LOWER(rl.topics[1]) = ANY($4::TEXT[])
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -96,6 +101,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     .bind(chain)
     .bind(from_block)
     .bind(to_block)
+    .bind(&topic0_filters)
     .fetch(&mut *conn);
 
     let mut scanned_log_count = 0usize;

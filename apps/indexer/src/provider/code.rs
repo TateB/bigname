@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockCodeObservationRequest,
-    ProviderBlockCodeObservations, ProviderBlockSelection, ProviderCodeObservation,
+    JsonRpcProvider, ProviderBlockCodeObservationRequest, ProviderBlockCodeObservations,
+    ProviderBlockSelection, ProviderCodeObservation,
     decode::{address_hex_from_str, hash_hex_from_str, parse_hex_bytes},
+    provider_batch_item_limit,
     request::JsonRpcBatchCall,
 };
 
@@ -70,7 +71,7 @@ impl JsonRpcProvider {
         }
 
         let mut code_by_key = BTreeMap::<(String, String), Vec<u8>>::new();
-        for chunk in call_keys.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in call_keys.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|(_, address, block_parameter)| JsonRpcBatchCall {

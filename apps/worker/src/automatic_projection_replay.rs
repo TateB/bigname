@@ -95,6 +95,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut bootstrap_completed = false;
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
     let mut primary_hydration_started = primary_hydration_config.is_none();
+    let mut projection_derivation_started = false;
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
     let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
 
@@ -148,6 +149,14 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if bootstrap_completed {
+            if !projection_derivation_started {
+                spawn_continuous_projection_invalidation_derivation(
+                    pool.clone(),
+                    poll_interval_secs,
+                );
+                projection_derivation_started = true;
+            }
+
             let hydration_schedule = bootstrap_hydration_schedule(
                 bootstrap_text_hydration_completed,
                 primary_hydration_started,
@@ -205,6 +214,51 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         "continuous projection apply iteration failed"
                     );
                 }
+            }
+        }
+
+        if !progressed {
+            sleep(poll_interval).await;
+        }
+    }
+}
+
+fn spawn_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+    tokio::spawn(async move {
+        run_continuous_projection_invalidation_derivation(pool, poll_interval_secs).await;
+    });
+}
+
+async fn run_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+    let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
+    info!(
+        service = "worker",
+        projection_apply = true,
+        "continuous projection invalidation derive loop started"
+    );
+
+    loop {
+        let mut progressed = false;
+        match projection_apply::derive_once(&pool).await {
+            Ok(summary) => {
+                progressed = summary.scanned_event_count > 0;
+                if progressed {
+                    info!(
+                        service = "worker",
+                        projection_apply = true,
+                        scanned_event_count = summary.scanned_event_count,
+                        enqueued_invalidation_count = summary.enqueued_invalidation_count,
+                        "continuous projection invalidation derive iteration completed"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    service = "worker",
+                    projection_apply = true,
+                    error = %format!("{error:#}"),
+                    "continuous projection invalidation derive iteration failed"
+                );
             }
         }
 

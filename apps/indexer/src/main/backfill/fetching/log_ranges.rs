@@ -251,3 +251,86 @@ fn same_log_identity(left: &ProviderLog, right: &ProviderLog) -> bool {
             .eq_ignore_ascii_case(&right.transaction_hash)
         && left.log_index == right.log_index
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigname_manifests::{
+        WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind,
+        WatchedSourceSelectorPlan,
+    };
+    use sqlx::types::Uuid;
+
+    fn provider_log(address: &str, block_number: i64) -> ProviderLog {
+        ProviderLog {
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number,
+            transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            address: address.to_owned(),
+            topics: Vec::new(),
+            data: "0x".to_owned(),
+        }
+    }
+
+    #[test]
+    fn basenames_registry_materialization_uses_all_active_addresses_not_log_emitters() {
+        let addresses = [
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000003",
+        ];
+        let source_plan = WatchedSourceSelectorPlan {
+            chain: "base-mainnet".to_owned(),
+            selector_kind: WatchedSourceSelectorKind::SourceFamily,
+            source_family: Some("basenames_base_registry".to_owned()),
+            requested_watched_targets: Vec::new(),
+            selected_targets: addresses
+                .iter()
+                .enumerate()
+                .map(|(index, address)| WatchedBackfillTarget {
+                    source_family: "basenames_base_registry".to_owned(),
+                    contract_instance_id: Uuid::from_u128(index as u128 + 1),
+                    address: (*address).to_owned(),
+                    effective_from_block: 10,
+                    effective_to_block: 10,
+                })
+                .collect(),
+            watched_chain_plan: WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: addresses
+                    .iter()
+                    .map(|address| (*address).to_owned())
+                    .collect(),
+                manifest_root_entry_count: 0,
+                manifest_contract_entry_count: addresses.len(),
+                discovery_edge_entry_count: 0,
+            },
+        };
+        let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+        let block_logs = vec![provider_log(addresses[1], 10)];
+
+        let selected_addresses = selected_addresses_for_materialized_block(
+            &source_plan,
+            &selected_target_index,
+            false,
+            10,
+            &block_logs,
+        );
+
+        assert_eq!(
+            selected_addresses,
+            addresses
+                .iter()
+                .map(|address| (*address).to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        assert_ne!(
+            selected_addresses,
+            BTreeSet::from([addresses[1].to_owned()])
+        );
+    }
+}

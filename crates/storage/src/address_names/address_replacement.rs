@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -203,6 +205,96 @@ pub async fn publish_address_names_current_address_replacement(
     Ok((deleted_row_count, inserted_row_count))
 }
 
+pub async fn replace_address_names_current_logical_names(
+    pool: &PgPool,
+    address: &str,
+    logical_name_ids: &[String],
+    rows: &[AddressNameCurrentRow],
+) -> Result<(u64, u64)> {
+    validate_logical_name_replacement_rows(address, logical_name_ids, rows)?;
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for address_names_current logical-name replacement")?;
+
+    write::set_address_names_current_sidecar_triggers(&mut transaction, false).await?;
+
+    sqlx::query(
+        r#"
+        SELECT address_names_current_identity_counts_lock_address($1)
+        "#,
+    )
+    .bind(address)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!("failed to acquire address_names_current sidecar lock for address {address}")
+    })?;
+
+    let deleted_row_count = sqlx::query(
+        r#"
+        DELETE FROM address_names_current
+        WHERE address = $1
+          AND logical_name_id = ANY($2::TEXT[])
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_ids)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to delete address_names_current rows for address {address} logical-name patch"
+        )
+    })?
+    .rows_affected();
+
+    let mut inserted_row_count = 0;
+    for row in rows {
+        write::upsert_address_name_current_row_into_table(
+            &mut transaction,
+            "address_names_current",
+            row,
+        )
+        .await?;
+        inserted_row_count += 1;
+    }
+
+    sqlx::query(
+        r#"
+        SELECT address_names_current_identity_counts_recompute_address($1)
+        "#,
+    )
+    .bind(address)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!("failed to refresh address_names_current identity counts for address {address}")
+    })?;
+
+    sqlx::query(
+        r#"
+        SELECT address_names_current_identity_feed_recompute_address($1)
+        "#,
+    )
+    .bind(address)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!("failed to refresh address_names_current identity feed for address {address}")
+    })?;
+
+    write::set_address_names_current_sidecar_triggers(&mut transaction, true).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit address_names_current logical-name replacement")?;
+
+    Ok((deleted_row_count, inserted_row_count))
+}
+
 fn validate_address_replacement_rows(address: &str, rows: &[AddressNameCurrentRow]) -> Result<()> {
     for row in rows {
         if row.address != address {
@@ -215,20 +307,74 @@ fn validate_address_replacement_rows(address: &str, rows: &[AddressNameCurrentRo
     Ok(())
 }
 
+fn validate_logical_name_replacement_rows(
+    address: &str,
+    logical_name_ids: &[String],
+    rows: &[AddressNameCurrentRow],
+) -> Result<()> {
+    if address.trim().is_empty() {
+        bail!("address_names_current logical-name replacement requires an address");
+    }
+    if logical_name_ids.is_empty() {
+        bail!("address_names_current logical-name replacement requires at least one logical name");
+    }
+
+    let logical_name_ids = logical_name_ids
+        .iter()
+        .map(|logical_name_id| {
+            if logical_name_id.trim().is_empty() {
+                bail!(
+                    "address_names_current logical-name replacement received an empty logical name"
+                );
+            }
+            Ok(logical_name_id.as_str())
+        })
+        .collect::<Result<HashSet<_>>>()?;
+
+    for row in rows {
+        if row.address != address {
+            bail!(
+                "address_names_current logical-name replacement for {address} received row for {}",
+                row.address
+            );
+        }
+        if !logical_name_ids.contains(row.logical_name_id.as_str()) {
+            bail!(
+                "address_names_current logical-name replacement for {address} received row for unexpected logical name {}",
+                row.logical_name_id
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn create_address_names_current_staging_table(pool: &PgPool) -> Result<String> {
     let table_name = format!("address_names_current_rebuild_{}", Uuid::new_v4().simple());
     let table_sql = quote_identifier(&table_name)?;
+    let unique_index_name = format!("anc_repl_{}_uniq", Uuid::new_v4().simple());
+    let unique_index_sql = quote_identifier(&unique_index_name)?;
 
     sqlx::query(&format!(
         r#"
         CREATE UNLOGGED TABLE {table_sql} (
-            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS
         )
         "#
     ))
     .execute(pool)
     .await
     .context("failed to create address_names_current address replacement staging table")?;
+
+    sqlx::query(&format!(
+        r#"
+        CREATE UNIQUE INDEX {unique_index_sql}
+        ON {table_sql} (address, logical_name_id, relation)
+        "#
+    ))
+    .execute(pool)
+    .await
+    .context("failed to create address_names_current address replacement staging key")?;
 
     Ok(table_name)
 }

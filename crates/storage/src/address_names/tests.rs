@@ -756,6 +756,125 @@ async fn address_names_current_full_rebuild_keeps_public_rows_until_publish() ->
 }
 
 #[tokio::test]
+async fn address_names_current_logical_name_replacement_swaps_only_target_names() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let target = "0x0000000000000000000000000000000000000abc";
+    let other = "0x0000000000000000000000000000000000000def";
+
+    for (logical_name_id, display_name, resource_id, token_lineage_id, surface_binding_id) in [
+        (
+            "ens:changed.eth",
+            "changed.eth",
+            Uuid::from_u128(0xa501),
+            Uuid::from_u128(0xa401),
+            Uuid::from_u128(0xa601),
+        ),
+        (
+            "ens:kept.eth",
+            "kept.eth",
+            Uuid::from_u128(0xb501),
+            Uuid::from_u128(0xb401),
+            Uuid::from_u128(0xb601),
+        ),
+    ] {
+        seed_relation_references(
+            &database,
+            logical_name_id,
+            display_name,
+            resource_id,
+            Some(token_lineage_id),
+            surface_binding_id,
+            CanonicalityState::Finalized,
+        )
+        .await?;
+    }
+
+    let stale_target_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:changed.eth",
+        display_name: "changed.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0xa601),
+        resource_id: Uuid::from_u128(0xa501),
+        token_lineage_id: Some(Uuid::from_u128(0xa401)),
+        manifest_version: 1,
+    });
+    let replacement_target_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:changed.eth",
+        display_name: "changed.eth",
+        relation: AddressNameRelation::TokenHolder,
+        surface_binding_id: Uuid::from_u128(0xa601),
+        resource_id: Uuid::from_u128(0xa501),
+        token_lineage_id: Some(Uuid::from_u128(0xa401)),
+        manifest_version: 2,
+    });
+    let kept_target_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:kept.eth",
+        display_name: "kept.eth",
+        relation: AddressNameRelation::EffectiveController,
+        surface_binding_id: Uuid::from_u128(0xb601),
+        resource_id: Uuid::from_u128(0xb501),
+        token_lineage_id: Some(Uuid::from_u128(0xb401)),
+        manifest_version: 1,
+    });
+    let other_changed_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: other,
+        logical_name_id: "ens:changed.eth",
+        display_name: "changed.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0xa601),
+        resource_id: Uuid::from_u128(0xa501),
+        token_lineage_id: Some(Uuid::from_u128(0xa401)),
+        manifest_version: 1,
+    });
+
+    upsert_name_current_rows(
+        database.pool(),
+        &[
+            name_current_row(&replacement_target_row),
+            name_current_row(&kept_target_row),
+        ],
+    )
+    .await?;
+    upsert_address_names_current_rows(
+        database.pool(),
+        &[
+            stale_target_row,
+            kept_target_row.clone(),
+            other_changed_row.clone(),
+        ],
+    )
+    .await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let logical_name_ids = vec!["ens:changed.eth".to_owned()];
+    let (deleted_row_count, inserted_row_count) = replace_address_names_current_logical_names(
+        database.pool(),
+        target,
+        &logical_name_ids,
+        std::slice::from_ref(&replacement_target_row),
+    )
+    .await?;
+
+    assert_eq!((deleted_row_count, inserted_row_count), (1, 1));
+    assert_eq!(
+        load_address_names_current(database.pool(), target, None, None).await?,
+        vec![replacement_target_row, kept_target_row]
+    );
+    assert_eq!(
+        load_address_names_current(database.pool(), other, None, None).await?,
+        vec![other_changed_row]
+    );
+    assert_eq!(identity_count(database.pool(), target, "owned").await?, 1);
+    assert_eq!(identity_count(database.pool(), target, "managed").await?, 1);
+    assert_eq!(identity_count(database.pool(), target, "both").await?, 2);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_names_current_address_replacement_swaps_one_address_and_sidecars() -> Result<()> {
     let database = TestDatabase::new().await?;
     let target = "0x0000000000000000000000000000000000000abc";
@@ -963,6 +1082,46 @@ async fn address_names_current_address_replacement_matches_trigger_lock_order() 
     assert_eq!(publish_summary, (0, 0));
 
     drop_address_names_current_address_replacement(database.pool(), &replacement).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_address_replacement_supports_many_open_staging_tables() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let mut addresses = Vec::new();
+    let mut replacements = Vec::new();
+
+    for index in 0..6 {
+        let address = format!("0x{index:040x}");
+        let replacement =
+            begin_address_names_current_address_replacement(database.pool(), &address).await?;
+        addresses.push(address);
+        replacements.push(replacement);
+    }
+
+    let row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: &addresses[0],
+        logical_name_id: "ens:staged.eth",
+        display_name: "staged.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0xb601),
+        resource_id: Uuid::from_u128(0xb501),
+        token_lineage_id: Some(Uuid::from_u128(0xb401)),
+        manifest_version: 1,
+    });
+    let snapshots = insert_address_names_current_address_replacement_rows(
+        database.pool(),
+        &replacements[0],
+        &[row.clone(), row],
+    )
+    .await?;
+    assert_eq!(snapshots.len(), 2);
+
+    for replacement in &replacements {
+        drop_address_names_current_address_replacement(database.pool(), replacement).await?;
+    }
+
     database.cleanup().await
 }
 

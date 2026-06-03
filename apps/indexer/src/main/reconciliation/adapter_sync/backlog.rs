@@ -6,7 +6,10 @@ use crate::normalized_replay_catchup::CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS;
 use super::sync_live_adapter_state_from_persisted_raw_payloads;
 
 const CURSOR_KIND_POST_REPLAY_LIVE_ADAPTER_BACKLOG: &str = "post_replay_live_adapter_backlog";
-const LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE: i64 = 1;
+const DEFAULT_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE: i64 = 1;
+const MAX_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE: i64 = 64;
+const LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE_ENV: &str =
+    "BIGNAME_INDEXER_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct LiveAdapterBacklogSyncSummary {
@@ -126,13 +129,9 @@ async fn ensure_backlog_cursor(
     chain: &str,
 ) -> Result<Option<BacklogCursor>> {
     if let Some(cursor) = load_existing_backlog_cursor(pool, deployment_profile, chain).await? {
-        if cursor.next_block_number <= cursor.target_block_number {
-            return Ok(Some(
-                refresh_incomplete_backlog_cursor_target(pool, deployment_profile, chain, cursor)
-                    .await?,
-            ));
-        }
-        return Ok(Some(cursor));
+        return Ok(Some(
+            refresh_backlog_cursor_target(pool, deployment_profile, chain, cursor).await?,
+        ));
     }
 
     let Some(replay_target_block_number) =
@@ -184,7 +183,7 @@ async fn ensure_backlog_cursor(
     }))
 }
 
-async fn refresh_incomplete_backlog_cursor_target(
+async fn refresh_backlog_cursor_target(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     chain: &str,
@@ -219,7 +218,7 @@ async fn refresh_incomplete_backlog_cursor_target(
     .await
     .with_context(|| {
         format!(
-            "failed to refresh incomplete post-replay live adapter backlog cursor target for {deployment_profile}/{chain}"
+            "failed to refresh post-replay live adapter backlog cursor target for {deployment_profile}/{chain}"
         )
     })?;
 
@@ -332,6 +331,7 @@ async fn load_backlog_block_hash_page(
     next_block_number: i64,
     target_block_number: i64,
 ) -> Result<Vec<BacklogBlock>> {
+    let block_batch_size = live_adapter_backlog_block_batch_size();
     let rows = sqlx::query_as::<_, (i64, String)>(
         r#"
         SELECT DISTINCT lineage.block_number, lineage.block_hash
@@ -359,7 +359,7 @@ async fn load_backlog_block_hash_page(
     .bind(chain)
     .bind(next_block_number)
     .bind(target_block_number)
-    .bind(LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE)
+    .bind(block_batch_size)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -375,6 +375,15 @@ async fn load_backlog_block_hash_page(
             block_hash: row.1,
         })
         .collect())
+}
+
+fn live_adapter_backlog_block_batch_size() -> i64 {
+    std::env::var(LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE))
+        .unwrap_or(DEFAULT_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE)
 }
 
 async fn advance_backlog_cursor(

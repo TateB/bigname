@@ -29,11 +29,16 @@ impl SourceScope {
             if target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
                 return None;
             }
+            let effective_from_block = target.effective_from_block.max(from_block);
+            let effective_to_block = target.effective_to_block.min(to_block);
+            if effective_from_block > effective_to_block {
+                return None;
+            }
             Some(SourceScopeTarget {
                 source_family: target.source_family.clone(),
                 address: target.address.to_ascii_lowercase(),
-                from_block: target.effective_from_block,
-                to_block: target.effective_to_block,
+                from_block: effective_from_block,
+                to_block: effective_to_block,
             })
         }));
 
@@ -181,6 +186,51 @@ mod tests {
                     18
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn watched_source_plan_scope_clips_targets_to_requested_range() {
+        let source_plan = WatchedSourceSelectorPlan {
+            chain: "base-mainnet".to_owned(),
+            selector_kind: WatchedSourceSelectorKind::WatchedTargetSet,
+            source_family: None,
+            requested_watched_targets: Vec::new(),
+            selected_targets: vec![
+                WatchedBackfillTarget {
+                    source_family: "basenames_base_registry".to_owned(),
+                    contract_instance_id: sqlx::types::Uuid::nil(),
+                    address: "0xABCDEFabcdefABCDEFabcdefabcdefABCDEFabcd".to_owned(),
+                    effective_from_block: 10,
+                    effective_to_block: 30,
+                },
+                WatchedBackfillTarget {
+                    source_family: "basenames_base_registry".to_owned(),
+                    contract_instance_id: sqlx::types::Uuid::nil(),
+                    address: "0x2222222222222222222222222222222222222222".to_owned(),
+                    effective_from_block: 1,
+                    effective_to_block: 9,
+                },
+            ],
+            watched_chain_plan: WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: Vec::new(),
+                manifest_root_entry_count: 0,
+                manifest_contract_entry_count: 0,
+                discovery_edge_entry_count: 0,
+            },
+        };
+
+        let scope = SourceScope::from_watched_source_plan(&source_plan, 20, 40);
+
+        assert_eq!(
+            scope.adapter_sync_scope(),
+            vec![(
+                "basenames_base_registry".to_owned(),
+                "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned(),
+                20,
+                30
+            )]
         );
     }
 

@@ -25,9 +25,11 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
                 WHERE cursor_name = 'normalized_events_to_projection_invalidations'
             ), 0) AS last_change_id
         ),
-        change_progress AS (
-            SELECT MAX(change_id) AS max_change_id
-            FROM projection_normalized_event_changes
+        unscanned_changes AS MATERIALIZED (
+            SELECT change.normalized_event_id
+            FROM projection_normalized_event_changes change
+            CROSS JOIN apply_cursor
+            WHERE change.change_id > apply_cursor.last_change_id
         ),
         pending_projection AS (
             SELECT
@@ -44,38 +46,52 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
               AND event.block_number IS NOT NULL
             GROUP BY event.chain_id
         ),
+        unscanned_projection AS (
+            SELECT
+                event.chain_id,
+                MIN(event.block_number) AS first_unscanned_block,
+                COUNT(*) AS unscanned_count
+            FROM unscanned_changes change
+            CROSS JOIN LATERAL (
+                SELECT event.chain_id, event.block_number
+                FROM normalized_events event
+                WHERE event.normalized_event_id = change.normalized_event_id
+                OFFSET 0
+            ) event
+            WHERE event.chain_id IS NOT NULL
+              AND event.block_number IS NOT NULL
+            GROUP BY event.chain_id
+        ),
         projected AS (
             SELECT
                 known_chains.chain_id,
                 CASE
                     WHEN cc.canonical_block_number IS NOT NULL
                       AND pending_projection.pending_count IS NULL
-                      AND (
-                          change_progress.max_change_id IS NULL
-                          OR apply_cursor.last_change_id >= change_progress.max_change_id
-                      )
+                      AND unscanned_projection.unscanned_count IS NULL
                     THEN cc.canonical_block_number
                     WHEN pending_projection.first_pending_block IS NOT NULL
                     THEN GREATEST(pending_projection.first_pending_block - 1, 0)
+                    WHEN unscanned_projection.first_unscanned_block IS NOT NULL
+                    THEN GREATEST(unscanned_projection.first_unscanned_block - 1, 0)
                     ELSE latest_applied_event.block_number
                 END AS latest_projected_block
             FROM known_chains
             CROSS JOIN apply_cursor
-            CROSS JOIN change_progress
             LEFT JOIN chain_checkpoints cc
               ON cc.chain_id = known_chains.chain_id
             LEFT JOIN pending_projection
               ON pending_projection.chain_id = known_chains.chain_id
+            LEFT JOIN unscanned_projection
+              ON unscanned_projection.chain_id = known_chains.chain_id
             LEFT JOIN LATERAL (
                 SELECT event.block_number
                 FROM normalized_events event
                 JOIN projection_normalized_event_changes change
                   ON change.normalized_event_id = event.normalized_event_id
-                WHERE pending_projection.first_pending_block IS NULL
-                  AND apply_cursor.last_change_id < COALESCE(
-                      change_progress.max_change_id,
-                      apply_cursor.last_change_id
-                  )
+                WHERE cc.canonical_block_number IS NULL
+                  AND pending_projection.first_pending_block IS NULL
+                  AND unscanned_projection.first_unscanned_block IS NULL
                   AND event.chain_id = known_chains.chain_id
                   AND event.block_number IS NOT NULL
                   AND change.change_id <= apply_cursor.last_change_id
@@ -141,6 +157,19 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
 
     let has_unscoped_pending_invalidations = sqlx::query_scalar::<_, bool>(
         r#"
+        WITH apply_cursor AS (
+            SELECT COALESCE((
+                SELECT last_change_id
+                FROM projection_apply_cursors
+                WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+            ), 0) AS last_change_id
+        ),
+        unscanned_changes AS MATERIALIZED (
+            SELECT change.normalized_event_id
+            FROM projection_normalized_event_changes change
+            CROSS JOIN apply_cursor
+            WHERE change.change_id > apply_cursor.last_change_id
+        )
         SELECT EXISTS (
             SELECT 1
             FROM projection_invalidations invalidation
@@ -151,6 +180,18 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
               )
             WHERE event.normalized_event_id IS NULL
                OR event.chain_id IS NULL
+               OR event.block_number IS NULL
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM unscanned_changes change
+            CROSS JOIN LATERAL (
+                SELECT event.chain_id, event.block_number
+                FROM normalized_events event
+                WHERE event.normalized_event_id = change.normalized_event_id
+                OFFSET 0
+            ) event
+            WHERE event.chain_id IS NULL
                OR event.block_number IS NULL
         )
         "#,

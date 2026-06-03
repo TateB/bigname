@@ -6,8 +6,11 @@ mod orphaning;
 
 pub(super) use lineage::{build_resource, build_token_lineage, build_token_lineage_from_boundary};
 use orphaning::orphan_stale_overlapping_surface_bindings;
+use orphaning::orphan_weaker_same_start_surface_bindings;
 #[cfg(test)]
 use orphaning::stale_overlapping_surface_binding_candidates;
+#[cfg(test)]
+use orphaning::weaker_same_start_surface_binding_candidates;
 
 const EXISTING_SURFACE_BINDING_LOOKUP_NAME_CHUNK_SIZE: usize = 5_000;
 
@@ -32,6 +35,7 @@ pub(super) fn normalize_surface_bindings_for_upsert(
             .then_with(|| left.block_number.cmp(&right.block_number))
             .then_with(|| left.surface_binding_id.cmp(&right.surface_binding_id))
     });
+    drop_same_start_weaker_surface_bindings(bindings);
 
     let mut group_start = 0usize;
     while group_start < bindings.len() {
@@ -46,6 +50,43 @@ pub(super) fn normalize_surface_bindings_for_upsert(
     }
 
     Ok(())
+}
+
+fn drop_same_start_weaker_surface_bindings(bindings: &mut Vec<SurfaceBinding>) -> usize {
+    let mut max_rank_by_boundary = BTreeMap::<(String, OffsetDateTime), u8>::new();
+    for binding in bindings
+        .iter()
+        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+    {
+        let key = (binding.logical_name_id.clone(), binding.active_from);
+        let rank = surface_binding_authority_rank(binding);
+        max_rank_by_boundary
+            .entry(key)
+            .and_modify(|max_rank| *max_rank = (*max_rank).max(rank))
+            .or_insert(rank);
+    }
+
+    let before_len = bindings.len();
+    bindings.retain(|binding| {
+        if !surface_binding_exclusion_applies(binding.canonicality_state) {
+            return true;
+        }
+        let key = (binding.logical_name_id.clone(), binding.active_from);
+        let rank = surface_binding_authority_rank(binding);
+        max_rank_by_boundary
+            .get(&key)
+            .is_none_or(|max_rank| rank >= *max_rank)
+    });
+
+    let dropped = before_len - bindings.len();
+    if dropped > 0 {
+        tracing::warn!(
+            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            shadowed_same_start_surface_binding_count = dropped,
+            "dropped lower-precedence same-start surface bindings before upsert"
+        );
+    }
+    dropped
 }
 
 fn coalesce_surface_bindings_for_upsert(bindings: &mut Vec<SurfaceBinding>) -> Result<()> {
@@ -185,7 +226,45 @@ pub(super) async fn build_name_surface(
         return Ok(None);
     };
 
-    Ok(Some(NameSurface {
+    Ok(Some(name_surface_from_anchor(
+        name,
+        &reference.chain_id,
+        &reference.block_hash,
+        reference.block_number,
+        reference.canonicality_state,
+        "registrar_name_observation",
+    )))
+}
+
+pub(super) async fn build_name_surface_from_boundary(
+    _pool: &PgPool,
+    name: &NameMetadata,
+    reference: Option<&BoundaryRef>,
+    source_event: &str,
+) -> Result<Option<NameSurface>> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+
+    Ok(Some(name_surface_from_anchor(
+        name,
+        &reference.chain_id,
+        &reference.block_hash,
+        reference.block_number,
+        reference.canonicality_state,
+        source_event,
+    )))
+}
+
+fn name_surface_from_anchor(
+    name: &NameMetadata,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+    source_event: &str,
+) -> NameSurface {
+    NameSurface {
         logical_name_id: name.logical_name_id.clone(),
         namespace: name.namespace.clone(),
         input_name: name.input_name.clone(),
@@ -197,16 +276,16 @@ pub(super) async fn build_name_surface(
         normalizer_version: name.normalizer_version.clone(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
-        chain_id: reference.chain_id.clone(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
+        chain_id: chain_id.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
         provenance: json!({
             "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
             "logical_name_id": name.logical_name_id,
-            "source_event": "registrar_name_observation",
+            "source_event": source_event,
         }),
-        canonicality_state: reference.canonicality_state,
-    }))
+        canonicality_state,
+    }
 }
 
 pub(super) async fn build_surface_binding(
@@ -242,6 +321,11 @@ pub(super) async fn prepend_existing_open_binding_closures(
         return Ok(0);
     }
 
+    drop_incoming_bindings_shadowed_by_existing(pool, bindings).await?;
+    if bindings.is_empty() {
+        return Ok(0);
+    }
+
     let mut closures = Vec::new();
     let mut group_start = 0usize;
     while group_start < bindings.len() {
@@ -263,6 +347,7 @@ pub(super) async fn prepend_existing_open_binding_closures(
             load_existing_surface_bindings_for_logical_names(pool, &logical_name_ids).await?;
 
         orphan_stale_overlapping_surface_bindings(pool, incoming, &mut existing_bindings).await?;
+        orphan_weaker_same_start_surface_bindings(pool, incoming, &mut existing_bindings).await?;
         trim_incoming_bindings_at_existing_starts(incoming, &existing_bindings);
 
         let mut chunk_closures =
@@ -283,6 +368,187 @@ pub(super) async fn prepend_existing_open_binding_closures(
     *bindings = next_bindings;
 
     Ok(closure_count)
+}
+
+pub(super) async fn close_weaker_overlapping_existing_surface_bindings(
+    pool: &PgPool,
+    incoming: &[SurfaceBinding],
+) -> Result<usize> {
+    let repairable = incoming
+        .iter()
+        .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+        .collect::<Vec<_>>();
+    if repairable.is_empty() {
+        return Ok(0);
+    }
+
+    let mut surface_binding_ids = Vec::with_capacity(repairable.len());
+    let mut logical_name_ids = Vec::with_capacity(repairable.len());
+    let mut active_froms = Vec::with_capacity(repairable.len());
+    let mut authority_ranks = Vec::with_capacity(repairable.len());
+    for binding in repairable {
+        surface_binding_ids.push(binding.surface_binding_id);
+        logical_name_ids.push(binding.logical_name_id.clone());
+        active_froms.push(binding.active_from);
+        authority_ranks.push(i16::from(surface_binding_authority_rank(binding)));
+    }
+
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH incoming(
+            surface_binding_id,
+            logical_name_id,
+            active_from,
+            authority_rank
+        ) AS (
+            SELECT *
+            FROM unnest(
+                $1::UUID[],
+                $2::TEXT[],
+                $3::TIMESTAMPTZ[],
+                $4::SMALLINT[]
+            )
+        ),
+        candidate AS (
+            SELECT
+                surface_bindings.surface_binding_id,
+                MIN(incoming.active_from) AS close_at
+            FROM surface_bindings
+            JOIN incoming
+              ON incoming.logical_name_id = surface_bindings.logical_name_id
+             AND incoming.surface_binding_id <> surface_bindings.surface_binding_id
+             AND surface_bindings.active_from < incoming.active_from
+             AND (
+                 surface_bindings.active_to IS NULL
+                 OR surface_bindings.active_to > incoming.active_from
+             )
+            WHERE surface_bindings.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND surface_bindings.provenance->>'adapter' = $5
+              AND (
+                  CASE surface_bindings.provenance->>'authority_kind'
+                      WHEN 'wrapper' THEN 3
+                      WHEN 'registrar' THEN 2
+                      WHEN 'registry_only' THEN 1
+                      ELSE 0
+                  END
+              ) <= incoming.authority_rank
+            GROUP BY surface_bindings.surface_binding_id
+        )
+        UPDATE surface_bindings
+        SET
+            active_to = candidate.close_at,
+            observed_at = now()
+        FROM candidate
+        WHERE surface_bindings.surface_binding_id = candidate.surface_binding_id
+          AND surface_bindings.active_from < candidate.close_at
+          AND (
+              surface_bindings.active_to IS NULL
+              OR surface_bindings.active_to > candidate.close_at
+          )
+        RETURNING surface_bindings.surface_binding_id
+        "#,
+    )
+    .bind(&surface_binding_ids)
+    .bind(&logical_name_ids)
+    .bind(&active_froms)
+    .bind(&authority_ranks)
+    .bind(DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY)
+    .fetch_all(pool)
+    .await
+    .context("failed to close weaker overlapping surface bindings before authority replay")?;
+
+    if !rows.is_empty() {
+        tracing::warn!(
+            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            repaired_surface_binding_overlap_count = rows.len(),
+            "closed weaker overlapping surface bindings before authority replay"
+        );
+    }
+
+    Ok(rows.len())
+}
+
+async fn drop_incoming_bindings_shadowed_by_existing(
+    pool: &PgPool,
+    bindings: &mut Vec<SurfaceBinding>,
+) -> Result<usize> {
+    let mut shadowed_ids = HashSet::new();
+    let mut group_start = 0usize;
+    while group_start < bindings.len() {
+        let group_end = next_surface_binding_name_chunk_end(bindings, group_start);
+        let incoming = &bindings[group_start..group_end];
+        let logical_name_ids = incoming
+            .iter()
+            .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
+            .map(|binding| binding.logical_name_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if logical_name_ids.is_empty() {
+            group_start = group_end;
+            continue;
+        }
+
+        let existing_bindings =
+            load_existing_surface_bindings_for_logical_names(pool, &logical_name_ids).await?;
+        for binding in incoming {
+            if incoming_binding_shadowed_by_existing(binding, &existing_bindings) {
+                shadowed_ids.insert(binding.surface_binding_id);
+            }
+        }
+
+        group_start = group_end;
+    }
+
+    if shadowed_ids.is_empty() {
+        return Ok(0);
+    }
+
+    bindings.retain(|binding| !shadowed_ids.contains(&binding.surface_binding_id));
+    tracing::warn!(
+        adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        shadowed_surface_binding_count = shadowed_ids.len(),
+        "dropped restricted authority surface bindings shadowed by existing stronger bindings"
+    );
+    Ok(shadowed_ids.len())
+}
+
+fn incoming_binding_shadowed_by_existing(
+    incoming: &SurfaceBinding,
+    existing_bindings: &[SurfaceBinding],
+) -> bool {
+    if !surface_binding_exclusion_applies(incoming.canonicality_state) {
+        return false;
+    }
+    let incoming_rank = surface_binding_authority_rank(incoming);
+    existing_bindings.iter().any(|existing| {
+        existing.logical_name_id == incoming.logical_name_id
+            && existing.surface_binding_id != incoming.surface_binding_id
+            && surface_binding_exclusion_applies(existing.canonicality_state)
+            && existing.active_from <= incoming.active_from
+            && existing
+                .active_to
+                .is_none_or(|active_to| incoming.active_from < active_to)
+            && {
+                let existing_rank = surface_binding_authority_rank(existing);
+                existing_rank > incoming_rank
+                    || (existing_rank == incoming_rank
+                        && existing.active_from == incoming.active_from)
+            }
+    })
+}
+
+fn surface_binding_authority_rank(binding: &SurfaceBinding) -> u8 {
+    match binding
+        .provenance
+        .get("authority_kind")
+        .and_then(Value::as_str)
+    {
+        Some("wrapper") => 3,
+        Some("registrar") => 2,
+        Some("registry_only") => 1,
+        _ => 0,
+    }
 }
 
 fn next_surface_binding_name_chunk_end(bindings: &[SurfaceBinding], start: usize) -> usize {

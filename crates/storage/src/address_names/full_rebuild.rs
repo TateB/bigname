@@ -67,17 +67,29 @@ async fn create_address_names_current_staging_table(
 ) -> Result<String> {
     let table_name = format!("address_names_current_rebuild_{}", Uuid::new_v4().simple());
     let table_sql = quote_identifier(&table_name)?;
+    let unique_index_name = format!("anc_full_{}_uniq", Uuid::new_v4().simple());
+    let unique_index_sql = quote_identifier(&unique_index_name)?;
 
     sqlx::query(&format!(
         r#"
         CREATE UNLOGGED TABLE {table_sql} (
-            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS
         )
         "#
     ))
     .execute(pool)
     .await
     .with_context(|| format!("failed to create address_names_current {purpose} staging table"))?;
+
+    sqlx::query(&format!(
+        r#"
+        CREATE UNIQUE INDEX {unique_index_sql}
+        ON {table_sql} (address, logical_name_id, relation)
+        "#
+    ))
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to create address_names_current {purpose} staging key"))?;
 
     Ok(table_name)
 }

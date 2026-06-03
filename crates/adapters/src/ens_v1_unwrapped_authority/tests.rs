@@ -952,7 +952,7 @@ fn reverse_claim_event(
         canonicality_state: CanonicalityState::Canonical,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "ReverseClaimed",
+            "source_event": "BaseReverseClaimed",
             "address": claimed_address,
             "coin_type": ENS_NATIVE_COIN_TYPE,
             "namespace": "ens",
@@ -1009,7 +1009,7 @@ fn basenames_reverse_claim_event(
         canonicality_state: CanonicalityState::Canonical,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "ReverseClaimed",
+            "source_event": "BaseReverseClaimed",
             "address": claimed_address,
             "coin_type": ENS_NATIVE_COIN_TYPE,
             "namespace": "basenames",
@@ -1038,6 +1038,19 @@ fn reverse_node_for_address(address: &str) -> String {
         b"addr".to_vec(),
         b"reverse".to_vec(),
     ])
+}
+
+fn base_reverse_name_for_address(address: &str) -> String {
+    format!("{}.80002105.reverse", reverse_label_for_address(address))
+}
+
+fn base_reverse_node_for_address(address: &str) -> String {
+    const BASE_REVERSE_NODE: &str =
+        "0x08d9b0993eb8c4da57c37a4b84a6e384c2623114ff4e9370ed51c9b8935109ba";
+
+    let label_hash = keccak256_hex(reverse_label_for_address(address).as_bytes());
+    child_namehash_hex(BASE_REVERSE_NODE, &label_hash)
+        .expect("Basenames reverse node test derivation must be valid")
 }
 
 fn resolver_raw_log(
@@ -8547,11 +8560,8 @@ async fn sync_ens_v1_unwrapped_authority_backfills_basenames_primary_claim_sourc
     let block_hash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     let transaction_hash = "0xtxeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     let claimed_address = "0x0000000000000000000000000000000000005678";
-    let reverse_node = reverse_node_for_address(claimed_address);
-    let reverse_name = format!(
-        "{}.addr.reverse",
-        reverse_label_for_address(claimed_address)
-    );
+    let reverse_node = base_reverse_node_for_address(claimed_address);
+    let reverse_name = base_reverse_name_for_address(claimed_address);
 
     upsert_raw_blocks(
         database.pool(),

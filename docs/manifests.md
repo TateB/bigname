@@ -185,12 +185,12 @@ Other `sepolia-dev` artifacts (`UniversalResolverV2`, `ReverseRegistry`, `DNSAli
 
 ### Basenames mainnet
 
-Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l33][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70]
+Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l33][^bn-readme-l34][^bn-readme-l36][^bn-readme-l37][^bn-readme-l69][^bn-readme-l70]
 
 - `basenames_base_registry` — `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95` (Base). Per-node owner/resolver/ttl state.[^bn-registry-l10][^bn-registry-l100][^bn-registry-l113][^bn-registry-l132]
-- `basenames_base_registrar` — `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a` (Base). Tokenized authority owning `base.eth`, minting `*.base.eth` subdomains.[^bn-baseregistrar-l15][^bn-baseregistrar-l17][^bn-baseregistrar-l237][^bn-baseregistrar-l327]
+- `basenames_base_registrar` — `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a` (Base), plus `legacy_registrar_controller` at `0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5` and `upgradeable_registrar_controller` proxy at `0xa7d2607c6BD39Ae9521e514026CBB078405Ab322`. Tokenized authority stays with BaseRegistrar; controller contracts are admitted in the same source family for label-bearing registration and renewal observations only.[^bn-baseregistrar-l15][^bn-baseregistrar-l17][^bn-baseregistrar-l237][^bn-baseregistrar-l327][^bn-registrar-controller-l180][^bn-registrar-controller-l187][^bn-upgradeable-registrar-controller-l191][^bn-upgradeable-registrar-controller-l198]
 - `basenames_base_resolver` — `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` (Base). Default `L2Resolver` profile seed.[^bn-l2resolver-l22][^bn-l2resolver-l49][^bn-l2resolver-l52][^bn-l2resolver-l193]
-- `basenames_base_primary` — `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` (Base). Declared primary-claim intake only.[^bn-revreg-l12][^bn-revreg-l150][^bn-revreg-l193]
+- `basenames_base_primary` — `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` (Base). Declared primary-claim intake only, keyed by the Basenames `BaseReverseClaimed(address,bytes32)` event. Its indexed node is the base-specific child of `80002105.reverse`: `keccak256(BASE_REVERSE_NODE, Sha3.hexAddress(addr))`, not the ENS `addr.reverse` child.[^bn-revreg-l12][^bn-revreg-l58][^bn-revreg-l150][^bn-revreg-l155][^bn-revreg-l156][^bn-revreg-l157][^bn-revreg-l193][^bn-revreg-l209][^bn-constants-l12][^bn-constants-l13][^bn-sha3-l15][^bn-sha3-l20][^bn-sha3-l31]
 - `basenames_l1_compat` — `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (Ethereum). L1 compatibility transport for the `base.eth` domain.[^bn-l1resolver-l13]
 - `basenames_execution` — `l1_resolver` at the same Ethereum address with `verified_resolution = "supported"` for the exact-surface transport-assisted direct-path class only. Execution entrypoint that initiates `OffchainLookup` and completes through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
@@ -350,8 +350,11 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 [^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
 [^bn-readme-l28]: (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
 [^bn-readme-l29]: (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc)
+[^bn-readme-l30]: (upstream: .refs/basenames/README.md:L30 @ basenames@1809bbc)
 [^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
 [^bn-readme-l34]: (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+[^bn-readme-l36]: (upstream: .refs/basenames/README.md:L36 @ basenames@1809bbc)
+[^bn-readme-l37]: (upstream: .refs/basenames/README.md:L37 @ basenames@1809bbc)
 [^bn-readme-l69]: (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
 [^bn-readme-l70]: (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 [^bn-readme-l71]: (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
@@ -372,6 +375,10 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 [^bn-baseregistrar-l17]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L17 @ basenames@1809bbc)
 [^bn-baseregistrar-l237]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
 [^bn-baseregistrar-l327]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327 @ basenames@1809bbc)
+[^bn-registrar-controller-l180]: (upstream: .refs/basenames/src/L2/RegistrarController.sol:L180 @ basenames@1809bbc)
+[^bn-registrar-controller-l187]: (upstream: .refs/basenames/src/L2/RegistrarController.sol:L187 @ basenames@1809bbc)
+[^bn-upgradeable-registrar-controller-l191]: (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L191 @ basenames@1809bbc)
+[^bn-upgradeable-registrar-controller-l198]: (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L198 @ basenames@1809bbc)
 
 [^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
 [^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)
@@ -385,5 +392,15 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 [^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
 
 [^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
+[^bn-revreg-l58]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L58 @ basenames@1809bbc)
 [^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+[^bn-revreg-l155]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L155 @ basenames@1809bbc)
+[^bn-revreg-l156]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L156 @ basenames@1809bbc)
+[^bn-revreg-l157]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L157 @ basenames@1809bbc)
 [^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+[^bn-revreg-l209]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L209 @ basenames@1809bbc)
+[^bn-constants-l12]: (upstream: .refs/basenames/src/util/Constants.sol:L12 @ basenames@1809bbc)
+[^bn-constants-l13]: (upstream: .refs/basenames/src/util/Constants.sol:L13 @ basenames@1809bbc)
+[^bn-sha3-l15]: (upstream: .refs/basenames/src/lib/Sha3.sol:L15 @ basenames@1809bbc)
+[^bn-sha3-l20]: (upstream: .refs/basenames/src/lib/Sha3.sol:L20 @ basenames@1809bbc)
+[^bn-sha3-l31]: (upstream: .refs/basenames/src/lib/Sha3.sol:L31 @ basenames@1809bbc)

@@ -141,6 +141,8 @@ mod tests {
                 crate::backfill::DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
             coinbase_sql_rate_limit_qps: crate::backfill::DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
             coinbase_sql_validation_mode: crate::backfill::CoinbaseSqlValidationMode::Full,
+            coinbase_sql_workers: 1,
+            coinbase_sql_range_blocks: 0,
             chain: "ethereum-mainnet".to_owned(),
             from_block: 1,
             to_block: 2,

@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -11,12 +14,11 @@ use super::{
 };
 use bigname_manifests::WatchedSourceSelectorPlan;
 
-#[allow(async_fn_in_trait)]
 pub(crate) trait HistoricalBackfillSourceOps {
-    async fn fetch_selected_log_payloads(
+    fn fetch_selected_log_payloads(
         &self,
         request: HistoricalLogPayloadRequest<'_>,
-    ) -> Result<HistoricalLogPayload>;
+    ) -> impl Future<Output = Result<HistoricalLogPayload>> + Send;
 }
 
 #[allow(
@@ -40,9 +42,18 @@ pub(crate) struct HistoricalLogPayload {
     pub(crate) transactions_by_block: BTreeMap<i64, Vec<ProviderTransaction>>,
     pub(crate) receipts_by_block: BTreeMap<i64, Vec<ProviderReceipt>>,
     pub(crate) logs_need_validation_provider_payload: bool,
+    pub(crate) logs_filtered_by_selected_target_index: bool,
+    pub(crate) code_observation_scope: HistoricalCodeObservationScope,
     pub(crate) validation_filters: Vec<HistoricalLogValidationFilter>,
     pub(crate) validation_mode: CoinbaseSqlValidationMode,
     pub(crate) source_stats: CoinbaseSqlFetchStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum HistoricalCodeObservationScope {
+    #[default]
+    SelectedAddresses,
+    LogEmittersOnly,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -78,22 +89,32 @@ impl CoinbaseSqlFetchStats {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BackfillTopicPlan {
     topic0s_by_source_family: BTreeMap<String, Vec<String>>,
+    event_signatures_by_source_family: BTreeMap<String, Vec<String>>,
     source_families_without_topics: BTreeSet<String>,
 }
 
 impl BackfillTopicPlan {
     pub(crate) fn new(
         topic0s_by_source_family: BTreeMap<String, Vec<String>>,
+        event_signatures_by_source_family: BTreeMap<String, Vec<String>>,
         source_families_without_topics: BTreeSet<String>,
     ) -> Self {
         Self {
             topic0s_by_source_family,
+            event_signatures_by_source_family,
             source_families_without_topics,
         }
     }
 
     pub(crate) fn topic0s_for_source_family(&self, source_family: &str) -> &[String] {
         self.topic0s_by_source_family
+            .get(source_family)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn event_signatures_for_source_family(&self, source_family: &str) -> &[String] {
+        self.event_signatures_by_source_family
             .get(source_family)
             .map(Vec::as_slice)
             .unwrap_or(&[])
@@ -117,11 +138,13 @@ impl BackfillTopicPlan {
         #[derive(Serialize)]
         struct TopicPlanIdentity<'a> {
             topic0s_by_source_family: &'a BTreeMap<String, Vec<String>>,
+            event_signatures_by_source_family: &'a BTreeMap<String, Vec<String>>,
             source_families_without_topics: &'a BTreeSet<String>,
         }
 
         serde_json::to_value(TopicPlanIdentity {
             topic0s_by_source_family: &self.topic0s_by_source_family,
+            event_signatures_by_source_family: &self.event_signatures_by_source_family,
             source_families_without_topics: &self.source_families_without_topics,
         })
         .context("failed to serialize Coinbase SQL topic plan identity")

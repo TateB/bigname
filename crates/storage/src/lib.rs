@@ -45,7 +45,8 @@ pub use address_names::{
     insert_address_names_current_full_rebuild_rows, load_address_names_current,
     load_address_names_current_including_noncanonical, load_address_names_current_page,
     publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
-    rebuild_address_names_current_identity_sidecars, upsert_address_names_current_rows,
+    rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
+    upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,

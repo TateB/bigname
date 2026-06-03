@@ -229,6 +229,7 @@ async fn insert_contract_instance_address(
 
 async fn insert_raw_reverse_claim_log(
     pool: &PgPool,
+    source_family: &str,
     chain: &str,
     block_hash: &str,
     block_number: i64,
@@ -263,9 +264,10 @@ async fn insert_raw_reverse_claim_log(
             log_index: 0,
             emitting_address: emitting_address.to_owned(),
             topics: vec![
-                reverse_claimed_topic0(),
+                reverse_claimed_topic0_for_source_family(source_family)
+                    .context("test source family must have a reverse-claim topic")?,
                 hex_string(&abi_word_address(claimed_address)),
-                reverse_node_for_address(claimed_address)?,
+                reverse_node_for_source_family(source_family, claimed_address)?,
             ],
             data: Vec::new(),
             canonicality_state,
@@ -346,6 +348,7 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
 
     insert_raw_reverse_claim_log(
         database.pool(),
+        config.source_family,
         config.chain,
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         42,
@@ -356,6 +359,7 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
     .await?;
     insert_raw_reverse_claim_log(
         database.pool(),
+        config.source_family,
         config.chain,
         "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         43,
@@ -397,19 +401,22 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
     );
     assert_eq!(events[0].after_state["coin_type"], ENS_NATIVE_COIN_TYPE);
     assert_eq!(events[0].after_state["namespace"], config.namespace);
+    assert_eq!(
+        events[0].after_state["source_event"],
+        if config.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+            SOURCE_EVENT_BASE_REVERSE_CLAIMED
+        } else {
+            SOURCE_EVENT_REVERSE_CLAIMED
+        }
+    );
     assert_eq!(events[0].after_state["reverse_namespace"], config.namespace);
     assert_eq!(
         events[0].after_state["reverse_node"],
-        reverse_node_for_address(claimed_address)?
+        reverse_node_for_source_family(config.source_family, claimed_address)?
     );
     assert_eq!(
         events[0].after_state["reverse_name"],
-        format!(
-            "{}.addr.reverse",
-            claimed_address
-                .trim_start_matches("0x")
-                .to_ascii_lowercase()
-        )
+        reverse_name_for_source_family(config.source_family, claimed_address)?
     );
     assert_eq!(
         events[0].after_state["claim_provenance"]["source_family"],
@@ -478,6 +485,7 @@ async fn run_canonicality_case(config: TestReverseClaimConfig<'_>) -> Result<()>
 
     insert_raw_reverse_claim_log(
         database.pool(),
+        config.source_family,
         config.chain,
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         44,
@@ -495,6 +503,7 @@ async fn run_canonicality_case(config: TestReverseClaimConfig<'_>) -> Result<()>
 
     insert_raw_reverse_claim_log(
         database.pool(),
+        config.source_family,
         config.chain,
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         44,

@@ -120,9 +120,21 @@ pub(super) async fn materialize_authority_histories(
         };
 
         let finalized = finalize_history(history, head_ref)?;
-        if let Some(surface) =
-            build_name_surface(pool, &name, finalized.first_name_ref.as_ref()).await?
-        {
+        let surface = if let Some(reference) = finalized.first_name_ref.as_ref() {
+            build_name_surface(pool, &name, Some(reference)).await?
+        } else {
+            build_name_surface_from_boundary(
+                pool,
+                &name,
+                finalized
+                    .bindings
+                    .first()
+                    .map(|segment| &segment.anchor_ref),
+                "authority_binding_known_name",
+            )
+            .await?
+        };
+        if let Some(surface) = surface {
             identity.push_surface(surface);
         }
 

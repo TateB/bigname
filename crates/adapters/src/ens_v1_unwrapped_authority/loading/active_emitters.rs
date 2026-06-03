@@ -8,7 +8,7 @@ use super::super::*;
 use anyhow::{Context, Result};
 use bigname_manifests::{
     WatchedContract, WatchedContractSource, load_manifest_declared_watched_contracts,
-    load_watched_contracts,
+    load_watched_contracts_by_chain,
 };
 use sqlx::{PgPool, types::Uuid};
 
@@ -132,15 +132,9 @@ async fn load_scoped_watched_contracts(
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
 ) -> Result<Vec<WatchedContract>> {
     let Some(source_scope) = source_scope else {
-        return load_watched_contracts(pool)
+        return load_watched_contracts_by_chain(pool, chain)
             .await
-            .context("failed to load watched contracts for ENSv1 unwrapped authority attribution")
-            .map(|contracts| {
-                contracts
-                    .into_iter()
-                    .filter(|contract| contract.chain == chain)
-                    .collect()
-            });
+            .context("failed to load watched contracts for ENSv1 unwrapped authority attribution");
     };
 
     let manifest_declared = load_manifest_declared_watched_contracts(pool)

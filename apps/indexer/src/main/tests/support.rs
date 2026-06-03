@@ -1347,9 +1347,9 @@ async fn insert_raw_reverse_claimed_log_at_index(
             log_index,
             emitting_address: emitting_address.to_ascii_lowercase(),
             topics: vec![
-                reverse_claimed_topic0(),
+                reverse_claimed_topic0_for_chain(chain),
                 hex_string(&abi_word_address(claimed_address)),
-                reverse_node_for_address(claimed_address),
+                reverse_node_for_chain(chain, claimed_address),
             ],
             data: Vec::new(),
             canonicality_state,
@@ -2204,6 +2204,18 @@ fn reverse_claimed_topic0() -> String {
     keccak256_hex(b"ReverseClaimed(address,bytes32)")
 }
 
+fn base_reverse_claimed_topic0() -> String {
+    keccak256_hex(b"BaseReverseClaimed(address,bytes32)")
+}
+
+fn reverse_claimed_topic0_for_chain(chain: &str) -> String {
+    if chain == "base-mainnet" {
+        base_reverse_claimed_topic0()
+    } else {
+        reverse_claimed_topic0()
+    }
+}
+
 const REVERSE_REGISTRAR_ROLE: &str = "reverse_registrar";
 
 fn reverse_label_for_address(address: &str) -> String {
@@ -2234,6 +2246,26 @@ fn reverse_node_for_address(address: &str) -> String {
     dns_name.extend_from_slice(b"reverse");
     dns_name.push(0);
     namehash_for_dns_name(&dns_name)
+}
+
+fn base_reverse_node_for_address(address: &str) -> String {
+    const BASE_REVERSE_NODE: &str =
+        "0x08d9b0993eb8c4da57c37a4b84a6e384c2623114ff4e9370ed51c9b8935109ba";
+
+    let label_hash = keccak256(reverse_label_for_address(address).as_bytes());
+    let parent = abi_word_bytes32(BASE_REVERSE_NODE);
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(&parent);
+    combined[32..].copy_from_slice(label_hash.as_slice());
+    hex_string(keccak256(combined).as_slice())
+}
+
+fn reverse_node_for_chain(chain: &str, address: &str) -> String {
+    if chain == "base-mainnet" {
+        base_reverse_node_for_address(address)
+    } else {
+        reverse_node_for_address(address)
+    }
 }
 
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
@@ -2461,6 +2493,28 @@ fn rpc_reverse_claimed_log_payload(
             reverse_claimed_topic0(),
             hex_string(&abi_word_address(claimed_address)),
             reverse_node_for_address(claimed_address)
+        ],
+        "data": "0x"
+    })
+}
+
+fn rpc_base_reverse_claimed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    claimed_address: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            base_reverse_claimed_topic0(),
+            hex_string(&abi_word_address(claimed_address)),
+            base_reverse_node_for_address(claimed_address)
         ],
         "data": "0x"
     })

@@ -5,9 +5,9 @@ use super::{NORMALIZED_EVENT_CURSOR, NormalizedEventChangeCursor};
 use crate::projection_apply::derive_queries::{INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct ProjectionInvalidationDeriveSummary {
-    pub(super) scanned_event_count: i64,
-    pub(super) enqueued_invalidation_count: u64,
+pub(crate) struct ProjectionInvalidationDeriveSummary {
+    pub(crate) scanned_event_count: i64,
+    pub(crate) enqueued_invalidation_count: u64,
 }
 
 pub(crate) async fn normalized_event_cursor_exists(pool: &PgPool) -> Result<bool> {

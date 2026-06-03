@@ -168,7 +168,7 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
             "replay_normalized_events_skips_noncanonical_raw_logs_in_selected_block_hashes",
         ],
         closure_replay_supported: true,
-        replay_note: "reverse rows are decoded from the selected ReverseClaimed raw log",
+        replay_note: "reverse rows are decoded from the selected reverse-claim raw log",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,

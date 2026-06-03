@@ -5,7 +5,7 @@ use sqlx::Postgres;
 
 use super::{
     IDENTITY_FAST_INSERT_BATCH_SIZE, canonicality_merge_sql, canonicality_merge_sql_from,
-    stable_anchor_refresh_allowed_sql, stable_later_anchor_canonicality_refresh_allowed_sql,
+    stable_anchor_refresh_required_sql, stable_later_anchor_canonicality_refresh_allowed_sql,
     stable_provenance_merge_sql, unique_string_count,
 };
 use crate::identity::types::NameSurface;
@@ -365,7 +365,7 @@ pub(in crate::identity) async fn bulk_upsert_name_surfaces_without_snapshots(
             "#,
             provenance_merge = stable_provenance_merge_sql("name_surfaces"),
             canonicality_merge = canonicality_merge_sql("name_surfaces"),
-            anchor_refresh = stable_anchor_refresh_allowed_sql("name_surfaces"),
+            anchor_refresh = stable_anchor_refresh_required_sql("name_surfaces"),
             later_anchor_canonicality_refresh =
                 stable_later_anchor_canonicality_refresh_allowed_sql("name_surfaces"),
             accepted_canonicality_merge = accepted_canonicality_merge,

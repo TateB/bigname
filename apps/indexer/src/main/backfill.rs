@@ -26,19 +26,25 @@ pub(crate) use coinbase_sql::{
     CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
     DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,
 };
-pub(crate) use concurrent_execution::run_resumable_hash_pinned_backfill_job_concurrently;
+pub(crate) use concurrent_execution::{
+    run_resumable_coinbase_sql_backfill_job_concurrently,
+    run_resumable_hash_pinned_backfill_job_concurrently,
+};
 #[allow(unused_imports)]
 pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_backfill_range};
 #[cfg(test)]
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
+#[cfg(test)]
+pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
     create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
     run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
 };
 pub(crate) use source::{
-    BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
-    HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
+    BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps,
+    HistoricalCodeObservationScope, HistoricalLogPayload, HistoricalLogPayloadRequest,
+    HistoricalLogValidationFilter,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

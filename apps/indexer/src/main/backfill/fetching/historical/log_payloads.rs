@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::backfill::{CoinbaseSqlValidationMode, HistoricalLogValidationFilter};
 use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
 
-pub(super) async fn fill_log_payloads_from_validation_provider(
+pub(crate) async fn fill_log_payloads_from_validation_provider(
     validation_provider: &(impl ChainProviderOps + ?Sized),
     resolved_blocks: &[ProviderResolvedBlock],
     logs_by_block: BTreeMap<i64, Vec<ProviderLog>>,

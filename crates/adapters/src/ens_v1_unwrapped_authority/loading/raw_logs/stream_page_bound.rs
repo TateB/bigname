@@ -6,13 +6,17 @@ use super::{super::super::AuthorityEventTopics, AuthorityRawLogStreamSourceRoute
 pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stream_to_block(
     conn: &mut PgConnection,
     chain: &str,
-    _source_router: &AuthorityRawLogStreamSourceRouter<'_>,
+    source_router: &AuthorityRawLogStreamSourceRouter<'_>,
     _event_topics: &AuthorityEventTopics,
     from_block: i64,
     scan_to_block: i64,
     max_raw_logs_per_page: usize,
 ) -> Result<i64> {
     if from_block >= scan_to_block {
+        return Ok(scan_to_block);
+    }
+    let topic0_filters = source_router.topic0_filters();
+    if topic0_filters.is_empty() {
         return Ok(scan_to_block);
     }
     let max_raw_logs_per_page = i64::try_from(max_raw_logs_per_page)
@@ -26,6 +30,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
             WHERE rl.chain_id = $1
               AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
               AND rl.topics[1] IS NOT NULL
+              AND LOWER(rl.topics[1]) = ANY($4::TEXT[])
               AND rl.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -37,7 +42,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
                 transaction_index,
                 log_index,
                 raw_log_id
-            LIMIT ($4::BIGINT + 1)
+            LIMIT ($5::BIGINT + 1)
         ),
         numbered_logs AS (
             SELECT block_number, ROW_NUMBER() OVER () AS ordinal
@@ -46,7 +51,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
         overflow AS (
             SELECT block_number
             FROM numbered_logs
-            WHERE ordinal = $4::BIGINT + 1
+            WHERE ordinal = $5::BIGINT + 1
         ),
         bounded AS (
             SELECT block_number
@@ -68,6 +73,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
     .bind(chain)
     .bind(from_block)
     .bind(scan_to_block)
+    .bind(&topic0_filters)
     .bind(max_raw_logs_per_page)
     .fetch_one(&mut *conn)
     .await

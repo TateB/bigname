@@ -8,7 +8,7 @@ mod relations;
 mod source_policy;
 mod util;
 
-pub use rebuild::rebuild_address_names_current;
+pub use rebuild::{rebuild_address_names_current, rebuild_address_names_current_logical_name};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AddressNamesCurrentRebuildSummary {

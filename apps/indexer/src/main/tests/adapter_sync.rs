@@ -448,14 +448,14 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         &[chain.to_owned()],
     )
     .await?;
-    assert_eq!(second_summary.selected_block_count, 0);
+    assert_eq!(second_summary.selected_block_count, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(
@@ -470,7 +470,7 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (12, 11)
+        (13, 12)
     );
 
     database.cleanup().await?;
@@ -946,9 +946,9 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 log_index: 0,
                 emitting_address: reverse_address.to_owned(),
                 topics: vec![
-                    reverse_claimed_topic0(),
+                    base_reverse_claimed_topic0(),
                     hex_string(&abi_word_address(claimed_address)),
-                    reverse_node_for_address(claimed_address),
+                    base_reverse_node_for_address(claimed_address),
                 ],
                 data: Vec::new(),
                 canonicality_state: CanonicalityState::Canonical,

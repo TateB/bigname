@@ -17,18 +17,36 @@ role = "registrar"
 address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a"
 proxy_kind = "none"
 
+[[contracts]]
+role = "legacy_registrar_controller"
+address = "0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5"
+proxy_kind = "none"
+
+[[contracts]]
+role = "upgradeable_registrar_controller"
+address = "0xa7d2607c6BD39Ae9521e514026CBB078405Ab322"
+proxy_kind = "erc1967"
+implementation = "0x9ad14968093C5E8C2A8CC86f6868CFEE8C659717"
+
 # Basenames label-bearing registrar-controller events consumed by
 # manifest-derived authority topic lookup:
+# (upstream: .refs/basenames/README.md:L30 @ basenames@1809bbc)
+# (upstream: .refs/basenames/README.md:L36 @ basenames@1809bbc)
+# (upstream: .refs/basenames/README.md:L37 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/RegistrarController.sol:L180 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/RegistrarController.sol:L187 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L191 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L198 @ basenames@1809bbc).
 [[abi.events]]
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)"
+emitter_roles = ["legacy_registrar_controller", "upgradeable_registrar_controller"]
 normalized_events = ["RegistrationGranted"]
 
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 expires)"
+emitter_roles = ["legacy_registrar_controller", "upgradeable_registrar_controller"]
 normalized_events = ["RegistrationRenewed"]
 
 # BaseRegistrar is an ERC721 token contract for registered labels:

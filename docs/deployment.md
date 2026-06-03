@@ -209,8 +209,9 @@ unavailable to `run` live following, `ops-catchup`, repair, chain-head
 promotion, and checkpoint promotion. Operators must still configure
 `BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
 the same Base chain so the validation provider owns block hashes, headers,
-canonicality evidence, code observations, and transaction/receipt fills. The
-Coinbase SQL runner respects `BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
+canonicality evidence, selected-log-emitter code observations, and
+transaction/receipt fills. The Coinbase SQL runner respects
+`BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
 `BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; row, query length, and timeout
@@ -218,9 +219,13 @@ defaults match the [CDP SQL REST API reference](https://docs.cdp.coinbase.com/ap
 while the QPS default is a conservative per-process guardrail and remains
 operator-configurable if product limits change. The default validation mode is
 `full`, so the validation provider fetches the same address/topic log span and
-fails the range if Coinbase SQL omitted or added a selected log identity.
-`sample` is accepted for CLI compatibility with the intended rollout shape, but
-this first slice treats it conservatively as the same completeness check.
+fails the range if Coinbase SQL omitted or added a selected log identity. Empty
+Coinbase SQL windows do not force code observations for every selected address.
+`sample` uses Coinbase SQL identities for selected logs, resolves and
+hash-checks only the returned log blocks with the validation provider, fills
+exact logs from those block bundles, and then uses the same validation provider
+for canonicality evidence, selected transaction/receipt fills, and
+selected-log-emitter code observations.
 
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`

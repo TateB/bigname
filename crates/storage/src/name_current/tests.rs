@@ -6,10 +6,11 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CanonicalityState, ChainLineageBlock, ChainPositions, NameSurface, NormalizedEvent, Resource,
-    SnapshotProjectionRead, SnapshotSelectionErrorKind, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, upsert_chain_lineage_blocks, upsert_name_surfaces, upsert_normalized_events,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    AddressNameCurrentRow, AddressNameRelation, CanonicalityState, ChainLineageBlock,
+    ChainPositions, NameSurface, NormalizedEvent, Resource, SnapshotProjectionRead,
+    SnapshotSelectionErrorKind, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    upsert_address_names_current_rows, upsert_chain_lineage_blocks, upsert_name_surfaces,
+    upsert_normalized_events, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
 async fn test_database() -> Result<TestDatabase> {
@@ -252,6 +253,38 @@ fn name_current_row(
     }
 }
 
+fn address_name_current_row(
+    address: &str,
+    name_current: &NameCurrentRow,
+    relation: AddressNameRelation,
+) -> AddressNameCurrentRow {
+    AddressNameCurrentRow {
+        address: address.to_owned(),
+        logical_name_id: name_current.logical_name_id.clone(),
+        relation,
+        namespace: name_current.namespace.clone(),
+        canonical_display_name: name_current.canonical_display_name.clone(),
+        normalized_name: name_current.normalized_name.clone(),
+        namehash: name_current.namehash.clone(),
+        surface_binding_id: name_current
+            .surface_binding_id
+            .expect("test name_current row must have a surface binding"),
+        resource_id: name_current
+            .resource_id
+            .expect("test name_current row must have a resource"),
+        token_lineage_id: name_current.token_lineage_id,
+        binding_kind: name_current
+            .binding_kind
+            .expect("test name_current row must have a binding kind"),
+        provenance: name_current.provenance.clone(),
+        coverage: name_current.coverage.clone(),
+        chain_positions: name_current.chain_positions.clone(),
+        canonicality_summary: name_current.canonicality_summary.clone(),
+        manifest_version: name_current.manifest_version,
+        last_recomputed_at: name_current.last_recomputed_at,
+    }
+}
+
 #[tokio::test]
 async fn name_current_upserts_and_loads_exact_name_projection() -> Result<()> {
     let database = test_database().await?;
@@ -282,6 +315,104 @@ async fn name_current_upserts_and_loads_exact_name_projection() -> Result<()> {
 
     let loaded = load_name_current(database.pool(), logical_name_id).await?;
     assert_eq!(loaded, Some(expected));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_identity_sidecars_skip_identity_anchor_noop_updates() -> Result<()> {
+    let database = test_database().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:alice.eth";
+    let token_lineage_id = Uuid::from_u128(0x1101);
+    let resource_id = Uuid::from_u128(0x2201);
+    let surface_binding_id = Uuid::from_u128(0x3301);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let existing = name_current_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&existing)).await?;
+    upsert_address_names_current_rows(
+        database.pool(),
+        &[address_name_current_row(
+            address,
+            &existing,
+            AddressNameRelation::TokenHolder,
+        )],
+    )
+    .await?;
+
+    let sentinel = timestamp(1_600_000_000);
+    sqlx::query(
+        r#"
+        UPDATE address_names_current_identity_counts
+        SET updated_at = $1
+        WHERE address = $2 AND roles = 'both'
+        "#,
+    )
+    .bind(sentinel)
+    .bind(address)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE address_names_current_identity_feed
+        SET last_recomputed_at = $1
+        WHERE address = $2 AND roles = 'both' AND coin_type = ''
+        "#,
+    )
+    .bind(sentinel)
+    .bind(address)
+    .execute(database.pool())
+    .await?;
+
+    let mut metadata_refresh = existing.clone();
+    metadata_refresh.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar",
+            "refreshed": true
+        }
+    });
+    metadata_refresh.last_recomputed_at = timestamp(1_817_171_717);
+    upsert_name_current_rows(database.pool(), &[metadata_refresh]).await?;
+
+    let count_updated_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        SELECT updated_at
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = 'both'
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await?;
+    let feed_recomputed_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        SELECT last_recomputed_at
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = 'both' AND coin_type = ''
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(count_updated_at, sentinel);
+    assert_eq!(feed_recomputed_at, sentinel);
 
     database.cleanup().await
 }
@@ -354,6 +485,61 @@ async fn name_current_snapshot_read_covers_later_snapshot_until_new_input() -> R
         .await
         .expect_err("newer selected snapshot with unreplayed input must be stale");
     assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_snapshot_read_allows_projected_auxiliary_chain_positions() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:alice.eth";
+    let token_lineage_id = Uuid::from_u128(0x1115);
+    let resource_id = Uuid::from_u128(0x2225);
+    let surface_binding_id = Uuid::from_u128(0x3335);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+
+    let mut expected = name_current_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    expected
+        .chain_positions
+        .as_object_mut()
+        .expect("test chain_positions must be an object")
+        .insert(
+            "base".to_owned(),
+            json!({
+                "chain_id": "base-mainnet",
+                "block_number": 31_000_003,
+                "block_hash": "0xbasebinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }),
+        );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+
+    let selected = ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    }))?;
+    assert_eq!(
+        load_name_current_for_snapshot(database.pool(), logical_name_id, &selected).await?,
+        SnapshotProjectionRead::Found(expected)
+    );
 
     database.cleanup().await
 }

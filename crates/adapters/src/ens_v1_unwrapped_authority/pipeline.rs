@@ -217,6 +217,15 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &generic_resolver_event_sources,
             &event_topics,
         )?;
+        tracing::info!(
+            service = "adapters",
+            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            chain,
+            active_emitter_count = raw_log_active_emitters.len(),
+            routed_active_emitter_count = stream_source_router.watched_emitter_count(),
+            generic_resolver_event_source_count = generic_resolver_event_sources.len(),
+            "ENSv1 unwrapped-authority replay source router prepared"
+        );
         let mut stream_conn = None;
         let mut total_scanned_log_count = active_replay_checkpoint.as_ref().map_or(
             0usize,
@@ -558,6 +567,11 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         upsert_surface_bindings_without_snapshots(pool, &bindings[..closure_count]).await?;
     }
     let binding_closures_upsert_ms = binding_closures_started.elapsed().as_millis();
+    let binding_overlap_repair_started = Instant::now();
+    let binding_overlap_repair_count =
+        close_weaker_overlapping_existing_surface_bindings(pool, &bindings[closure_count..])
+            .await?;
+    let binding_overlap_repair_ms = binding_overlap_repair_started.elapsed().as_millis();
     let bindings_started = Instant::now();
     upsert_surface_bindings_without_snapshots(pool, &bindings[closure_count..]).await?;
     let bindings_upsert_ms = bindings_started.elapsed().as_millis();
@@ -605,6 +619,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         resources_upsert_ms,
         surfaces_upsert_ms,
         binding_closures_upsert_ms,
+        binding_overlap_repair_count,
+        binding_overlap_repair_ms,
         bindings_upsert_ms,
         normalized_events_upsert_ms,
         total_ms = total_started.elapsed().as_millis(),

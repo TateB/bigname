@@ -1,6 +1,12 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
+use tokio::{
+    task::JoinHandle,
+    time::{MissedTickBehavior, interval, timeout},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -8,6 +14,9 @@ use crate::{
 };
 
 use super::{CLAIM_RETRY_DELAY, FAILURE_RETRY_DELAY};
+
+const NAME_CURRENT_SINGLE_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
+const CLAIM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ProjectionInvalidationApplySummary {
@@ -35,14 +44,16 @@ pub(super) async fn apply_pending_invalidations(
     }
 
     let claim_token = Uuid::new_v4();
-    let invalidations = claim_pending_invalidations(pool, batch_limit, claim_token).await?;
+    let mut invalidations = claim_pending_invalidations(pool, batch_limit, claim_token).await?;
+    sort_claimed_invalidations_for_apply(&mut invalidations);
     let mut summary = ProjectionInvalidationApplySummary {
         claimed_invalidation_count: invalidations.len(),
         ..ProjectionInvalidationApplySummary::default()
     };
-
     for invalidation in invalidations {
-        match apply_one(pool, &invalidation, text_hydration_config).await {
+        let result =
+            apply_one_with_claim_heartbeat(pool, &invalidation, text_hydration_config).await;
+        match result {
             Ok(()) => {
                 complete_invalidation(pool, &invalidation).await?;
                 summary.applied_invalidation_count += 1;
@@ -55,6 +66,124 @@ pub(super) async fn apply_pending_invalidations(
     }
 
     Ok(summary)
+}
+
+async fn apply_one_with_claim_heartbeat(
+    pool: &PgPool,
+    invalidation: &ClaimedInvalidation,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<()> {
+    let heartbeat = spawn_claim_heartbeat(pool.clone(), invalidation.clone());
+    let result = if invalidation.projection == "name_current" {
+        apply_name_current_single(pool, invalidation).await
+    } else {
+        apply_one(pool, invalidation, text_hydration_config).await
+    };
+    stop_claim_heartbeat(heartbeat).await;
+    result
+}
+
+fn spawn_claim_heartbeat(pool: PgPool, invalidation: ClaimedInvalidation) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut heartbeat = interval(CLAIM_HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            heartbeat.tick().await;
+            if let Err(error) = refresh_claimed_invalidation_claim(&pool, &invalidation).await {
+                tracing::warn!(
+                    projection = %invalidation.projection,
+                    projection_key = %invalidation.projection_key,
+                    error = %error,
+                    "failed to refresh projection invalidation claim heartbeat"
+                );
+            }
+        }
+    })
+}
+
+async fn stop_claim_heartbeat(heartbeat: JoinHandle<()>) {
+    heartbeat.abort();
+    let _ = heartbeat.await;
+}
+
+async fn apply_name_current_single(
+    pool: &PgPool,
+    invalidation: &ClaimedInvalidation,
+) -> Result<()> {
+    timeout(
+        NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
+        name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "timed out applying name_current invalidation {}",
+            invalidation.projection_key
+        )
+    })??;
+    Ok(())
+}
+
+async fn refresh_claimed_invalidation_claim(
+    pool: &PgPool,
+    invalidation: &ClaimedInvalidation,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE projection_invalidations
+        SET claimed_at = now()
+        WHERE projection = $1
+          AND projection_key = $2
+          AND generation = $3
+          AND claim_token = $4
+        "#,
+    )
+    .bind(&invalidation.projection)
+    .bind(&invalidation.projection_key)
+    .bind(invalidation.generation)
+    .bind(invalidation.claim_token)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to refresh projection invalidation claim {}:{}",
+            invalidation.projection, invalidation.projection_key
+        )
+    })?;
+
+    Ok(())
+}
+
+fn sort_claimed_invalidations_for_apply(invalidations: &mut [ClaimedInvalidation]) {
+    invalidations.sort_by(|left, right| {
+        claimed_invalidation_apply_key(left).cmp(&claimed_invalidation_apply_key(right))
+    });
+}
+
+fn claimed_invalidation_apply_key(invalidation: &ClaimedInvalidation) -> (u16, u8, &str) {
+    let family_rank = match invalidation.projection.as_str() {
+        "name_current" => 10,
+        "children_current" => 20,
+        "permissions_current" => 30,
+        "record_inventory_current" => 40,
+        "resolver_current" => 50,
+        "address_names_current" => 60,
+        "primary_names_current" => 70,
+        _ => 1000,
+    };
+    let namespace_rank = if invalidation.projection == "name_current"
+        && invalidation.projection_key.starts_with("basenames:")
+    {
+        0
+    } else {
+        1
+    };
+
+    (
+        family_rank,
+        namespace_rank,
+        invalidation.projection_key.as_str(),
+    )
 }
 
 async fn claim_pending_invalidations(
@@ -85,6 +214,11 @@ async fn claim_pending_invalidations(
                     WHEN 'address_names_current' THEN 60
                     WHEN 'primary_names_current' THEN 70
                     ELSE 1000
+                END,
+                CASE
+                    WHEN projection = 'name_current'
+                     AND projection_key LIKE 'basenames:%' THEN 0
+                    ELSE 1
                 END,
                 last_changed_at ASC,
                 projection_key ASC
@@ -170,8 +304,23 @@ async fn apply_one(
                 .await?;
         }
         "address_names_current" => {
-            address_names::rebuild_address_names_current(pool, Some(&invalidation.projection_key))
+            if let Some(logical_name_id) =
+                optional_payload_str(&invalidation.key_payload, "logical_name_id")
+            {
+                let address = payload_str(&invalidation.key_payload, "address")?;
+                address_names::rebuild_address_names_current_logical_name(
+                    pool,
+                    address,
+                    logical_name_id,
+                )
                 .await?;
+            } else {
+                address_names::rebuild_address_names_current(
+                    pool,
+                    Some(&invalidation.projection_key),
+                )
+                .await?;
+            }
         }
         "primary_names_current" => {
             let address = payload_str(&invalidation.key_payload, "address")?;
@@ -197,6 +346,13 @@ fn payload_str<'a>(payload: &'a Value, field: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .with_context(|| format!("projection invalidation payload missing {field}"))
+}
+
+fn optional_payload_str<'a>(payload: &'a Value, field: &str) -> Option<&'a str> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 async fn complete_invalidation(pool: &PgPool, invalidation: &ClaimedInvalidation) -> Result<()> {
@@ -355,6 +511,146 @@ mod tests {
         assert_eq!(claim_token, fresh_token);
 
         database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn projection_invalidation_claim_heartbeat_refreshes_claimed_at() -> Result<()> {
+        let database = test_database().await?;
+        let claim_token = Uuid::new_v4();
+
+        insert_claimed_invalidation(
+            &database,
+            "address_names_current",
+            "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+            claim_token,
+            "4 minutes",
+        )
+        .await?;
+
+        let before: sqlx::types::time::OffsetDateTime = sqlx::query_scalar(
+            r#"
+            SELECT claimed_at
+            FROM projection_invalidations
+            WHERE projection = 'address_names_current'
+              AND projection_key = '0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await
+        .context("failed to load initial claim timestamp")?;
+
+        let invalidation = ClaimedInvalidation {
+            projection: "address_names_current".to_owned(),
+            projection_key: "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401".to_owned(),
+            key_payload: Value::Object(Default::default()),
+            generation: 0,
+            claim_token,
+        };
+        refresh_claimed_invalidation_claim(database.pool(), &invalidation).await?;
+
+        let (after, refreshed_token): (sqlx::types::time::OffsetDateTime, Uuid) = sqlx::query_as(
+            r#"
+                SELECT claimed_at, claim_token
+                FROM projection_invalidations
+                WHERE projection = 'address_names_current'
+                  AND projection_key = '0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401'
+                "#,
+        )
+        .fetch_one(database.pool())
+        .await
+        .context("failed to load refreshed claim timestamp")?;
+
+        assert!(after > before);
+        assert_eq!(refreshed_token, claim_token);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn basenames_name_current_invalidations_are_claimed_before_older_ens_names() -> Result<()>
+    {
+        let database = test_database().await?;
+        insert_unclaimed_invalidation(&database, "name_current", "ens:older.eth").await?;
+        insert_unclaimed_invalidation(&database, "name_current", "basenames:newer.base.eth")
+            .await?;
+        sqlx::query(
+            r#"
+            UPDATE projection_invalidations
+            SET last_changed_at = now() - '10 minutes'::INTERVAL
+            WHERE projection = 'name_current'
+              AND projection_key = 'ens:older.eth'
+            "#,
+        )
+        .execute(database.pool())
+        .await
+        .context("failed to age ENS projection invalidation")?;
+
+        let claimed = claim_pending_invalidations(database.pool(), 1, Uuid::new_v4()).await?;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].projection, "name_current");
+        assert_eq!(claimed[0].projection_key, "basenames:newer.base.eth");
+
+        database.cleanup().await
+    }
+
+    #[test]
+    fn claimed_invalidation_apply_order_prioritizes_basenames_name_current() {
+        let mut invalidations = vec![
+            claimed_invalidation("name_current", "ens:later.eth"),
+            claimed_invalidation("permissions_current", "permissions:example"),
+            claimed_invalidation("name_current", "basenames:base-name.base.eth"),
+            claimed_invalidation("name_current", "ens:earlier.eth"),
+        ];
+
+        sort_claimed_invalidations_for_apply(&mut invalidations);
+
+        let ordered_keys = invalidations
+            .iter()
+            .map(|invalidation| invalidation.projection_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_keys,
+            vec![
+                "basenames:base-name.base.eth",
+                "ens:earlier.eth",
+                "ens:later.eth",
+                "permissions:example"
+            ]
+        );
+    }
+
+    fn claimed_invalidation(projection: &str, projection_key: &str) -> ClaimedInvalidation {
+        ClaimedInvalidation {
+            projection: projection.to_string(),
+            projection_key: projection_key.to_string(),
+            key_payload: Value::Object(Default::default()),
+            generation: 0,
+            claim_token: Uuid::nil(),
+        }
+    }
+
+    async fn insert_unclaimed_invalidation(
+        database: &TestDatabase,
+        projection: &str,
+        projection_key: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO projection_invalidations (
+                projection,
+                projection_key,
+                key_payload
+            )
+            VALUES ($1, $2, '{}'::jsonb)
+            "#,
+        )
+        .bind(projection)
+        .bind(projection_key)
+        .execute(database.pool())
+        .await
+        .context("failed to insert projection invalidation")?;
+
+        Ok(())
     }
 
     async fn insert_claimed_invalidation(

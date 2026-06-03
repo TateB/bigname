@@ -25,6 +25,49 @@ fn coalesce_name_surfaces_for_upsert_keeps_first_identity() {
 }
 
 #[test]
+fn name_surface_anchor_can_use_authority_binding_when_name_ref_is_missing() {
+    let name = NameMetadata {
+        namespace: "basenames".to_owned(),
+        logical_name_id: "basenames:brian.base.eth".to_owned(),
+        input_name: "brian.base.eth".to_owned(),
+        canonical_display_name: "brian.base.eth".to_owned(),
+        normalized_name: "brian.base.eth".to_owned(),
+        dns_encoded_name: vec![
+            5, b'b', b'r', b'i', b'a', b'n', 4, b'b', b'a', b's', b'e', 3, b'e', b't', b'h', 0,
+        ],
+        namehash: "0x381d5e3c853a86585a94e46b9be8022406adcb6582fe946860603c97a8c6e7af".to_owned(),
+        labelhashes: vec![
+            "0x61d644f0d6ba62b3b81f46d2291409f93244a931b0cf2556aad50391f3b67fb2".to_owned(),
+            "0xf1f3eb40f5bc1ad1344716ced8b8a0431d840b5783aea1fd01786bc26f35ac0f".to_owned(),
+            "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0".to_owned(),
+        ],
+        normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+    };
+
+    let surface = name_surface_from_anchor(
+        &name,
+        "base-mainnet",
+        "0xf895452624ab7f8fe47f729b9b9dc5090b776e089ebb465f1216419eea77e15a",
+        19_432_695,
+        CanonicalityState::Finalized,
+        "authority_binding_known_name",
+    );
+
+    assert_eq!(surface.logical_name_id, name.logical_name_id);
+    assert_eq!(surface.namespace, "basenames");
+    assert_eq!(surface.chain_id, "base-mainnet");
+    assert_eq!(surface.block_number, 19_432_695);
+    assert_eq!(surface.canonicality_state, CanonicalityState::Finalized);
+    assert_eq!(
+        surface
+            .provenance
+            .get("source_event")
+            .and_then(Value::as_str),
+        Some("authority_binding_known_name")
+    );
+}
+
+#[test]
 fn normalize_surface_bindings_closes_same_batch_open_intervals() -> Result<()> {
     let first = test_binding(
         Uuid::from_u128(0x100),
@@ -46,6 +89,42 @@ fn normalize_surface_bindings_closes_same_batch_open_intervals() -> Result<()> {
     assert_eq!(bindings[0].surface_binding_id, first.surface_binding_id);
     assert_eq!(bindings[0].active_to, Some(second.active_from));
     assert_eq!(bindings[1].surface_binding_id, second.surface_binding_id);
+    assert_eq!(bindings[1].active_to, None);
+
+    Ok(())
+}
+
+#[test]
+fn normalize_surface_bindings_drops_same_start_lower_precedence_binding() -> Result<()> {
+    let registry_only = test_binding_with_authority_kind(
+        Uuid::from_u128(0x100),
+        "ens:same-start.eth",
+        1_695_230_399,
+        None,
+        "registry_only",
+    );
+    let registrar = test_binding_with_authority_kind(
+        Uuid::from_u128(0x200),
+        "ens:same-start.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    );
+    let later = test_binding_with_authority_kind(
+        Uuid::from_u128(0x300),
+        "ens:same-start.eth",
+        1_695_284_247,
+        None,
+        "registry_only",
+    );
+
+    let mut bindings = vec![later.clone(), registry_only, registrar.clone()];
+    normalize_surface_bindings_for_upsert(&mut bindings)?;
+
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0].surface_binding_id, registrar.surface_binding_id);
+    assert_eq!(bindings[0].active_to, Some(later.active_from));
+    assert_eq!(bindings[1].surface_binding_id, later.surface_binding_id);
     assert_eq!(bindings[1].active_to, None);
 
     Ok(())
@@ -103,6 +182,75 @@ fn existing_binding_closure_uses_next_later_incoming_segment() {
 }
 
 #[test]
+fn lower_precedence_incoming_binding_is_shadowed_by_existing_authority() {
+    let existing = test_binding_with_authority_kind(
+        Uuid::from_u128(0x100),
+        "ens:mustafa.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    );
+    let incoming = test_binding_with_authority_kind(
+        Uuid::from_u128(0x200),
+        "ens:mustafa.eth",
+        1_695_284_247,
+        None,
+        "registry_only",
+    );
+
+    assert!(incoming_binding_shadowed_by_existing(
+        &incoming,
+        std::slice::from_ref(&existing)
+    ));
+}
+
+#[test]
+fn same_precedence_later_incoming_binding_is_not_shadowed() {
+    let existing = test_binding_with_authority_kind(
+        Uuid::from_u128(0x100),
+        "ens:missioncontrol.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    );
+    let incoming = test_binding_with_authority_kind(
+        Uuid::from_u128(0x200),
+        "ens:missioncontrol.eth",
+        1_695_284_247,
+        None,
+        "registrar",
+    );
+
+    assert!(!incoming_binding_shadowed_by_existing(
+        &incoming,
+        std::slice::from_ref(&existing)
+    ));
+}
+
+#[test]
+fn same_precedence_same_start_incoming_binding_is_shadowed() {
+    let existing = test_binding_with_authority_kind(
+        Uuid::from_u128(0x100),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    );
+    let incoming = test_binding_with_authority_kind(
+        Uuid::from_u128(0x200),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    );
+
+    assert!(incoming_binding_shadowed_by_existing(
+        &incoming,
+        std::slice::from_ref(&existing)
+    ));
+}
+
+#[test]
 fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_id() {
     let incoming = vec![test_binding(
         Uuid::from_u128(0x100),
@@ -143,6 +291,60 @@ fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_i
             .get(&stale.surface_binding_id)
             .map(|candidate| candidate.active_from_epoch),
         Some(stale.active_from.unix_timestamp())
+    );
+}
+
+#[test]
+fn weaker_same_start_candidates_include_lower_precedence_existing_binding() {
+    let incoming = vec![test_binding_with_authority_kind(
+        Uuid::from_u128(0x100),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+        "registrar",
+    )];
+    let mut weaker_existing = test_binding_with_authority_kind(
+        Uuid::from_u128(0x200),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+        "registry_only",
+    );
+    weaker_existing.provenance = json!({
+        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:ethereum-mainnet:0xabc"
+    });
+    let mut stronger_existing = test_binding_with_authority_kind(
+        Uuid::from_u128(0x300),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+        "wrapper",
+    );
+    stronger_existing.provenance = json!({
+        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        "authority_kind": "wrapper",
+        "authority_key": "wrapper:ethereum-mainnet:0xabc"
+    });
+
+    let candidates = weaker_same_start_surface_binding_candidates(
+        &incoming,
+        &[weaker_existing.clone(), stronger_existing],
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates
+            .get(&weaker_existing.surface_binding_id)
+            .map(|candidate| candidate.resource_id),
+        Some(weaker_existing.resource_id)
+    );
+    assert_eq!(
+        candidates
+            .get(&weaker_existing.surface_binding_id)
+            .map(|candidate| candidate.active_from),
+        Some(weaker_existing.active_from)
     );
 }
 
@@ -220,4 +422,16 @@ fn test_binding(
         provenance: json!({}),
         canonicality_state: CanonicalityState::Canonical,
     }
+}
+
+fn test_binding_with_authority_kind(
+    surface_binding_id: Uuid,
+    logical_name_id: &str,
+    active_from: i64,
+    active_to: Option<OffsetDateTime>,
+    authority_kind: &str,
+) -> SurfaceBinding {
+    let mut binding = test_binding(surface_binding_id, logical_name_id, active_from, active_to);
+    binding.provenance = json!({ "authority_kind": authority_kind });
+    binding
 }

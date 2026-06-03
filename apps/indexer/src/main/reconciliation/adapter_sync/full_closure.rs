@@ -38,12 +38,14 @@ pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_paylo
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery) {
         let adapter_started = Instant::now();
-        let summary = bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint(
-            pool,
-            chain,
-            &checkpoint_context,
-        )
-        .await?;
+        let summary =
+            bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+                pool,
+                chain,
+                &checkpoint_context,
+                max_raw_logs_per_page,
+            )
+            .await?;
         log_adapter_call_timing(
             chain,
             "ens_v1_subregistry_discovery",

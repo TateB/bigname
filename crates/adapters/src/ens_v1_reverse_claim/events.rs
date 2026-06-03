@@ -3,13 +3,15 @@ use bigname_storage::NormalizedEvent;
 use serde_json::json;
 
 use super::helpers::{
-    normalize_hex_32, normalize_topic_address, reverse_claimed_topic0, reverse_label_for_address,
-    reverse_node_for_address, supports_reverse_claim_source_family,
+    normalize_hex_32, normalize_topic_address, reverse_claimed_topic0_for_source_family,
+    reverse_label_for_address, reverse_name_for_source_family, reverse_node_for_source_family,
+    supports_reverse_claim_source_family,
 };
 use super::raw_logs::ReverseRawLogRow;
 use super::{
     CONTRACT_ROLE_REVERSE_REGISTRAR, DERIVATION_KIND_ENS_V1_REVERSE_CLAIM, ENS_NATIVE_COIN_TYPE,
-    EVENT_KIND_REVERSE_CHANGED, SOURCE_EVENT_REVERSE_CLAIMED,
+    EVENT_KIND_REVERSE_CHANGED, SOURCE_EVENT_BASE_REVERSE_CLAIMED, SOURCE_EVENT_REVERSE_CLAIMED,
+    SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
 };
 
 pub(super) fn build_reverse_changed_event(
@@ -22,9 +24,18 @@ pub(super) fn build_reverse_changed_event(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
-    if !topic0.eq_ignore_ascii_case(&reverse_claimed_topic0()) {
+    let Some(expected_topic0) = reverse_claimed_topic0_for_source_family(&raw_log.source_family)
+    else {
+        return Ok(None);
+    };
+    if !topic0.eq_ignore_ascii_case(&expected_topic0) {
         return Ok(None);
     }
+    let source_event = if raw_log.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        SOURCE_EVENT_BASE_REVERSE_CLAIMED
+    } else {
+        SOURCE_EVENT_REVERSE_CLAIMED
+    };
 
     let claimed_address = normalize_topic_address(
         raw_log
@@ -39,11 +50,13 @@ pub(super) fn build_reverse_changed_event(
             .context("ReverseClaimed log is missing indexed reverse node")?,
     )?;
     let reverse_label = reverse_label_for_address(&claimed_address)?;
-    let reverse_name = format!("{reverse_label}.addr.reverse");
-    let derived_reverse_node = reverse_node_for_address(&claimed_address)?;
+    let reverse_name = reverse_name_for_source_family(&raw_log.source_family, &claimed_address)?;
+    let derived_reverse_node =
+        reverse_node_for_source_family(&raw_log.source_family, &claimed_address)?;
     if !indexed_reverse_node.eq_ignore_ascii_case(&derived_reverse_node) {
         bail!(
-            "ReverseClaimed indexed reverse node {} does not match derived reverse node {} for chain {} block {} log {}",
+            "{} indexed reverse node {} does not match derived reverse node {} for chain {} block {} log {}",
+            source_event,
             indexed_reverse_node,
             derived_reverse_node,
             raw_log.chain_id,
@@ -87,7 +100,7 @@ pub(super) fn build_reverse_changed_event(
         canonicality_state: raw_log.canonicality_state,
         before_state: json!({}),
         after_state: json!({
-            "source_event": SOURCE_EVENT_REVERSE_CLAIMED,
+            "source_event": source_event,
             "address": claimed_address,
             "coin_type": ENS_NATIVE_COIN_TYPE,
             "namespace": raw_log.namespace,

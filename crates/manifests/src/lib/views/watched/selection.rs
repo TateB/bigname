@@ -88,9 +88,7 @@ pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<Watc
                 discovery_edge_entry_count: 0,
             });
 
-        if !plan.addresses.contains(&watched_contract.address) {
-            plan.addresses.push(watched_contract.address.clone());
-        }
+        plan.addresses.push(watched_contract.address.clone());
 
         match watched_contract.source {
             WatchedContractSource::ManifestRoot => plan.manifest_root_entry_count += 1,
@@ -102,6 +100,7 @@ pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<Watc
     let mut plans = plans.into_values().collect::<Vec<_>>();
     for plan in &mut plans {
         plan.addresses.sort();
+        plan.addresses.dedup();
     }
     plans
 }

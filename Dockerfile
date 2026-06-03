@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM ubuntu:24.04 AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 libstdc++6 tini \
+    && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 libstdc++6 tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 bigname \
     && useradd --system --uid 10001 --gid bigname --home-dir /app --create-home bigname

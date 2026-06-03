@@ -20,8 +20,9 @@ mod rows;
 use crate::provider::{ProviderLog, ProviderReceipt, ProviderTransaction};
 
 use super::{
-    CoinbaseSqlBackfillConfig, HistoricalBackfillSourceOps, HistoricalLogPayload,
-    HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
+    CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode, HistoricalBackfillSourceOps,
+    HistoricalCodeObservationScope, HistoricalLogPayload, HistoricalLogPayloadRequest,
+    HistoricalLogValidationFilter,
 };
 
 pub(crate) use planner::load_backfill_topic_plan;
@@ -138,77 +139,112 @@ impl CoinbaseSqlBackfillSource {
 }
 
 impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
-    async fn fetch_selected_log_payloads(
+    fn fetch_selected_log_payloads(
         &self,
         request: HistoricalLogPayloadRequest<'_>,
-    ) -> Result<HistoricalLogPayload> {
-        if request.chain != self.chain {
-            bail!(
-                "Coinbase SQL source configured for chain {} was asked to fetch {}",
-                self.chain,
-                request.chain
-            );
-        }
+    ) -> impl std::future::Future<Output = Result<HistoricalLogPayload>> + Send {
+        async move {
+            if request.chain != self.chain {
+                bail!(
+                    "Coinbase SQL source configured for chain {} was asked to fetch {}",
+                    self.chain,
+                    request.chain
+                );
+            }
 
-        let mut logs_by_block = BTreeMap::<i64, Vec<ProviderLog>>::new();
-        let transactions_by_block = BTreeMap::<i64, Vec<ProviderTransaction>>::new();
-        let receipts_by_block = BTreeMap::<i64, Vec<ProviderReceipt>>::new();
-        let mut stats = super::CoinbaseSqlFetchStats::default();
-        let mut validation_filters = Vec::new();
-        let mut seen_log_identities = BTreeSet::new();
-        let resolved_by_number = request
-            .resolved_blocks
-            .iter()
-            .map(|block| (block.block_number, block.block_hash.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let packs = planner::build_filter_packs(&request);
-
-        for pack in packs {
-            for split_pack in query::build_or_split_filter_pack(
-                pack,
-                self.config.sql_char_limit,
-                self.config.page_limit,
-            )? {
-                validation_filters.push(HistoricalLogValidationFilter {
-                    from_block: split_pack.from_block,
-                    to_block: split_pack.to_block,
-                    addresses: split_pack.addresses.clone(),
-                    topic0s: split_pack.topic0s.clone(),
-                });
-                let pages = pagination::fetch_all_pages(
-                    &self.client,
-                    &split_pack,
-                    self.config.page_limit,
-                    self.config.sql_char_limit,
+            let mut logs_by_block = BTreeMap::<i64, Vec<ProviderLog>>::new();
+            let transactions_by_block = BTreeMap::<i64, Vec<ProviderTransaction>>::new();
+            let receipts_by_block = BTreeMap::<i64, Vec<ProviderReceipt>>::new();
+            let mut stats = super::CoinbaseSqlFetchStats::default();
+            let mut validation_filters = Vec::new();
+            let mut seen_log_identities = BTreeSet::new();
+            let mut logs_filtered_by_selected_target_index = true;
+            let mut logs_need_validation_provider_payload =
+                request.validation_mode == CoinbaseSqlValidationMode::Full;
+            let resolved_by_number = if request.validation_mode == CoinbaseSqlValidationMode::Sample
+                || request.resolved_blocks.is_empty()
+            {
+                None
+            } else {
+                Some(
+                    request
+                        .resolved_blocks
+                        .iter()
+                        .map(|block| (block.block_number, block.block_hash.clone()))
+                        .collect::<BTreeMap<_, _>>(),
                 )
-                .await?;
-                stats.merge(pages.stats);
-                for row in pages.rows {
-                    row.validate_against_filter_pack(&split_pack, &resolved_by_number)?;
-                    let log = row.to_provider_log()?;
-                    push_deduped_log(&mut logs_by_block, &mut seen_log_identities, log);
+            };
+            let packs = planner::build_filter_packs(&request);
+
+            for pack in packs {
+                for split_pack in query::build_or_split_filter_pack(
+                    pack,
+                    self.config.sql_char_limit,
+                    self.config.page_limit,
+                )? {
+                    let materializes_all_scan_emitters =
+                        materializes_all_scan_all_emitters(&split_pack);
+                    logs_filtered_by_selected_target_index &=
+                        split_pack.scan_all_emitters && !materializes_all_scan_emitters;
+                    validation_filters.push(HistoricalLogValidationFilter {
+                        from_block: split_pack.from_block,
+                        to_block: split_pack.to_block,
+                        addresses: split_pack.addresses.clone(),
+                        topic0s: split_pack.topic0s.clone(),
+                    });
+                    let pages = pagination::fetch_all_pages(
+                        &self.client,
+                        &split_pack,
+                        self.config.page_limit,
+                        self.config.sql_char_limit,
+                    )
+                    .await?;
+                    stats.merge(pages.stats);
+                    for row in pages.rows {
+                        row.validate_against_filter_pack(&split_pack, resolved_by_number.as_ref())?;
+                        logs_need_validation_provider_payload |=
+                            row.requires_validation_provider_data;
+                        let log = row.to_provider_log()?;
+                        if split_pack.scan_all_emitters
+                            && !materializes_all_scan_emitters
+                            && !request
+                                .selected_target_index
+                                .contains(&log.address, log.block_number)
+                        {
+                            continue;
+                        }
+                        push_deduped_log(&mut logs_by_block, &mut seen_log_identities, log);
+                    }
                 }
             }
-        }
 
-        for logs in logs_by_block.values_mut() {
-            logs.sort_by(|left, right| {
-                left.transaction_index
-                    .cmp(&right.transaction_index)
-                    .then_with(|| left.log_index.cmp(&right.log_index))
-            });
-        }
+            for logs in logs_by_block.values_mut() {
+                logs.sort_by(|left, right| {
+                    left.transaction_index
+                        .cmp(&right.transaction_index)
+                        .then_with(|| left.log_index.cmp(&right.log_index))
+                });
+            }
 
-        Ok(HistoricalLogPayload {
-            logs_by_block,
-            transactions_by_block,
-            receipts_by_block,
-            logs_need_validation_provider_payload: true,
-            validation_filters,
-            validation_mode: request.validation_mode,
-            source_stats: stats,
-        })
+            Ok(HistoricalLogPayload {
+                logs_by_block,
+                transactions_by_block,
+                receipts_by_block,
+                logs_need_validation_provider_payload,
+                logs_filtered_by_selected_target_index,
+                code_observation_scope: HistoricalCodeObservationScope::LogEmittersOnly,
+                validation_filters,
+                validation_mode: request.validation_mode,
+                source_stats: stats,
+            })
+        }
     }
+}
+
+fn materializes_all_scan_all_emitters(pack: &query::CoinbaseSqlFilterPack) -> bool {
+    pack.scan_all_emitters
+        && pack.source_families.len() == 1
+        && pack.source_families[0] == "basenames_base_registry"
 }
 
 fn push_deduped_log(

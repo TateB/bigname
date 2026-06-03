@@ -4,11 +4,12 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlock, ProviderBlockBundle,
-    ProviderBlockSelection, ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlock, ProviderBlockBundle, ProviderBlockSelection,
+    ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
     RAW_PAYLOAD_KIND_FULL_BLOCK,
     decode::{block_hash_from_value, normalize_hash},
     logs_receipts::ProviderBlockLogFetch,
+    provider_batch_item_limit,
     request::JsonRpcBatchCall,
 };
 
@@ -163,7 +164,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderResolvedBlock>> {
         let mut resolved = Vec::with_capacity(block_numbers.len());
 
-        for chunk in block_numbers.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in block_numbers.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|block_number| {
@@ -227,7 +228,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlock>> {
         let mut blocks = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {
@@ -279,7 +280,7 @@ impl JsonRpcProvider {
 
         // Keep retained payload fetches single-response scoped: cache-fill verifies the stored
         // digest against the same full block/log/receipt JSON-RPC response body.
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             for resolved_block in chunk {
                 let bundle = self
                     .fetch_block_bundle_by_hash(&resolved_block.block_hash)
@@ -305,7 +306,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlockBundle>> {
         let mut bundles = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {

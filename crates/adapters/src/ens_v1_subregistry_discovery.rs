@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_manifests::{
     reconcile_discovery_observations, reconcile_scoped_discovery_observations,
 };
@@ -51,6 +51,7 @@ const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED: &str = "ens_v1_subregistry_changed";
 const DERIVATION_KIND_ENS_V1_REGISTRY_RESOLVER_CHANGED: &str = "ens_v1_registry_resolver_changed";
 const SUBREGISTRY_CHECKPOINT_EVENT_PAGE_LIMIT: i64 = 20_000;
+const SUBREGISTRY_CHECKPOINT_RECONCILIATION_PAGE_LIMIT: i64 = 50_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1SubregistryDiscoverySyncSummary {
@@ -79,6 +80,7 @@ pub async fn sync_ens_v1_subregistry_discovery(
         None,
         DiscoveryEdgeMutation::Reconcile,
         None,
+        SUBREGISTRY_CHECKPOINT_PAGE_LIMIT,
     )
     .await
 }
@@ -88,6 +90,23 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint(
     chain: &str,
     checkpoint: &ReplayAdapterCheckpointContext,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
+    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        pool,
+        chain,
+        checkpoint,
+        usize::try_from(SUBREGISTRY_CHECKPOINT_PAGE_LIMIT)?,
+    )
+    .await
+}
+
+pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &ReplayAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
+    let checkpoint_page_limit = i64::try_from(max_raw_logs_per_page.max(1))
+        .context("subregistry checkpoint page limit overflowed i64")?;
     sync_ens_v1_subregistry_discovery_with_scope(
         pool,
         chain,
@@ -96,6 +115,7 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint(
         None,
         DiscoveryEdgeMutation::Reconcile,
         Some(checkpoint),
+        checkpoint_page_limit,
     )
     .await
 }
@@ -115,6 +135,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             Some(source_scope),
             DiscoveryEdgeMutation::Reconcile,
             None,
+            SUBREGISTRY_CHECKPOINT_PAGE_LIMIT,
         )
         .await
     }
@@ -133,6 +154,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             Some(source_scope),
             DiscoveryEdgeMutation::Skip,
             None,
+            SUBREGISTRY_CHECKPOINT_PAGE_LIMIT,
         )
         .await
     }
@@ -150,6 +172,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             DiscoveryEdgeMutation::Skip,
             None,
+            SUBREGISTRY_CHECKPOINT_PAGE_LIMIT,
         )
         .await
     }
@@ -169,6 +192,7 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
     source_scope: Option<&[(String, String, i64, i64)]>,
     discovery_edge_mutation: DiscoveryEdgeMutation,
     replay_checkpoint: Option<&ReplayAdapterCheckpointContext>,
+    checkpoint_page_limit: i64,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
     let source_scope = source_scope.map(normalized_registry_source_scope_targets);
     let use_replay_checkpoint = !restrict_to_block_hashes
@@ -227,6 +251,7 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                     &emitters,
                     current_registry.as_ref(),
                     checkpoint,
+                    checkpoint_page_limit,
                     &mut latest_assignments,
                     &mut migrated_registry_nodes,
                 )
@@ -415,15 +440,36 @@ async fn reconcile_subregistry_discovery_from_checkpoint(
     reconciliation: &mut EnsV1SubregistryDiscoverySyncSummary,
 ) -> Result<()> {
     for discovery_source in discovery_sources {
-        let source_observations = checkpoint
-            .load_discovery_observations(pool, discovery_source)
+        let mut after_key = None::<String>;
+        loop {
+            let page = checkpoint
+                .load_assignment_page(
+                    pool,
+                    discovery_source,
+                    after_key.as_deref(),
+                    SUBREGISTRY_CHECKPOINT_RECONCILIATION_PAGE_LIMIT,
+                )
+                .await?;
+            let Some((last_key, _)) = page.last() else {
+                break;
+            };
+            after_key = Some(last_key.clone());
+
+            let source_observations = page
+                .iter()
+                .map(|(_, assignment)| assignment.discovery_observation())
+                .collect::<Result<Vec<_>>>()?;
+            let source_reconciliation = reconcile_scoped_discovery_observations(
+                pool,
+                discovery_source,
+                &source_observations,
+            )
             .await?;
-        let source_reconciliation =
-            reconcile_discovery_observations(pool, discovery_source, &source_observations).await?;
-        reconciliation.active_edge_count += source_reconciliation.active_edge_count;
-        reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
-        reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
-        reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
+            reconciliation.active_edge_count += source_reconciliation.active_edge_count;
+            reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
+            reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
+            reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
+        }
     }
     Ok(())
 }
@@ -470,6 +516,7 @@ async fn sync_checkpointed_registry_raw_logs(
     emitters: &[loader::ActiveEmitter],
     current_registry: Option<&loader::ActiveEmitter>,
     checkpoint: &mut SubregistryReplayCheckpoint,
+    checkpoint_page_limit: i64,
     latest_assignments: &mut BTreeMap<String, assignment::ObservedRegistryAssignment>,
     migrated_registry_nodes: &mut MigratedRegistryNodes,
 ) -> Result<(usize, usize)> {
@@ -491,7 +538,7 @@ async fn sync_checkpointed_registry_raw_logs(
             checkpoint.range_start_block_number(),
             checkpoint.target_block_number(),
             start_after.as_ref(),
-            SUBREGISTRY_CHECKPOINT_PAGE_LIMIT,
+            checkpoint_page_limit,
         )
         .await?;
         let Some(last_position) = page.last_position else {

@@ -15,7 +15,7 @@ pub(crate) use derive::{normalized_event_cursor_exists, seed_normalized_event_cu
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;
-const PROJECTION_APPLY_BATCH_LIMIT: i64 = 100;
+const PROJECTION_APPLY_BATCH_LIMIT: i64 = 25;
 const FAILURE_RETRY_DELAY: &str = "60 seconds";
 const CLAIM_RETRY_DELAY: &str = "5 minutes";
 const PRIMARY_NAMES_CURRENT_PROJECTION: &str = "primary_names_current";
@@ -47,9 +47,7 @@ pub(crate) async fn run_once(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<ProjectionApplyIterationSummary> {
-    let derived =
-        derive::derive_normalized_event_invalidations(pool, NORMALIZED_EVENT_DERIVE_BATCH_LIMIT)
-            .await?;
+    let derived = derive_once(pool).await?;
     let applied = apply::apply_pending_invalidations(
         pool,
         PROJECTION_APPLY_BATCH_LIMIT,
@@ -79,6 +77,12 @@ pub(crate) async fn run_once(
     }
 
     Ok(summary)
+}
+
+pub(crate) async fn derive_once(
+    pool: &PgPool,
+) -> Result<derive::ProjectionInvalidationDeriveSummary> {
+    derive::derive_normalized_event_invalidations(pool, NORMALIZED_EVENT_DERIVE_BATCH_LIMIT).await
 }
 
 pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result<bool> {

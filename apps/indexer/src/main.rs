@@ -45,7 +45,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use backfill::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig, BackfillSourceKind,
-    CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, run_resumable_coinbase_sql_backfill_job,
+    CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, hash_pinned_backfill_range_specs,
+    run_resumable_coinbase_sql_backfill_job, run_resumable_coinbase_sql_backfill_job_concurrently,
     run_resumable_hash_pinned_backfill_job,
 };
 #[cfg(test)]
@@ -233,15 +234,36 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
                         args.chain, args.chain, args.chain
                     )
                 })?;
-            run_resumable_coinbase_sql_backfill_job(
-                &pool,
-                &source_plan,
-                provider,
-                &source,
-                config,
-                coinbase_sql_config,
-            )
-            .await?;
+            if args.coinbase_sql_workers > 1 || args.coinbase_sql_range_blocks > 0 {
+                if args.coinbase_sql_range_blocks <= 0 {
+                    anyhow::bail!(
+                        "--coinbase-sql-range-blocks must be positive when --coinbase-sql-workers is greater than 1"
+                    );
+                }
+                let ranges =
+                    hash_pinned_backfill_range_specs(range, args.coinbase_sql_range_blocks)?;
+                run_resumable_coinbase_sql_backfill_job_concurrently(
+                    &pool,
+                    &source_plan,
+                    provider,
+                    &source,
+                    config,
+                    coinbase_sql_config,
+                    ranges,
+                    args.coinbase_sql_workers,
+                )
+                .await?;
+            } else {
+                run_resumable_coinbase_sql_backfill_job(
+                    &pool,
+                    &source_plan,
+                    provider,
+                    &source,
+                    config,
+                    coinbase_sql_config,
+                )
+                .await?;
+            }
         }
         BackfillSourceKind::Auto => unreachable!("auto must be resolved before execution"),
     }

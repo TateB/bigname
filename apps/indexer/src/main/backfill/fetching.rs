@@ -40,7 +40,9 @@ use super::{
 use crate::source_scope::SourceScope;
 
 pub(super) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
-pub(crate) use historical::materialize_historical_payload_range;
+pub(crate) use historical::{
+    fill_log_payloads_from_validation_provider, materialize_historical_payload_range,
+};
 use log_ranges::{
     fetch_backfill_logs_by_safe_ranges, selected_addresses_for_materialized_block,
     uses_topic_first_source_family_scan,

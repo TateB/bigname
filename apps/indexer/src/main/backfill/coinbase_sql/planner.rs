@@ -15,6 +15,10 @@ use crate::backfill::{
     selection::{BackfillLogRangeRequest, selected_log_range_requests},
 };
 
+const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
+const BASENAMES_SCAN_ALL_SOURCE_FAMILIES: &[&str] = &[BASENAMES_BASE_REGISTRY_SOURCE_FAMILY];
+const SCAN_ALL_EMITTERS_ADDRESS_THRESHOLD: usize = 512;
+
 pub(crate) async fn load_backfill_topic_plan(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -35,12 +39,17 @@ pub(crate) async fn load_backfill_topic_plan(
     .context("failed to load manifest ABI event topics for Coinbase SQL backfill")?;
 
     let mut topics_by_family = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut event_signatures_by_family = BTreeMap::<String, BTreeSet<String>>::new();
     for event in events {
         if let Some(topic0) = event.topic0 {
             topics_by_family
-                .entry(event.source_family)
+                .entry(event.source_family.clone())
                 .or_default()
                 .insert(topic0.to_ascii_lowercase());
+            event_signatures_by_family
+                .entry(event.source_family)
+                .or_default()
+                .insert(event.canonical_signature);
         }
     }
 
@@ -68,6 +77,10 @@ pub(crate) async fn load_backfill_topic_plan(
             .into_iter()
             .map(|(family, topics)| (family, topics.into_iter().collect()))
             .collect(),
+        event_signatures_by_family
+            .into_iter()
+            .map(|(family, signatures)| (family, signatures.into_iter().collect()))
+            .collect(),
         source_families_without_topics,
     ))
 }
@@ -75,6 +88,12 @@ pub(crate) async fn load_backfill_topic_plan(
 pub(super) fn build_filter_packs(
     request: &HistoricalLogPayloadRequest<'_>,
 ) -> Vec<CoinbaseSqlFilterPack> {
+    for source_family in BASENAMES_SCAN_ALL_SOURCE_FAMILIES {
+        if let Some(packs) = scan_all_source_family_filter_packs(request, source_family) {
+            return packs;
+        }
+    }
+
     selected_log_range_requests(request.source_plan, request.resolved_blocks)
         .into_iter()
         .flat_map(|range_request| {
@@ -92,30 +111,91 @@ pub(super) fn build_filter_packs(
         .collect()
 }
 
+fn scan_all_source_family_filter_packs(
+    request: &HistoricalLogPayloadRequest<'_>,
+    source_family: &str,
+) -> Option<Vec<CoinbaseSqlFilterPack>> {
+    if request.resolved_blocks.is_empty()
+        || request.selected_target_addresses_for_chunk.is_empty()
+        || !request
+            .source_plan
+            .selected_targets
+            .iter()
+            .all(|target| target.source_family == source_family)
+    {
+        return None;
+    }
+
+    let topic0s = request.topic_plan.topic0s_for_source_family(source_family);
+    let event_signatures = request
+        .topic_plan
+        .event_signatures_for_source_family(source_family);
+    if topic0s.is_empty() || event_signatures.is_empty() {
+        return None;
+    }
+
+    Some(vec![CoinbaseSqlFilterPack {
+        chain: request.chain.to_owned(),
+        from_block: request
+            .resolved_blocks
+            .first()
+            .expect("resolved blocks are not empty")
+            .block_number,
+        to_block: request
+            .resolved_blocks
+            .last()
+            .expect("resolved blocks are not empty")
+            .block_number,
+        addresses: Vec::new(),
+        topic0s: topic0s.to_vec(),
+        event_signatures: event_signatures.to_vec(),
+        scan_all_emitters: true,
+        source_families: vec![source_family.to_owned()],
+    }])
+}
+
 fn packs_for_source_family_segment(
     chain: &str,
     topic_plan: &BackfillTopicPlan,
     segment: CoinbaseSqlSourceFamilySegment,
 ) -> Vec<CoinbaseSqlFilterPack> {
-    let mut packs_by_topics = BTreeMap::<Option<Vec<String>>, CoinbaseSqlFilterPack>::new();
+    let mut packs_by_topics =
+        BTreeMap::<(Option<Vec<String>>, Option<Vec<String>>, bool), CoinbaseSqlFilterPack>::new();
     for (source_family, addresses) in segment.addresses_by_source_family {
         let topic0s = topic_plan.topic0s_for_source_family(&source_family);
+        let event_signatures = topic_plan.event_signatures_for_source_family(&source_family);
         let topic_key = topic_plan
             .source_family_has_topics(&source_family)
             .then(|| topic0s.to_vec());
-        let entry =
-            packs_by_topics
-                .entry(topic_key.clone())
-                .or_insert_with(|| CoinbaseSqlFilterPack {
-                    chain: chain.to_owned(),
-                    from_block: segment.from_block,
-                    to_block: segment.to_block,
-                    addresses: Vec::new(),
-                    topic0s: topic_key.unwrap_or_default(),
-                    scan_all_emitters: false,
-                    source_families: Vec::new(),
-                });
-        entry.addresses.extend(addresses);
+        let event_signature_key = topic_plan
+            .source_family_has_topics(&source_family)
+            .then(|| event_signatures.to_vec())
+            .filter(|signatures| !signatures.is_empty());
+        let scan_all_emitters = should_scan_all_emitters(
+            &source_family,
+            addresses.len(),
+            topic_key.as_ref(),
+            event_signature_key.as_ref(),
+        );
+        let entry = packs_by_topics
+            .entry((
+                topic_key.clone(),
+                event_signature_key.clone(),
+                scan_all_emitters,
+            ))
+            .or_insert_with(|| CoinbaseSqlFilterPack {
+                chain: chain.to_owned(),
+                from_block: segment.from_block,
+                to_block: segment.to_block,
+                addresses: Vec::new(),
+                topic0s: topic_key.unwrap_or_default(),
+                event_signatures: event_signature_key.unwrap_or_default(),
+                scan_all_emitters,
+                source_families: Vec::new(),
+            });
+        if !scan_all_emitters {
+            entry.addresses.extend(addresses);
+        }
         entry.source_families.push(source_family);
     }
 
@@ -129,6 +209,18 @@ fn packs_for_source_family_segment(
             pack
         })
         .collect()
+}
+
+fn should_scan_all_emitters(
+    source_family: &str,
+    address_count: usize,
+    topic0s: Option<&Vec<String>>,
+    event_signatures: Option<&Vec<String>>,
+) -> bool {
+    source_family == BASENAMES_BASE_REGISTRY_SOURCE_FAMILY
+        && address_count > SCAN_ALL_EMITTERS_ADDRESS_THRESHOLD
+        && topic0s.is_some_and(|topic0s| !topic0s.is_empty())
+        && event_signatures.is_some_and(|event_signatures| !event_signatures.is_empty())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

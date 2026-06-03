@@ -94,15 +94,26 @@ fn stable_provenance_merge_sql(table_name: &str) -> String {
     )
 }
 
-fn stable_anchor_refresh_allowed_sql(table_name: &str) -> String {
+fn stable_anchor_refresh_required_sql(table_name: &str) -> String {
     format!(
         r#"
         (
-            {table_name}.canonicality_state = 'orphaned'::canonicality_state
-            OR {same_anchor}
+            (
+                {table_name}.canonicality_state = 'orphaned'::canonicality_state
+                OR {same_anchor}
+            )
+            AND (
+                {table_name}.chain_id IS DISTINCT FROM EXCLUDED.chain_id
+                OR {table_name}.block_hash IS DISTINCT FROM EXCLUDED.block_hash
+                OR {table_name}.block_number IS DISTINCT FROM EXCLUDED.block_number
+                OR {table_name}.provenance IS DISTINCT FROM {provenance_merge}
+                OR {table_name}.canonicality_state IS DISTINCT FROM {canonicality_merge}
+            )
         )
         "#,
         same_anchor = stable_anchor_matches_sql(table_name),
+        provenance_merge = stable_provenance_merge_sql(table_name),
+        canonicality_merge = canonicality_merge_sql(table_name),
     )
 }
 
@@ -309,7 +320,7 @@ pub(super) async fn bulk_upsert_token_lineages_without_snapshots(
             "#,
             provenance_merge = stable_provenance_merge_sql("token_lineages"),
             canonicality_merge = canonicality_merge_sql("token_lineages"),
-            anchor_refresh = stable_anchor_refresh_allowed_sql("token_lineages"),
+            anchor_refresh = stable_anchor_refresh_required_sql("token_lineages"),
             later_anchor_canonicality_refresh =
                 stable_later_anchor_canonicality_refresh_allowed_sql("token_lineages"),
             accepted_canonicality_merge = accepted_canonicality_merge,
@@ -549,7 +560,7 @@ pub(super) async fn bulk_upsert_resources_without_snapshots(
             "#,
             provenance_merge = stable_provenance_merge_sql("resources"),
             canonicality_merge = canonicality_merge_sql("resources"),
-            anchor_refresh = stable_anchor_refresh_allowed_sql("resources"),
+            anchor_refresh = stable_anchor_refresh_required_sql("resources"),
             later_anchor_canonicality_refresh =
                 stable_later_anchor_canonicality_refresh_allowed_sql("resources"),
             accepted_token_lineage_id_merge = accepted_token_lineage_id_merge,

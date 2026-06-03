@@ -222,16 +222,20 @@ pub(super) async fn load_latest_registry_resolver_raw_state_before_block(
                 log.transaction_index,
                 log.log_index,
                 log.raw_log_id
-            FROM registry_emitters emitter
-            JOIN raw_logs log
-              ON log.chain_id = $1
-             AND log.emitting_address = emitter.address
-             AND log.topics[1] = $6
-             AND log.block_number BETWEEN emitter.active_from_block_number
-                 AND LEAST(emitter.active_to_block_number, $5 - 1)
-            WHERE emitter.source_family = scope.registry_source_family
+            FROM raw_logs log
+            WHERE log.chain_id = $1
+              AND log.topics[1] = $6
               AND lower(log.topics[2]) = scope.namehash
+              AND log.block_number < $5
               AND log.canonicality_state {CANONICALITY_STATE_FILTER}
+              AND EXISTS (
+                  SELECT 1
+                  FROM registry_emitters emitter
+                  WHERE emitter.source_family = scope.registry_source_family
+                    AND emitter.address = log.emitting_address
+                    AND log.block_number BETWEEN emitter.active_from_block_number
+                        AND LEAST(emitter.active_to_block_number, $5 - 1)
+              )
             ORDER BY log.block_number DESC, log.transaction_index DESC, log.log_index DESC, log.raw_log_id DESC
             LIMIT 1
         ) resolver_log ON TRUE

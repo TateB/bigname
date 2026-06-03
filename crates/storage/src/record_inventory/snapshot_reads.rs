@@ -133,14 +133,11 @@ async fn record_inventory_projection_covers_selected_snapshot(
 
     let projected_by_chain_id = positions_by_chain_id(&projected)?;
     let selected_by_chain_id = positions_by_chain_id(selected_chain_positions)?;
-    if projected_by_chain_id.keys().ne(selected_by_chain_id.keys()) {
-        return Ok(false);
-    }
 
-    for (chain_id, projected_position) in &projected_by_chain_id {
-        let selected_position = selected_by_chain_id
-            .get(chain_id)
-            .expect("selected map must have the same chain_id keys as projected map");
+    for (chain_id, selected_position) in &selected_by_chain_id {
+        let Some(projected_position) = projected_by_chain_id.get(chain_id) else {
+            return Ok(false);
+        };
         if selected_position.block_number < projected_position.block_number {
             return Ok(false);
         }

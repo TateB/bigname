@@ -13,7 +13,10 @@ mod target_loading;
 
 use profile::ResolverProfileGate;
 use summary_json::build_resolver_current_row;
-use target_loading::{ResolverTarget, load_target_resolvers, normalize_resolver_address};
+use target_loading::{
+    ResolverTarget, count_current_binding_candidate_pairs, load_target_resolvers,
+    normalize_resolver_address,
+};
 
 #[cfg(test)]
 use bigname_storage::{CanonicalityState, SurfaceBindingKind};
@@ -40,6 +43,7 @@ const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
 const RESOLVER_CURRENT_REBUILD_BATCH_SIZE: usize = 1_000;
 const RESOLVER_CURRENT_REBUILD_CONCURRENCY: usize = 1;
 const RESOLVER_CURRENT_REBUILD_LOG_INTERVAL: usize = 100;
+const TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT: i64 = 10_000;
 const RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON: &str =
     "resolver_binding_enumeration_not_projected";
 const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
@@ -157,11 +161,16 @@ async fn rebuild_one_resolver(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<ResolverCurrentRebuildSummary> {
+    let resolver_address = normalize_resolver_address(resolver_address);
     let target = ResolverTarget {
         chain_id: chain_id.to_owned(),
-        resolver_address: normalize_resolver_address(resolver_address),
+        resolver_address,
         profile_source_family: None,
         enumerate_bindings: true,
+    };
+    let target = ResolverTarget {
+        enumerate_bindings: should_enumerate_targeted_resolver_bindings(pool, &target).await?,
+        ..target
     };
     let profile_gate = ResolverProfileGate::load_for_target(pool, &target).await?;
     let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
@@ -180,6 +189,31 @@ async fn rebuild_one_resolver(
         upserted_row_count,
         deleted_row_count: 0,
     })
+}
+
+async fn should_enumerate_targeted_resolver_bindings(
+    pool: &PgPool,
+    target: &ResolverTarget,
+) -> Result<bool> {
+    let candidate_count = count_current_binding_candidate_pairs(
+        pool,
+        target,
+        TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT + 1,
+    )
+    .await?;
+    if candidate_count <= TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT {
+        return Ok(true);
+    }
+
+    tracing::info!(
+        projection = "resolver_current",
+        chain_id = %target.chain_id,
+        resolver_address = %target.resolver_address,
+        candidate_count,
+        candidate_limit = TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT,
+        "resolver_current targeted binding enumeration skipped because candidate set is too large"
+    );
+    Ok(false)
 }
 
 #[cfg(test)]

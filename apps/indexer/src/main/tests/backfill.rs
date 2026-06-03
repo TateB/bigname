@@ -126,6 +126,136 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
 }
 
 #[test]
+fn basenames_registry_source_identity_changes_when_discovery_expands_before_checkpoint()
+-> Result<()> {
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let checkpoint_block_number = 18_995_933;
+    let original_payload = backfill::backfill_job_source_identity_payload(&source_plan)?;
+
+    let mut expanded_source_plan = source_plan.clone();
+    expanded_source_plan
+        .selected_targets
+        .push(WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(2),
+            address: "0x0000000000000000000000000000000000000002".to_owned(),
+            effective_from_block: 18_900_000,
+            effective_to_block: 46_636_366,
+        });
+    let expanded_payload = backfill::backfill_job_source_identity_payload(&expanded_source_plan)?;
+
+    assert!(
+        expanded_source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.effective_from_block <= checkpoint_block_number)
+    );
+    assert_ne!(
+        expanded_payload.get("source_identity_hash"),
+        original_payload.get("source_identity_hash")
+    );
+    assert_ne!(expanded_payload, original_payload);
+
+    Ok(())
+}
+
+#[test]
+fn basenames_registry_coinbase_sql_scan_all_identity_ignores_discovery_expansion() -> Result<()> {
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let topic_plan = backfill::BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()],
+        )]),
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["NewOwner(bytes32,bytes32,address)".to_owned()],
+        )]),
+        BTreeSet::new(),
+    );
+    let config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 8_192,
+        max_window_blocks: 16_384,
+        page_limit: 50_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 5,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let original_payload = backfill::coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &config,
+        &topic_plan,
+    )?;
+
+    let mut expanded_source_plan = source_plan.clone();
+    expanded_source_plan
+        .selected_targets
+        .push(WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(2),
+            address: "0x0000000000000000000000000000000000000002".to_owned(),
+            effective_from_block: 18_900_000,
+            effective_to_block: 46_636_366,
+        });
+    let expanded_payload = backfill::coinbase_sql_backfill_job_source_identity_payload(
+        &expanded_source_plan,
+        &config,
+        &topic_plan,
+    )?;
+
+    assert_eq!(expanded_payload, original_payload);
+    assert_eq!(
+        original_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_event_signatures_v1")
+    );
+    assert!(original_payload.get("selected_targets").is_none());
+    assert!(original_payload.get("selected_targets_digest").is_none());
+
+    Ok(())
+}
+
+#[test]
 fn ensv1_resolver_backfill_source_identity_uses_generic_event_topics() -> Result<()> {
     let selected_targets = vec![WatchedBackfillTarget {
         source_family: "ens_v1_resolver_l1".to_owned(),

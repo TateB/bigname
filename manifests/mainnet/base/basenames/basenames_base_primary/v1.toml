@@ -16,3 +16,9 @@ discovery_rules = []
 role = "reverse_registrar"
 address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282"
 proxy_kind = "none"
+
+[[abi.events]]
+name = "BaseReverseClaimed"
+fragment = "event BaseReverseClaimed(address indexed addr, bytes32 indexed node)"
+emitter_roles = ["reverse_registrar"]
+normalized_events = ["ReverseChanged"]

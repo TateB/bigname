@@ -27,7 +27,9 @@ use super::{
         raw_payload_candidate_hashes, retained_transaction_keys_from_live_payload,
         selected_address_set,
     },
-    types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode},
+    types::{
+        CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
+    },
 };
 
 pub(crate) async fn persist_reconciled_raw_blocks(
@@ -81,8 +83,22 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
     adapter_sync_enabled: bool,
+    skip_post_replay_canonical_gap_refresh: bool,
     event_silent_resolver_addresses: &[String],
 ) -> Result<()> {
+    if skip_post_replay_canonical_gap_refresh
+        && canonical.status == CanonicalReconciliationStatus::GapBackfilled
+    {
+        info!(
+            service = "indexer",
+            command = "poll",
+            chain,
+            reconciled_block_count = canonical.reconciled_blocks.len(),
+            "live raw payload refresh skipped for post-replay canonical gap"
+        );
+        return Ok(());
+    }
+
     let block_hashes = raw_payload_candidate_hashes(heads, canonical, head_change_set);
     if block_hashes.is_empty() {
         return Ok(());
@@ -300,8 +316,21 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
+    skip_post_replay_canonical_gap_refresh: bool,
 ) -> Result<()> {
     if task.addresses.is_empty() {
+        return Ok(());
+    }
+    if skip_post_replay_canonical_gap_refresh
+        && canonical.status == CanonicalReconciliationStatus::GapBackfilled
+    {
+        info!(
+            service = "indexer",
+            command = "poll",
+            chain = %task.chain,
+            reconciled_block_count = canonical.reconciled_blocks.len(),
+            "live raw code-hash refresh skipped for post-replay canonical gap"
+        );
         return Ok(());
     }
 
