@@ -360,6 +360,7 @@ async fn load_associated_role_names(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                  AND binding.active_to IS NULL
                   AND (
                       nc.token_lineage_id IS NULL
                       OR token_lineage.canonicality_state IN (

@@ -183,6 +183,75 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
 }
 
 #[tokio::test]
+async fn roles_omit_associated_name_for_closed_surface_binding() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let account = "0x0000000000000000000000000000000000000aaa";
+    let resource_id = Uuid::from_u128(0xd301);
+    let token_lineage_id = Uuid::from_u128(0xd302);
+    let surface_binding_id = Uuid::from_u128(0xd303);
+
+    database
+        .seed_name_current_binding_migrated(
+            "ens:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            "ens:alice.eth",
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET active_to = $2
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(surface_binding_id)
+    .bind(timestamp(1_717_171_800))
+    .execute(&database.pool)
+    .await
+    .context("failed to close roles test surface binding")?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[permission_current_row(
+            resource_id,
+            account,
+            PermissionScope::Resource,
+            16,
+            61,
+        )],
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?account={account}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("account roles request for closed binding failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["data"][0]["resource_id"], json!(resource_id.to_string()));
+    assert_eq!(payload["data"][0]["name"], JsonValue::Null);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xd201);
