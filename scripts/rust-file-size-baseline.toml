@@ -18,7 +18,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 [[files]]
 path = "apps/indexer/src/main/backfill/fetching/historical/log_payloads.rs"
 loc = 653
-justification = "Coinbase SQL validation helper carries focused replay-safety tests for sample/full provider payload fill; future changes should split tests or shrink it."
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution.rs"
@@ -53,7 +53,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
-loc = 639
+loc = 602
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -80,12 +80,12 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs"
-loc = 645
+loc = 629
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "crates/manifests/src/lib/discovery/reconciliation.rs"
-loc = 644
+loc = 614
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -95,6 +95,5 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/storage/src/identity/write_fast.rs"
-loc = 917
+loc = 808
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."

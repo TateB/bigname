@@ -295,6 +295,7 @@ impl TestDatabase {
                         logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
                         resource_id UUID NOT NULL REFERENCES resources (resource_id),
                         binding_kind TEXT NOT NULL,
+                        active_to TIMESTAMPTZ,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (
                             binding_kind IN (

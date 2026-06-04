@@ -25,26 +25,26 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     assert_eq!(runtime_state.sync_summary.synced_manifest_count, 16);
     assert_eq!(runtime_state.sync_summary.active_manifest_count, 11);
     assert_eq!(runtime_state.sync_summary.root_count, 6);
-    assert_eq!(runtime_state.sync_summary.contract_count, 26);
+    assert_eq!(runtime_state.sync_summary.contract_count, 28);
     assert_eq!(runtime_state.sync_summary.capability_count, 10);
     assert_eq!(runtime_state.sync_summary.discovery_rule_count, 8);
     assert_eq!(runtime_state.discovery_admission.active_manifest_count, 11);
     assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
-    assert_eq!(runtime_state.discovery_admission.active_contract_count, 21);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 23);
     assert_eq!(runtime_state.discovery_admission.active_rule_count, 4);
     assert_eq!(
         runtime_state
             .manifest_normalized_event_summary
             .total_synced_count,
-        16
+        18
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
-        20
+        23
     );
     assert_eq!(
         runtime_state.watched_contract_summary.source_entry_count,
-        24
+        27
     );
     assert_eq!(
         runtime_state.watched_contract_summary.manifest_root_count,
@@ -54,11 +54,11 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         runtime_state
             .watched_contract_summary
             .manifest_contract_count,
-        21
+        23
     );
     assert_eq!(
         runtime_state.watched_contract_summary.discovery_edge_count,
-        0
+        1
     );
     assert_eq!(
         runtime_state.watched_chain_plan,
@@ -67,13 +67,16 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
                 chain: "base-mainnet".to_owned(),
                 addresses: vec![
                     "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a".to_owned(),
+                    "0x4ccb0bb02fcaba27e82a56646e81d8c5bc4119a5".to_owned(),
                     "0x79ea96012eea67a83431f1701b3dff7e37f9e282".to_owned(),
+                    "0x9ad14968093c5e8c2a8cc86f6868cfee8c659717".to_owned(),
+                    "0xa7d2607c6bd39ae9521e514026cbb078405ab322".to_owned(),
                     "0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned(),
                     "0xc6d566a56a1aff6508b41f6c90ff131615583bcd".to_owned(),
                 ],
                 manifest_root_entry_count: 1,
-                manifest_contract_entry_count: 4,
-                discovery_edge_entry_count: 0,
+                manifest_contract_entry_count: 6,
+                discovery_edge_entry_count: 1,
             },
             WatchedChainPlan {
                 chain: "ethereum-mainnet".to_owned(),

@@ -4730,7 +4730,7 @@ async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
     assert_eq!(summary.synced_manifest_count, 8);
     assert_eq!(summary.active_manifest_count, 6);
-    assert_eq!(summary.contract_count, 8);
+    assert_eq!(summary.contract_count, 10);
 
     let active_manifests =
         load_active_manifests_for_namespace(database.pool(), "basenames").await?;

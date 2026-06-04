@@ -8,9 +8,25 @@ pub(super) async fn queue_surface_binding_projection_invalidations(
     if logical_name_ids.is_empty() {
         return Ok(());
     }
+    if !projection_invalidations_table_exists(executor).await? {
+        tracing::debug!(
+            repaired_logical_name_count = logical_name_ids.len(),
+            "skipping surface-binding repair projection invalidations because projection queue table is absent"
+        );
+        return Ok(());
+    }
 
     queue_name_current_invalidations(executor, logical_name_ids).await?;
     queue_address_names_current_invalidations(executor, logical_name_ids).await
+}
+
+async fn projection_invalidations_table_exists(executor: &mut PgConnection) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.projection_invalidations') IS NOT NULL",
+    )
+    .fetch_one(&mut *executor)
+    .await
+    .context("failed to check projection invalidation queue availability")
 }
 
 async fn queue_name_current_invalidations(

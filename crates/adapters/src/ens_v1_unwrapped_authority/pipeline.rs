@@ -11,7 +11,7 @@ use apply::*;
 use flush::*;
 use identity::*;
 use materialize::{AuthorityMaterialization, materialize_authority_histories};
-use summary::empty_summary;
+use summary::{build_summary, empty_summary};
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
 const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
@@ -217,15 +217,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &generic_resolver_event_sources,
             &event_topics,
         )?;
-        tracing::info!(
-            service = "adapters",
-            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-            chain,
-            active_emitter_count = raw_log_active_emitters.len(),
-            routed_active_emitter_count = stream_source_router.watched_emitter_count(),
-            generic_resolver_event_source_count = generic_resolver_event_sources.len(),
-            "ENSv1 unwrapped-authority replay source router prepared"
-        );
         let mut stream_conn = None;
         let mut total_scanned_log_count = active_replay_checkpoint.as_ref().map_or(
             0usize,
@@ -567,11 +558,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         upsert_surface_bindings_without_snapshots(pool, &bindings[..closure_count]).await?;
     }
     let binding_closures_upsert_ms = binding_closures_started.elapsed().as_millis();
-    let binding_overlap_repair_started = Instant::now();
-    let binding_overlap_repair_count =
-        close_weaker_overlapping_existing_surface_bindings(pool, &bindings[closure_count..])
-            .await?;
-    let binding_overlap_repair_ms = binding_overlap_repair_started.elapsed().as_millis();
+    let (binding_overlap_repair_count, binding_overlap_repair_ms) =
+        close_binding_overlaps(pool, &bindings[closure_count..]).await?;
     let bindings_started = Instant::now();
     upsert_surface_bindings_without_snapshots(pool, &bindings[closure_count..]).await?;
     let bindings_upsert_ms = bindings_started.elapsed().as_millis();
@@ -579,8 +567,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     drop(bindings);
     let normalized_events_started = Instant::now();
     let normalized_event_count = events.len();
-    let normalized_event_inserted_count =
-        upsert_normalized_events_count_only(pool, &events).await?;
+    let event_inserted_count = upsert_normalized_events_count_only(pool, &events).await?;
     let normalized_events_upsert_ms = normalized_events_started.elapsed().as_millis();
     drop(events);
 
@@ -600,7 +587,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         binding_count,
         normalized_event_count,
         flushed_normalized_event_count = flushed_events.total_count,
-        normalized_event_inserted_count,
+        normalized_event_inserted_count = event_inserted_count,
         flushed_normalized_event_inserted_count = flushed_events.inserted_count,
         active_emitters_ms,
         raw_log_load_ms,
@@ -627,17 +614,14 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         "ENSv1 unwrapped-authority replay timing"
     );
 
-    let summary = EnsV1UnwrappedAuthoritySyncSummary {
+    let summary = build_summary(
         scanned_log_count,
         matched_log_count,
-        total_name_surface_count: surface_count,
-        total_resource_count: resource_count,
-        total_surface_binding_count: binding_count,
-        total_normalized_event_count: flushed_events.total_count + normalized_event_count,
-        total_normalized_event_inserted_count: flushed_events.inserted_count
-            + normalized_event_inserted_count,
+        (surface_count, resource_count, binding_count),
+        (flushed_events.total_count, flushed_events.inserted_count),
+        (normalized_event_count, event_inserted_count),
         by_kind,
-    };
+    );
     if let Some(checkpoint) = active_replay_checkpoint.as_mut() {
         checkpoint.mark_completed(pool, &summary).await?;
     }

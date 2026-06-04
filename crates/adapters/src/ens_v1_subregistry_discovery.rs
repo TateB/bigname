@@ -15,6 +15,7 @@ mod event;
 mod hex_topic;
 mod loader;
 mod migration_guard;
+mod reconciliation;
 mod replay;
 mod scope;
 
@@ -35,6 +36,7 @@ use loader::{
 use migration_guard::{
     current_registry_emitter, registry_migration_guard_action, rewrite_old_registry_assignment,
 };
+use reconciliation::reconcile_subregistry_discovery_from_checkpoint;
 use scope::{load_migrated_registry_nodes_before_block, normalized_registry_source_scope_targets};
 
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
@@ -408,45 +410,6 @@ fn empty_sync_summary() -> EnsV1SubregistryDiscoverySyncSummary {
         total_normalized_event_count: 0,
         total_normalized_event_inserted_count: 0,
     }
-}
-
-async fn reconcile_subregistry_discovery_from_checkpoint(
-    pool: &PgPool,
-    checkpoint: &SubregistryReplayCheckpoint,
-    discovery_sources: &[String],
-    reconciliation: &mut EnsV1SubregistryDiscoverySyncSummary,
-) -> Result<()> {
-    for discovery_source in discovery_sources {
-        let mut source_observations = Vec::new();
-        let mut after_key = None::<String>;
-        loop {
-            let page = checkpoint
-                .load_assignment_page(
-                    pool,
-                    discovery_source,
-                    after_key.as_deref(),
-                    SUBREGISTRY_CHECKPOINT_RECONCILIATION_PAGE_LIMIT,
-                )
-                .await?;
-            let Some((last_key, _)) = page.last() else {
-                break;
-            };
-            after_key = Some(last_key.clone());
-
-            source_observations.extend(
-                page.iter()
-                    .map(|(_, assignment)| assignment.discovery_observation())
-                    .collect::<Result<Vec<_>>>()?,
-            );
-        }
-        let source_reconciliation =
-            reconcile_discovery_observations(pool, discovery_source, &source_observations).await?;
-        reconciliation.active_edge_count += source_reconciliation.active_edge_count;
-        reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
-        reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
-        reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
-    }
-    Ok(())
 }
 
 async fn emit_registry_changed_events_from_checkpoint(

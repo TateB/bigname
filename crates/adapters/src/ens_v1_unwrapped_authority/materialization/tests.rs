@@ -630,6 +630,66 @@ async fn overlap_closure_queues_projection_invalidations_for_repaired_binding() 
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn overlap_closure_tolerates_missing_projection_invalidation_queue() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = MaterializationTestDatabase::new().await?;
+
+    let existing = adapter_binding_with_authority(
+        Uuid::from_u128(0x3100),
+        "ens:queue-missing.eth",
+        1_695_230_399,
+        "registry_only",
+        "registry-only:ethereum-mainnet:queue-missing",
+        "0x3100310031003100310031003100310031003100310031003100310031003100",
+    );
+    let incoming = adapter_binding_with_authority(
+        Uuid::from_u128(0x3101),
+        "ens:queue-missing.eth",
+        1_695_284_247,
+        "registrar",
+        "registrar:ethereum-mainnet:queue-missing",
+        "0x3101310131013101310131013101310131013101310131013101310131013101",
+    );
+
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        &[test_surface(
+            "ens:queue-missing.eth",
+            "queue-missing.eth",
+            "0x5100510051005100510051005100510051005100510051005100510051005100",
+        )],
+    )
+    .await?;
+    upsert_resources_without_snapshots(
+        database.pool(),
+        &[test_resource(
+            existing.resource_id,
+            "0x6100610061006100610061006100610061006100610061006100610061006100",
+        )],
+    )
+    .await?;
+    upsert_surface_bindings_without_snapshots(database.pool(), std::slice::from_ref(&existing))
+        .await?;
+    sqlx::query("DROP TABLE projection_invalidations")
+        .execute(database.pool())
+        .await?;
+
+    let repaired_count = close_weaker_overlapping_existing_surface_bindings(
+        database.pool(),
+        std::slice::from_ref(&incoming),
+    )
+    .await?;
+
+    assert_eq!(repaired_count, 1);
+    assert_eq!(
+        surface_binding_active_to(database.pool(), existing.surface_binding_id).await?,
+        Some(incoming.active_from)
+    );
+
+    database.cleanup().await
+}
+
 #[test]
 fn normalize_surface_bindings_tightens_duplicate_active_to() -> Result<()> {
     let earlier_close =

@@ -139,10 +139,6 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             .into_iter()
             .collect()
     }
-
-    pub(in crate::ens_v1_unwrapped_authority) fn watched_emitter_count(&self) -> usize {
-        self.watched_emitters.len()
-    }
 }
 
 fn append_routed_emitters_for_address(

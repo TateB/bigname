@@ -89,3 +89,12 @@ pub(super) async fn ensure_binding_authority_identity_rows(
 
     Ok(())
 }
+
+pub(super) async fn close_binding_overlaps(
+    pool: &PgPool,
+    bindings: &[SurfaceBinding],
+) -> Result<(usize, u128)> {
+    let started = Instant::now();
+    let count = close_weaker_overlapping_existing_surface_bindings(pool, bindings).await?;
+    Ok((count, started.elapsed().as_millis()))
+}
