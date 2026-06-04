@@ -504,11 +504,19 @@ async fn weaker_same_start_orphaning_preserves_event_backed_binding() -> Result<
     .await?;
     upsert_normalized_events(
         database.pool(),
-        &[surface_bound_event(
-            "event-backed-surface-bound",
-            &event_backed,
-            "registry-only:ethereum-mainnet:backed",
-        )],
+        &[
+            surface_bound_event(
+                "event-backed-surface-bound",
+                &event_backed,
+                "registry-only:ethereum-mainnet:backed",
+            ),
+            registration_granted_event(
+                "unbacked-registration-granted",
+                "ens:unbacked.eth",
+                unbacked.resource_id,
+                "0x1111111111111111111111111111111111111111",
+            ),
+        ],
     )
     .await?;
 
@@ -536,6 +544,88 @@ async fn weaker_same_start_orphaning_preserves_event_backed_binding() -> Result<
         surface_binding_canonicality(database.pool(), unbacked.surface_binding_id).await?,
         "orphaned"
     );
+    assert_projection_invalidation(database.pool(), "name_current", "ens:unbacked.eth").await?;
+    assert_projection_invalidation(
+        database.pool(),
+        "address_names_current",
+        "0x1111111111111111111111111111111111111111:ens:unbacked.eth",
+    )
+    .await?;
+    assert_no_projection_invalidation(database.pool(), "name_current", "ens:backed.eth").await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn overlap_closure_queues_projection_invalidations_for_repaired_binding() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = MaterializationTestDatabase::new().await?;
+
+    let existing = adapter_binding_with_authority(
+        Uuid::from_u128(0x3000),
+        "ens:closed.eth",
+        1_695_230_399,
+        "registry_only",
+        "registry-only:ethereum-mainnet:closed",
+        "0x3000300030003000300030003000300030003000300030003000300030003000",
+    );
+    let incoming = adapter_binding_with_authority(
+        Uuid::from_u128(0x3001),
+        "ens:closed.eth",
+        1_695_284_247,
+        "registrar",
+        "registrar:ethereum-mainnet:closed",
+        "0x3001300130013001300130013001300130013001300130013001300130013001",
+    );
+
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        &[test_surface(
+            "ens:closed.eth",
+            "closed.eth",
+            "0x5000500050005000500050005000500050005000500050005000500050005000",
+        )],
+    )
+    .await?;
+    upsert_resources_without_snapshots(
+        database.pool(),
+        &[test_resource(
+            existing.resource_id,
+            "0x6000600060006000600060006000600060006000600060006000600060006000",
+        )],
+    )
+    .await?;
+    upsert_surface_bindings_without_snapshots(database.pool(), std::slice::from_ref(&existing))
+        .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[registration_granted_event(
+            "closed-registration-granted",
+            "ens:closed.eth",
+            existing.resource_id,
+            "0x2222222222222222222222222222222222222222",
+        )],
+    )
+    .await?;
+
+    let repaired_count = close_weaker_overlapping_existing_surface_bindings(
+        database.pool(),
+        std::slice::from_ref(&incoming),
+    )
+    .await?;
+
+    assert_eq!(repaired_count, 1);
+    assert_eq!(
+        surface_binding_active_to(database.pool(), existing.surface_binding_id).await?,
+        Some(incoming.active_from)
+    );
+    assert_projection_invalidation(database.pool(), "name_current", "ens:closed.eth").await?;
+    assert_projection_invalidation(
+        database.pool(),
+        "address_names_current",
+        "0x2222222222222222222222222222222222222222:ens:closed.eth",
+    )
+    .await?;
 
     database.cleanup().await
 }
@@ -696,6 +786,38 @@ fn surface_bound_event(
     }
 }
 
+fn registration_granted_event(
+    event_identity: &str,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    registrant: &str,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: Some(resource_id),
+        event_kind: EVENT_KIND_REGISTRATION_GRANTED.to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(1),
+        block_hash: Some(
+            "0x7777777777777777777777777777777777777777777777777777777777777777".to_owned(),
+        ),
+        transaction_hash: Some(
+            "0xtxregistration000000000000000000000000000000000000000000000".to_owned(),
+        ),
+        log_index: Some(0),
+        raw_fact_ref: json!({}),
+        derivation_kind: DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({ "registrant": registrant }),
+    }
+}
+
 async fn surface_binding_canonicality(pool: &PgPool, surface_binding_id: Uuid) -> Result<String> {
     sqlx::query_scalar::<_, String>(
         "SELECT canonicality_state::TEXT FROM surface_bindings WHERE surface_binding_id = $1",
@@ -704,4 +826,67 @@ async fn surface_binding_canonicality(pool: &PgPool, surface_binding_id: Uuid) -
     .fetch_one(pool)
     .await
     .context("failed to load surface binding canonicality")
+}
+
+async fn surface_binding_active_to(
+    pool: &PgPool,
+    surface_binding_id: Uuid,
+) -> Result<Option<OffsetDateTime>> {
+    sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+        "SELECT active_to FROM surface_bindings WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load surface binding active_to")
+}
+
+async fn assert_projection_invalidation(
+    pool: &PgPool,
+    projection: &str,
+    projection_key: &str,
+) -> Result<()> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_invalidations
+        WHERE projection = $1
+          AND projection_key = $2
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!("failed to count projection invalidation {projection}:{projection_key}")
+    })?;
+
+    assert_eq!(count, 1);
+    Ok(())
+}
+
+async fn assert_no_projection_invalidation(
+    pool: &PgPool,
+    projection: &str,
+    projection_key: &str,
+) -> Result<()> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_invalidations
+        WHERE projection = $1
+          AND projection_key = $2
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!("failed to count projection invalidation {projection}:{projection_key}")
+    })?;
+
+    assert_eq!(count, 0);
+    Ok(())
 }

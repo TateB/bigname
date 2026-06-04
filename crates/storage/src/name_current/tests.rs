@@ -725,6 +725,64 @@ async fn name_current_excludes_rows_with_orphaned_backing_resources() -> Result<
 }
 
 #[tokio::test]
+async fn name_current_excludes_rows_with_closed_surface_bindings() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:alice.eth";
+    let token_lineage_id = Uuid::from_u128(0xb400);
+    let resource_id = Uuid::from_u128(0xb500);
+    let surface_binding_id = Uuid::from_u128(0xb600);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+    upsert_name_current_rows(
+        database.pool(),
+        &[name_current_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        )],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET active_to = $2
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(surface_binding_id)
+    .bind(timestamp(1_717_171_800))
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        load_name_current(database.pool(), logical_name_id).await?,
+        None
+    );
+
+    let loaded =
+        load_name_current_by_logical_name_ids(database.pool(), &[logical_name_id.to_owned()])
+            .await?;
+    assert!(loaded.is_empty());
+    assert_eq!(
+        NameCurrentRow::load_by_logical_name_ids(database.pool(), &[logical_name_id.to_owned()])
+            .await?,
+        loaded
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_current_upsert_replaces_existing_projection_row() -> Result<()> {
     let database = test_database().await?;
     let logical_name_id = "ens:alice.eth";

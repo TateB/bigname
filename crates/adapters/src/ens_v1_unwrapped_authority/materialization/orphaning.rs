@@ -23,7 +23,11 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
         active_from_epochs.push(candidate.active_from_epoch);
     }
 
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open stale surface-binding orphaning transaction")?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         WITH candidate(
             surface_binding_id,
@@ -59,7 +63,9 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
                 AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
                 AND normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
           )
-        RETURNING surface_bindings.surface_binding_id
+        RETURNING
+            surface_bindings.surface_binding_id,
+            surface_bindings.logical_name_id
         "#,
     )
     .bind(&surface_binding_ids)
@@ -67,7 +73,7 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
     .bind(&logical_name_ids)
     .bind(&authority_keys)
     .bind(&active_from_epochs)
-    .fetch_all(pool)
+    .fetch_all(transaction.as_mut())
     .await
     .context(
         "failed to orphan stale overlapping surface bindings before restricted authority replay",
@@ -77,7 +83,25 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
         return Ok(0);
     }
 
-    let orphaned_ids = rows.into_iter().collect::<HashSet<_>>();
+    let orphaned_ids = rows
+        .iter()
+        .map(|(surface_binding_id, _)| *surface_binding_id)
+        .collect::<HashSet<_>>();
+    let invalidated_logical_name_ids = rows
+        .iter()
+        .map(|(_, logical_name_id)| logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    queue_surface_binding_projection_invalidations(
+        transaction.as_mut(),
+        &invalidated_logical_name_ids,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit stale surface-binding orphaning transaction")?;
     existing.retain(|binding| !orphaned_ids.contains(&binding.surface_binding_id));
 
     tracing::warn!(
@@ -114,7 +138,11 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
         active_froms.push(candidate.active_from);
     }
 
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open weaker same-start surface-binding orphaning transaction")?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         WITH candidate(
             surface_binding_id,
@@ -155,7 +183,9 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
                 AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
                 AND normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
           )
-        RETURNING surface_bindings.surface_binding_id
+        RETURNING
+            surface_bindings.surface_binding_id,
+            surface_bindings.logical_name_id
         "#,
     )
     .bind(&surface_binding_ids)
@@ -164,7 +194,7 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
     .bind(&authority_keys)
     .bind(&active_from_epochs)
     .bind(&active_froms)
-    .fetch_all(pool)
+    .fetch_all(transaction.as_mut())
     .await
     .context(
         "failed to orphan weaker same-start surface bindings before restricted authority replay",
@@ -174,7 +204,25 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
         return Ok(0);
     }
 
-    let orphaned_ids = rows.into_iter().collect::<HashSet<_>>();
+    let orphaned_ids = rows
+        .iter()
+        .map(|(surface_binding_id, _)| *surface_binding_id)
+        .collect::<HashSet<_>>();
+    let invalidated_logical_name_ids = rows
+        .iter()
+        .map(|(_, logical_name_id)| logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    queue_surface_binding_projection_invalidations(
+        transaction.as_mut(),
+        &invalidated_logical_name_ids,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit weaker same-start surface-binding orphaning transaction")?;
     existing.retain(|binding| !orphaned_ids.contains(&binding.surface_binding_id));
 
     tracing::warn!(

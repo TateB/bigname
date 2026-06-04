@@ -568,6 +568,60 @@ async fn address_names_current_filters_noncanonical_supporting_identity_rows() -
 }
 
 #[tokio::test]
+async fn address_names_current_filters_closed_surface_bindings() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:closed.eth";
+    let token_lineage_id = Uuid::from_u128(0x3101);
+    let resource_id = Uuid::from_u128(0x3201);
+    let surface_binding_id = Uuid::from_u128(0x3301);
+
+    seed_relation_references(
+        &database,
+        logical_name_id,
+        "closed.eth",
+        resource_id,
+        Some(token_lineage_id),
+        surface_binding_id,
+        CanonicalityState::Finalized,
+    )
+    .await?;
+
+    let row = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id,
+        display_name: "closed.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id: Some(token_lineage_id),
+        manifest_version: 1,
+    });
+    upsert_name_current_rows(database.pool(), &[name_current_row(&row)]).await?;
+    upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&row)).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET active_to = $2
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(surface_binding_id)
+    .bind(timestamp(1_717_171_800))
+    .execute(database.pool())
+    .await?;
+
+    assert!(
+        load_address_names_current(database.pool(), address, None, None)
+            .await?
+            .is_empty()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_names_current_full_rebuild_counts_use_name_current_readability() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";
