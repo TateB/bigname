@@ -93,3 +93,24 @@ pub(crate) fn projection_coverage(
         "enumeration_basis": enumeration_basis,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::json_i64;
+
+    #[test]
+    fn json_i64_reads_real_timestamps_and_drops_the_no_expiry_sentinel() {
+        // Decode stays faithful: the raw on-chain `uint64` expiry lands in the event JSON, including
+        // ENSv2's `type(uint64).max` "reserved forever / no expiry" sentinel. The projection reads it
+        // here; an unrepresentable value is treated as absent (`None`) — so a permanent name projects
+        // to a `null` expiry rather than a fabricated far-future date.
+        assert_eq!(
+            json_i64(&json!({ "expiry": 1_900_000_000 }), &["expiry"]),
+            Some(1_900_000_000)
+        );
+        assert_eq!(json_i64(&json!({ "expiry": u64::MAX }), &["expiry"]), None);
+        assert_eq!(json_i64(&json!({}), &["expiry"]), None);
+    }
+}

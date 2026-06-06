@@ -1,5 +1,5 @@
 use alloy_sol_types::sol;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::{
@@ -81,7 +81,7 @@ pub(super) fn build_registry_observation(
             labelhash: prefixed_hex_string(event.labelHash.as_slice()),
             label: event.label,
             owner: address_hex(event.owner),
-            expiry: i64::try_from(event.expiry).context("LabelRegistered expiry exceeds i64")?,
+            expiry: event.expiry,
             sender: address_hex(event.sender),
             reference,
         }));
@@ -97,7 +97,7 @@ pub(super) fn build_registry_observation(
             token_id: u256_word_hex(event.tokenId),
             labelhash: prefixed_hex_string(event.labelHash.as_slice()),
             label: event.label,
-            expiry: i64::try_from(event.expiry).context("LabelReserved expiry exceeds i64")?,
+            expiry: event.expiry,
             sender: address_hex(event.sender),
             reference,
         }));
@@ -124,8 +124,7 @@ pub(super) fn build_registry_observation(
         )?;
         return Ok(Some(RegistryObservation::ExpiryUpdated {
             token_id: u256_word_hex(event.tokenId),
-            new_expiry: i64::try_from(event.newExpiry)
-                .context("ExpiryUpdated new expiry exceeds i64")?,
+            new_expiry: event.newExpiry,
             sender: address_hex(event.sender),
             reference,
         }));

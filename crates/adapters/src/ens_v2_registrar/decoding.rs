@@ -1,10 +1,11 @@
 use alloy_sol_types::sol;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 pub(super) use crate::ens_v2_common::{hex_string, normalize_address};
 use crate::evm_abi::{
-    address_hex, decode_event_log, hex_string as prefixed_hex_string, u256_word_hex,
+    address_hex, decode_event_log, hex_string as prefixed_hex_string, saturating_seconds_i64,
+    u256_word_hex,
 };
 
 use super::{
@@ -56,7 +57,7 @@ pub(super) enum RegistrarObservation {
         token_id: String,
         label: String,
         duration: i64,
-        new_expiry: i64,
+        new_expiry: u64,
         payment_token: String,
         referrer: String,
         base: String,
@@ -83,8 +84,7 @@ pub(super) fn build_registrar_observation(
             owner: address_hex(event.owner),
             subregistry: address_hex(event.subregistry),
             resolver: address_hex(event.resolver),
-            duration: i64::try_from(event.duration)
-                .context("NameRegistered duration exceeds i64")?,
+            duration: saturating_seconds_i64(event.duration),
             payment_token: address_hex(event.paymentToken),
             referrer: prefixed_hex_string(event.referrer.as_slice()),
             base: u256_word_hex(event.base),
@@ -101,8 +101,8 @@ pub(super) fn build_registrar_observation(
         return Ok(Some(RegistrarObservation::NameRenewed {
             token_id: u256_word_hex(event.tokenId),
             label: event.label,
-            duration: i64::try_from(event.duration).context("NameRenewed duration exceeds i64")?,
-            new_expiry: i64::try_from(event.newExpiry).context("NameRenewed expiry exceeds i64")?,
+            duration: saturating_seconds_i64(event.duration),
+            new_expiry: event.newExpiry,
             payment_token: address_hex(event.paymentToken),
             referrer: prefixed_hex_string(event.referrer.as_slice()),
             base: u256_word_hex(event.base),

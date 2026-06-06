@@ -41,6 +41,15 @@ pub(crate) fn u256_i64(value: U256, label: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{label} exceeds i64"))
 }
 
+/// Saturating `u64` -> `i64` for non-date second counts (e.g. registration durations). Decode stays
+/// faithful to the on-chain value; this only guards against a pathological `> i64::MAX` duration
+/// aborting the decode on a strict `try_from`. Timestamp/expiry fields are NOT converted here — they
+/// carry the raw `u64` (incl. the `type(uint64).max` "no expiry" sentinel) into the normalized event,
+/// and the name_current projection interprets it.
+pub(crate) fn saturating_seconds_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 pub(crate) fn u256_word_hex(value: U256) -> String {
     hex_string(value.to_be_bytes::<ABI_WORD_BYTES>())
 }
@@ -127,4 +136,16 @@ pub(crate) fn namehash_bytes(labels: &[Vec<u8>]) -> [u8; ABI_WORD_BYTES] {
         node = keccak256_bytes(&combined);
     }
     node
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saturating_seconds_i64;
+
+    #[test]
+    fn saturating_seconds_i64_clamps_durations_without_panicking() {
+        assert_eq!(saturating_seconds_i64(0), 0);
+        assert_eq!(saturating_seconds_i64(31_536_000), 31_536_000);
+        assert_eq!(saturating_seconds_i64(u64::MAX), i64::MAX);
+    }
 }
