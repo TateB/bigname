@@ -60,6 +60,9 @@ impl NameCurrentAddressRelationFilter {
 pub struct NameCurrentAddressFilter {
     pub address: String,
     pub relation: NameCurrentAddressRelationFilter,
+    /// When set (and non-empty), the address-membership CTE matches any address in this list
+    /// (`anc.address = ANY($list)`), superseding `address`. Backs the subgraph `owner_in` filter.
+    pub addresses: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -71,6 +74,10 @@ pub struct NameCurrentListFilter {
     pub contains_nocase: Option<String>,
     pub resolver: Option<String>,
     pub address: Option<NameCurrentAddressFilter>,
+    /// When `Some(true)`, restrict to names whose declared registration authority is the ENS v2
+    /// registry (`declared_summary.registration.authority_kind = 'ens_v2_registry'`). Backs the
+    /// subgraph `isMigrated` filter. `Some(false)` / `None` apply no migration predicate.
+    pub is_migrated: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -164,30 +171,11 @@ const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
   )
 "#;
 
-pub async fn load_name_current_list_page(
-    pool: &PgPool,
-    filter: &NameCurrentListFilter,
-    sort: NameCurrentListSort,
-    order: NameCurrentListOrder,
-    cursor: Option<&NameCurrentListCursor>,
-    page_size: u64,
-) -> Result<NameCurrentListPage> {
-    let page_size = checked_page_size_usize(
-        page_size,
-        "name_current list page_size must be positive",
-        "name_current list page_size does not fit in usize",
-    )?;
-    let page_limit = checked_page_limit_i64_from_usize(
-        page_size,
-        "name_current list page_size is too large",
-        "name_current list page_size exceeds SQL limit",
-    )?;
-    let total_count = count_name_current_list(pool, filter).await?;
-
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, filter);
-    builder.push(
-        r#"
+/// Shared projection of the derived list columns from the `filtered_names` CTE. Every list/count
+/// read path appends its own `WHERE` / `ORDER BY` / `LIMIT` after this so the column shape that
+/// [`decode_name_current_list_row`] decodes stays identical across cursor, offset, and by-namehash
+/// reads.
+const NAME_CURRENT_LIST_SELECT: &str = r#"
         SELECT
             logical_name_id,
             namespace,
@@ -214,9 +202,32 @@ pub async fn load_name_current_list_page(
             expiry_date,
             resolver_address
         FROM filtered_names
-        WHERE TRUE
-        "#,
-    );
+"#;
+
+pub async fn load_name_current_list_page(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    sort: NameCurrentListSort,
+    order: NameCurrentListOrder,
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+) -> Result<NameCurrentListPage> {
+    let page_size = checked_page_size_usize(
+        page_size,
+        "name_current list page_size must be positive",
+        "name_current list page_size does not fit in usize",
+    )?;
+    let page_limit = checked_page_limit_i64_from_usize(
+        page_size,
+        "name_current list page_size is too large",
+        "name_current list page_size exceeds SQL limit",
+    )?;
+    let total_count = count_name_current_list(pool, filter).await?;
+
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, filter);
+    builder.push(NAME_CURRENT_LIST_SELECT);
+    builder.push(" WHERE TRUE ");
     if let Some(cursor) = cursor {
         push_name_current_list_cursor_after(&mut builder, sort, order, cursor);
     }
@@ -246,6 +257,74 @@ pub async fn load_name_current_list_page(
         next_cursor,
         total_count,
     })
+}
+
+/// Load a single derived list row by EIP-137 namehash (case-insensitive), or `None` if no current
+/// name matches. Reuses the list CTE so the caller gets the same derived
+/// owner / token_id / dates / resolver_address as paged reads, rather than the bare projection row
+/// from [`load_name_current`](super::load_name_current).
+pub async fn load_name_current_list_row_by_namehash(
+    pool: &PgPool,
+    namehash: &str,
+) -> Result<Option<NameCurrentListRow>> {
+    let filter = NameCurrentListFilter::default();
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, &filter);
+    builder.push(NAME_CURRENT_LIST_SELECT);
+    builder.push(" WHERE LOWER(namehash) = LOWER(");
+    builder.push_bind(namehash);
+    builder.push(") LIMIT 1");
+
+    let row = builder
+        .build()
+        .fetch_optional(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load name_current compact row for namehash {namehash}")
+        })?;
+    row.map(decode_name_current_list_row).transpose()
+}
+
+/// Load a derived list page by absolute `LIMIT`/`OFFSET` instead of a keyset cursor. Applies the
+/// same ordering and total-order tie-break as [`load_name_current_list_page`], so windows are
+/// stable and disjoint across offsets. Bridges the subgraph `first`/`skip` paging onto the
+/// otherwise cursor-only storage; the caller counts separately via [`count_name_current_list`] when
+/// a total is needed.
+pub async fn load_name_current_list_page_offset(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    sort: NameCurrentListSort,
+    order: NameCurrentListOrder,
+    limit: u64,
+    offset: u64,
+) -> Result<Vec<NameCurrentListRow>> {
+    let page_size = checked_page_size_usize(
+        limit,
+        "name_current offset page limit must be positive",
+        "name_current offset page limit does not fit in usize",
+    )?;
+    // Bind the exact LIMIT — unlike the keyset reader, offset paging must not fetch the extra
+    // sentinel row `checked_page_limit_i64_from_usize` adds for next-page detection.
+    let page_limit =
+        i64::try_from(page_size).context("name_current offset page limit exceeds SQL limit")?;
+    let page_offset = i64::try_from(offset).context("name_current offset does not fit in i64")?;
+
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, filter);
+    builder.push(NAME_CURRENT_LIST_SELECT);
+    builder.push(" WHERE TRUE ");
+    push_name_current_list_order(&mut builder, sort, order);
+    builder.push(" LIMIT ");
+    builder.push_bind(page_limit);
+    builder.push(" OFFSET ");
+    builder.push_bind(page_offset);
+
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load name_current offset page for {filter:?}"))?;
+    rows.into_iter().map(decode_name_current_list_row).collect()
 }
 
 pub async fn count_name_current_list(pool: &PgPool, filter: &NameCurrentListFilter) -> Result<u64> {
@@ -390,10 +469,19 @@ fn push_address_membership_cte<'a>(
               ON membership_binding.surface_binding_id = anc.surface_binding_id
             LEFT JOIN token_lineages membership_token_lineage
               ON membership_token_lineage.token_lineage_id = anc.token_lineage_id
-            WHERE anc.address =
-        "#,
+            WHERE "#,
     );
-    builder.push_bind(&address_filter.address);
+    match address_filter.addresses.as_ref() {
+        Some(addresses) => {
+            builder.push("anc.address = ANY(");
+            builder.push_bind(addresses.as_slice());
+            builder.push(")");
+        }
+        None => {
+            builder.push("anc.address = ");
+            builder.push_bind(&address_filter.address);
+        }
+    }
     if let Some(namespace) = namespace {
         builder.push(" AND anc.namespace = ");
         builder.push_bind(namespace);
@@ -439,6 +527,11 @@ fn push_name_current_filter_predicates<'a>(
     if let Some(resolver) = filter.resolver.as_deref() {
         builder.push(" AND LOWER(nc.declared_summary #>> '{resolver,address}') = ");
         builder.push_bind(resolver);
+    }
+    if filter.is_migrated == Some(true) {
+        builder.push(
+            " AND (nc.declared_summary #>> '{registration,authority_kind}') = 'ens_v2_registry'",
+        );
     }
 }
 

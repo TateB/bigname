@@ -51,7 +51,8 @@ pub(crate) fn app_router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(openapi_docs))
         .route("/docs/", get(openapi_docs))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(crate::graphql::graphql_routes(state))
 }
 
 async fn openapi_json() -> Json<JsonValue> {

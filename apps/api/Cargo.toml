@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 anyhow.workspace = true
+async-graphql.workspace = true
+async-graphql-axum.workspace = true
 axum.workspace = true
 clap.workspace = true
 hex = "0.4.3"

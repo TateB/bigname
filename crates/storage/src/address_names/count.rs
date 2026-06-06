@@ -39,7 +39,9 @@ pub async fn count_address_names_current_for_app_filter(
             address: Some(NameCurrentAddressFilter {
                 address: filter.address.clone(),
                 relation: filter.relation,
+                addresses: None,
             }),
+            is_migrated: None,
         },
     )
     .await

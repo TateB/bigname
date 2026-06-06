@@ -42,6 +42,7 @@ use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod errors;
+mod graphql;
 mod pagination;
 mod query;
 mod routes;

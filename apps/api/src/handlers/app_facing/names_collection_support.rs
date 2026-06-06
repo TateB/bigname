@@ -101,6 +101,7 @@ fn parse_names_request(query: NamesQuery) -> ApiResult<ParsedNamesRequest> {
             contains_nocase,
             resolver,
             address,
+            is_migrated: None,
         },
         sort,
         order,
@@ -145,6 +146,7 @@ fn parse_names_address_filter(
             relation: bigname_storage::NameCurrentAddressRelationFilter::Relation(
                 AddressNameRelation::TokenHolder,
             ),
+            addresses: None,
         })),
         (Some(_), None, None, Some(_)) => Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -164,6 +166,7 @@ fn parse_names_address_filter(
             relation: bigname_storage::NameCurrentAddressRelationFilter::Relation(
                 AddressNameRelation::Registrant,
             ),
+            addresses: None,
         })),
         (None, None, Some(_), Some(_)) => Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -174,6 +177,7 @@ fn parse_names_address_filter(
             bigname_storage::NameCurrentAddressFilter {
                 address: account,
                 relation: relation.unwrap_or(bigname_storage::NameCurrentAddressRelationFilter::Any),
+                addresses: None,
             },
         )),
         (None, None, None, Some(_)) => Err(ApiError {

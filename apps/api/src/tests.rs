@@ -86,6 +86,8 @@ include!("tests/collections.rs");
 
 include!("tests/names_collection.rs");
 
+include!("tests/graphql.rs");
+
 include!("tests/records.rs");
 
 include!("tests/identity.rs");
