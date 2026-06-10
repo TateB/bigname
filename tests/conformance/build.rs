@@ -234,7 +234,6 @@ fn rewrite_openapi_components(source: &str) -> String {
                 "normalized_event_ids",
                 "raw_fact_refs",
                 "manifest_versions",
-                "execution_trace_id",
                 "derivation_kind",
             ],
             "properties": {
@@ -251,7 +250,7 @@ fn rewrite_openapi_components(source: &str) -> String {
                     "items": {},
                 },
                 "execution_trace_id": {
-                    "type": ["string", "null"],
+                    "type": "string",
                 },
                 "derivation_kind": {
                     "type": "string",

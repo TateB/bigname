@@ -42,7 +42,6 @@ pub(super) fn openapi_components() -> JsonValue {
                     "normalized_event_ids",
                     "raw_fact_refs",
                     "manifest_versions",
-                    "execution_trace_id",
                     "derivation_kind",
                 ],
                 "properties": {
@@ -59,7 +58,7 @@ pub(super) fn openapi_components() -> JsonValue {
                         "items": {},
                     },
                     "execution_trace_id": {
-                        "type": ["string", "null"],
+                        "type": "string",
                     },
                     "derivation_kind": {
                         "type": "string",

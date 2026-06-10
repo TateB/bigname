@@ -2287,14 +2287,23 @@
             );
             assert_eq!(name_payload["verified_state"], Value::Null);
             assert_eq!(coverage_payload["verified_state"], Value::Null);
+            assert_eq!(name_payload["provenance"], Value::Null);
+            let coverage_provenance = coverage_payload["provenance"]
+                .as_object()
+                .expect("coverage route provenance must be an object");
             assert_eq!(
-                name_payload["provenance"]["derivation_kind"],
-                json!("name_current_rebuild")
+                coverage_provenance.get("derivation_kind"),
+                Some(&json!("name_current_rebuild"))
+            );
+            assert!(
+                !coverage_provenance.contains_key("execution_trace_id"),
+                "declared-only coverage provenance must omit execution_trace_id"
             );
 
-            let manifest_versions = name_payload["provenance"]["manifest_versions"]
-                .as_array()
-                .expect("name provenance manifest_versions must be an array");
+            let manifest_versions = coverage_provenance
+                .get("manifest_versions")
+                .and_then(Value::as_array)
+                .expect("coverage provenance manifest_versions must be an array");
             assert!(manifest_versions.iter().any(|entry| {
                 entry.get("source_family") == Some(&json!("ens_v2_registry_l1"))
                     && entry.get("manifest_version") == Some(&json!(11))
@@ -2490,7 +2499,7 @@
                 },
                 ReplayRoute {
                     label: "children-collection",
-                    uri: "/v1/names/ens/parent.eth/children".to_owned(),
+                    uri: "/v1/names/ens/parent.eth/children?meta=full".to_owned(),
                 },
                 ReplayRoute {
                     label: "address-names-collection",

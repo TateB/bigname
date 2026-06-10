@@ -1615,6 +1615,7 @@ dependencies = [
  "bigname-domain",
  "bigname-manifests",
  "bigname-storage",
+ "bigname-test-support",
  "bytes",
  "clap",
  "jsonwebtoken",

@@ -4894,7 +4894,6 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
                 "chain": chain_id,
                 "deployment_epoch": "ens_v2",
             }],
-            "execution_trace_id": null,
             "derivation_kind": "resolver_current_rebuild",
         })
     );

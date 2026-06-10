@@ -10,6 +10,8 @@ mod bootstrap_backfill;
 mod cli;
 #[path = "main/ens_v1_resolver.rs"]
 mod ens_v1_resolver;
+#[path = "main/healthcheck.rs"]
+mod healthcheck;
 #[path = "main/normalized_replay_catchup.rs"]
 mod normalized_replay_catchup;
 #[path = "main/ops_catchup.rs"]
@@ -66,8 +68,8 @@ use bigname_storage::{
 use bootstrap_backfill::*;
 use clap::Parser;
 use cli::{
-    BackfillArgs, Cli, Command, OpsCatchupArgs, RepairArgs, RepairCommand, ReplayArgs,
-    ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
+    BackfillArgs, Cli, Command, HealthcheckArgs, OpsCatchupArgs, RepairArgs, RepairCommand,
+    ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
 };
 #[allow(unused_imports)]
 use provider::{
@@ -94,12 +96,17 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
+        Command::Healthcheck(args) => run_healthcheck(args).await,
         Command::Backfill(args) => run_backfill(args).await,
         Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
         Command::Rewind(args) => run_rewind(args).await.map(|_| ()),
         Command::Repair(args) => run_repair(args).await,
     }
+}
+
+async fn run_healthcheck(args: HealthcheckArgs) -> Result<()> {
+    healthcheck::healthcheck(args).await
 }
 
 async fn run_backfill(args: BackfillArgs) -> Result<()> {

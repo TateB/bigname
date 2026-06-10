@@ -200,7 +200,7 @@
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/parent.eth/children")
+                        .uri("/v1/names/ens/parent.eth/children?view=full")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -245,7 +245,6 @@
                         "source_family": "ens_v1_registry_l1",
                         "source_manifest_id": null
                     }],
-                    "execution_trace_id": null,
                     "derivation_kind": "children_current_rebuild"
                 })
             );
@@ -282,7 +281,7 @@
             let first_page_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/parent.eth/children?page_size=1")
+                        .uri("/v1/names/ens/parent.eth/children?view=full&page_size=1")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -300,7 +299,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                            "/v1/names/ens/parent.eth/children?view=full&page_size=1&cursor={cursor}"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -314,7 +313,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                            "/v1/names/ens/parent.eth/children?view=full&page_size=1&cursor={cursor}"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -359,7 +358,7 @@
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/parent.eth/children")
+                        .uri("/v1/names/ens/parent.eth/children?view=full")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -475,7 +474,7 @@
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/parent.eth/children?include=counts")
+                        .uri("/v1/names/ens/parent.eth/children?view=full&include=counts")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -544,7 +543,7 @@
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/basenames/base.eth/children")
+                        .uri("/v1/names/basenames/base.eth/children?view=full")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -587,7 +586,6 @@
                         "source_family": "basenames_base_registry",
                         "source_manifest_id": null
                     }],
-                    "execution_trace_id": null,
                     "derivation_kind": "children_current_rebuild"
                 })
             );
@@ -2025,7 +2023,10 @@
                     }],
                 }))
             );
-            assert_eq!(payload.provenance["execution_trace_id"], json!(null));
+            assert!(
+                payload.provenance.get("execution_trace_id").is_none(),
+                "declared-only address-name provenance must omit execution_trace_id"
+            );
             assert!(
                 payload.provenance["manifest_versions"]
                     .as_array()
@@ -2177,7 +2178,7 @@
             let children_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/perf-parent.eth/children")
+                        .uri("/v1/names/ens/perf-parent.eth/children?view=full")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2191,7 +2192,7 @@
             let children_first_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/names/ens/perf-parent.eth/children?page_size=11")
+                        .uri("/v1/names/ens/perf-parent.eth/children?view=full&page_size=11")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2208,7 +2209,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_cursor}"
+                            "/v1/names/ens/perf-parent.eth/children?view=full&page_size=11&cursor={children_cursor}"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -2226,7 +2227,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_third_cursor}"
+                            "/v1/names/ens/perf-parent.eth/children?view=full&page_size=11&cursor={children_third_cursor}"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -2239,7 +2240,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_cursor}"
+                            "/v1/names/ens/perf-parent.eth/children?view=full&page_size=11&cursor={children_cursor}"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),

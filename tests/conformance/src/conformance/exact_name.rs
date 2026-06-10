@@ -273,7 +273,11 @@ async fn ensv2_sepolia_dev_coverage_contract_matches_supported_exact_name_bounda
     let expected_coverage = ensv2_sepolia_dev_exact_name_coverage();
 
     assert_eq!(coverage_payload.data, name_payload.data);
-    assert_eq!(coverage_payload.provenance, name_payload.provenance);
+    assert_exact_name_default_provenance(&name_payload);
+    assert_diagnostic_name_current_provenance(
+        &coverage_payload,
+        &[("ens_v2_registry_l1", 11), ("ens_v2_registrar_l1", 11)],
+    );
     assert_eq!(
         coverage_payload.chain_positions,
         name_payload.chain_positions
@@ -342,7 +346,8 @@ async fn surface_binding_explain_contract_is_declared_only_with_exact_name_cover
         .expect("history summary must be present");
 
     assert_eq!(explain_payload.data, name_payload.data);
-    assert_eq!(explain_payload.provenance, name_payload.provenance);
+    assert_exact_name_default_provenance(&name_payload);
+    assert_diagnostic_name_current_provenance(&explain_payload, &[("ens_v1_registrar_l1", 7)]);
     assert_eq!(explain_payload.coverage, name_payload.coverage);
     assert_eq!(
         explain_payload.chain_positions,
@@ -553,7 +558,8 @@ async fn authority_control_explain_contract_is_declared_only_with_exact_name_cov
     let control = exact_name_control_summary();
 
     assert_eq!(explain_payload.data, name_payload.data);
-    assert_eq!(explain_payload.provenance, name_payload.provenance);
+    assert_exact_name_default_provenance(&name_payload);
+    assert_diagnostic_name_current_provenance(&explain_payload, &[("ens_v1_registrar_l1", 7)]);
     assert_eq!(explain_payload.coverage, name_payload.coverage);
     assert_eq!(
         explain_payload.chain_positions,
@@ -761,7 +767,15 @@ async fn basenames_coverage_contract_returns_shared_exact_name_coverage() -> Res
 
     assert_eq!(coverage_payload.data, name_payload.data);
     assert_eq!(coverage_payload.coverage, name_payload.coverage);
-    assert_eq!(coverage_payload.provenance, name_payload.provenance);
+    assert_exact_name_default_provenance(&name_payload);
+    assert_diagnostic_name_current_provenance(
+        &coverage_payload,
+        &[
+            ("basenames_base_registrar", 3),
+            ("basenames_base_registry", 3),
+            ("basenames_base_resolver", 4),
+        ],
+    );
     assert_eq!(
         coverage_payload.chain_positions,
         name_payload.chain_positions
@@ -845,7 +859,15 @@ async fn basenames_exact_name_explain_contract_reuses_rebuilt_projection_envelop
 
     assert_eq!(surface_payload.data, name_payload.data);
     assert_eq!(surface_payload.coverage, name_payload.coverage);
-    assert_eq!(surface_payload.provenance, name_payload.provenance);
+    assert_exact_name_default_provenance(&name_payload);
+    assert_diagnostic_name_current_provenance(
+        &surface_payload,
+        &[
+            ("basenames_base_registrar", 3),
+            ("basenames_base_registry", 3),
+            ("basenames_base_resolver", 4),
+        ],
+    );
     assert_eq!(
         surface_payload.chain_positions,
         name_payload.chain_positions
@@ -863,7 +885,14 @@ async fn basenames_exact_name_explain_contract_reuses_rebuilt_projection_envelop
 
     assert_eq!(authority_payload.data, name_payload.data);
     assert_eq!(authority_payload.coverage, name_payload.coverage);
-    assert_eq!(authority_payload.provenance, name_payload.provenance);
+    assert_diagnostic_name_current_provenance(
+        &authority_payload,
+        &[
+            ("basenames_base_registrar", 3),
+            ("basenames_base_registry", 3),
+            ("basenames_base_resolver", 4),
+        ],
+    );
     assert_eq!(
         authority_payload.chain_positions,
         name_payload.chain_positions
@@ -881,4 +910,49 @@ async fn basenames_exact_name_explain_contract_reuses_rebuilt_projection_envelop
 
     database.cleanup().await?;
     Ok(())
+}
+
+fn assert_exact_name_default_provenance(payload: &NameResponse) {
+    assert!(
+        payload.provenance.is_null(),
+        "exact-name route must omit route-level provenance by default"
+    );
+}
+
+fn assert_diagnostic_name_current_provenance(
+    payload: &NameResponse,
+    expected_manifest_versions: &[(&str, i64)],
+) {
+    let provenance = payload
+        .provenance
+        .as_object()
+        .expect("diagnostic route provenance must be an object");
+    assert_eq!(
+        provenance.get("derivation_kind").and_then(Value::as_str),
+        Some("name_current_rebuild")
+    );
+    assert!(
+        !provenance.contains_key("execution_trace_id"),
+        "declared-only diagnostic route provenance must omit execution_trace_id"
+    );
+
+    let manifest_versions = provenance
+        .get("manifest_versions")
+        .and_then(Value::as_array)
+        .expect("diagnostic route provenance manifest_versions must be an array");
+    assert!(
+        !manifest_versions.is_empty(),
+        "diagnostic route provenance must include manifest_versions"
+    );
+
+    for &(source_family, manifest_version) in expected_manifest_versions {
+        assert!(
+            manifest_versions.iter().any(|manifest| {
+                manifest.get("source_family").and_then(Value::as_str) == Some(source_family)
+                    && manifest.get("manifest_version").and_then(Value::as_i64)
+                        == Some(manifest_version)
+            }),
+            "diagnostic route provenance manifest_versions must include {source_family}@{manifest_version}: {manifest_versions:?}"
+        );
+    }
 }

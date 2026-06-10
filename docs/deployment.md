@@ -304,9 +304,9 @@ The repository publishes the image to:
 ghcr.io/tateb/bigname
 ```
 
-The GitHub Actions workflow publishes `latest` on the default branch and a short
-commit SHA tag on every push to `main`. Tags pushed to the repository are also
-published with the same tag name.
+The GitHub Actions workflow publishes only after the full CI workflow succeeds
+for a push to `main`. Successful main pushes publish `latest` and the short
+commit SHA tag. Release-tag image publishing is deferred and is not automatic.
 
 Manual publish from an authenticated checkout:
 

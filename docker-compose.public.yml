@@ -5,7 +5,8 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "${BIGNAME_PUBLIC_HTTP_PORT:-80}:80"
       - "${BIGNAME_PUBLIC_HTTPS_PORT:-443}:443"

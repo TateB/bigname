@@ -210,6 +210,7 @@ pub(crate) struct NamespaceMetadataProvenance {
     pub(crate) normalized_event_ids: Vec<String>,
     pub(crate) raw_fact_refs: Vec<String>,
     pub(crate) manifest_versions: Vec<ManifestVersionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) execution_trace_id: Option<String>,
     pub(crate) derivation_kind: String,
 }
@@ -259,6 +260,7 @@ pub(crate) struct NamespaceManifestsProvenance {
     pub(crate) normalized_event_ids: Vec<String>,
     pub(crate) raw_fact_refs: Vec<String>,
     pub(crate) manifest_versions: Vec<ManifestVersionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) execution_trace_id: Option<String>,
     pub(crate) derivation_kind: String,
 }
