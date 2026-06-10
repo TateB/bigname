@@ -349,6 +349,8 @@ fn build_collection_provenance_from_refs(
             "manifest_versions",
         )),
     );
+    // Collection provenance is a route-level summary; if execution-backed rows
+    // are later admitted, the first non-null trace id is the representative id.
     if let Some(execution_trace_id) = provenances
         .iter()
         .filter_map(|provenance| string_field(provenance_field(provenance, "execution_trace_id")))

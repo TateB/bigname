@@ -62,7 +62,7 @@ For each workstream:
 
 | Stream | Status | Branch | PR | Notes |
 | --- | --- | --- | --- | --- |
-| WS-H Safety net & docs | in progress | `fix/ws-h-safety-net-docs` | — | PR-ready locally after final gates; WS-H P0 checkboxes are closed on the branch; approved cross-scope healthcheck command patch touches indexer/worker; Docker publishes only from successful CI on main, with release-tag publishing deferred rather than left as an ungated path; awaiting supervisor instruction to stage/commit/open PR; no other stream merges to main before WS-H P0s land |
+| WS-H Safety net & docs | PR open | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | WS-H P0 checkboxes are closed on the branch; approved cross-scope healthcheck command patch touches indexer/worker; Docker publishes only from successful CI on main, with release-tag publishing deferred rather than left as an ungated path; no other stream merges to main before WS-H P0s land |
 | WS-A ENSv1 authority | not started | `fix/ens-v1-registry-owner-authority` | — | Items 1–3 gate the existing fix branch; may be prepared there but must not merge to main before WS-H |
 | WS-B ENSv2 + preimage | not started | — | — | |
 | WS-C Projection pipeline | not started | — | — | Will need a migration (dead-letter) — WS-F review |

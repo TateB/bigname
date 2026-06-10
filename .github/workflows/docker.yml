@@ -13,6 +13,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
 env:
   RUST_VERSION: 1.93.1
 

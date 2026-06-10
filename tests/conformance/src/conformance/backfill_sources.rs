@@ -230,12 +230,16 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
     .expect_err("old-registry block-hash replay must fail closed");
     let old_registry_replay_error = format!("{old_registry_replay_error:#}");
     assert!(
-        old_registry_replay_error.contains(
-            "normalized-event replay selected closure/context-dependent adapter(s) \
-             ens_v1_subregistry_discovery, ens_v1_unwrapped_authority; \
-             block-hash and source-scoped replay are disabled for these adapters"
-        ),
+        old_registry_replay_error.contains("block-hash and source-scoped replay are disabled"),
         "old-registry block-hash replay must fail closed for closure/context-dependent adapters: {old_registry_replay_error}"
+    );
+    assert!(
+        old_registry_replay_error.contains("ens_v1_subregistry_discovery"),
+        "old-registry block-hash replay must name the subregistry discovery adapter: {old_registry_replay_error}"
+    );
+    assert!(
+        old_registry_replay_error.contains("ens_v1_unwrapped_authority"),
+        "old-registry block-hash replay must name the unwrapped authority adapter: {old_registry_replay_error}"
     );
     assert_ens_registry_old_migration_suppression_survived_replay(
         &database,
