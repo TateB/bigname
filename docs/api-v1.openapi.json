@@ -1670,10 +1670,7 @@
             "type": "string"
           },
           "execution_trace_id": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "manifest_versions": {
             "items": {},
@@ -1694,7 +1691,6 @@
           "normalized_event_ids",
           "raw_fact_refs",
           "manifest_versions",
-          "execution_trace_id",
           "derivation_kind"
         ],
         "type": "object"
@@ -2818,7 +2814,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"
@@ -2947,7 +2943,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"
@@ -3074,7 +3070,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"

@@ -82,7 +82,14 @@ async fn get_namespace_manifests_returns_active_entries() -> Result<()> {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: NamespaceManifestsResponse = read_json(response).await?;
+    let raw_payload: Value = read_json(response).await?;
+    assert!(
+        raw_payload
+            .pointer("/provenance/execution_trace_id")
+            .is_none(),
+        "declared-only manifest provenance must omit execution_trace_id"
+    );
+    let payload: NamespaceManifestsResponse = serde_json::from_value(raw_payload)?;
     assert_eq!(payload.data.namespace, "ens");
     assert_eq!(payload.consistency, "head");
     assert!(payload.last_updated.ends_with('Z'));
@@ -247,7 +254,14 @@ async fn get_namespace_metadata_returns_active_summary() -> Result<()> {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: NamespaceMetadataResponse = read_json(response).await?;
+    let raw_payload: Value = read_json(response).await?;
+    assert!(
+        raw_payload
+            .pointer("/provenance/execution_trace_id")
+            .is_none(),
+        "declared-only namespace provenance must omit execution_trace_id"
+    );
+    let payload: NamespaceMetadataResponse = serde_json::from_value(raw_payload)?;
     assert_eq!(payload.data.namespace, "ens");
     assert_eq!(payload.declared_state.active_manifest_count, 2);
     assert_eq!(

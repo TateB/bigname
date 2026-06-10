@@ -15,11 +15,10 @@ pub(super) fn build_name_provenance(provenance: &JsonValue) -> JsonValue {
         "manifest_versions",
         array_or_empty(provenance_field(provenance, "manifest_versions")),
     );
-    insert_nullable_string_field(
-        &mut normalized,
-        "execution_trace_id",
-        string_field(provenance_field(provenance, "execution_trace_id")),
-    );
+    if let Some(execution_trace_id) = string_field(provenance_field(provenance, "execution_trace_id"))
+    {
+        insert_string_field(&mut normalized, "execution_trace_id", execution_trace_id);
+    }
     insert_string_field(
         &mut normalized,
         "derivation_kind",
@@ -34,12 +33,11 @@ pub(super) fn build_name_provenance_with_execution_trace(
     execution_trace_id: Option<Uuid>,
 ) -> JsonValue {
     let mut normalized = build_name_provenance(provenance);
-    insert_nullable_string_field(
-        &mut normalized,
-        "execution_trace_id",
-        execution_trace_id
-            .map(|value| value.to_string())
-            .or_else(|| string_field(provenance_field(provenance, "execution_trace_id"))),
-    );
+    if let Some(execution_trace_id) = execution_trace_id
+        .map(|value| value.to_string())
+        .or_else(|| string_field(provenance_field(provenance, "execution_trace_id")))
+    {
+        insert_string_field(&mut normalized, "execution_trace_id", execution_trace_id);
+    }
     normalized
 }

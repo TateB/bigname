@@ -1832,7 +1832,6 @@ fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
             "normalized_event_ids": [],
             "raw_fact_refs": [],
             "manifest_versions": [],
-            "execution_trace_id": null,
             "derivation_kind": "primary_name_route_bootstrap",
         })
     );
@@ -2674,7 +2673,6 @@ impl EnsV2DeclaredChildFixture {
                     "source_manifest_id": null
                 }
             ],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         }))
     }

@@ -217,7 +217,7 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
         .await?;
     assert_source_family_raw_retention_probe_scoped(&database, &source_family_raw_retention_probe)
         .await?;
-    replay_raw_fact_normalized_events_for_blocks(
+    let old_registry_replay_error = replay_raw_fact_normalized_events_for_blocks(
         &database,
         "mainnet",
         registry_old_replay_probe.chain_id,
@@ -226,7 +226,21 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
             registry_old_replay_probe.current_block_hash,
         ],
     )
-    .await?;
+    .await
+    .expect_err("old-registry block-hash replay must fail closed");
+    let old_registry_replay_error = format!("{old_registry_replay_error:#}");
+    assert!(
+        old_registry_replay_error.contains("block-hash and source-scoped replay are disabled"),
+        "old-registry block-hash replay must fail closed for closure/context-dependent adapters: {old_registry_replay_error}"
+    );
+    assert!(
+        old_registry_replay_error.contains("ens_v1_subregistry_discovery"),
+        "old-registry block-hash replay must name the subregistry discovery adapter: {old_registry_replay_error}"
+    );
+    assert!(
+        old_registry_replay_error.contains("ens_v1_unwrapped_authority"),
+        "old-registry block-hash replay must name the unwrapped authority adapter: {old_registry_replay_error}"
+    );
     assert_ens_registry_old_migration_suppression_survived_replay(
         &database,
         &registry_old_replay_probe,
@@ -2336,10 +2350,16 @@ async fn assert_existing_ensv1_exact_name_after_jobs_and_replay(
 
 fn assert_ensv2_shadow_exact_name_coverage_is_not_graduated(snapshots: &[(&'static str, Value)]) {
     let children = replay_route_payload(snapshots, "children-collection");
-    assert_json_contains(
-        children,
-        "ens_v2_registry_l1",
-        "ENSv2 child response should remain tied to the admitted registry source family",
+    let manifest_versions = children
+        .pointer("/meta/provenance/manifest_versions")
+        .and_then(Value::as_array)
+        .expect("children meta=full provenance manifest_versions must be an array");
+    assert!(
+        manifest_versions
+            .iter()
+            .any(|entry| entry.get("source_family").and_then(Value::as_str)
+                == Some("ens_v2_registry_l1")),
+        "ENSv2 child response should remain tied to the admitted registry source family: {manifest_versions:?}"
     );
     assert_json_not_contains(
         children,

@@ -328,7 +328,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "both",
         }))
     );
-    assert_view_meta_parameters(address_history, "compact", "summary");
+    assert_view_meta_parameters(address_history, "full", "summary");
 
     let children = openapi_operation(&document, "/v1/names/{namespace}/{name}/children");
     assert_eq!(
@@ -967,6 +967,24 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
                 .and_then(Value::as_object)
                 .is_some_and(|properties| properties.contains_key("name"))
     }));
+
+    let provenance = openapi_schema(&document, "Provenance");
+    assert_eq!(
+        required_fields(provenance),
+        vec![
+            "normalized_event_ids",
+            "raw_fact_refs",
+            "manifest_versions",
+            "derivation_kind",
+        ]
+    );
+    assert_eq!(
+        provenance
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("execution_trace_id")),
+        Some(&json!({ "type": "string" }))
+    );
 
     let coverage = openapi_schema(&document, "CoverageResponse");
     assert_eq!(

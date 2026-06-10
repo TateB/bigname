@@ -8,7 +8,7 @@ pub(super) async fn address_history(
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
     let relation = parse_address_name_relation(query.relation.as_deref())?;
     let scope = parse_history_scope(query.scope.as_deref())?;
-    let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let normalized_address = normalize_address(&address);
@@ -75,7 +75,7 @@ pub(super) async fn name_history(
     ensure_public_namespace(&namespace)?;
 
     let scope = parse_history_scope(query.scope.as_deref())?;
-    let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
@@ -152,7 +152,7 @@ pub(super) async fn resource_history(
     State(state): State<AppState>,
 ) -> ApiResult<Json<JsonValue>> {
     let scope = parse_history_scope(query.scope.as_deref())?;
-    let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let resource_id = Uuid::parse_str(&resource_id).map_err(|_| ApiError {

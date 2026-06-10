@@ -33,3 +33,6 @@ bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-manifests.workspace = true
 bigname-storage.workspace = true
+
+[dev-dependencies]
+bigname-test-support.workspace = true
