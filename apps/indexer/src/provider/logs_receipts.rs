@@ -478,6 +478,11 @@ fn validate_contiguous_log_range(
 }
 
 fn is_log_range_result_limit_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}");
+    let message = format!("{error:#}").to_ascii_lowercase();
     message.contains("query exceeds max results")
+        || message.contains("query returned more than")
+        || message.contains("log response size exceeded")
+        || message.contains("response size exceeded")
+        || message.contains("result size exceeded")
+        || message.contains("more than 10000 results")
 }

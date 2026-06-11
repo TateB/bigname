@@ -161,6 +161,24 @@ pub(super) fn ensure_lease_matches(range: &BackfillRange, lease_token: &str) -> 
     Ok(())
 }
 
+pub(super) fn ensure_lease_is_active(range: &BackfillRange) -> Result<()> {
+    let Some(lease_expires_at) = range.lease_expires_at else {
+        bail!(
+            "backfill range {} has no active lease deadline",
+            range.backfill_range_id
+        );
+    };
+    if lease_expires_at <= OffsetDateTime::now_utc() {
+        bail!(
+            "backfill range {} lease expired at {}",
+            range.backfill_range_id,
+            lease_expires_at
+        );
+    }
+
+    Ok(())
+}
+
 pub(super) fn ensure_ranges_ready_for_job_completion(
     backfill_job_id: i64,
     ranges: &[BackfillRange],

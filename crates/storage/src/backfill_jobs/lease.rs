@@ -10,7 +10,7 @@ use super::{
     },
     sql::backfill_range_returning_sql,
     types::{BackfillLifecycleStatus, BackfillRange},
-    validate::{ensure_lease_matches, validate_lease, validate_non_empty},
+    validate::{ensure_lease_is_active, ensure_lease_matches, validate_lease, validate_non_empty},
 };
 
 /// Atomically reserve the next pending, failed, or expired range for a job.
@@ -180,6 +180,7 @@ pub async fn advance_backfill_range(
         bail!("failed backfill range {backfill_range_id} must be reserved again before advancing");
     }
     ensure_lease_matches(&current, lease_token)?;
+    ensure_lease_is_active(&current)?;
     if checkpoint_block_number > current.range_end_block_number {
         bail!(
             "backfill range {backfill_range_id} checkpoint {checkpoint_block_number} is beyond declared range end {}",
@@ -200,6 +201,10 @@ pub async fn advance_backfill_range(
         SET
             checkpoint_block_number = $2,
             status = 'running'::backfill_lifecycle_status,
+            lease_expires_at = now() + GREATEST(
+                lease_expires_at - updated_at,
+                interval '5 seconds'
+            ),
             updated_at = now()
         WHERE backfill_range_id = $1
         "#,

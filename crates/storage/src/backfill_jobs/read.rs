@@ -170,6 +170,7 @@ where
           AND lease_owner = $2
           AND lease_token = $3
           AND status IN ('reserved'::backfill_lifecycle_status, 'running'::backfill_lifecycle_status)
+          AND lease_expires_at > now()
         "#,
         "FOR UPDATE",
     );

@@ -139,8 +139,8 @@ impl BackfillCanonicalityEvidence {
             return Ok(());
         }
 
-        let proven = block.block_hash == anchor.block_hash
-            || chain_lineage_contains_ancestor(pool, chain, &anchor.block_hash, &block.block_hash)
+        let proven =
+            chain_lineage_contains_ancestor(pool, chain, &anchor.block_hash, &block.block_hash)
                 .await?;
         if proven {
             promote_backfill_state(states, &block.block_hash, target_state);

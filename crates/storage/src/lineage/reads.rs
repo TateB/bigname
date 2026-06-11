@@ -195,12 +195,14 @@ where
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $3
+              AND canonicality_state <> 'orphaned'::canonicality_state
         ),
         lineage_path AS (
             SELECT chain_id, block_hash, parent_hash, block_number
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
+              AND canonicality_state <> 'orphaned'::canonicality_state
 
             UNION ALL
 
@@ -212,6 +214,7 @@ where
             JOIN ancestor
               ON lineage_path.block_number > ancestor.block_number
             WHERE lineage_path.block_hash <> $3
+              AND parent.canonicality_state <> 'orphaned'::canonicality_state
         )
         SELECT EXISTS (
             SELECT 1

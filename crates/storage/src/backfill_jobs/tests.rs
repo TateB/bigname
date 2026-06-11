@@ -228,6 +228,106 @@ async fn backfill_job_reservation_is_idempotent_and_reclaims_expired_leases() ->
 }
 
 #[tokio::test]
+async fn backfill_range_advance_refreshes_active_lease_deadline() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-advance-refreshes-lease"),
+    )
+    .await?;
+
+    let reserved = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-refresh",
+        lease_deadline(),
+    )
+    .await?
+    .expect("range must be reservable");
+
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET
+            updated_at = now() - interval '295 seconds',
+            lease_expires_at = now() + interval '5 seconds'
+        WHERE backfill_range_id = $1
+        "#,
+    )
+    .bind(reserved.backfill_range_id)
+    .execute(database.pool())
+    .await?;
+
+    let advanced = advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-refresh",
+        105,
+    )
+    .await?;
+    let refreshed_lease = advanced
+        .lease_expires_at
+        .expect("running range must retain an active lease deadline");
+    let minimum_refresh_deadline = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .checked_add(240)
+        .context("minimum lease refresh timestamp overflowed")?;
+    assert!(
+        refreshed_lease.unix_timestamp() >= minimum_refresh_deadline,
+        "advance must extend the active lease; got {refreshed_lease}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn backfill_range_advance_rejects_expired_lease_token() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-advance-rejects-expired-lease"),
+    )
+    .await?;
+
+    let reserved = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-expired",
+        lease_deadline(),
+    )
+    .await?
+    .expect("range must be reservable");
+
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET lease_expires_at = now() - interval '1 second'
+        WHERE backfill_range_id = $1
+        "#,
+    )
+    .bind(reserved.backfill_range_id)
+    .execute(database.pool())
+    .await?;
+
+    let error = advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-expired",
+        105,
+    )
+    .await
+    .expect_err("expired lease token must not advance or refresh a range");
+    assert!(
+        error.to_string().contains("lease expired"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn backfill_job_range_advance_and_completion_are_monotonic() -> Result<()> {
     let database = TestDatabase::new().await?;
     let created = create_backfill_job(

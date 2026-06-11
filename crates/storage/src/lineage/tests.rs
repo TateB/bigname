@@ -351,3 +351,54 @@ async fn orphan_range_stops_before_requested_ancestor() -> Result<()> {
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn ancestry_proof_rejects_orphaned_path_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let base_timestamp = timestamp(1_717_171_717);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            block(
+                "eth-mainnet",
+                "0x001",
+                None,
+                1,
+                base_timestamp,
+                CanonicalityState::Canonical,
+            ),
+            block(
+                "eth-mainnet",
+                "0x002",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_729),
+                CanonicalityState::Canonical,
+            ),
+            block(
+                "eth-mainnet",
+                "0x003",
+                Some("0x002"),
+                3,
+                timestamp(1_717_171_741),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0x003", Some("0x001"))
+        .await?;
+
+    assert!(
+        !chain_lineage_contains_ancestor(database.pool(), "eth-mainnet", "0x003", "0x001").await?,
+        "orphaned path rows must not prove canonical ancestry"
+    );
+    assert!(
+        !chain_lineage_contains_ancestor(database.pool(), "eth-mainnet", "0x003", "0x003").await?,
+        "orphaned exact-match rows must not prove canonical ancestry"
+    );
+
+    database.cleanup().await
+}

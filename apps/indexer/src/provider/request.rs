@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use alloy_json_rpc::{
     Id, Request as JsonRpcRequest, RequestPacket, Response, ResponsePacket, ResponsePayload,
@@ -14,6 +17,8 @@ use super::{
     JsonRpcProvider,
     payload_cache::{JsonRpcPayloadFingerprint, JsonRpcResultPayload},
 };
+
+const MAX_JSON_RPC_ATTEMPTS: usize = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct JsonRpcBatchCall {
@@ -58,6 +63,44 @@ impl JsonRpcProvider {
         method: &str,
         params: Vec<Value>,
     ) -> Result<JsonRpcResultPayload> {
+        for attempt in 0..MAX_JSON_RPC_ATTEMPTS {
+            match self
+                .fetch_json_rpc_result_with_payload_once_at_endpoint(
+                    endpoint,
+                    method,
+                    params.clone(),
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error)
+                    if is_retryable_provider_error(&error)
+                        && attempt + 1 < MAX_JSON_RPC_ATTEMPTS =>
+                {
+                    warn!(
+                        service = "indexer",
+                        component = "provider",
+                        method,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_JSON_RPC_ATTEMPTS,
+                        error = %format!("{error:#}"),
+                        "retrying transient JSON-RPC provider request"
+                    );
+                    sleep_json_rpc_backoff(attempt).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        bail!("JSON-RPC request retry loop exited unexpectedly")
+    }
+
+    async fn fetch_json_rpc_result_with_payload_once_at_endpoint(
+        &self,
+        endpoint: &Url,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<JsonRpcResultPayload> {
         let request = json_rpc_request(method.to_owned(), 1, params)?;
         let body = self
             .send_json_rpc_payload_to_endpoint(endpoint, method, RequestPacket::Single(request))
@@ -96,6 +139,12 @@ impl JsonRpcProvider {
         {
             Ok(results) => Ok(results),
             Err(batch_error) => {
+                if is_retryable_provider_error(&batch_error) {
+                    return Err(batch_error).context(
+                        "provider JSON-RPC batch exhausted retryable attempts; refusing immediate sequential fallback",
+                    );
+                }
+
                 let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
                     let method = call.method;
@@ -116,6 +165,39 @@ impl JsonRpcProvider {
     }
 
     async fn try_fetch_json_rpc_batch_results_at_endpoint(
+        &self,
+        endpoint: &Url,
+        calls: &[JsonRpcBatchCall],
+    ) -> Result<Vec<Option<Value>>> {
+        for attempt in 0..MAX_JSON_RPC_ATTEMPTS {
+            match self
+                .try_fetch_json_rpc_batch_results_once_at_endpoint(endpoint, calls)
+                .await
+            {
+                Ok(results) => return Ok(results),
+                Err(error)
+                    if is_retryable_provider_error(&error)
+                        && attempt + 1 < MAX_JSON_RPC_ATTEMPTS =>
+                {
+                    warn!(
+                        service = "indexer",
+                        component = "provider",
+                        request_context = "batch",
+                        attempt = attempt + 1,
+                        max_attempts = MAX_JSON_RPC_ATTEMPTS,
+                        error = %format!("{error:#}"),
+                        "retrying transient JSON-RPC provider batch"
+                    );
+                    sleep_json_rpc_backoff(attempt).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        bail!("JSON-RPC batch retry loop exited unexpectedly")
+    }
+
+    async fn try_fetch_json_rpc_batch_results_once_at_endpoint(
         &self,
         endpoint: &Url,
         calls: &[JsonRpcBatchCall],
@@ -252,4 +334,29 @@ fn response_id(id: &Id) -> Result<i64> {
 
 fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
     serde_json::from_str(value.get()).context("failed to decode raw JSON value")
+}
+
+pub(super) fn is_retryable_provider_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("http 429")
+        || message.contains("http 500")
+        || message.contains("http 502")
+        || message.contains("http 503")
+        || message.contains("http 504")
+        || message.contains("too many requests")
+        || message.contains("rate limit")
+        || message.contains("retry later")
+        || message.contains("temporarily unavailable")
+        || message.contains("service unavailable")
+        || message.contains("bad gateway")
+        || message.contains("gateway timeout")
+        || message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("connection reset")
+        || message.contains("connection closed")
+}
+
+async fn sleep_json_rpc_backoff(attempt: usize) {
+    let millis = 250_u64.saturating_mul(1_u64 << attempt.min(4));
+    tokio::time::sleep(Duration::from_millis(millis)).await;
 }
