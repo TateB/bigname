@@ -7,9 +7,9 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
-    SurfaceBindingKind, TokenLineage, default_database_url, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    SurfaceBindingKind, TokenLineage, default_database_url, label_preimage_from_label,
+    upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -765,7 +765,7 @@ fn name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -775,6 +775,16 @@ fn name_surface(
         provenance: json!({"source": "worker_replay_test", "kind": "name_surface"}),
         canonicality_state,
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    label_preimage_from_label(label, "worker_replay_test", 1, json!({}))
+        .expect("test label must hash")
+        .labelhash
 }
 
 fn registration_granted_event(resource_id: Uuid) -> NormalizedEvent {
@@ -855,7 +865,7 @@ fn subregistry_event() -> NormalizedEvent {
             "edge_kind": "subregistry",
             "parent_node": format!("namehash:{DISPLAY_NAME}"),
             "child_node": format!("namehash:{CHILD_DISPLAY_NAME}"),
-            "labelhash": format!("labelhash:{CHILD_DISPLAY_NAME}"),
+            "labelhash": labelhash_for_label(CHILD_DISPLAY_NAME.split('.').next().unwrap()),
             "owner": HOLDER_ADDRESS,
             "tombstone": false,
             "active_edge": true,

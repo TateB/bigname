@@ -7,9 +7,10 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding,
-    TokenLineage, default_database_url, load_name_current, upsert_chain_lineage_blocks,
-    upsert_name_current_rows, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
-    upsert_raw_logs, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    TokenLineage, default_database_url, label_preimage_from_label, load_name_current,
+    upsert_chain_lineage_blocks, upsert_name_current_rows, upsert_name_surfaces,
+    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -454,7 +455,7 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -718,7 +719,7 @@ async fn rebuild_ignores_deprecated_ens_v2_registrar_shadow_events_after_support
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -910,7 +911,7 @@ async fn rebuild_keeps_ens_v2_registry_only_exact_name_coverage_shadow() -> Resu
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -1882,7 +1883,7 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -3357,7 +3358,7 @@ async fn seed_basenames_identity(
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -3732,7 +3733,7 @@ fn name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -3742,6 +3743,16 @@ fn name_surface(
         provenance: json!({"source": "worker_name_current_test", "kind": "name_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    label_preimage_from_label(label, "worker_name_current_test", 1, json!({}))
+        .expect("test label must hash")
+        .labelhash
 }
 
 fn surface_binding(

@@ -88,6 +88,16 @@ loc = 808
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
+path = "crates/storage/src/identity/write_fast/name_surface.rs"
+loc = 633
+justification = "Inherited fix/ens-v1-registry-owner-authority branch debt; allowlisted to make the WS-A file-size gate enforceable without behavior changes."
+
+[[files]]
+path = "crates/storage/src/label_preimages.rs"
+loc = 641
+justification = "Inherited fix/ens-v1-registry-owner-authority branch debt; allowlisted to make the WS-A file-size gate enforceable without behavior changes."
+
+[[files]]
 path = "crates/storage/src/normalized_events/upsert/repair/ens_v1_registry_event_time.rs"
-loc = 872
+loc = 604
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

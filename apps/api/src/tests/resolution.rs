@@ -2756,9 +2756,8 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
         "case {}",
         case.label()
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null),
+    assert!(
+        payload.provenance.get("execution_trace_id").is_none(),
         "case {}",
         case.label()
     );
@@ -3984,10 +3983,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
         payload.verified_state,
         Some(resolution_unsupported_verified_state(&["addr:60", "text"]))
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    assert!(payload.provenance.get("execution_trace_id").is_none());
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
     assert_eq!(explain_payload.error.code, "not_found");
@@ -4141,9 +4137,11 @@ async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported(
             Some(json!({ "verified_queries": [] })),
             "{normalized_name}"
         );
-        assert_eq!(
-            verified_payload.provenance.get("execution_trace_id"),
-            Some(&Value::Null),
+        assert!(
+            verified_payload
+                .provenance
+                .get("execution_trace_id")
+                .is_none(),
             "{normalized_name}"
         );
         assert_eq!(explain_payload.error.code, "not_found", "{normalized_name}");
@@ -5770,10 +5768,7 @@ async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ance
             .and_then(|state| state.get("topology")),
         Some(&projected_topology)
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    assert!(payload.provenance.get("execution_trace_id").is_none());
     assert_eq!(
         payload.verified_state,
         Some(json!({ "verified_queries": [] }))
@@ -5908,10 +5903,7 @@ async fn get_resolution_both_mode_preserves_projected_transport_for_deferred_tra
             .and_then(|state| state.get("topology")),
         Some(&projected_topology)
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    assert!(payload.provenance.get("execution_trace_id").is_none());
     assert_eq!(
         payload.verified_state,
         Some(json!({ "verified_queries": [] }))

@@ -202,7 +202,7 @@ const HISTORY_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "Response view selector.",
     ApiParameterSchema::StringEnumDefault {
         values: &["compact", "full"],
-        default: "compact",
+        default: "full",
     },
 );
 const COMPACT_FULL_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(

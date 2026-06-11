@@ -6,12 +6,22 @@ pub(super) fn apply_registry_owner_changed(
 ) -> Result<()> {
     let before_anchor = active_anchor_for_observation(history, &event.reference);
     let before_owner = history.current_registry_owner.clone();
+    let registry_owner_restores_registrar =
+        registry_owner_restores_superseded_registrar(history, &event);
     let registry_owner_supersedes_registrar = history.current_wrapper_key.is_none()
         && nonzero_address(Some(event.owner.as_str())).is_some()
         && history
             .current_registration
             .as_ref()
             .is_some_and(|lease| !event.owner.eq_ignore_ascii_case(&lease.registrant));
+    if registry_owner_restores_registrar {
+        emit_registry_owner_revokes_before_registrar_restore(
+            history,
+            before_anchor.as_ref(),
+            &event.reference,
+            EVENT_KIND_AUTHORITY_TRANSFERRED,
+        );
+    }
     history.current_registry_owner = Some(event.owner.clone());
     history.latest_registry_owner_ref = Some(event.reference.clone());
     history
@@ -19,6 +29,10 @@ pub(super) fn apply_registry_owner_changed(
         .get_or_insert_with(|| event.reference.as_boundary_ref());
     if registry_owner_supersedes_registrar {
         history.superseded_registration = history.current_registration.take();
+    }
+    if registry_owner_restores_registrar && let Some(lease) = history.superseded_registration.take()
+    {
+        history.current_registration = Some(lease);
     }
 
     let after_anchor = active_anchor_for_observation(history, &event.reference);
@@ -83,6 +97,26 @@ pub(super) fn apply_registry_owner_changed(
         event.reference.block_timestamp,
     )?;
     Ok(())
+}
+
+fn registry_owner_restores_superseded_registrar(
+    history: &NameHistory,
+    event: &RegistryOwnerObservation,
+) -> bool {
+    if history.current_wrapper_key.is_some() || history.current_registration.is_some() {
+        return false;
+    }
+    let Some(lease) = history.superseded_registration.as_ref() else {
+        return false;
+    };
+    if !event.labelhash.is_empty() && !lease.labelhash.eq_ignore_ascii_case(&event.labelhash) {
+        return false;
+    }
+    if registration_released_at_or_before(lease, event.reference.block_timestamp) {
+        return false;
+    }
+    nonzero_address(Some(event.owner.as_str()))
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(&lease.registrant))
 }
 
 fn build_registry_owner_transfer_event(

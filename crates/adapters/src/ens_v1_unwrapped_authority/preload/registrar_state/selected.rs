@@ -109,9 +109,16 @@ fn selected_replay_observation_namehash(
         AuthorityObservation::TokenTransferred(value) => Ok(Some(
             registrar_child_namehash_for_reference(&value.reference, &value.labelhash)?,
         )),
-        AuthorityObservation::RegistryOwnerChanged(value) => Ok(Some(
-            registrar_child_namehash_for_reference(&value.reference, &value.labelhash)?,
-        )),
+        AuthorityObservation::RegistryOwnerChanged(value) => {
+            if let Some(namehash) = value.namehash.as_deref() {
+                Ok(Some(namehash.to_ascii_lowercase()))
+            } else {
+                Ok(Some(registrar_child_namehash_for_reference(
+                    &value.reference,
+                    &value.labelhash,
+                )?))
+            }
+        }
         AuthorityObservation::WrapperNameWrapped(value) => {
             Ok(Some(value.name.namehash.to_ascii_lowercase()))
         }

@@ -232,7 +232,7 @@ impl TestDatabase {
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(2)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect indexer test pool")?;
@@ -860,6 +860,112 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create normalized_events table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE projection_invalidations (
+                    projection TEXT NOT NULL,
+                    projection_key TEXT NOT NULL,
+                    key_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    generation BIGINT NOT NULL DEFAULT 0,
+                    first_change_id BIGINT,
+                    last_change_id BIGINT,
+                    first_normalized_event_id BIGINT,
+                    last_normalized_event_id BIGINT,
+                    last_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    invalidated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    claim_token UUID,
+                    claimed_at TIMESTAMPTZ,
+                    attempt_count BIGINT NOT NULL DEFAULT 0,
+                    last_failure_reason TEXT,
+                    last_failure_at TIMESTAMPTZ,
+                    PRIMARY KEY (projection, projection_key),
+                    CONSTRAINT projection_invalidations_generation_check CHECK (generation >= 0),
+                    CONSTRAINT projection_invalidations_attempt_check CHECK (attempt_count >= 0),
+                    CONSTRAINT projection_invalidations_change_order_check CHECK (
+                        first_change_id IS NULL
+                        OR last_change_id IS NULL
+                        OR first_change_id <= last_change_id
+                    ),
+                    CONSTRAINT projection_invalidations_event_order_check CHECK (
+                        first_normalized_event_id IS NULL
+                        OR last_normalized_event_id IS NULL
+                        OR first_normalized_event_id <= last_normalized_event_id
+                    ),
+                    CONSTRAINT projection_invalidations_claim_pair_check CHECK (
+                        (claim_token IS NULL AND claimed_at IS NULL)
+                        OR (claim_token IS NOT NULL AND claimed_at IS NOT NULL)
+                    )
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection_invalidations table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX projection_invalidations_pending_idx
+                    ON projection_invalidations (
+                        projection,
+                        last_changed_at,
+                        projection_key
+                    )
+                    WHERE claim_token IS NULL
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection invalidations pending index for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX projection_invalidations_claim_idx
+                    ON projection_invalidations (claim_token)
+                    WHERE claim_token IS NOT NULL
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection invalidations claim index for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE label_preimages (
+                    labelhash TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    normalized_label TEXT NOT NULL,
+                    canonical_display_label TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    source_priority INTEGER NOT NULL,
+                    provenance JSONB DEFAULT '{}'::jsonb NOT NULL,
+                    observed_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+                    inserted_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+                    CONSTRAINT label_preimages_pkey PRIMARY KEY (labelhash),
+                    CONSTRAINT label_preimages_labelhash_check CHECK (
+                        labelhash ~ '^0x[0-9a-f]{64}$'
+                    ),
+                    CONSTRAINT label_preimages_label_check CHECK (
+                        label <> ''
+                        AND normalized_label <> ''
+                        AND canonical_display_label <> ''
+                        AND position('.' IN normalized_label) = 0
+                    ),
+                    CONSTRAINT label_preimages_source_priority_check CHECK (source_priority >= 0),
+                    CONSTRAINT label_preimages_provenance_check CHECK (
+                        jsonb_typeof(provenance) = 'object'
+                    )
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create label_preimages table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX label_preimages_normalized_label_idx
+                    ON label_preimages (normalized_label, labelhash)
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create label preimages normalized label index for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE execution_traces (

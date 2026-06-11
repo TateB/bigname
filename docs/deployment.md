@@ -40,6 +40,14 @@ the API, the indexer, and the worker. The API listens on the host port from
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
 
+The indexer and worker healthcheck commands verify that applied database
+migrations exactly match the migration set compiled into the running binary.
+They fail closed for missing, failed, checksum-mismatched, or newer unknown
+migrations. During rolling upgrades, running `migrate` before recreating old
+service containers can therefore mark those old indexer/worker containers
+unhealthy until they are replaced with the matching image; treat that as version
+skew, not evidence that PostgreSQL is down.
+
 The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
 for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
 profile. Do not point one runtime at both manifest roots.
@@ -304,9 +312,9 @@ The repository publishes the image to:
 ghcr.io/tateb/bigname
 ```
 
-The GitHub Actions workflow publishes `latest` on the default branch and a short
-commit SHA tag on every push to `main`. Tags pushed to the repository are also
-published with the same tag name.
+The GitHub Actions workflow publishes only after the full CI workflow succeeds
+for a push to `main`. Successful main pushes publish `latest` and the short
+commit SHA tag. Release-tag image publishing is deferred and is not automatic.
 
 Manual publish from an authenticated checkout:
 

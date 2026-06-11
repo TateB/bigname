@@ -506,7 +506,7 @@ fn restore_superseded_registration_for_renewal(
     )
 }
 
-fn emit_registry_owner_revokes_before_registrar_restore(
+pub(super) fn emit_registry_owner_revokes_before_registrar_restore(
     history: &mut NameHistory,
     before_anchor: Option<&AuthorityAnchor>,
     reference: &ObservationRef,
@@ -574,7 +574,7 @@ fn registry_owner_still_supersedes_registrar(
             .is_some_and(|owner| !owner.eq_ignore_ascii_case(&lease.registrant))
 }
 
-fn registration_released_at_or_before(
+pub(super) fn registration_released_at_or_before(
     lease: &RegistrationLease,
     timestamp: OffsetDateTime,
 ) -> bool {

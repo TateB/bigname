@@ -627,7 +627,6 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
                 "source_family": "ens_v1_registry_l1",
                 "source_manifest_id": null
             }],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         })
     );
@@ -1067,7 +1066,6 @@ async fn get_name_children_returns_ensv2_declared_children_without_widening_rout
                 "source_family": "ens_v2_registry_l1",
                 "source_manifest_id": null
             }],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         })
     );
@@ -1267,7 +1265,6 @@ async fn get_name_children_returns_basenames_rows_from_base_authority() -> Resul
                 "source_family": "basenames_base_registry",
                 "source_manifest_id": null
             }],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         })
     );
@@ -3398,6 +3395,21 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
             }]
         }))
     );
+    assert!(base_payload.provenance.is_null());
+    assert!(
+        payload.provenance.get("execution_trace_id").is_none(),
+        "declared-only role-summary provenance must omit execution_trace_id"
+    );
+    let manifest_versions = payload.provenance["manifest_versions"]
+        .as_array()
+        .expect("role-summary provenance manifest_versions must be an array");
+    assert!(manifest_versions.iter().any(|manifest| {
+        manifest.get("source_family") == Some(&json!("ens_v2_registry_l1"))
+    }));
+    let normalized_event_ids = payload.provenance["normalized_event_ids"]
+        .as_array()
+        .expect("role-summary provenance normalized_event_ids must be an array");
+    assert!(normalized_event_ids.contains(&json!("210")));
     database.cleanup().await?;
     Ok(())
 }

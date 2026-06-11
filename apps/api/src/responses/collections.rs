@@ -1,4 +1,8 @@
 impl AddressNamesResponseSupplement {
+    fn has_provenance_inputs(&self) -> bool {
+        !self.provenances.is_empty()
+    }
+
     fn push_name_current(&mut self, row: &NameCurrentRow) {
         self.provenances.push(row.provenance.clone());
         self.chain_positions.push(row.chain_positions.clone());
@@ -43,12 +47,17 @@ fn build_address_names_response_from_summary(
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+    let provenance = if supplement.has_provenance_inputs() {
+        build_address_names_expanded_provenance(summary, &supplement)
+    } else {
+        JsonValue::Null
+    };
 
     AddressNamesResponse {
         data,
         declared_state: empty_object(),
         verified_state: None,
-        provenance: JsonValue::Null,
+        provenance,
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -108,7 +117,10 @@ fn build_resource_permissions_response_from_summary(
         data: page_rows.iter().map(build_permission_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: JsonValue::Null,
+        provenance: build_collection_provenance_from_inputs(
+            &summary.provenance,
+            "permissions_current_rebuild",
+        ),
         coverage: build_permissions_coverage_from_sample(summary.coverage.as_ref()),
         chain_positions: build_chain_positions_from_values(summary.chain_positions.iter()),
         page,
@@ -266,6 +278,38 @@ fn build_children_declared_state_from_count(child_count: u64, include_counts: bo
     declared_state
 }
 
+fn build_address_names_expanded_provenance(
+    summary: &bigname_storage::AddressNamesCurrentSummary,
+    supplement: &AddressNamesResponseSupplement,
+) -> JsonValue {
+    let summary_provenance = address_names_summary_provenance_value(&summary.provenance);
+    let mut provenances = Vec::with_capacity(supplement.provenances.len() + 1);
+    provenances.push(&summary_provenance);
+    provenances.extend(supplement.provenances.iter());
+    build_collection_provenance_from_refs(&provenances, "address_names_current_rebuild")
+}
+
+fn address_names_summary_provenance_value(
+    summary: &bigname_storage::AddressNamesCurrentProvenanceSummary,
+) -> JsonValue {
+    let mut value = empty_object();
+    insert_value_field(
+        &mut value,
+        "normalized_event_ids",
+        summary.normalized_event_ids.clone(),
+    );
+    insert_value_field(&mut value, "raw_fact_refs", summary.raw_fact_refs.clone());
+    insert_value_field(
+        &mut value,
+        "manifest_versions",
+        summary.manifest_versions.clone(),
+    );
+    if let Some(derivation_kind) = summary.derivation_kind.clone() {
+        insert_string_field(&mut value, "derivation_kind", derivation_kind);
+    }
+    value
+}
+
 fn build_collection_provenance_from_inputs(
     provenances: &[JsonValue],
     default_derivation_kind: &str,
@@ -305,7 +349,15 @@ fn build_collection_provenance_from_refs(
             "manifest_versions",
         )),
     );
-    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    // Collection provenance is a route-level summary; if execution-backed rows
+    // are later admitted, the first non-null trace id is the representative id.
+    if let Some(execution_trace_id) = provenances
+        .iter()
+        .filter_map(|provenance| string_field(provenance_field(provenance, "execution_trace_id")))
+        .next()
+    {
+        insert_string_field(&mut value, "execution_trace_id", execution_trace_id);
+    }
     insert_string_field(
         &mut value,
         "derivation_kind",

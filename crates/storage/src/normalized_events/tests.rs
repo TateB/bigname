@@ -3295,6 +3295,139 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_rejects_ens_v1_registry_event_time_resource_id_repair_for_invalid_anchors()
+-> Result<()> {
+    for (case, canonicality_state, logical_name_id, labelhash) in [
+        (
+            "orphaned",
+            "orphaned",
+            "ens:alice.eth",
+            "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
+        ),
+        (
+            "wrong-name",
+            "canonical",
+            "ens:bob.eth",
+            "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
+        ),
+        (
+            "wrong-labelhash",
+            "canonical",
+            "ens:alice.eth",
+            "0xwrong_labelhash",
+        ),
+    ] {
+        let database = TestDatabase::new().await?;
+        let stale_later_registrar_resource_id =
+            Uuid::from_u128(0x1600 + u128::from(case.as_bytes()[0]));
+        let event_time_registry_resource_id =
+            Uuid::from_u128(0x1700 + u128::from(case.as_bytes()[0]));
+        seed_ens_v1_registry_event_time_repair_resources(
+            database.pool(),
+            stale_later_registrar_resource_id,
+            event_time_registry_resource_id,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE resources
+            SET
+                canonicality_state = $2::canonicality_state,
+                provenance = jsonb_set(
+                    jsonb_set(provenance, '{logical_name_id}', to_jsonb($3::TEXT)),
+                    '{labelhash}',
+                    to_jsonb($4::TEXT)
+                )
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(event_time_registry_resource_id)
+        .bind(canonicality_state)
+        .bind(logical_name_id)
+        .bind(labelhash)
+        .execute(database.pool())
+        .await?;
+
+        let event_identity =
+            format!("ens-v1-unwrapped-authority:registry-event-time:invalid-anchor:{case}");
+        let event = ens_v1_registry_event_time_repair_event(
+            &event_identity,
+            stale_later_registrar_resource_id,
+        );
+        upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+        let repaired = ens_v1_registry_event_time_repair_event(
+            &event_identity,
+            event_time_registry_resource_id,
+        );
+        let result =
+            upsert_normalized_events(database.pool(), std::slice::from_ref(&repaired)).await;
+        let stored_resource_id: Uuid = sqlx::query_scalar(
+            "SELECT resource_id FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&event_identity)
+        .fetch_one(database.pool())
+        .await?;
+        database.cleanup().await?;
+
+        let error = match result {
+            Ok(snapshots) => {
+                panic!("repair with {case} target anchor unexpectedly succeeded: {snapshots:?}")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains(
+                "ENSv1 registry event-time resource_id repair rejected invalid resource anchors"
+            ),
+            "unexpected error for {case}: {error:#}"
+        );
+        assert_eq!(stored_resource_id, stale_later_registrar_resource_id);
+    }
+
+    let database = TestDatabase::new().await?;
+    let stale_later_registrar_resource_id = Uuid::from_u128(0x16ff);
+    let existing_registry_resource_id = Uuid::from_u128(0x17ff);
+    let dangling_resource_id = Uuid::from_u128(0x18ff);
+    seed_ens_v1_registry_event_time_repair_resources(
+        database.pool(),
+        stale_later_registrar_resource_id,
+        existing_registry_resource_id,
+    )
+    .await?;
+
+    let event_identity = "ens-v1-unwrapped-authority:registry-event-time:invalid-anchor:dangling";
+    let event =
+        ens_v1_registry_event_time_repair_event(event_identity, existing_registry_resource_id);
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let repaired = ens_v1_registry_event_time_repair_event(event_identity, dangling_resource_id);
+    let result = upsert_normalized_events(database.pool(), std::slice::from_ref(&repaired)).await;
+    let stored_resource_id: Uuid =
+        sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
+            .bind(event_identity)
+            .fetch_one(database.pool())
+            .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(snapshots) => {
+            panic!("repair with dangling target anchor unexpectedly succeeded: {snapshots:?}")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains(
+            "ENSv1 registry event-time resource_id repair rejected invalid resource anchors"
+        ),
+        "unexpected error for dangling target anchor: {error:#}"
+    );
+    assert_eq!(stored_resource_id, existing_registry_resource_id);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_zero_registrant_renewal_leak()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -3555,7 +3688,7 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
 }
 
 #[tokio::test]
-async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_resolver_resource_id_from_null_without_resource_row()
+async fn normalized_event_count_only_upsert_rejects_ens_v1_registry_event_time_resolver_resource_id_from_null_without_resource_row()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let event_time_registry_resource_id = Uuid::from_u128(0x1550);
@@ -3571,19 +3704,31 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
         "ens-v1-unwrapped-authority:registry-event-time:resolver-from-null-without-resource",
         event_time_registry_resource_id,
     );
-    let inserted_count =
-        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
-            .await?;
-    assert_eq!(inserted_count, 0);
+    let result =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired)).await;
 
     let stored_resource_id: Option<Uuid> =
         sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
             .bind(&stale.event_identity)
             .fetch_one(database.pool())
             .await?;
-    assert_eq!(stored_resource_id, Some(event_time_registry_resource_id));
+    database.cleanup().await?;
 
-    database.cleanup().await
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "null-resource repair with dangling target anchor unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains(
+            "ENSv1 registry event-time null resource_id repair rejected invalid resource anchors"
+        ),
+        "unexpected error for null-resource dangling target anchor: {error:#}"
+    );
+    assert_eq!(stored_resource_id, None);
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -3781,7 +3926,7 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_a
 }
 
 #[tokio::test]
-async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_record_version_before_state_without_resource_row()
+async fn normalized_event_count_only_upsert_rejects_ens_v1_registry_event_time_record_version_before_state_without_resource_row()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let legacy_labelhash_registry_resource_id = Uuid::from_u128(0x15d0);
@@ -3806,10 +3951,8 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
         Some(5),
         6,
     );
-    let inserted_count =
-        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
-            .await?;
-    assert_eq!(inserted_count, 0);
+    let result =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired)).await;
 
     let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
         "SELECT resource_id, before_state FROM normalized_events WHERE event_identity = $1",
@@ -3817,34 +3960,35 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
     .bind(&event.event_identity)
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(stored.0, namehash_registry_resource_id);
-    assert_eq!(stored.1, repaired.before_state);
+    assert_eq!(stored.0, legacy_labelhash_registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
 
-    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+    let invalidation_count = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT projection, projection_key
+        SELECT COUNT(*)::BIGINT
         FROM projection_invalidations
         WHERE projection = 'record_inventory_current'
-        ORDER BY projection_key
         "#,
     )
-    .fetch_all(database.pool())
+    .fetch_one(database.pool())
     .await?;
-    assert_eq!(
-        invalidation_keys,
-        vec![
-            (
-                "record_inventory_current".to_owned(),
-                legacy_labelhash_registry_resource_id.to_string()
-            ),
-            (
-                "record_inventory_current".to_owned(),
-                namehash_registry_resource_id.to_string()
-            ),
-        ]
-    );
+    database.cleanup().await?;
 
-    database.cleanup().await
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "record-version repair with dangling target anchor unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains(
+            "ENSv1 registry event-time resource_id repair rejected invalid resource anchors"
+        ),
+        "unexpected error for record-version dangling target anchor: {error:#}"
+    );
+    assert_eq!(invalidation_count, 0);
+
+    Ok(())
 }
 
 #[tokio::test]

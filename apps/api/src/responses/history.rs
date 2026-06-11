@@ -75,7 +75,15 @@ fn build_history_provenance(rows: &[HistoryEvent]) -> JsonValue {
         "manifest_versions",
         dedupe_json_values(rows.iter().map(history_manifest_version)),
     );
-    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    // History provenance is a route-level summary; if execution-backed rows are
+    // later admitted, the first non-null trace id is the representative id.
+    if let Some(execution_trace_id) = rows
+        .iter()
+        .filter_map(|row| string_field(provenance_field(&row.provenance, "execution_trace_id")))
+        .next()
+    {
+        insert_string_field(&mut value, "execution_trace_id", execution_trace_id);
+    }
     insert_string_field(
         &mut value,
         "derivation_kind",

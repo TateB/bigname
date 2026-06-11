@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     AddressNameRelation, CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    load_address_names_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    label_preimage_from_label, load_address_names_current, upsert_name_surfaces,
+    upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -1418,7 +1419,7 @@ fn name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -1428,6 +1429,16 @@ fn name_surface(
         provenance: json!({"source": "worker_address_names_test", "kind": "name_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    label_preimage_from_label(label, "worker_address_names_test", 1, json!({}))
+        .expect("test label must hash")
+        .labelhash
 }
 
 fn surface_binding(

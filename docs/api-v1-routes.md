@@ -416,7 +416,7 @@ Rules:
 
 - `dedupe_by=surface` is the default. `dedupe_by=resource` is grouping-only; it doesn't change coverage or turn the route into a resource collection.
 - Default sort is `display_name_asc`. `cursor` and `page_size` page over that frozen order.
-- `include=role_summary` is additive. It groups current `GET /v1/resources/{resource_id}/permissions` rows by `subject` and keeps `(scope, effective_powers)` pairs. Row-granular grant lineage stays on the dedicated permissions route.
+- `include=role_summary` is additive. It groups current `GET /v1/resources/{resource_id}/permissions` rows by `subject` and keeps `(scope, effective_powers)` pairs. The response provenance summarizes the base address-name collection plus expansion inputs. Row-granular grant lineage stays on the dedicated permissions route.
 - `subname_count` reuses declared-direct-child semantics from `GET /v1/names/{namespace}/{name}/children`.
 - `status` and `expiry` mirror the current `ControlVector.status` and `ControlVector.expiry` for the item's `resource_id`.
 - `record_count` counts distinct stable declared selectors at the current version boundary (same answer shape as `Resolution.record_inventory`).
@@ -461,6 +461,7 @@ Rules:
 - A wrapper-backed answer is `full` only when the current fuse modifier for the selected resource snapshot was applied. If the projection can't prove current fuse state, the route fails closed rather than returning unmasked powers.
 - `cursor` and `page_size` page over `subject_scope_asc`.
 - Declared-state only; `verified_state` is `null`.
+- Response provenance summarizes the filtered `permissions_current` collection. Per-row grant, revocation, inheritance, and transfer details stay on each row.
 
 ## `GET /v1/roles`
 
@@ -532,7 +533,7 @@ Rules:
 
 Canonical normalized-event history for one logical name anchor.
 
-Query: `scope=surface|resource|both` (default `both`), `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `scope=surface|resource|both` (default `both`), `view=compact|full` (default `full`), `meta=none|summary|full`, `cursor`, `page_size`.
 
 Rules:
 
@@ -560,7 +561,7 @@ Rules:
 
 Canonical normalized-event history for the address-derived anchor set.
 
-Query: `namespace`, `relation=registrant|token_holder|effective_controller`, `scope=surface|resource|both` (default `both`), `view=compact|full`, `meta=none|summary|full`, `cursor`, `page_size`.
+Query: `namespace`, `relation=registrant|token_holder|effective_controller`, `scope=surface|resource|both` (default `both`), `view=compact|full` (default `full`), `meta=none|summary|full`, `cursor`, `page_size`.
 
 Reuses the normalized-event history contract; no separate ledger. `namespace` and `relation` filter which surfaces and resources contribute anchors across current and historical matches; they don't change row shape, ordering, or coverage. Observed and orphaned events are excluded. Pages over `chain_position_desc`.
 

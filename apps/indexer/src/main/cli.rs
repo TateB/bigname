@@ -41,6 +41,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     Run(RunArgs),
+    Healthcheck(HealthcheckArgs),
     Backfill(BackfillArgs),
     OpsCatchup(OpsCatchupArgs),
     Replay(ReplayArgs),
@@ -142,6 +143,18 @@ pub(crate) struct RunArgs {
         default_value_t = false
     )]
     pub(crate) retain_header_audit_fields: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct HealthcheckArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
+        default_value = "manifests/mainnet"
+    )]
+    pub(crate) manifests_root: PathBuf,
 }
 
 #[derive(Args, Debug)]

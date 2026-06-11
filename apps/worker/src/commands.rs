@@ -5,14 +5,15 @@ mod execution_invalidation;
 
 use crate::cli::*;
 use crate::{
-    address_names, automatic_projection_replay, children, inspect, manifest_drift, name_current,
-    permissions, primary_name, raw_facts, record_inventory, replay, resolver,
+    address_names, automatic_projection_replay, children, healthcheck, inspect, manifest_drift,
+    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
 };
 use execution_invalidation::execution_command;
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Run(args) => automatic_projection_replay::run_worker(args).await,
+        Command::Healthcheck(args) => healthcheck::healthcheck(args).await,
         Command::Migrate(args) => migrate(args).await,
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,

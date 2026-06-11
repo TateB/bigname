@@ -98,6 +98,20 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_null_r
         repair_map AS (
             SELECT input.*
             FROM input
+            JOIN resources new_resource
+              ON new_resource.resource_id = input.new_resource_id
+             AND new_resource.chain_id = 'ethereum-mainnet'
+             AND new_resource.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+             AND new_resource.provenance->>'logical_name_id' = input.logical_name_id
+             AND new_resource.provenance->>'authority_kind' IN (
+                 'registrar',
+                 'wrapper',
+                 'registry_only'
+             )
             WHERE (
                     input.old_before_state::JSONB IS NOT DISTINCT FROM
                         input.new_before_state::JSONB

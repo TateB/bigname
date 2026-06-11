@@ -100,18 +100,47 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_selected_registrar_lease(
     registrar_state: Option<&PreloadedRegistrarState>,
     block_index: &CanonicalBlockIndex,
 ) -> Result<()> {
-    if history.current_registration.is_some() {
+    if history.current_registration.is_some() || history.superseded_registration.is_some() {
         return Ok(());
     }
-    let Some(state) = registrar_state else {
+    if let Some(lease) = preloaded_registrar_lease(history, registrar_state, block_index)? {
+        history.current_registration = Some(lease);
+        history.superseded_registration = None;
+    }
+
+    Ok(())
+}
+
+pub(in crate::ens_v1_unwrapped_authority) fn preload_superseded_registrar_lease(
+    history: &mut NameHistory,
+    registrar_state: Option<&PreloadedRegistrarState>,
+    block_index: &CanonicalBlockIndex,
+) -> Result<()> {
+    if history.current_registration.is_some() || history.superseded_registration.is_some() {
         return Ok(());
+    }
+    if let Some(lease) = preloaded_registrar_lease(history, registrar_state, block_index)? {
+        history.current_registration = None;
+        history.superseded_registration = Some(lease);
+    }
+
+    Ok(())
+}
+
+fn preloaded_registrar_lease(
+    history: &NameHistory,
+    registrar_state: Option<&PreloadedRegistrarState>,
+    block_index: &CanonicalBlockIndex,
+) -> Result<Option<RegistrationLease>> {
+    let Some(state) = registrar_state else {
+        return Ok(None);
     };
     let (Some(authority_key), Some(expiry), Some(start_ref)) = (
         state.authority_key.as_ref(),
         state.expiry,
         state.start_ref.as_ref(),
     ) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let labelhash = state
@@ -123,7 +152,7 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_selected_registrar_lease(
         .registrant
         .clone()
         .unwrap_or_else(|| ZERO_ADDRESS.to_owned());
-    history.current_registration = Some(RegistrationLease {
+    Ok(Some(RegistrationLease {
         authority_key: authority_key.clone(),
         labelhash,
         registrant,
@@ -131,10 +160,7 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_selected_registrar_lease(
         release_ref: block_index
             .first_block_at_or_after(release_after_grace(expiry)?, &start_ref.namespace),
         start_ref: start_ref.clone(),
-    });
-    history.superseded_registration = None;
-
-    Ok(())
+    }))
 }
 
 pub(super) fn registrar_labelhash_from_provenance_or_authority_key(

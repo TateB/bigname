@@ -17,6 +17,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     Run(RunArgs),
+    Healthcheck(HealthcheckArgs),
     Migrate(MigrateArgs),
     AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
@@ -79,6 +80,12 @@ pub(crate) struct RunArgs {
         default_value_t = 250_usize
     )]
     pub(crate) legacy_reverse_hydration_batch_size: usize,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct HealthcheckArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
 }
 
 #[derive(Args, Debug)]

@@ -1832,7 +1832,6 @@ fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
             "normalized_event_ids": [],
             "raw_fact_refs": [],
             "manifest_versions": [],
-            "execution_trace_id": null,
             "derivation_kind": "primary_name_route_bootstrap",
         })
     );
@@ -2077,7 +2076,7 @@ fn collection_name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: vec![direct_child_labelhash(display_name)],
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -2087,6 +2086,15 @@ fn collection_name_surface(
         provenance: json!({"seed": "children_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+fn direct_child_labelhash(display_name: &str) -> String {
+    let child_label = display_name.split('.').next().unwrap_or(display_name);
+
+    format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(child_label.as_bytes()))
+    )
 }
 
 fn declared_child_row(
@@ -2112,6 +2120,9 @@ fn declared_child_row(
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
         namehash: namehash.to_owned(),
+        labelhash: Some(direct_child_labelhash(display_name)),
+        owner: None,
+        registrant: None,
         provenance: json!({
             "normalized_event_ids": [normalized_event_id],
             "raw_fact_refs": [{
@@ -2674,7 +2685,6 @@ impl EnsV2DeclaredChildFixture {
                     "source_manifest_id": null
                 }
             ],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         }))
     }
