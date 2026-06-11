@@ -1,3 +1,5 @@
+use super::manifest_queries::MANIFEST_CURRENT_INVALIDATIONS_PREFIX;
+
 pub(super) const UPSERT_SUFFIX: &str = r#"
 INSERT INTO projection_invalidations (
     projection,
@@ -53,7 +55,7 @@ DO UPDATE SET
     claimed_at = NULL,
     last_failure_reason = NULL,
     last_failure_at = NULL
-"#;
+	"#;
 
 const NAME_CURRENT_INVALIDATIONS_PREFIX: &str = r#"
 WITH changed_events AS (
@@ -572,4 +574,5 @@ pub(super) const INVALIDATION_QUERY_PREFIXES: &[&str] = &[
     RESOLVER_CURRENT_INVALIDATIONS_PREFIX,
     ADDRESS_NAMES_CURRENT_INVALIDATIONS_PREFIX,
     PRIMARY_NAMES_CURRENT_INVALIDATIONS_PREFIX,
+    MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
 ];

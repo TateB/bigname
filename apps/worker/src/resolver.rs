@@ -1,10 +1,16 @@
 use anyhow::{Result, bail};
-use bigname_storage::{
-    ResolverCurrentRow, clear_resolver_current, delete_resolver_current,
-    upsert_resolver_current_rows,
-};
+use bigname_storage::{ResolverCurrentRow, delete_resolver_current, upsert_resolver_current_rows};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
+
+#[allow(clippy::duplicate_mod)]
+#[path = "staged_rebuild.rs"]
+mod staged_rebuild;
+
+use staged_rebuild::{
+    RESOLVER_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_resolver_current_rows,
+};
 
 mod profile;
 mod state_helpers;
@@ -88,13 +94,15 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let targets = load_target_resolvers(pool).await?;
     let requested_resolver_count = targets.len();
+    let mut conn = pool.acquire().await.map_err(anyhow::Error::from)?;
+    let stage_table = create_stage_table(&mut conn, "resolver_current").await?;
+    let previous_row_count = count_rows(&mut conn, "resolver_current", None).await?;
     tracing::info!(
         projection = "resolver_current",
         requested_resolver_count,
         rebuild_concurrency = RESOLVER_CURRENT_REBUILD_CONCURRENCY,
         "resolver_current rebuild targets loaded"
     );
-    let deleted_row_count = clear_resolver_current(pool).await?;
 
     let mut rows = Vec::with_capacity(RESOLVER_CURRENT_REBUILD_BATCH_SIZE);
     let mut completed_resolver_count = 0usize;
@@ -116,7 +124,8 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
         }
 
         if rows.len() >= RESOLVER_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+            upserted_row_count +=
+                stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
             rows.clear();
         }
 
@@ -136,13 +145,24 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
     }
 
     if !rows.is_empty() {
-        upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+        upserted_row_count +=
+            stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "resolver_current",
+        &stage_table,
+        RESOLVER_CURRENT_COLUMNS,
+        None,
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(ResolverCurrentRebuildSummary {
         requested_resolver_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
     })
 }
 

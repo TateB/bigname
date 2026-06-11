@@ -83,6 +83,14 @@ fn projection_replay_waits_for_projection_indexes() {
 }
 
 #[test]
+fn active_index_build_probe_is_scoped_to_current_database() {
+    assert!(
+        ACTIVE_INDEX_BUILDS_QUERY.contains("datname = current_database()"),
+        "projection replay readiness must ignore index builds in other databases"
+    );
+}
+
+#[test]
 fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
     assert!(ready_status().is_ready());
 }

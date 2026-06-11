@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    CanonicalityState, ChildrenCurrentRow, clear_children_current, delete_children_current,
+    CanonicalityState, ChildrenCurrentRow, delete_children_current,
     load_canonical_declared_child_sources, load_raw_block, stream_canonical_declared_child_sources,
     upsert_children_current_rows,
 };
@@ -11,7 +11,15 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 
+#[allow(clippy::duplicate_mod)]
+#[path = "staged_rebuild.rs"]
+mod staged_rebuild;
+
 use crate::projection_json::format_timestamp;
+use staged_rebuild::{
+    CHILDREN_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_children_current_rows,
+};
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const CHILDREN_CURRENT_DERIVATION_KIND: &str = "children_current_rebuild";
@@ -37,7 +45,17 @@ pub async fn rebuild_children_current(
 }
 
 async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSummary> {
-    let deleted_row_count = clear_children_current(pool).await?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire children_current staging connection")?;
+    let stage_table = create_stage_table(&mut conn, "children_current").await?;
+    let previous_row_count = count_rows(
+        &mut conn,
+        "children_current",
+        Some("WHERE surface_class = 'declared'"),
+    )
+    .await?;
     let mut rows = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
     let mut queued_source_count = 0usize;
     let mut completed_source_count = 0usize;
@@ -59,7 +77,8 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
         completed_source_count += 1;
         rows.push(result??);
         if rows.len() >= CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_children_current_rows(pool, &rows).await?.len();
+            upserted_row_count +=
+                stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
             rows.clear();
         }
 
@@ -83,15 +102,26 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
     }
 
     if !rows.is_empty() {
-        upserted_row_count += upsert_children_current_rows(pool, &rows).await?.len();
+        upserted_row_count +=
+            stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "children_current",
+        &stage_table,
+        CHILDREN_CURRENT_COLUMNS,
+        Some("WHERE surface_class = 'declared'"),
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     let requested_parent_count = count_children_current_parents(pool).await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
     })
 }
 
