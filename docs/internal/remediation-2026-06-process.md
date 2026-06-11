@@ -63,7 +63,7 @@ For each workstream:
 | Stream | Status | Branch | PR | Notes |
 | --- | --- | --- | --- | --- |
 | WS-H Safety net & docs | merged | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | Merged to `main` in `2891acd`; WS-H P0 gate is closed |
-| WS-A ENSv1 authority | PR open | `codex/ws-a-ens-v1-authority-gates` → `fix/ens-v1-registry-owner-authority` | [#15](https://github.com/TateB/bigname/pull/15) | Items 1–3 are under PR review; semantic blockers and CI fixture blockers have been addressed locally; final verification/PR update pending |
+| WS-A ENSv1 authority | merged | `codex/ws-a-ens-v1-authority-gates` → `fix/ens-v1-registry-owner-authority` | [#15](https://github.com/TateB/bigname/pull/15) | PR #15 squash-merged into fix/ens-v1-registry-owner-authority @ a878609; gate branch PR to main pending |
 | WS-B ENSv2 + preimage | not started | — | — | |
 | WS-C Projection pipeline | not started | — | — | Will need a migration (dead-letter) — WS-F review |
 | WS-D Intake resilience | not started | — | — | Owns storage `backfill_jobs/`, `lineage/` |
