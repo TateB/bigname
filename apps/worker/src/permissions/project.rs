@@ -29,8 +29,7 @@ const RESOURCE_CONTROL_FUSE_MASK: i64 = CANNOT_UNWRAP
     | CANNOT_SET_RESOLVER
     | CANNOT_SET_TTL
     | CANNOT_CREATE_SUBDOMAIN
-    | CANNOT_APPROVE
-    | PARENT_CANNOT_CONTROL;
+    | CANNOT_APPROVE;
 
 pub(super) async fn build_rows(
     pool: &PgPool,
@@ -149,8 +148,13 @@ fn mask_effective_powers(
     let Some(modifier) = modifier else {
         return Ok((powers, false));
     };
-    let Some(fuses) = modifier.after_state.get("fuses").and_then(Value::as_i64) else {
-        return Ok((powers, false));
+    let Some(fuses) = modifier
+        .after_state
+        .get("fuses")
+        .and_then(Value::as_i64)
+        .filter(|fuses| *fuses >= 0)
+    else {
+        return Ok((Vec::new(), true));
     };
     let mut changed = false;
     let masked = powers
@@ -166,7 +170,15 @@ fn mask_effective_powers(
 
 fn power_masked_by_fuses(power: &str, fuses: i64) -> bool {
     match power {
+        // `_wrapETH2LD` marks every wrapped .eth 2LD with
+        // PARENT_CANNOT_CONTROL | IS_DOT_ETH, but PCC restricts the parent,
+        // not the owner row's resource control.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
         "resource_control" => fuses & RESOURCE_CONTROL_FUSE_MASK != 0,
+        "resolver_control" => fuses & CANNOT_SET_RESOLVER != 0,
+        // The adapter emits resource_control/resolver_control today. These
+        // operation-specific names are forward vocabulary for future
+        // normalized powers and remain fail-closed under the same fuse bits.
         "set_resolver" => fuses & CANNOT_SET_RESOLVER != 0,
         "set_ttl" => fuses & CANNOT_SET_TTL != 0,
         "create_subnames" | "create_subdomain" => {
