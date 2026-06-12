@@ -56,6 +56,9 @@ sol! {
 
     #[derive(Debug)]
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+
+    #[derive(Debug)]
+    event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
 }
 
 pub(super) struct RegistrarLabelEventData {
@@ -312,6 +315,28 @@ pub(super) fn decode_wrapper_transfer_single_data(
         to_address: evm_abi::address_hex(event.to),
         value: evm_abi::u256_i64(event.value, "TransferSingle value")?,
     })
+}
+
+pub(super) fn decode_wrapper_transfer_batch_data(
+    raw_log: &AuthorityRawLogRow,
+) -> Result<Vec<WrapperTokenTransferData>> {
+    let event = decode_event::<TransferBatch>(raw_log, "TransferBatch log is malformed")?;
+    if event.ids.len() != event.values.len() {
+        bail!("TransferBatch ids and values length mismatch");
+    }
+    event
+        .ids
+        .into_iter()
+        .zip(event.values)
+        .map(|(id, value)| {
+            Ok(WrapperTokenTransferData {
+                namehash: evm_abi::u256_word_hex(id),
+                from_address: evm_abi::address_hex(event.from),
+                to_address: evm_abi::address_hex(event.to),
+                value: evm_abi::u256_i64(value, "TransferBatch value")?,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn normalize_hex_32(value: &str) -> Result<String> {

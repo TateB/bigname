@@ -3,6 +3,43 @@ use super::*;
 #[path = "observation/resolver_records.rs"]
 mod resolver_records;
 
+pub(super) fn build_authority_observations(
+    raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<AuthorityObservation>> {
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(Vec::new());
+    };
+    let profile = authority_profile_for_source_family(&raw_log.source_family);
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && event_topics.matches(TRANSFER_BATCH_SIGNATURE, topic0)?
+    {
+        return decode_wrapper_transfer_batch_data(raw_log)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, transfer)| {
+                Ok(AuthorityObservation::WrapperTokenTransferred(
+                    WrapperTokenTransferObservation {
+                        namehash: normalize_hex_32(&transfer.namehash)?,
+                        from_address: transfer.from_address,
+                        to_address: transfer.to_address,
+                        value: transfer.value,
+                        transfer_index: Some(
+                            i64::try_from(index).context("TransferBatch index exceeds i64")?,
+                        ),
+                        reference: raw_log.reference(),
+                    },
+                ))
+            })
+            .collect();
+    }
+
+    Ok(build_authority_observation(raw_log, event_topics)?
+        .into_iter()
+        .collect())
+}
+
 pub(super) fn build_authority_observation(
     raw_log: &AuthorityRawLogRow,
     event_topics: &AuthorityEventTopics,
@@ -393,6 +430,7 @@ pub(super) fn build_authority_observation(
                 from_address: transfer.from_address,
                 to_address: transfer.to_address,
                 value: transfer.value,
+                transfer_index: None,
                 reference: raw_log.reference(),
             },
         )));

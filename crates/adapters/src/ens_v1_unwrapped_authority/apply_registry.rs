@@ -70,6 +70,7 @@ pub(super) fn apply_registry_owner_changed(
                         after_subject: history.current_registry_owner.as_deref(),
                         resolver: history.current_resolver.as_deref(),
                         source_event_kind: EVENT_KIND_AUTHORITY_TRANSFERRED,
+                        identity_suffix: None,
                     },
                 );
             }

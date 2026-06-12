@@ -45,7 +45,7 @@ pub(super) async fn block_index_with_preloaded_registrar_release_boundaries(
                 .context("preloaded registrar expiry is not a valid unix timestamp")?
         };
         let release_timestamp = release_after_grace(expiry)?;
-        if release_timestamp <= replay_head.block_timestamp {
+        if release_timestamp < replay_head.block_timestamp {
             release_timestamps.push(release_timestamp);
             release_namespaces.push(sql_row::get(&row, "namespace")?);
         }
@@ -55,7 +55,7 @@ pub(super) async fn block_index_with_preloaded_registrar_release_boundaries(
             continue;
         };
         let release_timestamp = release_after_grace(expiry)?;
-        if release_timestamp <= replay_head.block_timestamp {
+        if release_timestamp < replay_head.block_timestamp {
             release_timestamps.push(release_timestamp);
             release_namespaces.push(start_ref.namespace.clone());
         }
@@ -111,7 +111,7 @@ async fn load_release_boundary_blocks_for_timestamps(
                 canonicality_state
             FROM chain_lineage
             WHERE chain_id = $1
-              AND block_timestamp >= requested.release_timestamp
+              AND block_timestamp > requested.release_timestamp
               AND block_timestamp <= $4
               AND block_number <= $5
               AND canonicality_state {CANONICALITY_STATE_FILTER}

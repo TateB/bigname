@@ -127,6 +127,8 @@ struct RawLogPosition {
     block_hash: String,
     transaction_hash: String,
     log_index: i64,
+    #[serde(default)]
+    is_wrapper_name_wrapped: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -235,6 +237,8 @@ struct WrapperTokenTransferObservation {
     from_address: String,
     to_address: String,
     value: i64,
+    #[serde(default)]
+    transfer_index: Option<i64>,
     reference: ObservationRef,
 }
 

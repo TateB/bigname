@@ -254,6 +254,25 @@ pub(super) fn active_anchor_for_observation(
     registry_anchor_for_history(history, &reference.chain_id, &history.labelhash)
 }
 
+pub(super) fn clear_stale_wrapper_authority_for_registration_grant(
+    history: &mut NameHistory,
+    reference: &ObservationRef,
+) -> Result<()> {
+    if history.current_wrapper_key.is_none() {
+        return Ok(());
+    }
+    let before_anchor = active_anchor_for_observation(history, reference);
+    history.current_wrapper_key = None;
+    let after_anchor = active_anchor_for_observation(history, reference);
+    transition_authority(
+        history,
+        before_anchor,
+        after_anchor,
+        &reference.as_boundary_ref(),
+        reference.block_timestamp,
+    )
+}
+
 pub(super) fn current_resolver_matches(history: &NameHistory, resolver: &str) -> bool {
     nonzero_address(history.current_resolver.as_deref())
         .is_some_and(|current| current.eq_ignore_ascii_case(resolver))

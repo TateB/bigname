@@ -140,7 +140,7 @@ async fn load_release_boundary_blocks_for_authority_logs(
                 canonicality_state
             FROM chain_lineage
             WHERE chain_id = $1
-              AND block_timestamp >= requested.release_timestamp
+              AND block_timestamp > requested.release_timestamp
               AND block_timestamp <= $4
               AND block_number <= $5
               AND canonicality_state IN (

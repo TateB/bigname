@@ -30,7 +30,7 @@ pub(super) fn apply_registration_granted(
         labelhash: event.labelhash.clone(),
         registrant: event.registrant.clone(),
         expiry: event.expiry,
-        release_ref: block_index.first_block_at_or_after(
+        release_ref: block_index.first_block_after(
             release_after_grace(event.expiry)?,
             &event.reference.namespace,
         ),
@@ -155,7 +155,7 @@ pub(super) fn apply_registration_renewed(
                 .map(|value| value.registrant.clone())
                 .unwrap_or_else(|| ZERO_ADDRESS.to_owned()),
             expiry: event.expiry,
-            release_ref: block_index.first_block_at_or_after(
+            release_ref: block_index.first_block_after(
                 release_after_grace(event.expiry)?,
                 &event.reference.namespace,
             ),
@@ -220,7 +220,7 @@ pub(super) fn apply_registration_renewed(
     if let Some(current_registration) = registration_for_renewal_mut(history, &event) {
         let before_expiry = current_registration.expiry;
         current_registration.expiry = event.expiry;
-        current_registration.release_ref = block_index.first_block_at_or_after(
+        current_registration.release_ref = block_index.first_block_after(
             release_after_grace(event.expiry)?,
             &event.reference.namespace,
         );
@@ -300,14 +300,17 @@ pub(super) fn settle_due_registration_release(
     }
 
     emit_registration_released_event(history, &lease, &release_ref)?;
-    if history.current_wrapper_key.is_some() {
-        return Ok(());
-    }
+    let before_anchor = if history.current_wrapper_key.is_some() {
+        active_anchor_for_history(history, &lease.reference_chain())
+    } else {
+        Some(build_registrar_anchor(&lease))
+    };
+    history.current_wrapper_key = None;
     let registry_after =
         registry_anchor_for_history(history, &lease.reference_chain(), &lease.labelhash);
     transition_authority(
         history,
-        Some(build_registrar_anchor(&lease)),
+        before_anchor,
         registry_after.clone(),
         &release_ref,
         release_ref.block_timestamp,
@@ -402,6 +405,7 @@ pub(super) fn apply_token_transferred(
             after_subject: Some(event.to_address.as_str()),
             resolver: current_resolver.as_deref(),
             source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+            identity_suffix: None,
         },
     );
     if transfer_applied_to_current_registration
@@ -530,6 +534,7 @@ pub(super) fn emit_registry_owner_revokes_before_registrar_restore(
             after_subject: None,
             resolver: history.current_resolver.as_deref(),
             source_event_kind,
+            identity_suffix: None,
         },
     );
 }

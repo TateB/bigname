@@ -65,6 +65,8 @@ pub(super) const FUSES_SET_SIGNATURE: &str = "FusesSet(bytes32,uint32)";
 pub(super) const EXPIRY_EXTENDED_SIGNATURE: &str = "ExpiryExtended(bytes32,uint64)";
 pub(super) const TRANSFER_SINGLE_SIGNATURE: &str =
     "TransferSingle(address,address,address,uint256,uint256)";
+pub(super) const TRANSFER_BATCH_SIGNATURE: &str =
+    "TransferBatch(address,address,address,uint256[],uint256[])";
 
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 pub(super) use bigname_domain::normalization::ENS_NORMALIZER_VERSION;

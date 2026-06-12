@@ -6,19 +6,18 @@ pub(in crate::ens_v1_unwrapped_authority::pipeline) fn name_intro_positions_for_
 ) -> Result<HashMap<String, Vec<RawLogPosition>>> {
     let mut positions = HashMap::<String, Vec<RawLogPosition>>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        let Some(namehash) = observation_intro_namehash(&observation)? else {
-            continue;
-        };
-        let Some(position) = observation_raw_log_position(&observation) else {
-            continue;
-        };
-        positions
-            .entry(namehash.to_ascii_lowercase())
-            .or_default()
-            .push(position);
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            let Some(namehash) = observation_intro_namehash(&observation)? else {
+                continue;
+            };
+            let Some(position) = observation_raw_log_position(&observation) else {
+                continue;
+            };
+            positions
+                .entry(namehash.to_ascii_lowercase())
+                .or_default()
+                .push(position);
+        }
     }
     Ok(positions)
 }
@@ -48,11 +47,10 @@ pub(in crate::ens_v1_unwrapped_authority::pipeline) async fn preload_name_metada
 ) -> Result<()> {
     let mut namehashes = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        if let Some(namehash) = observation_namehash(&observation) {
-            namehashes.insert(namehash.to_ascii_lowercase());
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            if let Some(namehash) = observation_namehash(&observation) {
+                namehashes.insert(namehash.to_ascii_lowercase());
+            }
         }
     }
     if namehashes.is_empty() {

@@ -189,6 +189,7 @@ const TEST_MANIFEST_EVENT_SIGNATURES: &[&str] = &[
     "TokenResource(uint256,uint256)",
     "Transfer(address,address,uint256)",
     "Transfer(bytes32,address)",
+    "TransferBatch(address,address,address,uint256[],uint256[])",
     "TransferSingle(address,address,address,uint256,uint256)",
     "VersionChanged(bytes32,uint64)",
 ];

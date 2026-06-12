@@ -33,14 +33,14 @@ impl AuthorityRawLogRow {
 }
 
 impl CanonicalBlockIndex {
-    pub(super) fn first_block_at_or_after(
+    pub(super) fn first_block_after(
         &self,
         timestamp: OffsetDateTime,
         namespace: &str,
     ) -> Option<BoundaryRef> {
         let index = self
             .blocks
-            .partition_point(|block| block.block_timestamp < timestamp);
+            .partition_point(|block| block.block_timestamp <= timestamp);
         self.blocks.get(index).map(|block| BoundaryRef {
             chain_id: block.chain_id.clone(),
             block_hash: block.block_hash.clone(),

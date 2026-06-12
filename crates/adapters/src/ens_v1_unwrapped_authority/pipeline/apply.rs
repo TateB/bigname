@@ -6,6 +6,7 @@ mod preload;
 use pending::{
     PendingObservationFlush, drain_pending_namehash_observations, is_name_intro_observation,
     observation_raw_log_position, remember_known_name,
+    should_clear_stale_wrapper_before_registration_grant,
 };
 pub(super) use preload::{name_intro_positions_for_raw_logs, preload_name_metadata_for_raw_logs};
 
@@ -62,7 +63,7 @@ pub(super) fn apply_authority_raw_log(
         }
         return Ok(false);
     }
-    let observation = build_authority_observation(raw_log, event_topics)?;
+    let observations = build_authority_observations(raw_log, event_topics)?;
     if let Some(node) = migration_guard.mark_migrated_node() {
         if migrated_registry_nodes.insert(node.to_owned())
             && let Some(delta) = checkpoint_delta.as_deref_mut()
@@ -70,23 +71,25 @@ pub(super) fn apply_authority_raw_log(
             delta.mark_migrated_node(node);
         }
     }
-    let Some(observation) = observation else {
+    if observations.is_empty() {
         return Ok(false);
-    };
+    }
 
-    apply_authority_observation(
-        observation,
-        histories,
-        reverse_histories,
-        known_names_by_namehash,
-        known_name_refs_by_namehash,
-        namehash_to_labelhash,
-        pending_namehash_observations,
-        same_tx_name_intro_positions,
-        reverse_claim_sources,
-        block_index,
-        checkpoint_delta.as_deref_mut(),
-    )?;
+    for observation in observations {
+        apply_authority_observation(
+            observation,
+            histories,
+            reverse_histories,
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            pending_namehash_observations,
+            same_tx_name_intro_positions,
+            reverse_claim_sources,
+            block_index,
+            checkpoint_delta.as_deref_mut(),
+        )?;
+    }
     Ok(true)
 }
 
@@ -403,6 +406,20 @@ fn apply_authority_observation_for_history_key(
         let history = histories
             .get_mut(history_key)
             .with_context(|| format!("missing ENSv1 authority history {history_key}"))?;
+        settle_due_registration_release(
+            history,
+            &observation_reference(&observation).as_boundary_ref(),
+        )?;
+        if should_clear_stale_wrapper_before_registration_grant(
+            history,
+            &observation,
+            same_tx_name_intro_positions,
+        )? {
+            clear_stale_wrapper_authority_for_registration_grant(
+                history,
+                observation_reference(&observation),
+            )?;
+        }
         apply_observation(history, observation, block_index)?;
         history.name.clone()
     };

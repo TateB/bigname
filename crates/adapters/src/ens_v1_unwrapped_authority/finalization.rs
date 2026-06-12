@@ -16,67 +16,23 @@ pub(super) fn finalize_history(
     mut history: NameHistory,
     head_ref: &BoundaryRef,
 ) -> Result<FinalizedHistory> {
-    if history.current_wrapper_key.is_none()
-        && let Some(lease) = history.current_registration.take()
-    {
-        if let Some(release_ref) = lease.release_ref.clone() {
-            if release_ref.block_timestamp <= head_ref.block_timestamp {
-                emit_registration_released_event(&mut history, &lease, &release_ref)?;
-                let registry_after = registry_anchor_for_history(
-                    &history,
-                    &lease.reference_chain(),
-                    &lease.labelhash,
-                );
-                transition_authority(
-                    &mut history,
-                    Some(build_registrar_anchor(&lease)),
-                    registry_after.clone(),
-                    &release_ref,
-                    release_ref.block_timestamp,
-                )?;
-                if let (Some(name), Some(anchor), Some(subject)) = (
-                    history.name.as_ref(),
-                    registry_after.as_ref(),
-                    nonzero_address(history.current_registry_owner.as_deref()),
-                ) {
-                    emit_boundary_permission_grants(
-                        &mut history.events,
-                        &release_ref,
-                        &name.logical_name_id,
-                        anchor,
-                        &subject,
-                        history.current_resolver.as_deref(),
-                        EVENT_KIND_REGISTRATION_RELEASED,
-                    );
-                }
-            } else if history.open_binding.is_none() {
-                let registrar_anchor = build_registrar_anchor(&lease);
-                history.open_binding = Some(OpenBinding {
-                    surface_binding_id: deterministic_uuid(&format!(
-                        "binding:{}:{}",
-                        registrar_anchor.authority_key,
-                        lease.start_ref.block_timestamp.unix_timestamp()
-                    )),
-                    authority: registrar_anchor,
-                    active_from: lease.start_ref.block_timestamp,
-                    anchor_ref: lease.start_ref.as_boundary_ref(),
-                });
-            }
-        } else if history.open_binding.is_none() {
-            let registrar_anchor = build_registrar_anchor(&lease);
-            history.open_binding = Some(OpenBinding {
-                surface_binding_id: deterministic_uuid(&format!(
-                    "binding:{}:{}",
-                    registrar_anchor.authority_key,
-                    lease.start_ref.block_timestamp.unix_timestamp()
-                )),
-                authority: registrar_anchor,
-                active_from: lease.start_ref.block_timestamp,
-                anchor_ref: lease.start_ref.as_boundary_ref(),
-            });
-        }
+    settle_due_registration_release(&mut history, head_ref)?;
 
-        history.current_registration = Some(lease);
+    if history.current_wrapper_key.is_none()
+        && history.open_binding.is_none()
+        && let Some(lease) = history.current_registration.as_ref()
+    {
+        let registrar_anchor = build_registrar_anchor(lease);
+        history.open_binding = Some(OpenBinding {
+            surface_binding_id: deterministic_uuid(&format!(
+                "binding:{}:{}",
+                registrar_anchor.authority_key,
+                lease.start_ref.block_timestamp.unix_timestamp()
+            )),
+            authority: registrar_anchor,
+            active_from: lease.start_ref.block_timestamp,
+            anchor_ref: lease.start_ref.as_boundary_ref(),
+        });
     }
 
     if history.open_binding.is_none()

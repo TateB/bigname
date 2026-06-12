@@ -80,7 +80,7 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registrar_history(
         registrant,
         expiry,
         release_ref: block_index
-            .first_block_at_or_after(release_after_grace(expiry)?, &binding_ref.namespace),
+            .first_block_after(release_after_grace(expiry)?, &binding_ref.namespace),
         start_ref,
     };
     let anchor = build_registrar_anchor(&lease);
@@ -158,7 +158,7 @@ fn preloaded_registrar_lease(
         registrant,
         expiry,
         release_ref: block_index
-            .first_block_at_or_after(release_after_grace(expiry)?, &start_ref.namespace),
+            .first_block_after(release_after_grace(expiry)?, &start_ref.namespace),
         start_ref: start_ref.clone(),
     }))
 }

@@ -55,6 +55,7 @@ pub(super) struct PermissionSubjectChange<'a> {
     pub(super) after_subject: Option<&'a str>,
     pub(super) resolver: Option<&'a str>,
     pub(super) source_event_kind: &'a str,
+    pub(super) identity_suffix: Option<&'a str>,
 }
 
 pub(super) struct WrapperFuseChange<'a> {
@@ -71,6 +72,23 @@ pub(super) fn build_observation_permission_change_event(
     anchor: &AuthorityAnchor,
     change: PermissionChange<'_>,
 ) -> NormalizedEvent {
+    build_observation_permission_change_event_with_identity_suffix(
+        reference,
+        logical_name_id,
+        anchor,
+        change,
+        None,
+    )
+}
+
+fn build_observation_permission_change_event_with_identity_suffix(
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    change: PermissionChange<'_>,
+    identity_suffix: Option<&str>,
+) -> NormalizedEvent {
+    let event_identity = observation_permission_identity(&change, reference, identity_suffix);
     let source = permission_source(anchor, change.source_event_kind);
     let before_state = match change.action {
         PermissionAction::Grant => {
@@ -104,16 +122,29 @@ pub(super) fn build_observation_permission_change_event(
         EVENT_KIND_PERMISSION_CHANGED,
         before_state,
         after_state,
-        format!(
-            "permission:{}:{}:{}:{}:{}:{}",
-            change.action.as_str(),
-            change.scope_identity,
-            change.subject,
-            reference.block_hash,
-            reference.transaction_hash.as_deref().unwrap_or_default(),
-            reference.log_index.unwrap_or_default()
-        ),
+        event_identity,
     )
+}
+
+fn observation_permission_identity(
+    change: &PermissionChange<'_>,
+    reference: &ObservationRef,
+    identity_suffix: Option<&str>,
+) -> String {
+    let mut identity = format!(
+        "permission:{}:{}:{}:{}:{}:{}",
+        change.action.as_str(),
+        change.scope_identity,
+        change.subject,
+        reference.block_hash,
+        reference.transaction_hash.as_deref().unwrap_or_default(),
+        reference.log_index.unwrap_or_default()
+    );
+    if let Some(suffix) = identity_suffix {
+        identity.push(':');
+        identity.push_str(suffix);
+    }
+    identity
 }
 
 fn build_boundary_permission_change_event(
@@ -183,34 +214,62 @@ pub(super) fn emit_observation_permission_grants(
     resolver: Option<&str>,
     source_event_kind: &str,
 ) {
-    events.push(build_observation_permission_change_event(
+    emit_observation_permission_grants_with_identity_suffix(
+        events,
         reference,
         logical_name_id,
         anchor,
-        PermissionChange {
-            subject,
-            scope: resource_permission_scope(),
-            scope_identity: "resource".to_owned(),
-            power: PERMISSION_POWER_RESOURCE_CONTROL,
-            action: PermissionAction::Grant,
-            source_event_kind,
-        },
-    ));
+        subject,
+        resolver,
+        source_event_kind,
+        None,
+    );
+}
 
-    if let Some(resolver) = nonzero_address(resolver) {
-        events.push(build_observation_permission_change_event(
+fn emit_observation_permission_grants_with_identity_suffix(
+    events: &mut Vec<NormalizedEvent>,
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    subject: &str,
+    resolver: Option<&str>,
+    source_event_kind: &str,
+    identity_suffix: Option<&str>,
+) {
+    events.push(
+        build_observation_permission_change_event_with_identity_suffix(
             reference,
             logical_name_id,
             anchor,
             PermissionChange {
                 subject,
-                scope: resolver_permission_scope(&reference.chain_id, &resolver),
-                scope_identity: format!("resolver:{resolver}"),
-                power: PERMISSION_POWER_RESOLVER_CONTROL,
+                scope: resource_permission_scope(),
+                scope_identity: "resource".to_owned(),
+                power: PERMISSION_POWER_RESOURCE_CONTROL,
                 action: PermissionAction::Grant,
                 source_event_kind,
             },
-        ));
+            identity_suffix,
+        ),
+    );
+
+    if let Some(resolver) = nonzero_address(resolver) {
+        events.push(
+            build_observation_permission_change_event_with_identity_suffix(
+                reference,
+                logical_name_id,
+                anchor,
+                PermissionChange {
+                    subject,
+                    scope: resolver_permission_scope(&reference.chain_id, &resolver),
+                    scope_identity: format!("resolver:{resolver}"),
+                    power: PERMISSION_POWER_RESOLVER_CONTROL,
+                    action: PermissionAction::Grant,
+                    source_event_kind,
+                },
+                identity_suffix,
+            ),
+        );
     }
 }
 
@@ -268,38 +327,44 @@ pub(super) fn emit_observation_permission_subject_change(
     }
 
     if let Some(subject) = before_subject.as_deref() {
-        events.push(build_observation_permission_change_event(
-            reference,
-            logical_name_id,
-            anchor,
-            PermissionChange {
-                subject,
-                scope: resource_permission_scope(),
-                scope_identity: "resource".to_owned(),
-                power: PERMISSION_POWER_RESOURCE_CONTROL,
-                action: PermissionAction::Revoke,
-                source_event_kind: change.source_event_kind,
-            },
-        ));
-        if let Some(resolver) = nonzero_address(change.resolver) {
-            events.push(build_observation_permission_change_event(
+        events.push(
+            build_observation_permission_change_event_with_identity_suffix(
                 reference,
                 logical_name_id,
                 anchor,
                 PermissionChange {
                     subject,
-                    scope: resolver_permission_scope(&reference.chain_id, &resolver),
-                    scope_identity: format!("resolver:{resolver}"),
-                    power: PERMISSION_POWER_RESOLVER_CONTROL,
+                    scope: resource_permission_scope(),
+                    scope_identity: "resource".to_owned(),
+                    power: PERMISSION_POWER_RESOURCE_CONTROL,
                     action: PermissionAction::Revoke,
                     source_event_kind: change.source_event_kind,
                 },
-            ));
+                change.identity_suffix,
+            ),
+        );
+        if let Some(resolver) = nonzero_address(change.resolver) {
+            events.push(
+                build_observation_permission_change_event_with_identity_suffix(
+                    reference,
+                    logical_name_id,
+                    anchor,
+                    PermissionChange {
+                        subject,
+                        scope: resolver_permission_scope(&reference.chain_id, &resolver),
+                        scope_identity: format!("resolver:{resolver}"),
+                        power: PERMISSION_POWER_RESOLVER_CONTROL,
+                        action: PermissionAction::Revoke,
+                        source_event_kind: change.source_event_kind,
+                    },
+                    change.identity_suffix,
+                ),
+            );
         }
     }
 
     if let Some(subject) = after_subject.as_deref() {
-        emit_observation_permission_grants(
+        emit_observation_permission_grants_with_identity_suffix(
             events,
             reference,
             logical_name_id,
@@ -307,6 +372,7 @@ pub(super) fn emit_observation_permission_subject_change(
             subject,
             change.resolver,
             change.source_event_kind,
+            change.identity_suffix,
         );
     }
 }

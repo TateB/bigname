@@ -7,59 +7,57 @@ pub(super) fn selected_registrar_event_identities(
     let mut earliest_selected_position_by_namehash =
         HashMap::<String, SelectedReplayPosition>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        let Some(namehash) = selected_replay_observation_namehash(&observation)? else {
-            continue;
-        };
-        let position = SelectedReplayPosition::from(raw_log);
-        earliest_selected_position_by_namehash
-            .entry(namehash)
-            .and_modify(|existing| {
-                if position < *existing {
-                    *existing = position;
-                }
-            })
-            .or_insert(position);
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            let Some(namehash) = selected_replay_observation_namehash(&observation)? else {
+                continue;
+            };
+            let position = SelectedReplayPosition::from(raw_log);
+            earliest_selected_position_by_namehash
+                .entry(namehash)
+                .and_modify(|existing| {
+                    if position < *existing {
+                        *existing = position;
+                    }
+                })
+                .or_insert(position);
+        }
     }
 
     let mut identities = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        let Some(namehash) = selected_replay_observation_namehash(&observation)? else {
-            continue;
-        };
-        let position = SelectedReplayPosition::from(raw_log);
-        if earliest_selected_position_by_namehash
-            .get(&namehash)
-            .is_some_and(|earliest| position > *earliest)
-        {
-            continue;
-        }
-        match observation {
-            AuthorityObservation::RegistrationRenewed(_) => {
-                identities.insert(raw_log_event_identity(
-                    raw_log,
-                    EVENT_KIND_REGISTRATION_RENEWED,
-                    "renewal",
-                ));
-                identities.insert(raw_log_event_identity(
-                    raw_log,
-                    EVENT_KIND_EXPIRY_CHANGED,
-                    "expiry",
-                ));
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            let Some(namehash) = selected_replay_observation_namehash(&observation)? else {
+                continue;
+            };
+            let position = SelectedReplayPosition::from(raw_log);
+            if earliest_selected_position_by_namehash
+                .get(&namehash)
+                .is_some_and(|earliest| position > *earliest)
+            {
+                continue;
             }
-            AuthorityObservation::TokenTransferred(_) => {
-                identities.insert(raw_log_event_identity(
-                    raw_log,
-                    EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
-                    "token-transfer",
-                ));
+            match observation {
+                AuthorityObservation::RegistrationRenewed(_) => {
+                    identities.insert(raw_log_event_identity(
+                        raw_log,
+                        EVENT_KIND_REGISTRATION_RENEWED,
+                        "renewal",
+                    ));
+                    identities.insert(raw_log_event_identity(
+                        raw_log,
+                        EVENT_KIND_EXPIRY_CHANGED,
+                        "expiry",
+                    ));
+                }
+                AuthorityObservation::TokenTransferred(_) => {
+                    identities.insert(raw_log_event_identity(
+                        raw_log,
+                        EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                        "token-transfer",
+                    ));
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     Ok(identities.into_iter().collect())

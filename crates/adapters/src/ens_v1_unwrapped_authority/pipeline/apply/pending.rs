@@ -158,7 +158,40 @@ pub(super) fn observation_raw_log_position(
         block_hash: reference.block_hash.clone(),
         transaction_hash: reference.transaction_hash.clone()?,
         log_index: reference.log_index?,
+        is_wrapper_name_wrapped: matches!(observation, AuthorityObservation::WrapperNameWrapped(_)),
     })
+}
+
+pub(super) fn should_clear_stale_wrapper_before_registration_grant(
+    history: &NameHistory,
+    observation: &AuthorityObservation,
+    same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
+) -> Result<bool> {
+    if history.current_wrapper_key.is_none() {
+        return Ok(false);
+    }
+    let AuthorityObservation::RegistrationGranted(event) = observation else {
+        return Ok(false);
+    };
+    let Some(grant_position) = observation_raw_log_position(observation) else {
+        return Ok(true);
+    };
+    let namehash = observe_registrar_name_with_reference(
+        &event.label,
+        &event.reference,
+        ENS_NORMALIZER_VERSION,
+    )?
+    .namehash;
+    Ok(!same_tx_name_intro_positions
+        .get(&namehash.to_ascii_lowercase())
+        .is_some_and(|positions| {
+            positions.iter().any(|position| {
+                position.is_wrapper_name_wrapped
+                    && position.block_hash == grant_position.block_hash
+                    && position.transaction_hash == grant_position.transaction_hash
+                    && position.log_index > grant_position.log_index
+            })
+        }))
 }
 
 fn observation_reference(observation: &AuthorityObservation) -> &ObservationRef {

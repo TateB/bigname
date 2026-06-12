@@ -149,11 +149,11 @@ pub(super) async fn preload_restricted_name_histories(
     let mut registrar_scopes = Vec::with_capacity(rows.len());
     for row in &rows {
         let resource_provenance: Value = sql_row::get(row, "resource_provenance")?;
-        let lower_block_number = if resource_provenance
+        let authority_kind = resource_provenance
             .get("authority_kind")
             .and_then(Value::as_str)
-            == Some("registry_only")
-        {
+            .unwrap_or_default();
+        let lower_block_number = if matches!(authority_kind, "registry_only" | "wrapper") {
             0
         } else {
             row.get("binding_block_number")

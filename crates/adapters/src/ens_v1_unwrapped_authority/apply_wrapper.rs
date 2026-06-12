@@ -243,6 +243,33 @@ pub(super) fn apply_wrapper_token_transferred(
     let before_owner = wrapper.owner.clone();
     wrapper.owner = event.to_address.clone();
     let anchor = build_wrapper_anchor(wrapper);
+    let transfer_identity_suffix = event
+        .transfer_index
+        .map(|transfer_index| format!("batch:{transfer_index}"));
+    let identity_suffix = if let Some(transfer_index) = event.transfer_index {
+        format!(
+            "wrapper-token:{}:{}:{}:{}",
+            event.reference.block_hash,
+            event
+                .reference
+                .transaction_hash
+                .as_deref()
+                .unwrap_or_default(),
+            event.reference.log_index.unwrap_or_default(),
+            transfer_index
+        )
+    } else {
+        format!(
+            "wrapper-token:{}:{}:{}",
+            event.reference.block_hash,
+            event
+                .reference
+                .transaction_hash
+                .as_deref()
+                .unwrap_or_default(),
+            event.reference.log_index.unwrap_or_default()
+        )
+    };
     history.events.push(build_normalized_event(
         &event.reference,
         Some(name.logical_name_id.clone()),
@@ -257,16 +284,7 @@ pub(super) fn apply_wrapper_token_transferred(
             "authority_kind": "wrapper",
             "authority_key": wrapper.authority_key,
         }),
-        format!(
-            "wrapper-token:{}:{}:{}",
-            event.reference.block_hash,
-            event
-                .reference
-                .transaction_hash
-                .as_deref()
-                .unwrap_or_default(),
-            event.reference.log_index.unwrap_or_default()
-        ),
+        identity_suffix,
     ));
     emit_observation_permission_subject_change(
         &mut history.events,
@@ -278,6 +296,7 @@ pub(super) fn apply_wrapper_token_transferred(
             after_subject: Some(event.to_address.as_str()),
             resolver: history.current_resolver.as_deref(),
             source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+            identity_suffix: transfer_identity_suffix.as_deref(),
         },
     );
     Ok(())

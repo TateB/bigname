@@ -9,19 +9,18 @@ pub(super) fn restricted_replay_labelhashes(
 ) -> Result<Vec<String>> {
     let mut labelhashes = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        if let Some(namehash) = observation_namehash(&observation) {
-            if let Some(labelhash) = namehash_to_labelhash.get(namehash) {
-                labelhashes.insert(labelhash.to_ascii_lowercase());
-            } else if let Some(name) = known_names_by_namehash.get(namehash)
-                && let Some(labelhash) = name.labelhashes.first()
-            {
-                labelhashes.insert(labelhash.to_ascii_lowercase());
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            if let Some(namehash) = observation_namehash(&observation) {
+                if let Some(labelhash) = namehash_to_labelhash.get(namehash) {
+                    labelhashes.insert(labelhash.to_ascii_lowercase());
+                } else if let Some(name) = known_names_by_namehash.get(namehash)
+                    && let Some(labelhash) = name.labelhashes.first()
+                {
+                    labelhashes.insert(labelhash.to_ascii_lowercase());
+                }
+            } else {
+                labelhashes.insert(observation_labelhash(&observation).to_ascii_lowercase());
             }
-        } else {
-            labelhashes.insert(observation_labelhash(&observation).to_ascii_lowercase());
         }
     }
     Ok(labelhashes.into_iter().collect())
@@ -37,31 +36,30 @@ pub(super) fn resolver_state_scopes_for_selected_names(
         return Ok(Vec::new());
     }
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        let name = match observation {
-            AuthorityObservation::RegistrationGranted(value) => {
-                Some(observe_registrar_name_with_reference(
-                    &value.label,
-                    &value.reference,
-                    ENS_NORMALIZER_VERSION,
-                )?)
+        for observation in build_authority_observations(raw_log, event_topics)? {
+            let name = match observation {
+                AuthorityObservation::RegistrationGranted(value) => {
+                    Some(observe_registrar_name_with_reference(
+                        &value.label,
+                        &value.reference,
+                        ENS_NORMALIZER_VERSION,
+                    )?)
+                }
+                AuthorityObservation::RegistrationRenewed(value) => {
+                    Some(observe_registrar_name_with_reference(
+                        &value.label,
+                        &value.reference,
+                        ENS_NORMALIZER_VERSION,
+                    )?)
+                }
+                AuthorityObservation::WrapperNameWrapped(value) => Some(value.name),
+                _ => None,
+            };
+            if let Some(name) = name {
+                known_names_by_namehash
+                    .entry(name.namehash.clone())
+                    .or_insert(name);
             }
-            AuthorityObservation::RegistrationRenewed(value) => {
-                Some(observe_registrar_name_with_reference(
-                    &value.label,
-                    &value.reference,
-                    ENS_NORMALIZER_VERSION,
-                )?)
-            }
-            AuthorityObservation::WrapperNameWrapped(value) => Some(value.name),
-            _ => None,
-        };
-        if let Some(name) = name {
-            known_names_by_namehash
-                .entry(name.namehash.clone())
-                .or_insert(name);
         }
     }
     let selected_labelhashes = labelhashes.iter().cloned().collect::<BTreeSet<_>>();
