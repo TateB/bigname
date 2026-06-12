@@ -1,7 +1,8 @@
 # ADR 0006: API v2 Product Surface
 
-Status: Proposed
+Status: Accepted
 Date: 2026-06-10
+Accepted: 2026-06-12
 
 ## Context
 
