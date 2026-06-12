@@ -2,12 +2,20 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    clear_primary_names_current, delete_primary_name_current, normalize_evm_address,
-    upsert_primary_name_current_snapshots,
+    delete_primary_name_current, normalize_evm_address, upsert_primary_name_current_snapshots,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
+
+#[allow(clippy::duplicate_mod)]
+#[path = "../staged_rebuild.rs"]
+mod staged_rebuild;
+
+use staged_rebuild::{
+    PRIMARY_NAMES_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_primary_names_current_snapshots,
+};
 
 use super::{
     PrimaryNamesCurrentRebuildSummary,
@@ -38,7 +46,12 @@ pub async fn rebuild_primary_names_current(
 }
 
 async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentRebuildSummary> {
-    let deleted_row_count = clear_primary_names_current(pool).await?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire primary_names_current staging connection")?;
+    let stage_table = create_stage_table(&mut conn, "primary_names_current").await?;
+    let previous_row_count = count_rows(&mut conn, "primary_names_current", None).await?;
     let mut projections = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
     let mut status_counts = StatusCounts::default();
     let mut requested_tuple_count = 0usize;
@@ -54,9 +67,9 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
         projections.push(projection);
 
         if projections.len() >= PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
-                .await?
-                .len();
+            upserted_row_count +=
+                stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
+                    as usize;
             projections.clear();
         }
 
@@ -72,15 +85,25 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     }
 
     if !projections.is_empty() {
-        upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
-            .await?
-            .len();
+        upserted_row_count +=
+            stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
+                as usize;
     }
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "primary_names_current",
+        &stage_table,
+        PRIMARY_NAMES_CURRENT_COLUMNS,
+        None,
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(PrimaryNamesCurrentRebuildSummary {
         requested_tuple_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
         success_row_count: status_counts.success_row_count,
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,

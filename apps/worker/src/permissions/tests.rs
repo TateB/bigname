@@ -413,6 +413,261 @@ async fn permissions_current_keyed_rebuild_projects_basenames_resolver_scope_fro
 }
 
 #[tokio::test]
+async fn wrapper_scope_fuses_mask_resource_control_powers() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73b1);
+    let subject = "0x0000000000000000000000000000000000000abc";
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm0096", 150, 1_776_100_150),
+            raw_block("ethereum-mainnet", "0xperm0097", 151, 1_776_100_151),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            permission_event(
+                "wrapper-resource-grant",
+                resource_id,
+                subject,
+                json!({"kind": "resource"}),
+                json!(["resource_control"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 50})),
+                None,
+                150,
+                0,
+            ),
+            permission_scope_event("wrapper-fuses-set", resource_id, 8, 151, 0),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(summary.requested_resource_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+
+    let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+    assert!(
+        rows.is_empty(),
+        "CANNOT_SET_RESOLVER must fail closed instead of publishing resource_control"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapped_eth_2ld_parent_cannot_control_keeps_owner_resource_control() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73b2);
+    let subject = "0x0000000000000000000000000000000000000abc";
+    let parent_cannot_control = 1_i64 << 16;
+    let is_dot_eth = 1_i64 << 17;
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm0098", 152, 1_776_100_152),
+            raw_block("ethereum-mainnet", "0xperm0099", 153, 1_776_100_153),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            permission_event(
+                "wrapped-eth-owner-resource-grant",
+                resource_id,
+                subject,
+                json!({"kind": "resource"}),
+                json!(["resource_control"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 51})),
+                None,
+                152,
+                0,
+            ),
+            permission_scope_event(
+                "wrapped-eth-default-fuses",
+                resource_id,
+                parent_cannot_control | is_dot_eth,
+                153,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].subject, subject);
+    assert_eq!(rows[0].scope, PermissionScope::Resource);
+    assert_eq!(rows[0].effective_powers, json!(["resource_control"]));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn cannot_set_resolver_masks_resolver_control() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73b3);
+    let subject = "0x0000000000000000000000000000000000000abc";
+    let cannot_set_resolver = 8;
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm009a", 154, 1_776_100_154),
+            raw_block("ethereum-mainnet", "0xperm009b", 155, 1_776_100_155),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            permission_event(
+                "wrapper-resolver-control-grant",
+                resource_id,
+                subject,
+                json!({
+                    "kind": "resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "resolver_address": "0x0000000000000000000000000000000000000def"
+                }),
+                json!(["resolver_control"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 52})),
+                None,
+                154,
+                0,
+            ),
+            permission_scope_event(
+                "wrapper-cannot-set-resolver",
+                resource_id,
+                cannot_set_resolver,
+                155,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(summary.upserted_row_count, 0);
+
+    let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+    assert!(
+        rows.is_empty(),
+        "CANNOT_SET_RESOLVER must mask resolver_control"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn malformed_wrapper_fuse_modifiers_fail_closed() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let missing_fuses_resource_id = Uuid::from_u128(0x73b4);
+    let malformed_fuses_resource_id = Uuid::from_u128(0x73b5);
+    let subject = "0x0000000000000000000000000000000000000abc";
+
+    seed_resources(
+        database.pool(),
+        &[missing_fuses_resource_id, malformed_fuses_resource_id],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm009c", 156, 1_776_100_156),
+            raw_block("ethereum-mainnet", "0xperm009d", 157, 1_776_100_157),
+            raw_block("ethereum-mainnet", "0xperm009e", 158, 1_776_100_158),
+            raw_block("ethereum-mainnet", "0xperm009f", 159, 1_776_100_159),
+        ],
+    )
+    .await?;
+
+    let mut missing_fuses = permission_scope_event(
+        "wrapper-missing-fuses",
+        missing_fuses_resource_id,
+        0,
+        157,
+        0,
+    );
+    missing_fuses.after_state = json!({
+        "namehash": "0xwrapped",
+        "authority_kind": "name_wrapper",
+        "authority_key": "wrapped"
+    });
+    let mut malformed_fuses = permission_scope_event(
+        "wrapper-malformed-fuses",
+        malformed_fuses_resource_id,
+        0,
+        159,
+        0,
+    );
+    malformed_fuses.after_state = json!({
+        "fuses": "not-an-integer",
+        "namehash": "0xwrapped",
+        "authority_kind": "name_wrapper",
+        "authority_key": "wrapped"
+    });
+
+    seed_permission_events(
+        database.pool(),
+        &[
+            permission_event(
+                "wrapper-missing-fuse-proof-grant",
+                missing_fuses_resource_id,
+                subject,
+                json!({"kind": "resource"}),
+                json!(["resource_control"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 53})),
+                None,
+                156,
+                0,
+            ),
+            missing_fuses,
+            permission_event(
+                "wrapper-malformed-fuse-proof-grant",
+                malformed_fuses_resource_id,
+                subject,
+                json!({"kind": "resource"}),
+                json!(["resource_control"]),
+                Some(json!({"kind": "normalized_event", "normalized_event_id": 54})),
+                None,
+                158,
+                0,
+            ),
+            malformed_fuses,
+        ],
+    )
+    .await?;
+
+    let summary = rebuild_permissions_current(database.pool(), None).await?;
+    assert_eq!(summary.upserted_row_count, 0);
+
+    for resource_id in [missing_fuses_resource_id, malformed_fuses_resource_id] {
+        let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+        assert!(
+            rows.is_empty(),
+            "unprovable wrapper fuse state must not publish full authoritative unmasked powers"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x73c0);
@@ -479,6 +734,80 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].subject, subject);
     assert_eq!(rows[0].scope, PermissionScope::Resource);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let visible_resource_id = Uuid::from_u128(0x73c1);
+    let failing_resource_id = Uuid::from_u128(0x73c2);
+    let subject = "0x0000000000000000000000000000000000000abc";
+
+    seed_resources(database.pool(), &[visible_resource_id, failing_resource_id]).await?;
+    upsert_permissions_current_rows(
+        database.pool(),
+        &[PermissionsCurrentRow {
+            resource_id: visible_resource_id,
+            subject: subject.to_owned(),
+            scope: PermissionScope::Resource,
+            effective_powers: json!(["set_records"]),
+            grant_source: json!({}),
+            revocation_source: None,
+            inheritance_path: json!([]),
+            transfer_behavior: json!({}),
+            provenance: json!({"derivation_kind": PERMISSIONS_CURRENT_DERIVATION_KIND}),
+            coverage: json!({"enumeration_basis": PERMISSIONS_ENUMERATION_BASIS}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 1,
+            last_recomputed_at: timestamp(1_776_100_001),
+        }],
+    )
+    .await?;
+
+    let mut malformed = permission_event(
+        "full-rebuild-malformed-scope",
+        failing_resource_id,
+        subject,
+        json!({"kind": "resource"}),
+        json!(["set_records"]),
+        Some(json!({"kind": "normalized_event", "normalized_event_id": 60})),
+        None,
+        160,
+        0,
+    );
+    malformed.after_state = json!({
+        "subject": subject,
+        "effective_powers": ["set_records"],
+        "grant_source": {"kind": "normalized_event", "normalized_event_id": 60},
+        "revocation_source": Value::Null,
+        "inheritance_path": [{
+            "kind": "resource_authority",
+            "resource_id": failing_resource_id
+        }],
+        "transfer_behavior": {
+            "kind": "resource_rebound"
+        }
+    });
+    seed_permission_events(database.pool(), &[malformed]).await?;
+
+    let error = rebuild_permissions_current(database.pool(), None)
+        .await
+        .expect_err("full rebuild should fail when permission scope is missing");
+    assert!(
+        error
+            .to_string()
+            .contains("PermissionChanged after_state.scope must be an object")
+    );
+
+    let rows = load_permissions_current(database.pool(), visible_resource_id, None, None).await?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "failed full rebuild must not publish an empty permissions_current table"
+    );
 
     database.cleanup().await
 }
@@ -712,6 +1041,45 @@ fn permission_event_with_context(
             "transfer_behavior": {
                 "kind": "resource_rebound"
             }
+        }),
+    }
+}
+
+fn permission_scope_event(
+    event_identity: &str,
+    resource_id: Uuid,
+    fuses: i64,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(format!("ens:{resource_id}")),
+        resource_id: Some(resource_id),
+        event_kind: "PermissionScopeChanged".to_owned(),
+        source_family: "ens_v1_wrapper_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(format!("0xperm{block_number:04x}")),
+        transaction_hash: Some(format!("0xtx{block_number:04x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "log_index": log_index
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({
+            "fuses": fuses,
+            "namehash": "0xwrapped",
+            "authority_kind": "name_wrapper",
+            "authority_key": "wrapped"
         }),
     }
 }

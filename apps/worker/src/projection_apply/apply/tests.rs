@@ -1,4 +1,5 @@
 use super::*;
+use crate::projection_apply::apply_locks::invalidation_apply_lock_key;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
 async fn test_database() -> Result<TestDatabase> {
@@ -48,7 +49,42 @@ async fn stale_projection_invalidation_claims_are_reclaimed() -> Result<()> {
     .await
     .context("failed to load reclaimed projection invalidation")?;
     assert_eq!(claim_token, new_token);
-    assert_eq!(attempt_count, 1);
+    assert_eq!(
+        attempt_count, 0,
+        "claim recovery is not a failed projection apply attempt"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn reinvalidation_after_dead_letter_preserves_dead_letter_history() -> Result<()> {
+    let database = test_database().await?;
+
+    insert_poison_invalidation(&database, "poisoned-key", 4).await?;
+    apply_pending_invalidations(database.pool(), 10, None).await?;
+
+    insert_poison_invalidation(&database, "poisoned-key", 4).await?;
+    apply_pending_invalidations(database.pool(), 10, None).await?;
+
+    let dead_letters = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT generation, attempt_count
+        FROM projection_invalidation_dead_letters
+        WHERE projection = 'unsupported_projection'
+          AND projection_key = 'poisoned-key'
+        ORDER BY generation
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await
+    .context("failed to load projection invalidation dead-letter history")?;
+
+    assert_eq!(
+        dead_letters,
+        vec![(0, 5), (1, 5)],
+        "each dead-lettered generation must remain operator-visible"
+    );
 
     database.cleanup().await
 }
@@ -87,6 +123,100 @@ async fn fresh_projection_invalidation_claims_are_not_reclaimed() -> Result<()> 
 }
 
 #[tokio::test]
+async fn repeated_failures_move_projection_invalidation_to_dead_letter() -> Result<()> {
+    let database = test_database().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            attempt_count
+        )
+        VALUES (
+            'unsupported_projection',
+            'poisoned-key',
+            '{}'::jsonb,
+            4
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to seed poison projection invalidation")?;
+
+    let summary = apply_pending_invalidations(database.pool(), 10, None).await?;
+    assert_eq!(
+        summary,
+        ProjectionInvalidationApplySummary {
+            claimed_invalidation_count: 1,
+            applied_invalidation_count: 0,
+            failed_invalidation_count: 1,
+        }
+    );
+
+    let queue_row_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_invalidations
+        WHERE projection = 'unsupported_projection'
+          AND projection_key = 'poisoned-key'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to count live projection invalidation rows after dead-letter")?;
+    assert_eq!(
+        queue_row_count, 0,
+        "dead-lettered invalidations must leave the live queue"
+    );
+
+    let (state, attempt_count, dead_lettered_at, failure_reason): (
+        String,
+        i64,
+        Option<sqlx::types::time::OffsetDateTime>,
+        Option<String>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT
+            state::TEXT AS state,
+            attempt_count,
+            dead_lettered_at,
+            last_failure_reason
+        FROM projection_invalidation_dead_letters
+        WHERE projection = 'unsupported_projection'
+          AND projection_key = 'poisoned-key'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load dead-lettered projection invalidation")?;
+    assert_eq!(state, "dead_letter");
+    assert_eq!(attempt_count, 5);
+    assert!(dead_lettered_at.is_some());
+    assert!(
+        failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unsupported projection invalidation family"))
+    );
+
+    let indexing_status = bigname_storage::load_indexing_status(database.pool()).await?;
+    assert!(
+        !indexing_status.has_unscoped_pending_invalidations,
+        "dead-lettered invalidations must not poison indexing status"
+    );
+
+    let claimed = claim_pending_invalidations(database.pool(), 10, Uuid::new_v4()).await?;
+    assert!(
+        claimed.is_empty(),
+        "dead-lettered invalidations must not be claimed again"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn projection_invalidation_claim_heartbeat_refreshes_claimed_at() -> Result<()> {
     let database = test_database().await?;
     let claim_token = Uuid::new_v4();
@@ -118,6 +248,7 @@ async fn projection_invalidation_claim_heartbeat_refreshes_claimed_at() -> Resul
         key_payload: Value::Object(Default::default()),
         generation: 0,
         claim_token,
+        attempt_count: 0,
     };
     refresh_claimed_invalidation_claim(database.pool(), &invalidation).await?;
 
@@ -135,6 +266,57 @@ async fn projection_invalidation_claim_heartbeat_refreshes_claimed_at() -> Resul
 
     assert!(after > before);
     assert_eq!(refreshed_token, claim_token);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn projection_invalidation_apply_locks_serialize_same_key() -> Result<()> {
+    let database = test_database().await?;
+    let invalidation = ClaimedInvalidation {
+        projection: "permissions_current".to_owned(),
+        projection_key: Uuid::new_v4().to_string(),
+        key_payload: Value::Object(Default::default()),
+        generation: 0,
+        claim_token: Uuid::new_v4(),
+        attempt_count: 0,
+    };
+
+    let mut first_lock =
+        acquire_invalidation_apply_locks(database.pool(), std::slice::from_ref(&invalidation))
+            .await?;
+    let lock_key = invalidation_apply_lock_key(&invalidation);
+    let mut second_conn = database
+        .pool()
+        .acquire()
+        .await
+        .context("failed to acquire second lock probe connection")?;
+
+    let acquired_while_locked: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))")
+            .bind(&lock_key)
+            .fetch_one(&mut *second_conn)
+            .await
+            .context("failed to probe held projection invalidation apply lock")?;
+    assert!(!acquired_while_locked);
+
+    release_invalidation_apply_locks(&mut first_lock).await?;
+    drop(first_lock);
+    let acquired_after_release: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))")
+            .bind(&lock_key)
+            .fetch_one(&mut *second_conn)
+            .await
+            .context("failed to acquire released projection invalidation apply lock")?;
+    assert!(acquired_after_release);
+    let released_probe_lock: bool =
+        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
+            .bind(&lock_key)
+            .fetch_one(&mut *second_conn)
+            .await
+            .context("failed to release second projection invalidation apply lock")?;
+    assert!(released_probe_lock);
+    drop(second_conn);
 
     database.cleanup().await
 }
@@ -442,6 +624,7 @@ fn claimed_invalidation(projection: &str, projection_key: &str) -> ClaimedInvali
         key_payload: Value::Object(Default::default()),
         generation: 0,
         claim_token: Uuid::nil(),
+        attempt_count: 0,
     }
 }
 
@@ -465,6 +648,7 @@ fn address_names_claimed_invalidation(
         key_payload,
         generation: 0,
         claim_token: Uuid::nil(),
+        attempt_count: 0,
     }
 }
 
@@ -522,6 +706,36 @@ async fn insert_primary_invalidation(
     .execute(database.pool())
     .await
     .context("failed to insert primary-name projection invalidation")?;
+
+    Ok(())
+}
+
+async fn insert_poison_invalidation(
+    database: &TestDatabase,
+    projection_key: &str,
+    attempt_count: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            attempt_count
+        )
+        VALUES (
+            'unsupported_projection',
+            $1,
+            '{}'::jsonb,
+            $2
+        )
+        "#,
+    )
+    .bind(projection_key)
+    .bind(attempt_count)
+    .execute(database.pool())
+    .await
+    .context("failed to insert poison projection invalidation")?;
 
     Ok(())
 }

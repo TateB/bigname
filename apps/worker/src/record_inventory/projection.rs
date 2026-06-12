@@ -1,13 +1,21 @@
 use anyhow::{Context, Result};
 use bigname_storage::{
-    RecordInventoryCurrentRow, clear_record_inventory_current, normalize_evm_address,
-    upsert_record_inventory_current_rows,
+    RecordInventoryCurrentRow, normalize_evm_address, upsert_record_inventory_current_rows,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use tokio::task::JoinSet;
 use uuid::Uuid;
+
+#[allow(clippy::duplicate_mod)]
+#[path = "../staged_rebuild.rs"]
+mod staged_rebuild;
+
+use staged_rebuild::{
+    RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_record_inventory_current_rows,
+};
 
 use super::{
     chain_position::{
@@ -35,6 +43,36 @@ use profile_rows::{
     filter_explicit_gaps,
 };
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod staged_rebuild_tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn staged_record_boundary_key_rejects_missing_event_identity_pair() {
+        let resource_id = Uuid::new_v4();
+        let boundary = json!({
+            "logical_name_id": "ens:staged.eth",
+            "resource_id": resource_id.to_string(),
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 1,
+                "block_hash": "0xblock",
+                "timestamp": "2026-06-11T00:00:00Z"
+            }
+        });
+
+        let error =
+            super::staged_rebuild::record_version_boundary_storage_key(&boundary, resource_id)
+                .expect_err("staged rebuild must reject malformed record version boundaries");
+        assert!(
+            format!("{error:#}").contains("normalized_event_id"),
+            "unexpected error: {error:#}"
+        );
+    }
+}
+
 const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 500;
 const RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
@@ -49,7 +87,12 @@ pub(super) async fn rebuild_record_inventory_current(
 }
 
 async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
-    let deleted_row_count = clear_record_inventory_current(pool).await?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire record_inventory_current staging connection")?;
+    let stage_table = create_stage_table(&mut conn, "record_inventory_current").await?;
+    let previous_row_count = count_rows(&mut conn, "record_inventory_current", None).await?;
     let mut rows = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
     let mut requested_resource_count = 0usize;
     let mut completed_resource_count = 0usize;
@@ -74,9 +117,8 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
         }
 
         if rows.len() >= RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_record_inventory_current_rows(pool, &rows)
-                .await?
-                .len();
+            upserted_row_count +=
+                stage_record_inventory_current_rows(&mut conn, &stage_table, &rows).await? as usize;
             rows.clear();
         }
 
@@ -100,15 +142,24 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
     }
 
     if !rows.is_empty() {
-        upserted_row_count += upsert_record_inventory_current_rows(pool, &rows)
-            .await?
-            .len();
+        upserted_row_count +=
+            stage_record_inventory_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "record_inventory_current",
+        &stage_table,
+        RECORD_INVENTORY_CURRENT_COLUMNS,
+        None,
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(RecordInventoryCurrentRebuildSummary {
         requested_resource_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
     })
 }
 

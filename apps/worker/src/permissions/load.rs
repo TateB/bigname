@@ -4,7 +4,9 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::types::RelevantEvent;
-use super::{CANONICAL_STATE_FILTER, EVENT_KIND_PERMISSION_CHANGED};
+use super::{
+    CANONICAL_STATE_FILTER, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+};
 
 pub(super) fn stream_target_resource_ids<'a>(
     pool: &'a PgPool,
@@ -20,7 +22,7 @@ pub(super) fn stream_target_resource_ids<'a>(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        WHERE ne.event_kind = $1
+        WHERE ne.event_kind IN ($1, $2)
           AND ne.resource_id IS NOT NULL
           AND ne.canonicality_state IN (
               'canonical'::canonicality_state,
@@ -31,6 +33,7 @@ pub(super) fn stream_target_resource_ids<'a>(
         "#,
     )
     .bind(EVENT_KIND_PERMISSION_CHANGED)
+    .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream resource_ids for permissions_current rebuild")
@@ -47,6 +50,7 @@ pub(super) async fn load_permission_events(
         SELECT
             ne.normalized_event_id,
             ne.resource_id,
+            ne.event_kind,
             ne.source_family,
             ne.manifest_version,
             ne.source_manifest_id,
@@ -69,8 +73,8 @@ pub(super) async fn load_permission_events(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.event_kind = $1
-          AND ne.resource_id = $2
+        WHERE ne.event_kind IN ($1, $2)
+          AND ne.resource_id = $3
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC NULLS FIRST,
@@ -79,11 +83,12 @@ pub(super) async fn load_permission_events(
         "#
     ))
     .bind(EVENT_KIND_PERMISSION_CHANGED)
+    .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .bind(resource_id)
     .fetch_all(pool)
     .await
     .with_context(|| {
-        format!("failed to load canonical PermissionChanged events for resource_id {resource_id}")
+        format!("failed to load canonical permission events for resource_id {resource_id}")
     })?;
 
     Ok(rows)

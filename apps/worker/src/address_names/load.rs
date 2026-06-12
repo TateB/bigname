@@ -256,7 +256,7 @@ pub(super) async fn load_relevant_events(
           AND ne.source_family = ANY($5::TEXT[])
           AND ne.chain_id = $6
           AND (
-              ne.event_kind <> 'PermissionChanged'
+              ne.event_kind NOT IN ('PermissionChanged', 'PermissionScopeChanged')
               OR ne.resource_id = $7
           )
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}

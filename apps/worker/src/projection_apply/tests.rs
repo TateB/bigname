@@ -423,6 +423,375 @@ async fn address_names_permission_changes_invalidate_existing_authority_owner() 
 }
 
 #[tokio::test]
+async fn address_names_permission_scope_changes_invalidate_controller_and_fallback_addresses()
+-> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fuse-address-registrant",
+            namespace: "ens",
+            logical_name_id: Some("ens:fused-controller.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RegistrationGranted",
+            source_family: "ens_v1_registrar_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(30),
+            block_hash: Some("0xfuse30"),
+            before_state: json!({}),
+            after_state: json!({
+                "registrant": "0x0000000000000000000000000000000000000bbb"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fuse-address-controller",
+            namespace: "ens",
+            logical_name_id: Some("ens:fused-controller.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(31),
+            block_hash: Some("0xfuse31"),
+            before_state: json!({}),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000ccc",
+                "effective_powers": ["resource_control"]
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear setup invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fuse-address-scope",
+            namespace: "ens",
+            logical_name_id: Some("ens:fused-controller.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionScopeChanged",
+            source_family: "ens_v1_wrapper_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(32),
+            block_hash: Some("0xfuse32"),
+            before_state: json!({}),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "fuses": 8
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000ccc:ens:fused-controller.eth"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000bbb:ens:fused-controller.eth"
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_current_resource_scope_fuse_changes_invalidate_resolver_permission_keys()
+-> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fuse-resolver-permission",
+            namespace: "ens",
+            logical_name_id: Some("ens:fused-resolver.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(40),
+            block_hash: Some("0xfuse40"),
+            before_state: json!({}),
+            after_state: json!({
+                "scope": {
+                    "kind": "resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "resolver_address": "0x0000000000000000000000000000000000000ccc"
+                },
+                "subject": "0x0000000000000000000000000000000000000aaa",
+                "effective_powers": ["resolver_control"]
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear setup invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fuse-resolver-scope",
+            namespace: "ens",
+            logical_name_id: Some("ens:fused-resolver.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionScopeChanged",
+            source_family: "ens_v1_wrapper_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(41),
+            block_hash: Some("0xfuse41"),
+            before_state: json!({}),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "fuses": 8
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "resolver_current",
+        "ethereum-mainnet:0x0000000000000000000000000000000000000ccc"
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_events_enqueue_manifest_sensitive_projection_keys() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+
+    insert_name_surface(&database, "ens:manifest.eth", "manifest.eth").await?;
+    insert_resource(&database, resource_id).await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:manifest-record",
+            namespace: "ens",
+            logical_name_id: Some("ens:manifest.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RecordChanged",
+            source_family: "ens_v1_resolver_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(20),
+            block_hash: Some("0xmanifest20"),
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:manifest-resolver",
+            namespace: "ens",
+            logical_name_id: Some("ens:manifest.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(21),
+            block_hash: Some("0xmanifest21"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000abc"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear setup invalidations")?;
+
+    for (index, event_kind) in [
+        "SourceManifestUpdated",
+        "CapabilityChanged",
+        "ProxyImplementationChanged",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query("DELETE FROM projection_invalidations")
+            .execute(database.pool())
+            .await
+            .context("failed to clear manifest invalidations")?;
+        let event_identity = format!("projection-apply:manifest-{event_kind}");
+        insert_event(
+            &database,
+            EventSeed {
+                event_identity: &event_identity,
+                namespace: "ens",
+                logical_name_id: None,
+                resource_id: None,
+                event_kind,
+                source_family: "ens_v1_registry_l1",
+                derivation_kind: "manifest_sync",
+                chain_id: Some("ethereum-mainnet"),
+                block_number: None,
+                block_hash: None,
+                before_state: json!({}),
+                after_state: json!({
+                    "manifest_version": 2 + index as i64,
+                    "normalizer_version": "test"
+                }),
+                observed_at: timestamp(1_800_000_100 + index as i64),
+            },
+        )
+        .await?;
+
+        let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+        assert_eq!(summary.scanned_event_count, 1);
+        let invalidations = load_invalidations(&database).await?;
+        assert!(has_key(&invalidations, "name_current", "ens:manifest.eth"));
+        assert!(has_key(
+            &invalidations,
+            "record_inventory_current",
+            &resource_id.to_string()
+        ));
+        assert!(has_key(
+            &invalidations,
+            "resolver_current",
+            "ethereum-mainnet:0x0000000000000000000000000000000000000abc"
+        ));
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn generation_bump_releases_in_flight_claim_for_serialized_reapply() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let claim_token = Uuid::new_v4();
+
+    insert_resource(&database, resource_id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            claim_token,
+            claimed_at
+        )
+        VALUES (
+            'permissions_current',
+            $1,
+            jsonb_build_object('resource_id', $1),
+            $2,
+            now()
+        )
+        "#,
+    )
+    .bind(resource_id.to_string())
+    .bind(claim_token)
+    .execute(database.pool())
+    .await
+    .context("failed to seed claimed projection invalidation")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:claimed-permission-change",
+            namespace: "ens",
+            logical_name_id: Some("ens:claimed.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(22),
+            block_hash: Some("0xclaimed22"),
+            before_state: json!({}),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000abc",
+                "effective_powers": ["resource_control"]
+            }),
+            observed_at: timestamp(1_800_000_200),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+
+    let (generation, retained_claim_token): (i64, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT generation, claim_token
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(resource_id.to_string())
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load bumped projection invalidation")?;
+    assert_eq!(generation, 1);
+    assert_eq!(retained_claim_token, None);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn derives_record_inventory_cross_resource_invalidations_for_logical_name_dependencies()
 -> Result<()> {
     let database = test_database().await?;
@@ -640,6 +1009,54 @@ async fn primary_hydration_blocking_work_detects_primary_retry_delayed_failures(
 }
 
 #[tokio::test]
+async fn primary_hydration_blocking_work_ignores_dead_lettered_invalidations() -> Result<()> {
+    let database = test_database().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidation_dead_letters (
+            projection,
+            projection_key,
+            key_payload,
+            attempt_count,
+            generation,
+            last_changed_at,
+            invalidated_at,
+            last_failure_reason,
+            last_failure_at,
+            dead_lettered_at
+        )
+        VALUES (
+            'primary_names_current',
+            '0x0000000000000000000000000000000000000aaa:ens:60',
+            jsonb_build_object(
+                'address', '0x0000000000000000000000000000000000000aaa',
+                'namespace', 'ens',
+                'coin_type', '60'
+            ),
+            5,
+            0,
+            now(),
+            now(),
+            'poisoned test invalidation',
+            now(),
+            now() - '10 minutes'::INTERVAL
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to seed dead-lettered primary_names_current invalidation")?;
+
+    assert!(
+        !has_primary_hydration_blocking_work(database.pool()).await?,
+        "dead-lettered invalidations are operator-visible terminal failures, not claimable blocking work"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn primary_hydration_blocking_work_detects_claimable_invalidations_and_cursor_lag()
 -> Result<()> {
     let database = test_database().await?;
@@ -798,6 +1215,54 @@ async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<(
     .execute(database.pool())
     .await
     .context("failed to insert projection apply test resource")?;
+    Ok(())
+}
+
+async fn insert_name_surface(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    normalized_name: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ens',
+            $2,
+            $2,
+            $2,
+            '\x00'::bytea,
+            $3,
+            ARRAY[]::TEXT[],
+            'test',
+            'ethereum-mainnet',
+            '0xsurface',
+            1,
+            'finalized'::canonicality_state
+        )
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(normalized_name)
+    .bind(format!("0x{name}", name = normalized_name.replace('.', "")))
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test name surface")?;
     Ok(())
 }
 

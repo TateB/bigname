@@ -479,6 +479,125 @@ async fn rebuild_uses_resource_permission_subject_as_tokenized_effective_control
 }
 
 #[tokio::test]
+async fn wrapper_fuse_burn_drops_address_names_effective_controller() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:fused-controller.eth",
+        "fused-controller.eth",
+        Some(0x9110),
+        0x9210,
+        0x9310,
+    );
+    let token_holder = "0x0000000000000000000000000000000000000bbb";
+    let controller = "0x0000000000000000000000000000000000000ccc";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xfused-grant", 510, 1_717_180_510),
+            raw_block("ethereum-mainnet", "0xfused-control", 511, 1_717_180_511),
+            raw_block("ethereum-mainnet", "0xfused-scope", 512, 1_717_180_512),
+        ],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &binding,
+        "0xfused-grant",
+        510,
+        1_717_180_510,
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "fused-grant",
+                "RegistrationGranted",
+                ENS_V1_REGISTRAR_SOURCE_FAMILY,
+                "0xfused-grant",
+                510,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:fused-controller",
+                    "registrant": token_holder,
+                }),
+            ),
+            authority_event(
+                &binding,
+                "fused-resource-control",
+                "PermissionChanged",
+                ENS_V1_REGISTRY_SOURCE_FAMILY,
+                "0xfused-control",
+                511,
+                Some(0),
+                json!({}),
+                json!({
+                    "scope": {"kind": "resource"},
+                    "subject": controller,
+                    "effective_powers": ["resource_control"],
+                    "grant_source": {
+                        "kind": "ens_v1_authority",
+                        "authority_kind": "registry_only",
+                        "source_event_kind": "AuthorityTransferred"
+                    }
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    let controller_summary =
+        rebuild_address_names_current(database.pool(), Some(controller)).await?;
+    assert_eq!(controller_summary.upserted_row_count, 1);
+    let controller_rows =
+        load_address_names_current(database.pool(), controller, Some("ens"), None).await?;
+    assert_eq!(controller_rows.len(), 1);
+    assert_eq!(
+        controller_rows[0].relation,
+        AddressNameRelation::EffectiveController
+    );
+
+    seed_events(
+        database.pool(),
+        &[authority_event(
+            &binding,
+            "fused-resource-control-masked",
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            "0xfused-scope",
+            512,
+            Some(0),
+            json!({}),
+            json!({
+                "scope": {"kind": "resource"},
+                "fuses": 8,
+                "namehash": "0xwrapped",
+                "authority_kind": "name_wrapper",
+                "authority_key": "wrapped"
+            }),
+        )],
+    )
+    .await?;
+
+    let controller_summary =
+        rebuild_address_names_current(database.pool(), Some(controller)).await?;
+    assert_eq!(controller_summary.upserted_row_count, 0);
+    assert_eq!(controller_summary.deleted_row_count, 1);
+    let controller_rows =
+        load_address_names_current(database.pool(), controller, Some("ens"), None).await?;
+    assert!(
+        controller_rows.is_empty(),
+        "address_names_current must not keep effective-controller rows masked by wrapper fuses"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_one_address_refreshes_deleted_and_new_relation_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:alpha.eth", "alpha.eth", Some(0x6100), 0x6200, 0x6300);

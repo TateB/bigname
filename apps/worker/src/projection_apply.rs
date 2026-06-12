@@ -1,6 +1,9 @@
 mod apply;
+mod apply_locks;
+mod dead_letters;
 mod derive;
 mod derive_queries;
+mod manifest_queries;
 
 #[cfg(test)]
 mod tests;
@@ -103,7 +106,8 @@ pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result
             EXISTS (
                 SELECT 1
                 FROM projection_invalidations
-                WHERE
+                WHERE state = 'pending'::projection_invalidation_state
+                  AND (
                     (
                         claim_token IS NOT NULL
                         AND claimed_at >= now() - $2::INTERVAL
@@ -122,6 +126,7 @@ pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result
                         projection = $4
                         AND last_failure_at >= now() - $3::INTERVAL
                     )
+                  )
             )
             OR cursor.last_change_id < watermark.max_change_id
         FROM cursor

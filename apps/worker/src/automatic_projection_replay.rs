@@ -30,6 +30,11 @@ const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
     "normalized_events_name_relevant_projection_idx",
     "normalized_events_record_inventory_resource_replay_idx",
 ];
+const ACTIVE_INDEX_BUILDS_QUERY: &str = r#"
+    SELECT COUNT(*)::bigint
+    FROM pg_stat_progress_create_index
+    WHERE datname = current_database()
+"#;
 
 pub(crate) fn all_current_projections_database_config(
     mut database: DatabaseConfig,
@@ -458,11 +463,10 @@ async fn load_projection_replay_readiness(pool: &PgPool) -> Result<ProjectionRep
     .await
     .context("failed to inspect normalized replay cursor readiness")?;
 
-    let active_index_build_count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM pg_stat_progress_create_index")
-            .fetch_one(pool)
-            .await
-            .context("failed to inspect active PostgreSQL index builds")?;
+    let active_index_build_count = sqlx::query_scalar::<_, i64>(ACTIVE_INDEX_BUILDS_QUERY)
+        .fetch_one(pool)
+        .await
+        .context("failed to inspect active PostgreSQL index builds")?;
 
     let missing_projection_index_count = missing_projection_index_count(pool).await?;
 
