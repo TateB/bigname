@@ -415,7 +415,7 @@ The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as hel
 | `GET /v1/history/addresses/{address}` | `chain_position_desc` |
 | `GET /v1/events` | `chain_position_desc` |
 
-Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports and retained-fact backfills may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_cursor`.
+Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports and retained-fact backfills may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_input`.
 
 ## Error model
 
@@ -429,7 +429,7 @@ Other routes don't honor `cursor` or `page_size`. Surface-first views break ties
 }
 ```
 
-Codes: `invalid_input`, `invalid_cursor`, `not_found`, `unsupported`, `stale`, `verification_failed`, `conflict`, `internal_error`.
+Codes: `invalid_input`, `not_found`, `unsupported`, `stale`, `verification_failed`, `conflict`, `internal_error`.
 
 Rules:
 
