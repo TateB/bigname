@@ -52,6 +52,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `expires_at` | expiry, RFC 3339 | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
+| `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
@@ -83,7 +84,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `powers` | effective permission powers | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
-| `page` | pagination object on collection responses or per-input lookup results | pagination sections with divergent field subsets |
+| `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
 | `cursor` | opaque request cursor for the current page | `cursor` (unchanged; now opaque and versioned) |
 | `next_cursor` | opaque cursor for the next page, or `null` | `next_cursor` (unchanged) |
 | `page_size` | requested or served page size | `page_size` (unchanged) |
@@ -147,11 +148,12 @@ One success shape applies to every route:
 Rules:
 
 - `data` is an object on single-resource routes and an array on collections.
-- `page` appears on collections only. Per-input pagination on `POST /v2/lookup`
-  uses the same object inside each result.
+- Top-level `page` appears on collection routes only. Per-input pagination on
+  `POST /v2/lookup` and the nested resolver-overview `bound_names` collection
+  use the same object inside their containing result/object.
 - `total_count` is nullable. It is populated where a precomputed count makes
-  it cheap or where the caller opts in via `include=total_count`. Routes must
-  not run unconditional full counts on the request path to fill it.
+  it cheap or where a route explicitly documents `include=total_count`. Routes
+  must not run unconditional full counts on the request path to fill it.
 - `meta` is always present. Routes that read chain-derived state include
   `meta.as_of`; control-plane routes (`/v2/status`,
   `/v2/namespaces/{namespace}`) omit it. `meta.completeness`,
@@ -168,8 +170,8 @@ Rules:
 ## Field Budgets
 
 `include` is a route-documented expansion allowlist. It may add documented
-sections or opt into documented expensive metadata such as `total_count`, but it
-must not change the envelope shape.
+sections or route-documented expensive metadata. No route supports
+`include=total_count` unless that route's parameter list says so.
 
 `profile=feed` on `POST /v2/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
@@ -222,10 +224,12 @@ Common parameter rules:
 | `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
-| `sort`, `order` | every paginated route | route-documented field set plus `asc`/`desc` |
+| `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 No advertised-but-rejected parameters are part of the `v2` contract.
+Snapshot-pinned reads require the ADR 0003 slice-3 snapshot-service enabler;
+ADR 0006 rollout step 3 includes that read-layer work.
 
 ## Status Vocabulary
 
@@ -255,6 +259,9 @@ Rules:
 uniform across snapshot-read routes. Each chain-derived response carries
 `meta.as_of`, keyed by stringified `chain_id`, and that response metadata can
 round-trip as an `at` snapshot token to pin exact per-chain positions.
+For event and history rows, `finality` selects rows at blocks at or below the
+selected chain checkpoint; `safe` and `finalized` exclude rows above their
+respective checkpoints.
 
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
 `finality`; its `meta.as_of` records the served positions for staleness

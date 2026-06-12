@@ -41,7 +41,9 @@ Field ownership:
   `inputs` are request controls, `record` holds a single name result, `records`
   holds reverse result rows, and `changed`, `input_name`, and `reason` live
   inside `normalization` only.
-- Search-only request fields are route-local: `q`, `match`, and `dedupe`.
+- Name-filter request fields are route-local: `q` is shared by search and
+  address-name collections, `match` is search-only, and `dedupe` is
+  address-name-only.
 - Records-route containers are route-local: `records`, `inventory`,
   `known_keys`, `unset_keys`, `unsupported_keys`, and `value` are the per-key
   answer and inventory shape for one resolver-record route, not shared domain
@@ -57,6 +59,8 @@ Field ownership:
   `role_summary`.
 - Namespace metadata containers are route-local: `networks` is the
   product-facing list of public chain mappings for one namespace.
+- Resolver overview containers are route-local: `bound_names` is the nested
+  names collection inside one resolver overview object.
 - Ops status containers are route-local: `/v2/status` owns `chains`,
   `latest_block`, `indexed_block`, `safe_block`, `finalized_block`,
   `lag_blocks`, and `lag_seconds`.
@@ -121,10 +125,11 @@ Field ownership:
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
-  `registered_at`, `created_at`, `expires_at`, and `status` on the same
-  object. The profile portion uses `name`, `display_name`, `namespace`,
+  `registered_at`, `created_at`, `expires_at`, and `registration_status` on
+  the same object. The profile portion uses `name`, `display_name`, `namespace`,
   `namehash`, `resolver`, `addresses`, `text_records`, `content_hash`,
-  `primary_address`, and `unsupported_fields` when those fields are served.
+  `primary_name`, `primary_address`, `chain_id`, `network`, and
+  `unsupported_fields` when those fields are served.
 - Pagination behavior: none.
 - Status semantics: valid names with no profile return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -220,15 +225,17 @@ Field ownership:
 - Tier: product read.
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `at`, `finality`,
-  `relation`, `q`, `sort=name|expires_at|registered_at`,
+  `relation`, `q`, `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`.
+  `q` applies prefix matching to the dictionary `name` field; this route does
+  not accept `match`.
 - Response shape: `data` is an array of record-shaped rows. Reverse rows add
   `is_primary` and `relations`, where `relations` is the subset of
   `owner`, `manager`, and `registrant` that matched. `include=role_summary`
   adds `role_summary: [{address, grants}]`, where each `grants` entry is
   `{grant_scope, powers}`. The same expansion may add `subname_count`,
-  `record_count`, `status`, and `expires_at` when those fields are already
-  available for the row.
+  `record_count`, `registration_status`, and `expires_at` when those fields
+  are already available for the row.
 - Pagination behavior: standard collection pagination.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
@@ -279,7 +286,7 @@ Field ownership:
 - Tier: product read.
 - Purpose: name search and suggestions. No availability or pricing semantics.
 - Request parameters: query `q`, `match=prefix|contains` default `prefix`,
-  `namespace`, `cursor`, `page_size`.
+  `namespace`, `at`, `finality`, `cursor`, `page_size`.
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary.
 - Pagination behavior: standard collection pagination.
@@ -309,12 +316,12 @@ Field ownership:
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
 - Request parameters: path `chain_id`, `address`; query `include` for
-  route-documented sections, `cursor`, `page_size`.
+  route-documented sections, `at`, `finality`, `cursor`, `page_size`.
 - Response shape: `data` is a resolver overview in product vocabulary. The
-  route includes a paginated bound-names section that replaces resolver-based
-  name filtering.
+  route includes route-local `bound_names: {data, page}`, a nested collection
+  of record-shaped name rows that replaces resolver-based name filtering.
 - Pagination behavior: standard collection pagination applies to the
-  bound-names section.
+  nested `bound_names.page` object. The top-level response has no `page`.
 - Status semantics: an otherwise valid resolver with no overview row returns
   `404 not_found`. A resolver overview with no bound names returns `200` with
   an empty bound-names section. Malformed `chain_id` or `address` returns
