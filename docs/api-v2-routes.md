@@ -51,7 +51,7 @@ Field ownership:
 - Permission lineage containers are route-local: `lineage`, `grant`,
   `revocation`, `inheritance_path`, and `transfer_behavior` exist only on
   `include=lineage` for `/v2/permissions`.
-- Primary-name containers are route-local: `answers` holds the selected
+- Primary-name containers are route-local: `answers` holds the returned
   source answer entries, and `raw_claim_name` preserves an invalid reverse
   claim exactly as observed for that tuple.
 - Role-summary containers are route-local: `grants` groups
@@ -128,7 +128,7 @@ Field ownership:
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
   the same object. The profile portion uses `name`, `display_name`, `namespace`,
   `namehash`, `resolver`, `addresses`, `text_records`, `content_hash`,
-  `primary_name`, `primary_address`, `chain_id`, `network`, and
+  `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
   `unsupported_fields` when those fields are served.
 - Pagination behavior: none.
 - Status semantics: valid names with no profile return `404 not_found`.
@@ -253,9 +253,10 @@ Field ownership:
 - Response shape: `data` is
   `{address, coin_type, namespace, answers, verification?}`. `answers` is an
   array of `{source, status, name?, raw_claim_name?, unsupported_reason?,
-  failure_reason?}` entries. The current `source` parameter selects exactly one
-  answer entry; the array shape keeps the route able to carry one answer per
-  source without introducing parallel state trees. `verification` is
+  failure_reason?}` entries. When `source` is omitted, the route returns one
+  entry per supported answer source in stable `indexed`, then `verified` order.
+  Supplying `source=indexed` or `source=verified` narrows the `answers` array
+  to that source for single-source callers. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears whenever
   a persisted or on-demand verified outcome exists. Claimed-vs-verified remains
   one call without `declared_state`/`verified_state`.
@@ -432,11 +433,12 @@ Diagnostic snapshot rules:
 - Method/path: `GET /v2/diagnostics/names/{name}/execution`
 - Tier: diagnostics.
 - Purpose: persisted verified-execution explain.
-- Request parameters: path `name`; query `namespace` and required `keys`.
+- Request parameters: path `name`; query `namespace`, `at`, `finality`, and
+  required `keys`.
   `keys` uses the same record-key grammar as `/v2/names/{name}/records`. The
-  route is verified-only; callers select the persisted artifact by exact name
-  and requested keys. The route rejects duplicate or malformed keys with
-  `400 invalid_input`.
+  route is verified-only; callers select the persisted artifact by exact name,
+  requested keys, and selected snapshot. The route rejects duplicate or
+  malformed keys with `400 invalid_input`.
 - Response shape: `data` includes trace id, steps, digests, and CCIP
   participation.
 - Pagination behavior: none.

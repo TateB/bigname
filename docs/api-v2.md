@@ -68,7 +68,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
-| `source` | `indexed`, `verified` (the records route adds `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
+| `source` | answer origin `indexed` or `verified` (the records route adds request value `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
 | `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
@@ -219,9 +219,9 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
-| `finality` | snapshot-read routes; not lookup, status, primary-name, or namespace metadata | `latest` (default), `safe`, `finalized` |
-| `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
+| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
+| `finality` | snapshot-read routes and diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | `latest` (default), `safe`, `finalized` |
+| `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
