@@ -64,11 +64,11 @@ For each workstream:
 | --- | --- | --- | --- | --- |
 | WS-H Safety net & docs | merged | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | Merged to `main` in `2891acd`; WS-H P0 gate is closed |
 | WS-A ENSv1 authority | merged | `fix/ens-v1-registry-owner-authority` | [#15](https://github.com/TateB/bigname/pull/15) → [#16](https://github.com/TateB/bigname/pull/16) | Items 1-3 closed via #15; gate branch merged to main in 12bcea0 (PR #16, two 9d057a4 blockers fixed on-branch pre-merge); remaining WS-A items branch off main |
-| WS-B ENSv2 + preimage | not started | — | — | |
+| WS-B ENSv2 + preimage | in progress | `fix/ws-b-ensv2-preimage` | — | Wave 2 started 2026-06-12; worktree /home/ubuntu/bigname-worktrees/ws-b |
 | WS-C Projection pipeline | merged | `fix/ws-c-projection-integrity` | [#19](https://github.com/TateB/bigname/pull/19) | Merged 74ea76d; dead-letter migration 20260611120000 landed (newest); two post-approval fuse-reach findings fixed pre-merge; new P3 polish entries pending |
 | WS-D Intake resilience | merged | `fix/ws-d-intake-resilience` | [#18](https://github.com/TateB/bigname/pull/18) | Merged 36ab81a; pipeline-unification stacked follow-up + new P2/P3 entries pending; stranded-job race fixed (deflakes bootstrap_auto_backfill test) |
-| WS-E Verified execution & primary names | merged | `fix/ws-e-verified-execution` | [#17](https://github.com/TateB/bigname/pull/17) | Merged 5521105; verified-primary wiring follow-up pending, sequenced after WS-C; record-selector canonicalization P2 added |
-| WS-F Storage write-path & perf | not started | — | — | Migration reviewer for all streams |
-| WS-G API contract & pagination | not started | — | — | Owns storage `history.rs` |
+| WS-E Verified execution & primary names | merged | `fix/ws-e-verified-execution` | [#17](https://github.com/TateB/bigname/pull/17) | Merged 5521105; verified-primary wiring follow-up pending, sequenced after WS-C; record-selector canonicalization P2 added; verified-primary wiring follow-up started 2026-06-12 on fix/ws-e-verified-primary-wiring (scoped exceptions: apps/worker primary_name/execution, crates/storage/src/primary_name — WS-F-rule review at PR) |
+| WS-F Storage write-path & perf | in progress | `fix/ws-f-storage-write-path` | — | Wave 2 started 2026-06-12; owns migration review — WS-G may announce a pagination-index migration; index migrations of its own expected; worktree /home/ubuntu/bigname-worktrees/ws-f |
+| WS-G API contract & pagination | in progress | `fix/ws-g-api-contract` | — | Wave 2 started 2026-06-12; primary-name seam excluded (WS-E); possible index migration — serialized via WS-F review; worktree /home/ubuntu/bigname-worktrees/ws-g |
 
 Status values: `not started` → `in progress` → `PR open` → `merged` → (`re-triaged` for leftovers).
