@@ -33,8 +33,8 @@ docker run --rm ghcr.io/tateb/bigname:latest bigname-worker inspect watch-plan -
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The server compose file starts PostgreSQL, MinIO, a one-shot migration service,
-the API, the indexer, and the worker. The API listens on the host port from
+The server compose file starts PostgreSQL, a one-shot migration service, the API,
+the indexer, and the worker. The API listens on the host port from
 `BIGNAME_API_PORT` and answers readiness at `/healthz`. Set
 `BIGNAME_API_HOST` to control the host bind address; production public-edge
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy

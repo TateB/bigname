@@ -465,7 +465,7 @@ Live manifest drift / proxy upgrade alerting is a worker-owned operational loop.
 
 ## Implementation shape
 
-Rust modular monolith. PostgreSQL is the hot indexed/replay store. Hash-addressed object storage for execution artifacts and durable raw payloads. Workers handle ingestion, projection, replay, execution. The public `v1` API is read-only over projections and execution output. A small TypeScript conformance harness checks protocol and consumer-capability behavior.
+Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable replay facts, projections, retained payload metadata, and execution artifacts. Workers handle ingestion, projection, replay, execution. The public `v1` API is read-only over projections and execution output. A standalone Rust conformance package checks protocol and consumer-capability behavior.
 
 Repository layout:
 
@@ -491,7 +491,7 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 
 - exact Postgres partitioning strategy
 - exact cache invalidation granularity for verified queries
-- which execution artifacts stay inline in Postgres vs object storage
+- whether any execution artifacts should move out of inline Postgres
 - exact raw-payload cache retention windows and which payload classes are durable
 - whether subscriptions ship in the first stable read milestone or after
 

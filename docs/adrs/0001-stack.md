@@ -31,11 +31,10 @@ Baseline technology choices:
 - `serde` for wire and persistence serialization
 - `clap` for binary entrypoints
 - `tracing` and OpenTelemetry-compatible exports for observability
-- S3-compatible object storage for large execution and metadata artifacts
 
 Local development baseline:
 
-- Docker Compose for PostgreSQL and object storage
+- Docker Compose for PostgreSQL
 - checked-in migrations
 - one command to boot API, indexer, and worker processes in development
 
@@ -45,7 +44,7 @@ Testing baseline:
 - `cargo clippy`
 - `cargo test` or `cargo nextest`
 - migration verification in CI
-- a small TypeScript conformance harness under `tests/conformance`
+- a standalone Rust conformance package under `tests/conformance`
 
 Operational baseline:
 
@@ -67,4 +66,3 @@ Tradeoffs:
 - careful module boundaries are required to avoid a monolith blob
 - database-backed coordination may need replacement at higher scale
 - `sqlx` query discipline must be maintained to keep schema changes safe
-

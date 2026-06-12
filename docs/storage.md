@@ -36,9 +36,7 @@ Postgres is the hot indexed and replay-focused store. It retains:
 - code-hash observations and discovery/proxy evidence used by manifests, adapter routing, and audit tooling
 - compact metadata and optional digests for full payloads fetched as cache
 
-Hash-addressed object storage holds large execution payloads (CCIP bodies, large metadata responses, trace attachments) keyed by SHA-256 digest. Postgres records the digest, size, content type, and object key; the bytes live in object storage.
-
-Hash-addressed object storage is a durability boundary only for raw payload classes a doc-first policy explicitly declares durable. For everything else it is implementation detail for evictable cache.
+There is no deployed object-storage layer in the current schema or compose stack. When the system retains fetched payload metadata, Postgres stores the metadata and optional digests needed to validate later cache use; fetched bytes outside durable replay facts are cache-owned and may be absent.
 
 ## Raw-log retention modes
 
@@ -59,7 +57,7 @@ Compaction and pruning must stay behind the rewind horizon they serve. Minimal m
 
 ## Evictable payload cache
 
-Large/full block payloads, non-indexed transaction/receipt/block bodies, and non-audit raw-log staging rows are evictable cache by default once the selected replay contract has been satisfied. They may live inline during a hot window, in local/provider cache, in hash-addressed object storage, or not be retained at all.
+Large/full block payloads, non-indexed transaction/receipt/block bodies, and non-audit raw-log staging rows are evictable cache by default once the selected replay contract has been satisfied. They may live inline during a hot window, in local/provider cache, or not be retained at all.
 
 Retained cache metadata describes what was fetched: payload kind, chain id, block hash/number where block-scoped, optional digest, size, content type or encoding, source observation metadata, observed time, canonicality state. A retained digest authorizes later byte use; metadata without one cannot.
 
@@ -188,19 +186,9 @@ Backfill range checkpoints are operational state. They record only that bounded 
 
 Backfill raw admission still writes canonicality for the facts it admits. When the admitted historical range is already proven canonical, safe, or finalized by retained lineage or provider checkpoint evidence, new lineage, raw-fact, and normalized-event rows use `canonical`, `safe`, or `finalized` as appropriate rather than staying `observed` solely because the source was backfill. If the evidence is absent, the storage layer preserves the weaker state.
 
-## Partitioning baseline
+## Partitioning status
 
-Partitioned tables:
-
-- `chain_lineage`
-- `chain_header_audit` (when auditable retention produces enough rows to justify it)
-- `raw_transactions`
-- `raw_receipts`
-- `raw_logs`
-- `normalized_events`
-- `execution_steps`
-
-Partition keys: `chain_id` and block-number range. Current-state projection tables start unpartitioned unless measurements prove otherwise.
+The current migrations create ordinary PostgreSQL tables for lineage, raw facts, normalized events, execution, identity, and projections. There is no checked-in table partitioning baseline yet. Row-volume control currently comes from explicit indexes, bounded backfill ranges, normalized-replay catch-up chunks, and retention/compaction policy. Any future partitioning change is a migration-bearing storage change and must update this section with the concrete table list and keys.
 
 ## Canonicality model
 
@@ -334,13 +322,7 @@ Inline in Postgres for small payloads:
 - decoded final values
 - failure reasons
 
-In hash-addressed object storage, addressed by SHA-256 digest:
-
-- CCIP payload bodies
-- large metadata responses
-- trace attachments
-
-Postgres records the digest, size, content type, and object key for each attachment.
+Large gateway bodies, metadata responses, and trace attachments are not persisted to a separate object store today. Execution may retain digests and trace metadata in Postgres, but adding durable external payload storage would be a migration-bearing storage change.
 
 `execution_traces` and `execution_steps` preserve what was executed and why. Normal `execution_cache_outcomes` writes record whether a verified outcome can be reused under its request key, manifest versions, and block-hash-bearing dependency boundaries. The reorg-invalidation exception above is the only non-execution-worker write path.
 

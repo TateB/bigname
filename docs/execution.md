@@ -109,7 +109,7 @@ Each step row in `execution_steps` records:
 
 Admitted exact block-anchored `raw_call_snapshots` are not part of this schema. They remain intake-owned raw facts keyed by exact block identity even when verified-resolution persistence hands them off alongside the trace.
 
-Execution traces and steps are durable audit artifacts. Reorg-driven cache invalidation does not delete `execution_traces`, `execution_steps`, object-store attachments, or the trace-local step list — it only changes whether a persisted outcome is reusable as a cache hit.
+Execution traces and steps are durable audit artifacts. Reorg-driven cache invalidation does not delete `execution_traces`, `execution_steps`, or the trace-local step list — it only changes whether a persisted outcome is reusable as a cache hit.
 
 ### Worker inspection
 

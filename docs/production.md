@@ -20,7 +20,7 @@ process serves:
 - `GET /v1/...`
 
 There are no public admin or mutation routes in the API process. Worker,
-migration, PostgreSQL, MinIO, and indexer control surfaces are not routed
+migration, PostgreSQL, and indexer control surfaces are not routed
 through Caddy.
 
 ## Environment
@@ -84,14 +84,14 @@ For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and
 
 ## Operations Notes
 
-- Keep PostgreSQL and MinIO unexposed at the host/network edge.
+- Keep PostgreSQL unexposed at the host/network edge.
 - Keep JSON-RPC providers reachable only from the containers that need them.
 - Use [`runbooks/production-docker.md`](runbooks/production-docker.md) for
   current-host Docker operations, monitoring, pause/resume, and recovery
   checklists.
 - Use host firewall or cloud security groups to allow public `80/tcp` and
   `443/tcp`. Allow `443/udp` when HTTP/3 should be available. Do not publish
-  database, object-store, or execution-node admin ports.
+  database or execution-node admin ports.
 - Caddy data lives in the `caddy-data` Docker volume. Preserve it across
   container recreates so certificate state survives restarts.
 - Caddy sends HSTS and advertises HTTP/3 when the UDP port is published. The

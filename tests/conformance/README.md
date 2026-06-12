@@ -229,9 +229,8 @@ Execution notes:
   verified answer across manifest, topology-boundary, and
   record-boundary cases, confirms sibling tuple outcomes remain readable, and confirms the evicted
   tuple falls back to the same tuple-backed declared status plus bootstrap verified unsupported
-  section. It also requires both
-  `namespace` and `coin_type`, asserts `400 invalid_input` for missing `namespace` / `coin_type`,
-  malformed addresses, and malformed non-decimal `coin_type` values, `404 not_found` for
+  section. It also defaults missing `namespace` / `coin_type` to `ens` / `60`, asserts
+  `400 invalid_input` for malformed addresses and malformed non-decimal `coin_type` values, `404 not_found` for
   unsupported namespaces, and the shared bootstrap provenance invariant
   (`normalized_event_ids`, `raw_fact_refs`, and `manifest_versions` empty,
   `execution_trace_id=null`, `derivation_kind=primary_name_route_bootstrap`) plus the same

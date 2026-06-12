@@ -18,7 +18,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 | `apps/indexer`, `crates/adapters`, `docs/chain-intake.md` | Intake and Adapters | Raw intake, adapter normalization, provider/backfill behavior |
 | `apps/worker`, projection modules, `docs/projections.md` | Projections and API | Projection apply/rebuild, current read models, worker-owned operational commands |
 | `crates/storage`, `migrations`, `docs/storage.md` | Storage and Domain | Schema, canonicality, migrations, storage helpers |
-| `crates/domain` | Storage and Domain | Highest-conflict shared IDs/enums; keep narrow |
+| `crates/domain` | Storage and Domain | Narrow normalization helpers only; persisted identity types live in `crates/storage/src/identity/types.rs` |
 | `crates/manifests`, `manifests/**`, `docs/manifests.md` | Manifests and Discovery | Source authority, discovery, capability flags, watch-plan inputs |
 | `crates/execution`, `docs/execution.md` | Verified Execution | Resolution/primary execution, traces, invalidation |
 | `tests/conformance`, checked-in fixtures | Conformance and Fixtures | Capability evidence, replay/conformance suites, golden fixtures |

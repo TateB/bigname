@@ -46,34 +46,5 @@ services:
       retries: 10
       start_period: 5s
 
-  minio:
-    image: minio/minio:latest
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bigname}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-bigname-secret}
-      MINIO_REGION_NAME: ${AWS_REGION:-us-east-1}
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - minio-data:/data
-
-  minio-bootstrap:
-    image: minio/mc:latest
-    depends_on:
-      - minio
-    restart: "no"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 "${MINIO_ROOT_USER:-bigname}" "${MINIO_ROOT_PASSWORD:-bigname-secret}"; do
-          sleep 1
-        done
-        mc mb --ignore-existing local/"${S3_BUCKET:-bigname-dev}"
-
 volumes:
   postgres-data:
-  minio-data:
