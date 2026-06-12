@@ -42,32 +42,24 @@ fn build_ens_reverse_claimed_event(raw_log: &ReverseRawLogRow) -> Result<Vec<Nor
         return Ok(Vec::new());
     }
 
-    let claimed_address = normalize_topic_address(
-        raw_log
-            .topics
-            .get(1)
-            .context("ReverseClaimed log is missing indexed address")?,
-    )?;
-    let indexed_reverse_node = normalize_hex_32(
-        raw_log
-            .topics
-            .get(2)
-            .context("ReverseClaimed log is missing indexed reverse node")?,
-    )?;
+    let Some(raw_claimed_address) = raw_log.topics.get(1) else {
+        return Ok(Vec::new());
+    };
+    let Ok(claimed_address) = normalize_topic_address(raw_claimed_address) else {
+        return Ok(Vec::new());
+    };
+    let Some(raw_indexed_reverse_node) = raw_log.topics.get(2) else {
+        return Ok(Vec::new());
+    };
+    let Ok(indexed_reverse_node) = normalize_hex_32(raw_indexed_reverse_node) else {
+        return Ok(Vec::new());
+    };
     let reverse_label = reverse_label_for_address(&claimed_address)?;
     let reverse_name = reverse_name_for_source_family(&raw_log.source_family, &claimed_address)?;
     let derived_reverse_node =
         reverse_node_for_source_family(&raw_log.source_family, &claimed_address)?;
     if !indexed_reverse_node.eq_ignore_ascii_case(&derived_reverse_node) {
-        bail!(
-            "{} indexed reverse node {} does not match derived reverse node {} for chain {} block {} log {}",
-            SOURCE_EVENT_REVERSE_CLAIMED,
-            indexed_reverse_node,
-            derived_reverse_node,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
+        return Ok(Vec::new());
     }
 
     Ok(vec![reverse_changed_event(

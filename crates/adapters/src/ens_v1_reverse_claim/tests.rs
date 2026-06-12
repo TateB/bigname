@@ -291,6 +291,70 @@ async fn insert_raw_reverse_claim_log(
     Ok(())
 }
 
+#[test]
+fn reverse_claimed_node_mismatch_drops_log_without_error() -> Result<()> {
+    let claimed_address = "0x1111111111111111111111111111111111111111";
+    let raw_log = raw_logs::ReverseRawLogRow {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xblock".to_owned(),
+        block_number: 42,
+        transaction_hash: "0xtx".to_owned(),
+        transaction_index: 0,
+        log_index: 7,
+        emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+        emitting_contract_instance_id: Uuid::new_v4(),
+        topics: vec![
+            reverse_claimed_topic0_for_source_family(SOURCE_FAMILY_ENS_V1_REVERSE_L1)
+                .context("ENSv1 reverse source should have a ReverseClaimed topic")?,
+            hex_string(&abi_word_address(claimed_address)),
+            hex_string(&[0x44; 32]),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Canonical,
+        source_manifest_id: 42,
+        namespace: "ens".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1.to_owned(),
+        manifest_version: 1,
+    };
+
+    assert!(events::build_reverse_changed_events(&raw_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn malformed_reverse_claimed_topics_drop_log_without_error() -> Result<()> {
+    let base_raw_log = raw_logs::ReverseRawLogRow {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xblock".to_owned(),
+        block_number: 42,
+        transaction_hash: "0xtx".to_owned(),
+        transaction_index: 0,
+        log_index: 7,
+        emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+        emitting_contract_instance_id: Uuid::new_v4(),
+        topics: vec![
+            reverse_claimed_topic0_for_source_family(SOURCE_FAMILY_ENS_V1_REVERSE_L1)
+                .context("ENSv1 reverse source should have a ReverseClaimed topic")?,
+            "0x1234".to_owned(),
+            hex_string(&[0x44; 32]),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Canonical,
+        source_manifest_id: 42,
+        namespace: "ens".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1.to_owned(),
+        manifest_version: 1,
+    };
+    assert!(events::build_reverse_changed_events(&base_raw_log)?.is_empty());
+
+    let mut missing_node_log = base_raw_log;
+    missing_node_log.topics.truncate(2);
+    assert!(events::build_reverse_changed_events(&missing_node_log)?.is_empty());
+
+    Ok(())
+}
+
 fn expected_events_per_reverse_log(source_family: &str) -> usize {
     if source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
         2

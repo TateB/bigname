@@ -1626,6 +1626,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             "SubregistryUpdated",
             "ResolverUpdated",
             "TokenResource",
+            "EACRolesChanged",
             "TokenRegenerated",
             "ParentUpdated",
         ]
@@ -1933,7 +1934,7 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
     let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
 
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 10);
     let label_registered = events
         .iter()
         .find(|event| event.name == "LabelRegistered")

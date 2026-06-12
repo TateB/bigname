@@ -1,13 +1,20 @@
 use anyhow::{Context, Result};
+use bigname_manifests::load_watched_contracts;
 use bigname_storage::sql_row;
 use sqlx::PgPool;
 
+use crate::adapter_manifest::{
+    active_manifest_for_watched_contract, ensure_watched_contract_manifest_chain,
+    load_active_manifest_metadata, watched_contract_manifest_ids,
+};
 use crate::ens_v2_common::{
     ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
-    source_scope_bindings,
 };
 
-use super::constants::{RESOLVER_EDGE_KIND, SOURCE_FAMILY_ENS_V2_RESOLVER_L1};
+use super::constants::{
+    RESOLVER_EDGE_KIND, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+    SOURCE_FAMILY_ENS_V2_ROOT_L1,
+};
 use super::types::PermissionsRawLogRow;
 
 pub(super) async fn load_permissions_raw_logs(
@@ -28,8 +35,7 @@ pub(super) async fn load_permissions_raw_logs(
         .keys()
         .cloned()
         .collect::<Vec<_>>();
-    let (scope_addresses, scope_from_blocks, scope_to_blocks) =
-        source_scope_bindings(source_scope, SOURCE_FAMILY_ENS_V2_RESOLVER_L1);
+    let (scope_addresses, scope_from_blocks, scope_to_blocks) = source_scope_bindings(source_scope);
     if source_scope.is_some() && scope_addresses.is_empty() {
         return Ok(Vec::new());
     }
@@ -119,12 +125,80 @@ pub(super) async fn load_permissions_raw_logs(
 }
 
 pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
-    crate::ens_v2_common::load_active_emitters(
+    let mut emitters = crate::ens_v2_common::load_active_emitters(
         pool,
         chain,
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         RESOLVER_EDGE_KIND,
         "ENSv2 permissions",
     )
-    .await
+    .await?;
+    emitters.extend(load_registry_active_emitters(pool, chain).await?);
+    emitters.sort_by(|left, right| {
+        left.address
+            .cmp(&right.address)
+            .then(left.source_family.cmp(&right.source_family))
+            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
+            .then(left.contract_instance_id.cmp(&right.contract_instance_id))
+    });
+    Ok(emitters)
+}
+
+async fn load_registry_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+    let watched_contracts = load_watched_contracts(pool)
+        .await
+        .context("failed to load watched contracts for ENSv2 registry permissions")?;
+    let watched_contracts = watched_contracts
+        .into_iter()
+        .filter(|contract| contract.chain == chain)
+        .collect::<Vec<_>>();
+    if watched_contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
+    let active_manifests =
+        load_active_manifest_metadata(pool, &manifest_ids, "ENSv2 registry permissions").await?;
+    let mut emitters = Vec::new();
+    for watched_contract in watched_contracts {
+        let (source_manifest_id, manifest) =
+            active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
+        if manifest.source_family != SOURCE_FAMILY_ENS_V2_ROOT_L1
+            && manifest.source_family != SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+        {
+            continue;
+        }
+        ensure_watched_contract_manifest_chain(&watched_contract, manifest, source_manifest_id)?;
+        emitters.push(ActiveEmitter {
+            address: watched_contract.address,
+            contract_instance_id: watched_contract.contract_instance_id,
+            source_manifest_id,
+            namespace: manifest.namespace.clone(),
+            source_family: manifest.source_family.clone(),
+            manifest_version: manifest.manifest_version,
+            active_from_block_number: watched_contract.active_from_block_number,
+            active_to_block_number: watched_contract.active_to_block_number,
+        });
+    }
+    Ok(emitters)
+}
+
+fn source_scope_bindings(
+    source_scope: Option<&[(String, String, i64, i64)]>,
+) -> (Vec<String>, Vec<i64>, Vec<i64>) {
+    let mut addresses = Vec::new();
+    let mut from_blocks = Vec::new();
+    let mut to_blocks = Vec::new();
+    for (source_family, address, from_block, to_block) in source_scope.unwrap_or(&[]) {
+        if source_family != SOURCE_FAMILY_ENS_V2_ROOT_L1
+            && source_family != SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+            && source_family != SOURCE_FAMILY_ENS_V2_RESOLVER_L1
+        {
+            continue;
+        }
+        addresses.push(address.to_ascii_lowercase());
+        from_blocks.push(*from_block);
+        to_blocks.push(*to_block);
+    }
+    (addresses, from_blocks, to_blocks)
 }

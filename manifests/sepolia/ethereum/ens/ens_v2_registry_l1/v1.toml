@@ -92,6 +92,15 @@ fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resourc
 emitter_roles = ["registry"]
 normalized_events = ["TokenResourceLinked"]
 
+# EACRolesChanged comes from the permissioned registry's inherited EnhancedAccessControl interface:
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L9 @ ens_v2@554c309)
+# (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2@554c309).
+[[abi.events]]
+name = "EACRolesChanged"
+fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
+emitter_roles = ["registry"]
+normalized_events = ["PermissionChanged", "RootPermissionChanged"]
+
 # TokenRegenerated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L73 @ ens_v2@554c309).
 [[abi.events]]
 name = "TokenRegenerated"

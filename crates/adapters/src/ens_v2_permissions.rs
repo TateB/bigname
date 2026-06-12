@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 use crate::ens_v2_common::ActiveEmitter;
@@ -101,11 +101,14 @@ async fn sync_ens_v2_permissions_with_scope(
     let manifest_ids = active_emitters
         .iter()
         .map(|emitter| emitter.source_manifest_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
+    let required_event_signatures = required_permission_event_signatures(&active_emitters);
     let event_topics = load_required_active_manifest_event_topic0s_by_signature(
         pool,
         &manifest_ids,
-        &constants::ABI_EVENT_SIGNATURES,
+        &required_event_signatures,
         "ENSv2 permissions",
     )
     .await?;
@@ -244,5 +247,46 @@ fn empty_summary(scanned_log_count: usize) -> EnsV2PermissionsSyncSummary {
         total_synced_count: 0,
         total_inserted_count: 0,
         by_kind: BTreeMap::new(),
+    }
+}
+
+fn required_permission_event_signatures(active_emitters: &[ActiveEmitter]) -> Vec<&'static str> {
+    let mut signatures = Vec::new();
+    if active_emitters
+        .iter()
+        .any(|emitter| emitter.source_family == constants::SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+    {
+        push_signature(
+            &mut signatures,
+            constants::ABI_EVENT_NAMED_RESOURCE_SIGNATURE,
+        );
+        push_signature(
+            &mut signatures,
+            constants::ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE,
+        );
+        push_signature(
+            &mut signatures,
+            constants::ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE,
+        );
+        push_signature(
+            &mut signatures,
+            constants::ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE,
+        );
+    }
+    if active_emitters.iter().any(|emitter| {
+        emitter.source_family == constants::SOURCE_FAMILY_ENS_V2_ROOT_L1
+            || emitter.source_family == constants::SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+    }) {
+        push_signature(
+            &mut signatures,
+            constants::ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE,
+        );
+    }
+    signatures
+}
+
+fn push_signature(signatures: &mut Vec<&'static str>, signature: &'static str) {
+    if !signatures.contains(&signature) {
+        signatures.push(signature);
     }
 }

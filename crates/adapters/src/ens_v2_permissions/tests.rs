@@ -1,10 +1,28 @@
-use anyhow::Result;
-use bigname_storage::CanonicalityState;
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result};
+use bigname_manifests::{
+    load_active_manifest_abi_events_by_chain_and_source_families, load_repository, sync_repository,
+};
+use bigname_storage::{
+    CanonicalityState, RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
+    upsert_raw_blocks, upsert_raw_logs,
+};
 use serde_json::json;
-use sqlx::types::Uuid;
-use std::collections::HashMap;
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+    types::{Uuid, time::OffsetDateTime},
+};
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
+use crate::ens_v2_common::normalize_address;
 use crate::evm_abi::keccak_signature_hex;
 
 use super::constants::*;
@@ -13,6 +31,78 @@ use super::hints::{fallback_resource_hint, resolver_resource_hint};
 use super::normalized::permission_changed_event;
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
 use super::util::hex_string;
+
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TestDatabase {
+    admin_pool: PgPool,
+    pool: PgPool,
+    database_name: String,
+}
+
+impl TestDatabase {
+    async fn new() -> Result<Self> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let base_options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for ENSv2 permissions tests")?;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before unix epoch")?
+            .as_nanos();
+        let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let database_name = format!(
+            "bn_ad_ensv2_perm_{}_{}_{}",
+            std::process::id(),
+            unique,
+            sequence
+        );
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(base_options.clone().database("postgres"))
+            .await
+            .context("failed to connect admin pool for ENSv2 permissions tests")?;
+        sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to create test database {database_name}"))?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(base_options.database(&database_name))
+            .await
+            .context("failed to connect test pool for ENSv2 permissions tests")?;
+        bigname_storage::MIGRATOR
+            .run(&pool)
+            .await
+            .context("failed to apply migrations for ENSv2 permissions tests")?;
+
+        Ok(Self {
+            admin_pool,
+            pool,
+            database_name,
+        })
+    }
+
+    fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        self.pool.close().await;
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.database_name
+        ))
+        .execute(&self.admin_pool)
+        .await
+        .with_context(|| format!("failed to drop test database {}", self.database_name))?;
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
 
 #[test]
 fn decodes_named_text_resource_observation() -> Result<()> {
@@ -205,7 +295,230 @@ fn builds_permission_changed_event_payload() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn registry_root_resource_builds_root_permission_changed_event_payload() -> Result<()> {
+    let account = "0x1111111111111111111111111111111111111111";
+    let root_resource = topic_word(0);
+    let raw_log = raw_log_with_source_family(
+        "ens_v2_registry_l1",
+        vec![
+            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
+            root_resource.clone(),
+            address_topic(account),
+        ],
+        [hex_word(0), bitmap_with_last_byte(0x11)]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let hint = fallback_resource_hint(&raw_log, root_resource.clone(), true);
+    let resource_id = Uuid::parse_str("11111111-1111-5111-8111-111111111111")?;
+    let event = permission_changed_event(
+        &raw_log,
+        &hint,
+        resource_id,
+        account.to_owned(),
+        topic_word(0),
+        bitmap_hex_with_last_byte(0x11),
+    )?;
+
+    assert_eq!(event.event_kind, "RootPermissionChanged");
+    assert_eq!(
+        event.event_identity,
+        format!("ens_v2_permissions:42:0xblock:0xtx:9:RootPermissionChanged:{root_resource}")
+    );
+    assert_eq!(
+        event.after_state["scope"],
+        json!({
+            "kind": "registry_root",
+            "chain_id": "sepolia-dev",
+            "registry_address": "0x2222222222222222222222222222222222222222",
+        })
+    );
+    assert_eq!(
+        event.after_state["grant_source"]["registry_contract_instance_id"],
+        raw_log.emitting_contract_instance_id.to_string()
+    );
+    assert_eq!(event.after_state["grant_source"]["root_resource"], true);
+    assert_eq!(
+        event.after_state["inheritance_path"][0]["kind"],
+        "registry_root_fallback"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let root_address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3";
+    let registry_address = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
+    let account = "0x1111111111111111111111111111111111111111";
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    assert_registry_and_root_eac_roles_changed_are_admitted(database.pool(), chain).await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[permissions_test_raw_block(chain, block_hash, 10_462_900)],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 10_462_900,
+                transaction_hash: "0xtx420".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: normalize_address(root_address),
+                topics: vec![
+                    keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),
+                    topic_word(0),
+                    address_topic(account),
+                ],
+                data: [hex_word(0), bitmap_with_last_byte(0x11)]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 10_462_900,
+                transaction_hash: "0xtx420".to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: normalize_address(registry_address),
+                topics: vec![
+                    keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),
+                    topic_word(0),
+                    address_topic(account),
+                ],
+                data: [hex_word(0), bitmap_with_last_byte(0x11)]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &[block_hash.to_owned()],
+    )
+    .await?;
+
+    assert_eq!(summary.scanned_log_count, 2);
+    assert_eq!(summary.matched_log_count, 2);
+    assert_eq!(summary.total_synced_count, 2);
+    assert_eq!(
+        summary
+            .by_kind
+            .get(EVENT_KIND_ROOT_PERMISSION_CHANGED)
+            .map(|entry| entry.synced_count),
+        Some(2)
+    );
+
+    let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+    assert_eq!(events.len(), 2);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_kind == EVENT_KIND_ROOT_PERMISSION_CHANGED)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.source_family.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            SOURCE_FAMILY_ENS_V2_ROOT_L1,
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        ])
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.after_state["scope"]["kind"] == "registry_root")
+    );
+    assert!(events.iter().all(|event| {
+        event.after_state["registry_contract_instance_id"]
+            .as_str()
+            .is_some()
+    }));
+
+    database.cleanup().await
+}
+
+async fn assert_registry_and_root_eac_roles_changed_are_admitted(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<()> {
+    let source_families = vec![
+        SOURCE_FAMILY_ENS_V2_ROOT_L1.to_owned(),
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+    ];
+    let admitted =
+        load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, &source_families)
+            .await?
+            .into_iter()
+            .filter(|event| event.canonical_signature == ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE)
+            .filter(|event| event.topic0.is_some())
+            .map(|event| event.source_family)
+            .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        admitted,
+        BTreeSet::from([
+            SOURCE_FAMILY_ENS_V2_ROOT_L1.to_owned(),
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+        ])
+    );
+    Ok(())
+}
+
+fn checked_in_manifest_root(profile_root: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(profile_root)
+}
+
+fn permissions_test_raw_block(chain: &str, block_hash: &str, block_number: i64) -> RawBlock {
+    RawBlock {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        parent_hash: None,
+        block_number,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_717_172_700 + block_number)
+            .expect("test timestamp should fit"),
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
 fn raw_log(topics: Vec<String>, data: Vec<u8>) -> PermissionsRawLogRow {
+    raw_log_with_source_family("ens_v2_resolver_l1", topics, data)
+}
+
+fn raw_log_with_source_family(
+    source_family: &str,
+    topics: Vec<String>,
+    data: Vec<u8>,
+) -> PermissionsRawLogRow {
     PermissionsRawLogRow {
         chain_id: "sepolia-dev".to_owned(),
         block_hash: "0xblock".to_owned(),
@@ -221,7 +534,7 @@ fn raw_log(topics: Vec<String>, data: Vec<u8>) -> PermissionsRawLogRow {
         canonicality_state: CanonicalityState::Canonical,
         source_manifest_id: 42,
         namespace: "ens".to_owned(),
-        source_family: "ens_v2_resolver_l1".to_owned(),
+        source_family: source_family.to_owned(),
         manifest_version: 7,
     }
 }

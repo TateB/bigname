@@ -32,6 +32,15 @@ const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
 const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
 const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
 const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
+const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
+const UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
+const UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
+const BASENAMES_NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256)";
+const BASENAMES_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256)";
 
 // ENSv1's `NameWrapped` event declaration starts at this pinned source line.
 // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
@@ -186,8 +195,20 @@ fn manifest_abi_events(source_family: &str) -> Vec<Value> {
                 "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)",
             }),
             json!({
+                "name": ABI_EVENT_NAME_REGISTERED,
+                "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAME_REGISTERED,
+                "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer)",
+            }),
+            json!({
                 "name": ABI_EVENT_NAME_RENEWED,
                 "fragment": "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
+            }),
+            json!({
+                "name": ABI_EVENT_NAME_RENEWED,
+                "fragment": "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer)",
             }),
         ],
         SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => vec![json!({
@@ -812,6 +833,81 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
 }
 
 #[test]
+fn post_2023_controller_label_logs_emit_preimage_observations() -> Result<()> {
+    let cases = [
+        (
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            SOURCE_EVENT_NAME_REGISTERED,
+            WRAPPED_NAME_REGISTERED_SIGNATURE,
+            "wrapped",
+            "wrapped.eth",
+            3,
+        ),
+        (
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            SOURCE_EVENT_NAME_REGISTERED,
+            UNWRAPPED_NAME_REGISTERED_SIGNATURE,
+            "unwrapped",
+            "unwrapped.eth",
+            4,
+        ),
+        (
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            SOURCE_EVENT_NAME_RENEWED,
+            UNWRAPPED_NAME_RENEWED_SIGNATURE,
+            "renewed",
+            "renewed.eth",
+            3,
+        ),
+        (
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            SOURCE_EVENT_NAME_REGISTERED,
+            BASENAMES_NAME_REGISTERED_SIGNATURE,
+            "based",
+            "based.base.eth",
+            2,
+        ),
+        (
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            SOURCE_EVENT_NAME_RENEWED,
+            BASENAMES_NAME_RENEWED_SIGNATURE,
+            "renewed",
+            "renewed.base.eth",
+            1,
+        ),
+    ];
+
+    for (source_family, source_event, signature, label, expected_name, static_words) in cases {
+        let log = watched_log(
+            source_family,
+            static_words as i64,
+            registrar_topics(
+                signature,
+                label,
+                matches!(source_event, SOURCE_EVENT_NAME_REGISTERED),
+            ),
+            encode_dynamic_string_with_prefix(label, &vec![[0u8; 32]; static_words]),
+        );
+        let events = build_test_preimage_observed_events(&log)
+            .with_context(|| format!("failed to build preimage for {signature}"))?;
+        assert_eq!(events.len(), 1, "{signature} should produce one preimage");
+        assert_eq!(events[0].after_state["source_event"], source_event);
+        assert_eq!(events[0].after_state["decoded_name"], expected_name);
+        assert_eq!(
+            events[0].after_state["labelhashes"][0],
+            keccak256_hex(label.as_bytes())
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn nul_labels_are_not_observable_preimages() {
+    assert!(!preimage_observation::can_observe_dns_label("ali\0ce"));
+}
+
+#[test]
 fn oversized_label_logs_do_not_abort_preimage_observation() -> Result<()> {
     let oversized_label = "a".repeat(usize::from(u8::MAX) + 1);
     let registrar_log = watched_log(
@@ -927,6 +1023,75 @@ fn labelhash_mismatch_logs_do_not_abort_preimage_observation() -> Result<()> {
         ),
     );
     assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn missing_indexed_labelhash_logs_do_not_emit_preimage_observation() -> Result<()> {
+    let label = "alice";
+    let registrar_log = watched_log(
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        11,
+        vec![keccak_signature_hex(ENS_V1_NAME_REGISTERED_SIGNATURE)],
+        encode_registrar_label_log_data(label),
+    );
+    assert!(build_test_preimage_observed_events(&registrar_log)?.is_empty());
+
+    let registry_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        12,
+        vec![
+            keccak_signature_hex("LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
+            hex_string(&abi_word_u64(1)),
+        ],
+        encode_ens_v2_label_registered_data(
+            label,
+            "0x00000000000000000000000000000000000000bb",
+            2_000_000_000,
+        ),
+    );
+    assert!(build_test_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn alias_hash_mismatch_logs_do_not_abort_preimage_observation() -> Result<()> {
+    let alice_dns_name = dns_encoded_name(&["alice", "eth"]);
+    let bob_dns_name = dns_encoded_name(&["bob", "eth"]);
+    let alias_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+        6,
+        vec![
+            keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
+            keccak256_hex(&bob_dns_name),
+            keccak256_hex(&bob_dns_name),
+        ],
+        encode_two_dynamic_bytes(&alice_dns_name, &bob_dns_name),
+    );
+
+    assert!(build_test_preimage_observed_events(&alias_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn malformed_alias_changed_logs_do_not_abort_preimage_observation() -> Result<()> {
+    let alice_dns_name = dns_encoded_name(&["alice", "eth"]);
+    let bob_dns_name = dns_encoded_name(&["bob", "eth"]);
+    let alias_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+        7,
+        vec![
+            keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
+            keccak256_hex(&alice_dns_name),
+            keccak256_hex(&bob_dns_name),
+        ],
+        abi_word_u64(64).to_vec(),
+    );
+
+    assert!(build_test_preimage_observed_events(&alias_log)?.is_empty());
 
     Ok(())
 }
@@ -1059,6 +1224,31 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
                     ENS_V1_NAME_RENEWED_SIGNATURE.to_owned(),
                     keccak_signature_hex("NameRenewed(string,bytes32,uint256,uint256)"),
                 ),
+                (
+                    WRAPPED_NAME_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(WRAPPED_NAME_REGISTERED_SIGNATURE),
+                ),
+                (
+                    UNWRAPPED_NAME_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(UNWRAPPED_NAME_REGISTERED_SIGNATURE),
+                ),
+                (
+                    UNWRAPPED_NAME_RENEWED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(UNWRAPPED_NAME_RENEWED_SIGNATURE),
+                ),
+            ])),
+        ),
+        (
+            test_source_manifest_id(SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    BASENAMES_NAME_REGISTERED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(BASENAMES_NAME_REGISTERED_SIGNATURE),
+                ),
+                (
+                    BASENAMES_NAME_RENEWED_SIGNATURE.to_owned(),
+                    keccak_signature_hex(BASENAMES_NAME_RENEWED_SIGNATURE),
+                ),
             ])),
         ),
         (
@@ -1135,6 +1325,7 @@ fn test_source_manifest_id(source_family: &str) -> i64 {
         SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => 3,
         SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => 4,
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => 5,
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => 6,
         _ => 1,
     }
 }
@@ -1184,6 +1375,19 @@ fn resolver_preimage_events_for_watched_log(
             manifest_version: raw_log.manifest_version,
         },
     )
+}
+
+fn registrar_topics(signature: &str, label: &str, includes_owner: bool) -> Vec<String> {
+    let mut topics = vec![
+        keccak_signature_hex(signature),
+        keccak256_hex(label.as_bytes()),
+    ];
+    if includes_owner {
+        topics.push(hex_string(&abi_word_address(
+            "0x0000000000000000000000000000000000000001",
+        )));
+    }
+    topics
 }
 
 fn encode_ens_v2_label_registered_data(label: &str, owner: &str, expiry_unix: u64) -> Vec<u8> {

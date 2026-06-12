@@ -3,6 +3,7 @@ pub(super) const DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION: &str =
 pub(super) const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
 pub(super) const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 pub(super) const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
+pub(super) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 pub(super) const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 pub(super) const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 pub(super) const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
@@ -20,8 +21,17 @@ pub(super) const SOURCE_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
 pub(super) const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
 pub(super) const ENS_V1_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256)";
+pub(super) const ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
+pub(super) const ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
 pub(super) const ENS_V1_NAME_RENEWED_SIGNATURE: &str =
     "NameRenewed(string,bytes32,uint256,uint256)";
+pub(super) const ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
+pub(super) const BASENAMES_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256)";
+pub(super) const BASENAMES_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256)";
 pub(super) const LABEL_REGISTERED_SIGNATURE: &str =
     "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
 pub(super) const LABEL_RESERVED_SIGNATURE: &str =
@@ -38,9 +48,16 @@ pub(super) const NAMED_TEXT_RESOURCE_SIGNATURE: &str =
 pub(super) const NAMED_ADDR_RESOURCE_SIGNATURE: &str = "NamedAddrResource(uint256,bytes,uint256)";
 
 pub(super) const ENS_V1_WRAPPER_PREIMAGE_EVENT_SIGNATURES: [&str; 1] = [NAME_WRAPPED_SIGNATURE];
-pub(super) const ENS_V1_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 2] = [
+pub(super) const ENS_V1_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 5] = [
     ENS_V1_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE,
     ENS_V1_NAME_RENEWED_SIGNATURE,
+    ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE,
+];
+pub(super) const BASENAMES_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 2] = [
+    BASENAMES_NAME_REGISTERED_SIGNATURE,
+    BASENAMES_NAME_RENEWED_SIGNATURE,
 ];
 pub(super) const ENS_V2_REGISTRY_PREIMAGE_EVENT_SIGNATURES: [&str; 3] = [
     LABEL_REGISTERED_SIGNATURE,
@@ -57,10 +74,15 @@ pub(super) const ENS_V2_RESOLVER_PREIMAGE_EVENT_SIGNATURES: [&str; 4] = [
     NAMED_TEXT_RESOURCE_SIGNATURE,
     NAMED_ADDR_RESOURCE_SIGNATURE,
 ];
-pub(super) const PREIMAGE_EVENT_SIGNATURES: [&str; 12] = [
+pub(super) const PREIMAGE_EVENT_SIGNATURES: [&str; 17] = [
     NAME_WRAPPED_SIGNATURE,
     ENS_V1_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE,
     ENS_V1_NAME_RENEWED_SIGNATURE,
+    ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE,
+    BASENAMES_NAME_REGISTERED_SIGNATURE,
+    BASENAMES_NAME_RENEWED_SIGNATURE,
     LABEL_REGISTERED_SIGNATURE,
     LABEL_RESERVED_SIGNATURE,
     PARENT_UPDATED_SIGNATURE,

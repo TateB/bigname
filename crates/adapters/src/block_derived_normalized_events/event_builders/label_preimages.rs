@@ -1,22 +1,23 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bigname_storage::NormalizedEvent;
 
-use super::{
-    LabelRegistered, LabelReserved, NameRegistered_0, NameRegistered_1, NameRenewed_0,
-    NameRenewed_1, ParentUpdated, build_preimage_observed_normalized_event, decode_event_log,
-};
+use super::build_preimage_observed_normalized_event;
 use crate::block_derived_normalized_events::constants::{
+    BASENAMES_NAME_REGISTERED_SIGNATURE, BASENAMES_NAME_RENEWED_SIGNATURE,
     ENS_V1_NAME_REGISTERED_SIGNATURE, ENS_V1_NAME_RENEWED_SIGNATURE,
-    ENS_V2_NAME_REGISTERED_SIGNATURE, ENS_V2_NAME_RENEWED_SIGNATURE, LABEL_REGISTERED_SIGNATURE,
-    LABEL_RESERVED_SIGNATURE, PARENT_UPDATED_SIGNATURE, SOURCE_EVENT_LABEL_REGISTERED,
-    SOURCE_EVENT_LABEL_RESERVED, SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED,
-    SOURCE_EVENT_PARENT_UPDATED, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+    ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE, ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE,
+    ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE, ENS_V2_NAME_REGISTERED_SIGNATURE,
+    ENS_V2_NAME_RENEWED_SIGNATURE, LABEL_REGISTERED_SIGNATURE, LABEL_RESERVED_SIGNATURE,
+    PARENT_UPDATED_SIGNATURE, SOURCE_EVENT_LABEL_REGISTERED, SOURCE_EVENT_LABEL_RESERVED,
+    SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED, SOURCE_EVENT_PARENT_UPDATED,
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
     SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
     SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use crate::block_derived_normalized_events::event_topics::PreimageObservedEventTopics;
 use crate::block_derived_normalized_events::preimage_observation::{
-    can_observe_dns_label, observe_registrar_eth_name, observe_single_label,
+    can_observe_dns_label, observe_registrar_base_name, observe_registrar_eth_name,
+    observe_single_label,
 };
 use crate::block_derived_normalized_events::types::{PreimageObservation, WatchedRawLogRow};
 
@@ -31,7 +32,8 @@ struct LabelPreimageSpec {
 
 #[derive(Clone, Copy)]
 enum LabelPreimageObservationKind {
-    RegistrarEthName,
+    RegistrarEnsName,
+    RegistrarBaseName,
     SingleLabel,
 }
 
@@ -39,16 +41,58 @@ const ENS_V1_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
     LabelPreimageSpec {
         source_event: SOURCE_EVENT_NAME_REGISTERED,
         signature: ENS_V1_NAME_REGISTERED_SIGNATURE,
-        observation_kind: LabelPreimageObservationKind::RegistrarEthName,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
+        indexed_labelhash_topic: Some(1),
+        missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
+    },
+    LabelPreimageSpec {
+        source_event: SOURCE_EVENT_NAME_REGISTERED,
+        signature: ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
+        indexed_labelhash_topic: Some(1),
+        missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
+    },
+    LabelPreimageSpec {
+        source_event: SOURCE_EVENT_NAME_REGISTERED,
+        signature: ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
         indexed_labelhash_topic: Some(1),
         missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
     },
     LabelPreimageSpec {
         source_event: SOURCE_EVENT_NAME_RENEWED,
         signature: ENS_V1_NAME_RENEWED_SIGNATURE,
-        observation_kind: LabelPreimageObservationKind::RegistrarEthName,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
         indexed_labelhash_topic: Some(1),
         missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
+    },
+    LabelPreimageSpec {
+        source_event: SOURCE_EVENT_NAME_RENEWED,
+        signature: ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
+        indexed_labelhash_topic: Some(1),
+        missing_labelhash_context: Some("registrar observation is missing the explicit labelhash"),
+    },
+];
+
+const BASENAMES_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
+    LabelPreimageSpec {
+        source_event: SOURCE_EVENT_NAME_REGISTERED,
+        signature: BASENAMES_NAME_REGISTERED_SIGNATURE,
+        observation_kind: LabelPreimageObservationKind::RegistrarBaseName,
+        indexed_labelhash_topic: Some(1),
+        missing_labelhash_context: Some(
+            "Basenames registrar observation is missing the explicit labelhash",
+        ),
+    },
+    LabelPreimageSpec {
+        source_event: SOURCE_EVENT_NAME_RENEWED,
+        signature: BASENAMES_NAME_RENEWED_SIGNATURE,
+        observation_kind: LabelPreimageObservationKind::RegistrarBaseName,
+        indexed_labelhash_topic: Some(1),
+        missing_labelhash_context: Some(
+            "Basenames registrar observation is missing the explicit labelhash",
+        ),
     },
 ];
 
@@ -84,14 +128,14 @@ const ENS_V2_REGISTRAR_LABEL_PREIMAGE_EVENTS: &[LabelPreimageSpec] = &[
     LabelPreimageSpec {
         source_event: SOURCE_EVENT_NAME_REGISTERED,
         signature: ENS_V2_NAME_REGISTERED_SIGNATURE,
-        observation_kind: LabelPreimageObservationKind::RegistrarEthName,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
         indexed_labelhash_topic: None,
         missing_labelhash_context: None,
     },
     LabelPreimageSpec {
         source_event: SOURCE_EVENT_NAME_RENEWED,
         signature: ENS_V2_NAME_RENEWED_SIGNATURE,
-        observation_kind: LabelPreimageObservationKind::RegistrarEthName,
+        observation_kind: LabelPreimageObservationKind::RegistrarEnsName,
         indexed_labelhash_topic: None,
         missing_labelhash_context: None,
     },
@@ -108,7 +152,11 @@ pub(super) fn build_registrar_preimage_observed_events(
         raw_log,
         event_topics,
         topic0,
-        ENS_V1_REGISTRAR_LABEL_PREIMAGE_EVENTS,
+        match raw_log.source_family.as_str() {
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => ENS_V1_REGISTRAR_LABEL_PREIMAGE_EVENTS,
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => BASENAMES_REGISTRAR_LABEL_PREIMAGE_EVENTS,
+            _ => &[],
+        },
     )
     .map(Option::unwrap_or_default)
 }
@@ -179,7 +227,8 @@ fn build_label_preimage_observed_events(
 impl LabelPreimageObservationKind {
     fn observe(self, label: &str) -> Result<PreimageObservation> {
         match self {
-            Self::RegistrarEthName => observe_registrar_eth_name(label),
+            Self::RegistrarEnsName => observe_registrar_eth_name(label),
+            Self::RegistrarBaseName => observe_registrar_base_name(label),
             Self::SingleLabel => observe_single_label(label),
         }
     }
@@ -197,9 +246,10 @@ fn indexed_labelhash_matches(
         spec.missing_labelhash_context
             .unwrap_or("preimage observation is missing the explicit labelhash"),
     )?;
-    if let Some(indexed_labelhash) = raw_log.topics.get(indexed_labelhash_topic)
-        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
-    {
+    let Some(indexed_labelhash) = raw_log.topics.get(indexed_labelhash_topic) else {
+        return Ok(false);
+    };
+    if !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash) {
         return Ok(false);
     }
     Ok(true)
@@ -216,44 +266,59 @@ fn decode_observable_event_label(raw_log: &WatchedRawLogRow, signature: &str) ->
 
 fn decode_event_label(raw_log: &WatchedRawLogRow, signature: &str) -> Option<String> {
     match (raw_log.source_family.as_str(), signature) {
-        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, ENS_V1_NAME_REGISTERED_SIGNATURE) => {
-            decode_event_log::<NameRegistered_0>(raw_log, "ENSv1 NameRegistered log is malformed")
-                .ok()
-                .map(|event| event.name)
-        }
-        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, ENS_V1_NAME_RENEWED_SIGNATURE) => {
-            decode_event_log::<NameRenewed_0>(raw_log, "ENSv1 NameRenewed log is malformed")
-                .ok()
-                .map(|event| event.name)
-        }
         (
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            ENS_V1_NAME_REGISTERED_SIGNATURE
+            | ENS_V1_WRAPPED_NAME_REGISTERED_SIGNATURE
+            | ENS_V1_UNWRAPPED_NAME_REGISTERED_SIGNATURE
+            | ENS_V1_NAME_RENEWED_SIGNATURE
+            | ENS_V1_UNWRAPPED_NAME_RENEWED_SIGNATURE,
+        )
+        | (
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            BASENAMES_NAME_REGISTERED_SIGNATURE | BASENAMES_NAME_RENEWED_SIGNATURE,
+        )
+        | (
             SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            LABEL_REGISTERED_SIGNATURE,
-        ) => decode_event_log::<LabelRegistered>(raw_log, "LabelRegistered log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            LABEL_RESERVED_SIGNATURE,
-        ) => decode_event_log::<LabelReserved>(raw_log, "LabelReserved log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            PARENT_UPDATED_SIGNATURE,
-        ) => decode_event_log::<ParentUpdated>(raw_log, "ParentUpdated log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, ENS_V2_NAME_REGISTERED_SIGNATURE) => {
-            decode_event_log::<NameRegistered_1>(raw_log, "ENSv2 NameRegistered log is malformed")
-                .ok()
-                .map(|event| event.label)
-        }
-        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, ENS_V2_NAME_RENEWED_SIGNATURE) => {
-            decode_event_log::<NameRenewed_1>(raw_log, "ENSv2 NameRenewed log is malformed")
-                .ok()
-                .map(|event| event.label)
-        }
+            LABEL_REGISTERED_SIGNATURE | LABEL_RESERVED_SIGNATURE | PARENT_UPDATED_SIGNATURE,
+        )
+        | (
+            SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+            ENS_V2_NAME_REGISTERED_SIGNATURE | ENS_V2_NAME_RENEWED_SIGNATURE,
+        ) => decode_first_abi_string(&raw_log.data).ok(),
         _ => None,
     }
+}
+
+fn decode_first_abi_string(data: &[u8]) -> Result<String> {
+    let offset = abi_word_usize(
+        data.get(..32)
+            .context("label-bearing event data is missing string offset")?,
+    )?;
+    let length_offset = offset
+        .checked_add(32)
+        .context("label-bearing event string offset overflowed")?;
+    let length = abi_word_usize(
+        data.get(offset..length_offset)
+            .context("label-bearing event data is missing string length")?,
+    )?;
+    let end = length_offset
+        .checked_add(length)
+        .context("label-bearing event string length overflowed")?;
+    let bytes = data
+        .get(length_offset..end)
+        .context("label-bearing event data is shorter than declared string length")?;
+    String::from_utf8(bytes.to_vec()).context("label-bearing event label is not valid utf-8")
+}
+
+fn abi_word_usize(word: &[u8]) -> Result<usize> {
+    if word.len() != 32 {
+        bail!("ABI word must be 32 bytes");
+    }
+    if word[..24].iter().any(|byte| *byte != 0) {
+        bail!("ABI word is too large for this decoder");
+    }
+    let mut value = [0u8; 8];
+    value.copy_from_slice(&word[24..]);
+    Ok(u64::from_be_bytes(value) as usize)
 }

@@ -36,7 +36,7 @@ pub(super) fn build_permissions_observation(
         return Ok(None);
     };
 
-    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE_SIGNATURE, topic0)? {
+    if event_topic_matches(event_topics, ABI_EVENT_NAMED_RESOURCE_SIGNATURE, topic0) {
         let event = decode_event_log::<NamedResource>(
             &raw_log.topics,
             &raw_log.data,
@@ -48,7 +48,11 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE, topic0)? {
+    if event_topic_matches(
+        event_topics,
+        ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE,
+        topic0,
+    ) {
         let event = decode_event_log::<NamedTextResource>(
             &raw_log.topics,
             &raw_log.data,
@@ -62,7 +66,11 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE, topic0)? {
+    if event_topic_matches(
+        event_topics,
+        ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE,
+        topic0,
+    ) {
         let event = decode_event_log::<NamedAddrResource>(
             &raw_log.topics,
             &raw_log.data,
@@ -75,7 +83,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE, topic0)? {
+    if event_topic_matches(event_topics, ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE, topic0) {
         let event = decode_event_log::<EACRolesChanged>(
             &raw_log.topics,
             &raw_log.data,
@@ -90,4 +98,14 @@ pub(super) fn build_permissions_observation(
     }
 
     Ok(None)
+}
+
+fn event_topic_matches(
+    event_topics: &ActiveManifestEventTopic0sBySignature,
+    canonical_signature: &str,
+    topic0: &str,
+) -> bool {
+    event_topics
+        .optional_topic0(canonical_signature)
+        .is_some_and(|expected| topic0.eq_ignore_ascii_case(expected))
 }
