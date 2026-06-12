@@ -399,6 +399,8 @@ pub(crate) async fn reconcile_canonical_head(
     let mut fetched_parent_count = 0usize;
     let mut common_ancestor_hash = None::<String>;
     let mut parent_fetch_limit_exhausted = true;
+    let live_gap_blocks =
+        current_canonical_number.map_or(0, |number| latest_head.block_number - number);
 
     for _ in 0..MAX_PARENT_FETCH_DEPTH {
         if cursor.parent_hash.as_deref() == current_canonical_hash {
@@ -417,18 +419,11 @@ pub(crate) async fn reconcile_canonical_head(
                 != CanonicalityState::Orphaned
                 && current_canonical_number
                     .is_some_and(|number| stored_parent.block_number <= number);
-            let is_current_branch_ancestor = if can_be_current_branch_ancestor {
-                if let Some(head_hash) = current_canonical_hash {
-                    chain_lineage_contains_ancestor(
-                        pool,
-                        chain,
-                        head_hash,
-                        &stored_parent.block_hash,
-                    )
+            let is_current_branch_ancestor = if let (true, Some(head_hash)) =
+                (can_be_current_branch_ancestor, current_canonical_hash)
+            {
+                chain_lineage_contains_ancestor(pool, chain, head_hash, &stored_parent.block_hash)
                     .await?
-                } else {
-                    false
-                }
             } else {
                 false
             };
@@ -441,6 +436,13 @@ pub(crate) async fn reconcile_canonical_head(
             cursor = lineage_block_to_provider(&stored_parent);
             path.push(cursor.clone());
             continue;
+        }
+
+        // Over-bound live gaps may recover only through lineage already persisted by backfill.
+        if live_gap_blocks > MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS {
+            bail!(
+                "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; run bounded catch-up or hash-pinned backfill for the missing range"
+            );
         }
 
         let fetched_parent = provider.fetch_block_by_hash(&parent_hash).await?;
@@ -542,9 +544,7 @@ async fn reconcile_contiguous_checkpoint_gap(
     }
     let gap_blocks = latest_head.block_number - current_canonical_number;
     if gap_blocks > MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS {
-        bail!(
-            "canonical gap of {gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; run bounded catch-up or hash-pinned backfill for the missing range"
-        );
+        return Ok(None);
     }
     if gap_blocks as usize > MAX_PARENT_FETCH_DEPTH {
         return Ok(None);

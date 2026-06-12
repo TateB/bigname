@@ -586,6 +586,76 @@ async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk
 }
 
 #[tokio::test]
+async fn reconcile_canonical_head_recovers_large_gap_from_stored_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let gap_end_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 2;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=gap_end_block {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    for block in &blocks {
+        insert_chain_lineage_for_block(
+            database.pool(),
+            chain,
+            block,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+    let (provider, server) = bundle_provider(blocks).await?;
+    let checkpoint = ChainCheckpoint {
+        chain_id: chain.to_owned(),
+        canonical_block_hash: Some(current.block_hash.clone()),
+        canonical_block_number: Some(current.block_number),
+        safe_block_hash: None,
+        safe_block_number: None,
+        finalized_block_hash: None,
+        finalized_block_number: None,
+    };
+
+    let reconciliation = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        chain,
+        &checkpoint,
+        &latest,
+        HeaderAuditMode::Minimal,
+    )
+    .await
+    .expect("stored lineage must allow large-gap checkpoint recovery");
+
+    assert_eq!(
+        reconciliation.status,
+        CanonicalReconciliationStatus::GapBackfilled
+    );
+    assert_eq!(
+        reconciliation.canonical,
+        Some(bigname_storage::CheckpointBlockRef {
+            block_hash: latest.block_hash.clone(),
+            block_number: latest.block_number,
+        })
+    );
+    assert_eq!(reconciliation.fetched_parent_count, 0);
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn cache_fill_authorizes_full_block_metadata_from_provider_fetch() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
