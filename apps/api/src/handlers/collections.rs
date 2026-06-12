@@ -10,7 +10,7 @@ pub(super) async fn address_names(
     let dedupe_by = parse_address_names_dedupe_by(query.dedupe_by.as_deref())?;
     let include = parse_address_names_include(query.include.as_deref())?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
-    let normalized_address = normalize_address(&address);
+    let normalized_address = parse_evm_address(&address, "address")?;
 
     let mut filters = BTreeMap::new();
     if let Some(namespace) = namespace.as_ref() {
@@ -100,7 +100,7 @@ pub(super) async fn name_children(
     Query(query): Query<ChildrenQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<JsonValue>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let include_counts = parse_children_query(&query)?;
     let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;

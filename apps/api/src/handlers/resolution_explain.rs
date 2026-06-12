@@ -3,7 +3,7 @@ pub(super) async fn explain_resolution_execution_current(
     Query(query): Query<ResolutionExecutionExplainQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<ResolutionResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let records = parse_resolution_record_keys(query.records.as_deref(), ResolutionMode::Verified)?;
     let logical_name_id = format!("{namespace}:{name}");

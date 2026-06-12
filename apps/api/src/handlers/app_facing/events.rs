@@ -16,10 +16,31 @@ pub(super) async fn events(
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let parsed = parse_events_filter(&query)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
+    let cursor_spec = CursorSpec {
+        route: "/v1/events",
+        anchor: "events".to_owned(),
+        sort: "chain_position_desc",
+        filters: parsed.cursor_filters,
+    };
+    let storage_cursor = history_storage_cursor(&pagination, &cursor_spec)?;
 
-    let rows = load_event_history(&state.pool, parsed.storage_filter, true)
+    let storage_page = load_event_history_page(
+        &state.pool,
+        parsed.storage_filter,
+        true,
+        storage_cursor.as_ref(),
+        storage_page_size(&pagination),
+        compact_history_summary_mode(meta),
+    )
         .await
         .map_err(|load_error| {
+            if load_error
+                .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+                .is_some()
+            {
+                return invalid_cursor_error();
+            }
+
             error!(
                 service = "api",
                 error = ?load_error,
@@ -27,23 +48,16 @@ pub(super) async fn events(
             );
             ApiError::internal_error("failed to load compact events")
         })?;
-
-    let page = paginate_window(
-        &rows,
+    let page = page_response_from_storage_cursor(
         &pagination,
-        &CursorSpec {
-            route: "/v1/events",
-            anchor: "events".to_owned(),
-            sort: "chain_position_desc",
-            filters: parsed.cursor_filters,
-        },
-        history_cursor_fields,
-    )?;
+        &cursor_spec,
+        storage_page.next_cursor.as_ref().map(history_cursor_item),
+    );
 
     Ok(Json(build_compact_events_response(
-        &rows,
-        &rows[page.start..page.end],
-        page.page,
+        storage_page.summary.as_ref(),
+        &storage_page.rows,
+        page,
         meta,
         HistoryScope::Both,
     )))
@@ -66,7 +80,9 @@ fn parse_events_filter(query: &EventsQuery) -> ApiResult<ParsedEventsFilter> {
         .map(|name| format!("{}:{name}", namespace.as_ref().expect("namespace checked")));
 
     let resource_id = parse_events_resource_id(query)?;
-    let address = trimmed_query_value(query.address.as_deref()).map(|address| normalize_address(&address));
+    let address = trimmed_query_value(query.address.as_deref())
+        .map(|address| parse_evm_address(&address, "address"))
+        .transpose()?;
     let relation = parse_events_relation(query.relation.as_deref())?;
     if relation.is_some() && address.is_none() {
         return Err(ApiError {

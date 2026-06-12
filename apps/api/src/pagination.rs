@@ -22,13 +22,6 @@ pub(crate) struct PaginationRequest {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PaginationWindow {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) page: HistoryPageResponse,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct CursorSpec {
     pub(crate) route: &'static str,
     pub(crate) anchor: String,

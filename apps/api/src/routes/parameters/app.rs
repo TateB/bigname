@@ -126,7 +126,7 @@ pub(crate) const EVENTS_PARAMETERS: &[ApiRouteParameter] = &[
     ),
     ApiRouteParameter::query(
         "address",
-        "Address relation event filter.",
+        "Address relation event filter. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
         ApiParameterSchema::String,
     ),
     ApiRouteParameter::query(

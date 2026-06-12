@@ -220,6 +220,19 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
         })
     );
 
+    let unnormalized_path_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/Alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("unnormalized path name request failed")?;
+    assert_eq!(unnormalized_path_response.status(), StatusCode::BAD_REQUEST);
+    let unnormalized_path_payload: ErrorResponse = read_json(unnormalized_path_response).await?;
+    assert_eq!(unnormalized_path_payload.error.code, "invalid_input");
+
     database.cleanup().await?;
     Ok(())
 }
@@ -281,6 +294,41 @@ async fn exact_name_routes_reject_invalid_snapshot_selectors_as_invalid_input() 
 
             assert_public_invalid_input_response(response, expected_message_fragment).await?;
         }
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_name_routes_reject_unnormalizable_path_names_as_invalid_input() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let routes = [
+        "/v1/names/ens/bad%20name.eth",
+        "/v1/coverage/ens/bad%20name.eth",
+        "/v1/explain/names/ens/bad%20name.eth/surface-binding",
+        "/v1/explain/names/ens/bad%20name.eth/authority-control",
+        "/v1/names/ens/bad%20name.eth/children",
+        "/v1/names/ens/bad%20name.eth/records",
+        "/v1/names/ens/bad%20name.eth/roles",
+        "/v1/history/names/ens/bad%20name.eth",
+        "/v1/explain/resolutions/ens/bad%20name.eth/execution?records=addr:60",
+    ];
+
+    for route in routes {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(route)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("unnormalizable exact-name route request failed for {route}"))?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "invalid_input");
     }
 
     database.cleanup().await?;

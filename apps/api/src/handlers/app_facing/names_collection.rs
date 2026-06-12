@@ -16,6 +16,7 @@ pub(super) async fn names(
         parsed.order,
         storage_cursor.as_ref(),
         storage_page_size(&parsed.pagination),
+        parsed.include.total_count,
     )
     .await
     .map_err(|load_error| {
@@ -40,7 +41,7 @@ pub(super) async fn names(
     let meta = parsed.meta.include_summary().then(|| {
         compact_meta_object(
             "partial",
-            parsed.include.total_count.then_some(storage_page.total_count),
+            storage_page.total_count,
             parsed.unsupported_fields,
             Vec::new(),
         )

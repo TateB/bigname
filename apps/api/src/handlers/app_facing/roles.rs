@@ -100,7 +100,7 @@ pub(super) async fn name_roles(
     Query(query): Query<NameRolesQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<CompactRolesResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
     parse_compact_only_response_view(
         query.view.as_deref(),
         "view=full is not supported for compact name roles",

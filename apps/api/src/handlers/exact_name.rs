@@ -5,7 +5,7 @@ pub(super) async fn name_current(
     Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let ExactNameInventoryRead {
         row,
@@ -31,7 +31,7 @@ pub(super) async fn coverage_current(
     Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let ExactNameRead {
         row,
@@ -53,7 +53,7 @@ pub(super) async fn explain_surface_binding_current(
     Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let ExactNameRead {
         row,
@@ -78,7 +78,7 @@ pub(super) async fn explain_authority_control_current(
     Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let ExactNameRead {
         row,

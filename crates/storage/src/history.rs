@@ -2,6 +2,7 @@ mod address_matches;
 mod decoders;
 mod paging;
 mod selectors;
+mod summary;
 
 use std::collections::BTreeSet;
 
@@ -63,6 +64,56 @@ pub struct HistoryEvent {
     pub coverage: Value,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryCursor {
+    pub normalized_event_id: i64,
+    pub event_identity: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryChainPositionSample {
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub block_timestamp: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistorySummary {
+    pub total_count: u64,
+    pub normalized_event_ids: Vec<String>,
+    pub raw_fact_refs: Vec<Value>,
+    pub manifest_versions: Vec<Value>,
+    pub execution_trace_id: Option<String>,
+    pub chain_position_samples: Vec<HistoryChainPositionSample>,
+    pub last_updated: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistorySummaryMode {
+    None,
+    Count,
+    Full,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryPage {
+    pub rows: Vec<HistoryEvent>,
+    pub next_cursor: Option<HistoryCursor>,
+    pub summary: Option<HistorySummary>,
+}
+
+#[derive(Debug)]
+pub struct InvalidHistoryCursor;
+
+impl std::fmt::Display for InvalidHistoryCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("history page cursor does not match filtered event history")
+    }
+}
+
+impl std::error::Error for InvalidHistoryCursor {}
+
 /// Address-derived anchor filter for app-facing event history reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventHistoryAddressFilter {
@@ -113,6 +164,38 @@ pub async fn load_name_history(
     })
 }
 
+/// Load one SQL-keyset page for one logical name anchor.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_name_history_page(
+    pool: &PgPool,
+    logical_name_id: &str,
+    resource_ids: &[Uuid],
+    scope: HistoryScope,
+    canonical_only: bool,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+) -> Result<HistoryPage> {
+    paging::load_history_page(
+        pool,
+        EventHistoryReadFilter {
+            selectors: vec![name_history_selector(logical_name_id, resource_ids, scope)],
+            ..EventHistoryReadFilter::default()
+        },
+        canonical_only,
+        cursor,
+        page_size,
+        summary_mode,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load history page for logical_name_id {logical_name_id} with scope {}",
+            scope.as_str()
+        )
+    })
+}
+
 /// Load the first history row for one logical name anchor under the shared default sort.
 pub async fn load_name_history_head(
     pool: &PgPool,
@@ -141,6 +224,181 @@ pub async fn load_event_history(
     filter: EventHistoryFilter,
     canonical_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
+    let read_filter = event_history_read_filter(pool, filter, canonical_only).await?;
+    load_event_history_rows(pool, read_filter, canonical_only)
+        .await
+        .context("failed to load app-facing event history")
+}
+
+/// Load one SQL-keyset page for app-facing event history filters.
+pub async fn load_event_history_page(
+    pool: &PgPool,
+    filter: EventHistoryFilter,
+    canonical_only: bool,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+) -> Result<HistoryPage> {
+    let read_filter = event_history_read_filter(pool, filter, canonical_only).await?;
+    paging::load_history_page(
+        pool,
+        read_filter,
+        canonical_only,
+        cursor,
+        page_size,
+        summary_mode,
+    )
+    .await
+    .context("failed to load app-facing event history page")
+}
+
+/// Load history rows for one resource anchor.
+pub async fn load_resource_history(
+    pool: &PgPool,
+    resource_id: Uuid,
+    logical_name_ids: &[String],
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<Vec<HistoryEvent>> {
+    load_history(
+        pool,
+        resource_history_selector(resource_id, logical_name_ids, scope),
+        canonical_only,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load history for resource_id {resource_id} with scope {}",
+            scope.as_str()
+        )
+    })
+}
+
+/// Load one SQL-keyset page for one resource anchor.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_resource_history_page(
+    pool: &PgPool,
+    resource_id: Uuid,
+    logical_name_ids: &[String],
+    scope: HistoryScope,
+    canonical_only: bool,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+) -> Result<HistoryPage> {
+    paging::load_history_page(
+        pool,
+        EventHistoryReadFilter {
+            selectors: vec![resource_history_selector(
+                resource_id,
+                logical_name_ids,
+                scope,
+            )],
+            ..EventHistoryReadFilter::default()
+        },
+        canonical_only,
+        cursor,
+        page_size,
+        summary_mode,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load history page for resource_id {resource_id} with scope {}",
+            scope.as_str()
+        )
+    })
+}
+
+/// Load history rows for one address-derived anchor set.
+pub async fn load_address_history(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<Vec<HistoryEvent>> {
+    let normalized_address = address.to_ascii_lowercase();
+    let selector = load_address_history_selector(
+        pool,
+        &normalized_address,
+        namespace,
+        relation,
+        scope,
+        canonical_only,
+    )
+    .await?;
+
+    load_history(pool, selector, canonical_only)
+        .await
+        .with_context(|| {
+            let mut parts = vec![format!("address {}", normalized_address)];
+            if let Some(namespace) = namespace {
+                parts.push(format!("namespace {namespace}"));
+            }
+            if let Some(relation) = relation {
+                parts.push(format!("relation {}", relation.as_str()));
+            }
+            parts.push(format!("scope {}", scope.as_str()));
+            format!("failed to load history for {}", parts.join(" "))
+        })
+}
+
+/// Load one SQL-keyset page for one address-derived anchor set.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_address_history_page(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    scope: HistoryScope,
+    canonical_only: bool,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+) -> Result<HistoryPage> {
+    let normalized_address = address.to_ascii_lowercase();
+    let selector = load_address_history_selector(
+        pool,
+        &normalized_address,
+        namespace,
+        relation,
+        scope,
+        canonical_only,
+    )
+    .await?;
+
+    paging::load_history_page(
+        pool,
+        EventHistoryReadFilter {
+            selectors: vec![selector],
+            ..EventHistoryReadFilter::default()
+        },
+        canonical_only,
+        cursor,
+        page_size,
+        summary_mode,
+    )
+    .await
+    .with_context(|| {
+        let mut parts = vec![format!("address {}", normalized_address)];
+        if let Some(namespace) = namespace {
+            parts.push(format!("namespace {namespace}"));
+        }
+        if let Some(relation) = relation {
+            parts.push(format!("relation {}", relation.as_str()));
+        }
+        parts.push(format!("scope {}", scope.as_str()));
+        format!("failed to load history page for {}", parts.join(" "))
+    })
+}
+
+async fn event_history_read_filter(
+    pool: &PgPool,
+    filter: EventHistoryFilter,
+    canonical_only: bool,
+) -> Result<EventHistoryReadFilter> {
     let mut selectors = Vec::new();
 
     if let Some(logical_name_id) = filter.logical_name_id.as_deref() {
@@ -203,76 +461,13 @@ pub async fn load_event_history(
         );
     }
 
-    load_event_history_rows(
-        pool,
-        EventHistoryReadFilter {
-            selectors,
-            namespace: filter.namespace,
-            event_kinds: filter.event_kinds,
-            from_block: filter.from_block,
-            to_block: filter.to_block,
-        },
-        canonical_only,
-    )
-    .await
-    .context("failed to load app-facing event history")
-}
-
-/// Load history rows for one resource anchor.
-pub async fn load_resource_history(
-    pool: &PgPool,
-    resource_id: Uuid,
-    logical_name_ids: &[String],
-    scope: HistoryScope,
-    canonical_only: bool,
-) -> Result<Vec<HistoryEvent>> {
-    load_history(
-        pool,
-        resource_history_selector(resource_id, logical_name_ids, scope),
-        canonical_only,
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load history for resource_id {resource_id} with scope {}",
-            scope.as_str()
-        )
+    Ok(EventHistoryReadFilter {
+        selectors,
+        namespace: filter.namespace,
+        event_kinds: filter.event_kinds,
+        from_block: filter.from_block,
+        to_block: filter.to_block,
     })
-}
-
-/// Load history rows for one address-derived anchor set.
-pub async fn load_address_history(
-    pool: &PgPool,
-    address: &str,
-    namespace: Option<&str>,
-    relation: Option<AddressNameRelation>,
-    scope: HistoryScope,
-    canonical_only: bool,
-) -> Result<Vec<HistoryEvent>> {
-    let normalized_address = address.to_ascii_lowercase();
-    let selector = load_address_history_selector(
-        pool,
-        &normalized_address,
-        namespace,
-        relation,
-        scope,
-        canonical_only,
-    )
-    .await?;
-
-    load_history(pool, selector, canonical_only)
-        .await
-        .with_context(|| {
-            let mut parts = vec![format!("address {}", normalized_address)];
-            if let Some(namespace) = namespace {
-                parts.push(format!("namespace {namespace}"));
-            }
-            if let Some(relation) = relation {
-                parts.push(format!("relation {}", relation.as_str()));
-            }
-            parts.push(format!("scope {}", scope.as_str()));
-            format!("failed to load history for {}", parts.join(" "))
-        })
 }
 
 async fn load_resource_ids_for_logical_name_id(

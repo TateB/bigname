@@ -1,7 +1,7 @@
 pub(crate) type CompactEventsResponse = JsonValue;
 
 fn build_history_route_response(
-    rows: &[HistoryEvent],
+    summary: Option<&HistorySummary>,
     page_rows: &[HistoryEvent],
     scope: HistoryScope,
     page: HistoryPageResponse,
@@ -10,15 +10,20 @@ fn build_history_route_response(
 ) -> JsonValue {
     match view {
         ResponseView::Full => {
-            serde_json::to_value(build_history_response(rows, page_rows, scope, page))
+            serde_json::to_value(build_history_response(
+                summary.expect("full history response requires a full history summary"),
+                page_rows,
+                scope,
+                page,
+            ))
                 .expect("history response must serialize")
         }
-        ResponseView::Compact => build_compact_events_response(rows, page_rows, page, meta, scope),
+        ResponseView::Compact => build_compact_events_response(summary, page_rows, page, meta, scope),
     }
 }
 
 fn build_compact_events_response(
-    rows: &[HistoryEvent],
+    summary: Option<&HistorySummary>,
     page_rows: &[HistoryEvent],
     page: HistoryPageResponse,
     meta: MetaMode,
@@ -36,7 +41,15 @@ fn build_compact_events_response(
         serde_json::to_value(page).expect("history page response must serialize"),
     );
     if meta != MetaMode::None {
-        insert_value_field(&mut value, "meta", build_compact_events_meta(rows, meta, scope));
+        insert_value_field(
+            &mut value,
+            "meta",
+            build_compact_events_meta(
+                summary.expect("compact history metadata requires a history summary"),
+                meta,
+                scope,
+            ),
+        );
     }
     value
 }
@@ -79,19 +92,19 @@ fn build_compact_history_event(row: &HistoryEvent) -> JsonValue {
 }
 
 fn build_compact_events_meta(
-    rows: &[HistoryEvent],
+    summary: &HistorySummary,
     meta: MetaMode,
     scope: HistoryScope,
 ) -> JsonValue {
     let mut value = compact_meta_object(
         "supported",
-        Some(rows.len() as u64),
+        Some(summary.total_count),
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
 
     if meta == MetaMode::Full {
-        insert_value_field(&mut value, "provenance", build_history_provenance(rows));
+        insert_value_field(&mut value, "provenance", build_history_provenance(summary));
         insert_value_field(
             &mut value,
             "coverage",
@@ -101,10 +114,10 @@ fn build_compact_events_meta(
         insert_value_field(
             &mut value,
             "chain_positions",
-            build_history_chain_positions(rows),
+            build_history_chain_positions(summary),
         );
         insert_string_field(&mut value, "consistency", "head".to_owned());
-        insert_string_field(&mut value, "last_updated", compact_events_last_updated(rows));
+        insert_string_field(&mut value, "last_updated", history_last_updated(summary));
     }
 
     value
@@ -168,12 +181,4 @@ fn compact_state_payload(value: &JsonValue) -> JsonValue {
 
 fn json_object_is_empty(value: &JsonValue) -> bool {
     value.as_object().is_some_and(serde_json::Map::is_empty)
-}
-
-fn compact_events_last_updated(rows: &[HistoryEvent]) -> String {
-    rows.iter()
-        .filter_map(|row| row.block_timestamp)
-        .max()
-        .map(format_timestamp)
-        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
 }

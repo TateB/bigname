@@ -2311,6 +2311,438 @@ async fn history_reads_use_deterministic_chain_position_desc_ordering() -> Resul
 }
 
 #[tokio::test]
+async fn history_page_uses_storage_limit_and_keyset_cursor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0xa305);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0x510", None, 510, 1_700_000_510),
+            raw_block(
+                "ethereum-mainnet",
+                "0x511",
+                Some("0x510"),
+                511,
+                1_700_000_511,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x512",
+                Some("0x511"),
+                512,
+                1_700_000_512,
+            ),
+        ],
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            history_event(
+                "page:first",
+                Some("ens:alice.eth"),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(512),
+                Some("0x512"),
+                Some("0xtx512"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "page:second",
+                Some("ens:alice.eth"),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(511),
+                Some("0x511"),
+                Some("0xtx511"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "page:third",
+                Some("ens:alice.eth"),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(510),
+                Some("0x510"),
+                Some("0xtx510"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let first_page = load_name_history_page(
+        database.pool(),
+        "ens:alice.eth",
+        &[resource_id],
+        HistoryScope::Both,
+        true,
+        None,
+        1,
+        HistorySummaryMode::None,
+    )
+    .await?;
+    assert_eq!(
+        first_page
+            .rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["page:first"]
+    );
+    let next_cursor = first_page
+        .next_cursor
+        .as_ref()
+        .expect("first history page must return a cursor");
+    assert_eq!(next_cursor.event_identity, "page:first");
+
+    let second_page = load_name_history_page(
+        database.pool(),
+        "ens:alice.eth",
+        &[resource_id],
+        HistoryScope::Both,
+        true,
+        Some(next_cursor),
+        1,
+        HistorySummaryMode::None,
+    )
+    .await?;
+    assert_eq!(
+        second_page
+            .rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["page:second"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn history_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:ties.eth";
+    let resource_id = Uuid::from_u128(0xa307);
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            history_event(
+                "tie:block-newer",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(906),
+                Some("0x906"),
+                Some("0xtx906"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:chain-base",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("base-mainnet"),
+                Some(905),
+                Some("0x905base"),
+                Some("0xtx905base"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:chain-ethereum",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(905),
+                Some("0x905ethereum"),
+                Some("0xtx905ethereum"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:chain-null",
+                Some(logical_name_id),
+                Some(resource_id),
+                None,
+                Some(905),
+                Some("0x905null"),
+                Some("0xtx905null"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:block-hash-high",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(904),
+                Some("0x904ff"),
+                Some("0xtx904"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:block-hash-low",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(904),
+                Some("0x904aa"),
+                Some("0xtx904"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:tx-high",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(903),
+                Some("0x903"),
+                Some("0xtxff"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:tx-low",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(903),
+                Some("0x903"),
+                Some("0xtxaa"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:tx-null",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(903),
+                Some("0x903"),
+                None,
+                None,
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:log-one",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(902),
+                Some("0x902"),
+                Some("0xtx902"),
+                Some(1),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:log-zero",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(902),
+                Some("0x902"),
+                Some("0xtx902"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:log-null",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(902),
+                Some("0x902"),
+                Some("0xtx902"),
+                None,
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:same:z",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(901),
+                Some("0x901"),
+                Some("0xtx901"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:same:y",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(901),
+                Some("0x901"),
+                Some("0xtx901"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "tie:block-null",
+                Some(logical_name_id),
+                Some(resource_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let unpaged = load_name_history(
+        database.pool(),
+        logical_name_id,
+        &[resource_id],
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    let expected = unpaged
+        .iter()
+        .map(|row| row.event_identity.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected,
+        vec![
+            "tie:block-newer",
+            "tie:chain-base",
+            "tie:chain-ethereum",
+            "tie:chain-null",
+            "tie:block-hash-high",
+            "tie:block-hash-low",
+            "tie:tx-high",
+            "tie:tx-low",
+            "tie:tx-null",
+            "tie:log-one",
+            "tie:log-zero",
+            "tie:log-null",
+            "tie:same:z",
+            "tie:same:y",
+            "tie:block-null",
+        ]
+    );
+
+    let mut walked = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = load_name_history_page(
+            database.pool(),
+            logical_name_id,
+            &[resource_id],
+            HistoryScope::Both,
+            true,
+            cursor.as_ref(),
+            1,
+            HistorySummaryMode::None,
+        )
+        .await?;
+        assert_eq!(page.rows.len(), 1, "page should return one walked row");
+        walked.push(page.rows[0].event_identity.clone());
+
+        let walked_unique = walked
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(walked_unique, walked.len(), "page walk duplicated a row");
+
+        cursor = match page.next_cursor {
+            Some(next_cursor) => Some(next_cursor),
+            None => break,
+        };
+    }
+
+    assert_eq!(walked, expected);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn history_page_rejects_cursor_when_selector_is_empty() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            "0x520",
+            None,
+            520,
+            1_700_000_520,
+        )],
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[history_event(
+            "page:cursor",
+            Some("ens:alice.eth"),
+            Some(Uuid::from_u128(0xa306)),
+            Some("ethereum-mainnet"),
+            Some(520),
+            Some("0x520"),
+            Some("0xtx520"),
+            Some(0),
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let cursor_page = load_name_history_page(
+        database.pool(),
+        "ens:alice.eth",
+        &[Uuid::from_u128(0xa306)],
+        HistoryScope::Both,
+        true,
+        None,
+        1,
+        HistorySummaryMode::None,
+    )
+    .await?;
+    let cursor_row = cursor_page
+        .rows
+        .first()
+        .expect("history page must include the cursor row");
+    let cursor = HistoryCursor {
+        normalized_event_id: cursor_row.normalized_event_id,
+        event_identity: cursor_row.event_identity.clone(),
+    };
+
+    let error = load_name_history_page(
+        database.pool(),
+        "ens:missing.eth",
+        &[],
+        HistoryScope::Resource,
+        true,
+        Some(&cursor),
+        1,
+        HistorySummaryMode::None,
+    )
+    .await
+    .expect_err("empty selector with stale cursor must reject the cursor");
+    assert!(
+        error.downcast_ref::<InvalidHistoryCursor>().is_some(),
+        "expected invalid history cursor error, got {error:?}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_history_head_matches_first_row_for_surface_and_resource_scopes() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:alice.eth";

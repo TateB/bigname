@@ -30,45 +30,6 @@ pub(super) fn parse_pagination(
     })
 }
 
-pub(super) fn paginate_window<T>(
-    items: &[T],
-    request: &PaginationRequest,
-    spec: &CursorSpec,
-    item_cursor_fields: impl Fn(&T) -> BTreeMap<String, String>,
-) -> ApiResult<PaginationWindow> {
-    let start = match request.cursor.as_deref() {
-        None => 0,
-        Some(cursor) => {
-            let decoded = decode_cursor(cursor)?;
-            validate_cursor(spec, &decoded)?;
-            items
-                .iter()
-                .position(|item| item_cursor_fields(item) == decoded.item)
-                .map(|index| index + 1)
-                .ok_or_else(invalid_cursor_error)?
-        }
-    };
-    let end = (start + request.page_size as usize).min(items.len());
-    let next_cursor = if end < items.len() {
-        Some(encode_cursor(
-            &spec.envelope(item_cursor_fields(&items[end - 1])),
-        ))
-    } else {
-        None
-    };
-
-    Ok(PaginationWindow {
-        start,
-        end,
-        page: HistoryPageResponse {
-            cursor: request.cursor.clone(),
-            next_cursor,
-            page_size: request.page_size,
-            sort: spec.sort.to_owned(),
-        },
-    })
-}
-
 pub(super) fn storage_page_size(request: &PaginationRequest) -> u64 {
     let _ = request.active;
     request.page_size
@@ -142,6 +103,26 @@ pub(super) fn permissions_storage_cursor(
     }))
 }
 
+pub(super) fn history_storage_cursor(
+    request: &PaginationRequest,
+    spec: &CursorSpec,
+) -> ApiResult<Option<bigname_storage::HistoryCursor>> {
+    let Some(item) = decoded_cursor_item(request, spec)? else {
+        return Ok(None);
+    };
+
+    require_cursor_item_fields(&item, &["normalized_event_id", "event_identity"])?;
+    let normalized_event_id =
+        required_cursor_item_field(&item, "normalized_event_id")?
+            .parse::<i64>()
+            .map_err(|_| invalid_cursor_error())?;
+
+    Ok(Some(bigname_storage::HistoryCursor {
+        normalized_event_id,
+        event_identity: required_cursor_item_field(&item, "event_identity")?.to_owned(),
+    }))
+}
+
 pub(super) fn address_names_cursor_item(
     cursor: &bigname_storage::AddressNamesCurrentCursor,
 ) -> BTreeMap<String, String> {
@@ -176,6 +157,18 @@ pub(super) fn permissions_cursor_item(
     let mut item = BTreeMap::new();
     item.insert("subject".to_owned(), cursor.subject.clone());
     item.insert("scope".to_owned(), cursor.scope.clone());
+    item
+}
+
+pub(super) fn history_cursor_item(
+    cursor: &bigname_storage::HistoryCursor,
+) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "normalized_event_id".to_owned(),
+        cursor.normalized_event_id.to_string(),
+    );
+    item.insert("event_identity".to_owned(), cursor.event_identity.clone());
     item
 }
 
@@ -363,14 +356,4 @@ pub(super) fn encode_hex(bytes: &[u8]) -> String {
 
 pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     hex::decode(value).ok()
-}
-
-pub(super) fn history_cursor_fields(row: &HistoryEvent) -> BTreeMap<String, String> {
-    let mut item = BTreeMap::new();
-    item.insert(
-        "normalized_event_id".to_owned(),
-        row.normalized_event_id.to_string(),
-    );
-    item.insert("event_identity".to_owned(), row.event_identity.clone());
-    item
 }

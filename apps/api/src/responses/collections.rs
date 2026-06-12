@@ -78,28 +78,21 @@ fn build_address_names_response_from_summary(
 }
 
 fn build_history_response(
-    rows: &[HistoryEvent],
+    summary: &HistorySummary,
     page_rows: &[HistoryEvent],
     scope: HistoryScope,
     page: HistoryPageResponse,
 ) -> HistoryResponse {
-    let last_updated = rows
-        .iter()
-        .filter_map(|row| row.block_timestamp)
-        .max()
-        .map(format_timestamp)
-        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
-
     HistoryResponse {
         data: page_rows.iter().map(build_history_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_history_provenance(rows),
+        provenance: build_history_provenance(summary),
         coverage: build_history_coverage(scope),
-        chain_positions: build_history_chain_positions(rows),
+        chain_positions: build_history_chain_positions(summary),
         page,
         consistency: "head".to_owned(),
-        last_updated,
+        last_updated: history_last_updated(summary),
     }
 }
 

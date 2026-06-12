@@ -139,6 +139,11 @@ async fn get_events_returns_compact_canonical_rows_with_projection_filters() -> 
         first_page_payload["meta"]["support_status"],
         json!("supported")
     );
+    assert_eq!(
+        first_page_payload["meta"]["total_count"],
+        json!(2),
+        "events metadata must describe the filtered set, not just the current page"
+    );
     let cursor = first_page_payload["page"]["next_cursor"]
         .as_str()
         .expect("events first page must include a next cursor")
@@ -258,6 +263,35 @@ async fn get_events_returns_explicit_errors_for_reserved_filters() -> Result<()>
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let payload: ErrorResponse = read_json(response).await?;
         assert_eq!(payload.error.code, "unsupported");
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn address_route_families_reject_malformed_addresses_consistently() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    for uri in [
+        "/v1/addresses/not-an-address/names",
+        "/v1/history/addresses/not-an-address",
+        "/v1/events?address=not-an-address",
+    ] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("malformed address request failed for {uri}"))?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "invalid_input");
+        assert!(payload.error.message.contains("address"));
     }
 
     database.cleanup().await?;

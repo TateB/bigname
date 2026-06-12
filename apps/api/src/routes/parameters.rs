@@ -125,7 +125,7 @@ const NAMESPACE_PATH: ApiRouteParameter = ApiRouteParameter::path(
 );
 const NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "name",
-    "Normalized name within the namespace.",
+    "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
     ApiParameterSchema::String,
 );
 const INFERRED_NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
@@ -135,7 +135,7 @@ const INFERRED_NAME_PATH: ApiRouteParameter = ApiRouteParameter::path(
 );
 const ADDRESS_PATH: ApiRouteParameter = ApiRouteParameter::path(
     "address",
-    "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+    "Address anchor for the collection or history read. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
     ApiParameterSchema::String,
 );
 const RESOURCE_ID_PATH: ApiRouteParameter = ApiRouteParameter::path(

@@ -14,6 +14,10 @@ Use the route groups as integration guidance, not just documentation order:
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
 | Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | Supported surfaces for specialist workflows; prefer canonical product reads for new integrations when they fit. |
 
+Exact-name path segments must already be in ENSIP-15 normalized form. Unnormalizable input and normalizable-but-unnormalized input both return `400 invalid_input`.
+
+Empty values for optional enum query parameters are treated as omitted and use the route default.
+
 ## `GET /v1/namespaces/{namespace}`
 
 Manifest-backed metadata for one public namespace.
@@ -414,6 +418,7 @@ Each item: `logical_name_id`, `namespace`, `normalized_name`, `canonical_display
 
 Rules:
 
+- Malformed `{address}` path values return `400 invalid_input`; valid EVM addresses are normalized before lookup.
 - `dedupe_by=surface` is the default. `dedupe_by=resource` is grouping-only; it doesn't change coverage or turn the route into a resource collection.
 - Default sort is `display_name_asc`. `cursor` and `page_size` page over that frozen order.
 - `include=role_summary` is additive. It groups current `GET /v1/resources/{resource_id}/permissions` rows by `subject` and keeps `(scope, effective_powers)` pairs. The response provenance summarizes the base address-name collection plus expansion inputs. Row-granular grant lineage stays on the dedicated permissions route.
@@ -563,7 +568,7 @@ Canonical normalized-event history for the address-derived anchor set.
 
 Query: `namespace`, `relation=registrant|token_holder|effective_controller`, `scope=surface|resource|both` (default `both`), `view=compact|full` (default `full`), `meta=none|summary|full`, `cursor`, `page_size`.
 
-Reuses the normalized-event history contract; no separate ledger. `namespace` and `relation` filter which surfaces and resources contribute anchors across current and historical matches; they don't change row shape, ordering, or coverage. Observed and orphaned events are excluded. Pages over `chain_position_desc`.
+Reuses the normalized-event history contract; no separate ledger. Malformed `{address}` path values return `400 invalid_input`; valid EVM addresses are normalized before anchor selection. `namespace` and `relation` filter which surfaces and resources contribute anchors across current and historical matches; they don't change row shape, ordering, or coverage. Observed and orphaned events are excluded. Pages over `chain_position_desc`.
 
 ## `GET /v1/events`
 
@@ -578,7 +583,7 @@ Each row is `CompactHistoryEvent`.
 Rules:
 
 - `name` requires `namespace`. Otherwise `400 invalid_input`.
-- `address` selects events whose projected anchor relates to the address under the requested `relation`. Same anchor selection as `GET /v1/history/addresses/{address}`.
+- Malformed `address` query values return `400 invalid_input`; valid EVM addresses are normalized before selecting events whose projected anchor relates to the address under the requested `relation`. Same anchor selection as `GET /v1/history/addresses/{address}`.
 - `resource` and `resource_id` both select events anchored on the resource. Supplying both returns `400 invalid_input`. `resource_hex` isn't accepted.
 - `type` filters by normalized event type or route-owned compact type alias. Unsupported aliases return non-2xx `unsupported`.
 - `from_block` and `to_block` apply to canonical chain position. They don't trigger raw fact scans.

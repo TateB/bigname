@@ -60,10 +60,17 @@ pub(super) fn chain_position_key(chain_id: &str) -> String {
     }
 }
 
-pub(super) fn history_manifest_version(row: &HistoryEvent) -> JsonValue {
-    json!({
-        "manifest_version": row.manifest_version,
-        "source_family": row.source_family.clone(),
-        "source_manifest_id": row.source_manifest_id,
-    })
+pub(super) fn compact_history_summary_mode(meta: MetaMode) -> HistorySummaryMode {
+    match meta {
+        MetaMode::None => HistorySummaryMode::None,
+        MetaMode::Summary => HistorySummaryMode::Count,
+        MetaMode::Full => HistorySummaryMode::Full,
+    }
+}
+
+pub(super) fn history_route_summary_mode(view: ResponseView, meta: MetaMode) -> HistorySummaryMode {
+    match view {
+        ResponseView::Full => HistorySummaryMode::Full,
+        ResponseView::Compact => compact_history_summary_mode(meta),
+    }
 }

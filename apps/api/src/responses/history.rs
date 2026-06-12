@@ -54,35 +54,33 @@ fn build_history_item(row: &HistoryEvent) -> JsonValue {
     value
 }
 
-fn build_history_provenance(rows: &[HistoryEvent]) -> JsonValue {
+fn build_history_provenance(summary: &HistorySummary) -> JsonValue {
     let mut value = empty_object();
     insert_value_field(
         &mut value,
         "normalized_event_ids",
         JsonValue::Array(
-            rows.iter()
-                .map(|row| JsonValue::String(row.normalized_event_id.to_string()))
+            summary
+                .normalized_event_ids
+                .iter()
+                .map(|normalized_event_id| JsonValue::String(normalized_event_id.clone()))
                 .collect(),
         ),
     );
     insert_value_field(
         &mut value,
         "raw_fact_refs",
-        dedupe_json_values(rows.iter().map(|row| row.raw_fact_ref.clone())),
+        dedupe_json_values(summary.raw_fact_refs.iter().cloned()),
     );
     insert_value_field(
         &mut value,
         "manifest_versions",
-        dedupe_json_values(rows.iter().map(history_manifest_version)),
+        dedupe_json_values(summary.manifest_versions.iter().cloned()),
     );
     // History provenance is a route-level summary; if execution-backed rows are
     // later admitted, the first non-null trace id is the representative id.
-    if let Some(execution_trace_id) = rows
-        .iter()
-        .filter_map(|row| string_field(provenance_field(&row.provenance, "execution_trace_id")))
-        .next()
-    {
-        insert_string_field(&mut value, "execution_trace_id", execution_trace_id);
+    if let Some(execution_trace_id) = summary.execution_trace_id.as_ref() {
+        insert_string_field(&mut value, "execution_trace_id", execution_trace_id.clone());
     }
     insert_string_field(
         &mut value,
@@ -105,29 +103,27 @@ fn build_history_coverage(scope: HistoryScope) -> CoverageResponse {
     }
 }
 
-fn build_history_chain_positions(rows: &[HistoryEvent]) -> JsonValue {
+fn build_history_chain_positions(summary: &HistorySummary) -> JsonValue {
     let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
-    for row in rows {
-        let (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
-            row.chain_id.as_ref(),
-            row.block_number,
-            row.block_hash.as_ref(),
-            row.block_timestamp,
-        ) else {
-            continue;
-        };
-
-        let key = chain_position_key(chain_id);
+    for sample in &summary.chain_position_samples {
+        let key = chain_position_key(&sample.chain_id);
         let candidate = ChainPositionResponse {
-            chain_id: chain_id.clone(),
-            block_number,
-            block_hash: block_hash.clone(),
-            timestamp: format_timestamp(timestamp),
+            chain_id: sample.chain_id.clone(),
+            block_number: sample.block_number,
+            block_hash: sample.block_hash.clone(),
+            timestamp: format_timestamp(sample.block_timestamp),
         };
         merge_chain_position(&mut chain_positions, key, candidate);
     }
 
     serde_json::to_value(chain_positions).expect("history chain positions must serialize")
+}
+
+fn history_last_updated(summary: &HistorySummary) -> String {
+    summary
+        .last_updated
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
 }
 
 fn chain_position_from_value(value: &JsonValue) -> Option<ChainPositionResponse> {

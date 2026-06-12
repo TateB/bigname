@@ -309,6 +309,15 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         .context("name history first page request failed")?;
     assert_eq!(first_page_response.status(), StatusCode::OK);
     let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+    assert_eq!(
+        first_page_payload
+            .provenance
+            .get("raw_fact_refs")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(3),
+        "paged history provenance must describe the filtered set, not just the current page"
+    );
     let cursor = first_page_payload
         .page
         .next_cursor

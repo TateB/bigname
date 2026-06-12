@@ -92,9 +92,11 @@ pub use execution::{
     upsert_execution_trace_in_transaction,
 };
 pub use history::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryEvent, HistoryScope,
-    load_address_history, load_event_history, load_name_history, load_name_history_head,
-    load_resource_history,
+    EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
+    HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
+    InvalidHistoryCursor, load_address_history, load_address_history_page, load_event_history,
+    load_event_history_page, load_name_history, load_name_history_head, load_name_history_page,
+    load_resource_history, load_resource_history_page,
 };
 pub use identity::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,

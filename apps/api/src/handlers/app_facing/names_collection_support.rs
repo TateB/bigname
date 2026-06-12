@@ -361,11 +361,7 @@ fn parse_optional_address_filter(
 }
 
 fn parse_address_filter_value(field: &'static str, value: &str) -> ApiResult<String> {
-    parse_primary_name_address(value).map_err(|_| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_input",
-        message: format!("{field} must be a 0x-prefixed 20-byte hex string"),
-    })
+    parse_evm_address(value, field)
 }
 
 fn unsupported_filter_error(filter: &'static str, reason: &'static str) -> ApiError {

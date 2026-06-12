@@ -811,10 +811,24 @@ async fn name_current_excludes_rows_with_closed_surface_bindings() -> Result<()>
         NameCurrentListOrder::Asc,
         None,
         10,
+        true,
     )
     .await?;
     assert!(list_page.rows.is_empty());
-    assert_eq!(list_page.total_count, 0);
+    assert_eq!(list_page.total_count, Some(0));
+
+    let list_page_without_count = load_name_current_list_page(
+        database.pool(),
+        &NameCurrentListFilter::default(),
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+        false,
+    )
+    .await?;
+    assert!(list_page_without_count.rows.is_empty());
+    assert_eq!(list_page_without_count.total_count, None);
 
     database.cleanup().await
 }
@@ -900,6 +914,7 @@ async fn name_current_list_address_filter_excludes_closed_membership_bindings() 
         NameCurrentListOrder::Asc,
         None,
         10,
+        true,
     )
     .await?;
     assert_eq!(
@@ -924,10 +939,11 @@ async fn name_current_list_address_filter_excludes_closed_membership_bindings() 
         NameCurrentListOrder::Asc,
         None,
         10,
+        true,
     )
     .await?;
     assert!(address_page.rows.is_empty());
-    assert_eq!(address_page.total_count, 0);
+    assert_eq!(address_page.total_count, Some(0));
 
     database.cleanup().await
 }
