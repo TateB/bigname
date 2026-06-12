@@ -390,7 +390,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource plus ENSv2 root fallback rows when applicable; compact view only.[^v2-eac-l56][^v2-eac-l187] |
 | `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
 | `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
@@ -409,7 +409,7 @@ The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as hel
 | `GET /v1/names/{namespace}/{name}/children` | `display_name_asc` |
 | `GET /v1/resources/{resource_id}/permissions` | `subject_scope_asc` |
 | `GET /v1/roles` | `account_resource_scope_asc` |
-| `GET /v1/names/{namespace}/{name}/roles` | `account_scope_asc` |
+| `GET /v1/names/{namespace}/{name}/roles` | `account_resource_scope_asc` |
 | `GET /v1/history/names/{namespace}/{name}` | `chain_position_desc` |
 | `GET /v1/history/resources/{resource_id}` | `chain_position_desc` |
 | `GET /v1/history/addresses/{address}` | `chain_position_desc` |
@@ -470,3 +470,5 @@ Rules:
 
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
+[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L56 @ ens_v2@554c309)
+[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L187 @ ens_v2@554c309)

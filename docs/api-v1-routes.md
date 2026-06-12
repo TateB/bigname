@@ -402,11 +402,11 @@ Rules:
 
 ## `GET /v1/names/{namespace}/{name}/roles`
 
-Compact role rows for the name's current resource.
+Compact role rows for the name's current resource, plus ENSv2 root fallback rows when applicable.
 
 Query: `account`, `role_bitmap`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
-Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. For ENSv2 registry resources, the response also includes the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; root-derived rows keep their root `resource_id` and are not fanned out onto the name resource.[^v2-eac-l56][^v2-eac-l187] If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. Pagination uses `account_resource_scope_asc` over the combined rows with the same `(account, resource_id, scope)` cursor tuple as `GET /v1/roles`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/addresses/{address}/names`
 
@@ -481,11 +481,12 @@ Each item is `RoleRow`.
 Rules:
 
 - At least one of `account`, `resource_id`, or the pair `{namespace, name}` is required.
-- `{namespace, name}` resolves through `GET /v1/resources/lookup` semantics, then reads current effective permission rows for that resource.
+- `{namespace, name}` resolves through `GET /v1/resources/lookup` semantics, then reads current effective permission rows for that resource. For ENSv2 registry resources, name-qualified reads also include the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; missing or malformed root provenance leaves the response resource-only. Non-ENSv2 names remain resource-only.[^v2-eac-l56][^v2-eac-l187]
 - `account` filters by effective permission subject. It doesn't search owner, registrant, or address-name relations unless those subjects also exist in `permissions_current`.
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
-- Compact item unit is one `(resource_id, subject, scope)` row. `effective_powers` is an array within that one scope; the same account appears in separate items when it has both resource-scoped and resolver-scoped powers. Summary metadata may group rows by subject, but compact `items` do not.
+- Compact item unit is one `(resource_id, subject, scope)` row. `effective_powers` is an array within that one scope; the same account appears in separate items when it has both resource-scoped and resolver-scoped powers. ENSv2 root-derived rows keep their root `resource_id`; the route does not fan them out onto the name resource. Summary metadata may group rows by subject, but compact `items` do not.
+- Pagination for name-qualified reads uses `account_resource_scope_asc` over the combined resource and root-resource rows. The cursor remains the same `(account, resource_id, scope)` keyset tuple.
 - Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 - `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
@@ -785,6 +786,8 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
+[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L56 @ ens_v2@554c309)
+[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L187 @ ens_v2@554c309)
 [^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
 [^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
 [^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)

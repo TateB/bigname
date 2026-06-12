@@ -314,7 +314,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
         "/v1/names/{namespace}/{name}/roles",
         ApiRouteContract::new(
             "name_roles",
-            "App-facing role rows for a name's current resource",
+            "App-facing role rows for a name, including ENSv2 root fallback",
             "Collections",
             NAME_ROLES_PARAMETERS,
             "CompactRolesResponse",

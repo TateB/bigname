@@ -55,23 +55,37 @@ pub(super) async fn roles(
         return Ok(Json(build_empty_compact_roles_response(page, meta_mode)));
     }
 
+    let ensv2_root_resource_id = match resolved_resource_id {
+        Some(resource_id) => {
+            load_ensv2_root_resource_id_for_name_resource(
+                &state.pool,
+                resource_id,
+                "/v1/roles",
+            )
+            .await?
+        }
+        None => None,
+    };
+
     ensure_permissions_current_projection_available(&state.pool, "/v1/roles").await?;
 
     if let Some(cursor) = storage_cursor.as_ref() {
-        ensure_roles_cursor_exists(
+        ensure_composed_roles_cursor_exists(
             &state.pool,
             account.as_deref(),
             effective_resource_id,
+            ensv2_root_resource_id,
             cursor,
             "/v1/roles",
         )
         .await?;
     }
 
-    let storage_page = load_roles_page(
+    let storage_page = load_composed_roles_page(
         &state.pool,
         account.as_deref(),
         effective_resource_id,
+        ensv2_root_resource_id,
         storage_cursor.as_ref(),
         storage_page_size(&pagination),
         "/v1/roles",
@@ -116,12 +130,18 @@ pub(super) async fn name_roles(
     let cursor_spec = roles_cursor_spec(
         "/v1/names/{namespace}/{name}/roles",
         logical_name_id,
-        "account_scope_asc",
+        "account_resource_scope_asc",
         account.as_deref(),
         None,
         None,
     );
     let storage_cursor = roles_storage_cursor(&pagination, &cursor_spec)?;
+    let ensv2_root_resource_id = load_ensv2_root_resource_id_for_name_resource(
+        &state.pool,
+        resource_id,
+        "/v1/names/{namespace}/{name}/roles",
+    )
+    .await?;
     ensure_permissions_current_projection_available(
         &state.pool,
         "/v1/names/{namespace}/{name}/roles",
@@ -129,20 +149,22 @@ pub(super) async fn name_roles(
     .await?;
 
     if let Some(cursor) = storage_cursor.as_ref() {
-        ensure_roles_cursor_exists(
+        ensure_composed_roles_cursor_exists(
             &state.pool,
             account.as_deref(),
             Some(resource_id),
+            ensv2_root_resource_id,
             cursor,
             "/v1/names/{namespace}/{name}/roles",
         )
         .await?;
     }
 
-    let storage_page = load_roles_page(
+    let storage_page = load_composed_roles_page(
         &state.pool,
         account.as_deref(),
         Some(resource_id),
+        ensv2_root_resource_id,
         storage_cursor.as_ref(),
         storage_page_size(&pagination),
         "/v1/names/{namespace}/{name}/roles",

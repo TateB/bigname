@@ -14,6 +14,12 @@ fn reject_role_bitmap_filter(role_bitmap: Option<&str>) -> ApiResult<()> {
     Ok(())
 }
 
+const ENSV2_ROOT_UPSTREAM_RESOURCE: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+const ENSV2_RESOURCE_UUID_PREFIX: &str = "ens-v2-resource";
+const ENSV2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
+const ENSV2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
+
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())
 }
@@ -275,6 +281,25 @@ async fn ensure_roles_cursor_exists(
     }
 }
 
+async fn ensure_composed_roles_cursor_exists(
+    pool: &PgPool,
+    account: Option<&str>,
+    resource_id: Option<Uuid>,
+    root_resource_id: Option<Uuid>,
+    cursor: &bigname_storage::PermissionsCurrentAccountResourceCursor,
+    route: &'static str,
+) -> ApiResult<()> {
+    if let (Some(resource_id), Some(root_resource_id)) = (resource_id, root_resource_id) {
+        if cursor.resource_id != resource_id && cursor.resource_id != root_resource_id {
+            return Err(invalid_cursor_error());
+        }
+        return ensure_roles_cursor_exists(pool, account, Some(cursor.resource_id), cursor, route)
+            .await;
+    }
+
+    ensure_roles_cursor_exists(pool, account, resource_id, cursor, route).await
+}
+
 async fn load_roles_page(
     pool: &PgPool,
     account: Option<&str>,
@@ -302,6 +327,160 @@ async fn load_roles_page(
         );
         ApiError::internal_error("failed to load app-facing roles")
     })
+}
+
+async fn load_composed_roles_page(
+    pool: &PgPool,
+    account: Option<&str>,
+    resource_id: Option<Uuid>,
+    root_resource_id: Option<Uuid>,
+    cursor: Option<&bigname_storage::PermissionsCurrentAccountResourceCursor>,
+    page_size: u64,
+    route: &'static str,
+) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
+    let Some(resource_id) = resource_id else {
+        return load_roles_page(pool, account, None, cursor, page_size, route).await;
+    };
+    let Some(root_resource_id) = root_resource_id.filter(|root| *root != resource_id) else {
+        return load_roles_page(pool, account, Some(resource_id), cursor, page_size, route).await;
+    };
+
+    let fetch_size = page_size.saturating_add(1);
+    let resource_page =
+        load_roles_page(pool, account, Some(resource_id), cursor, fetch_size, route).await?;
+    let root_page =
+        load_roles_page(pool, account, Some(root_resource_id), cursor, fetch_size, route).await?;
+
+    Ok(merge_roles_pages(resource_page, root_page, page_size))
+}
+
+fn merge_roles_pages(
+    resource_page: bigname_storage::PermissionsCurrentAccountResourcePage,
+    root_page: bigname_storage::PermissionsCurrentAccountResourcePage,
+    page_size: u64,
+) -> bigname_storage::PermissionsCurrentAccountResourcePage {
+    let bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: mut resource_rows,
+        next_cursor: _,
+        summary: resource_summary,
+    } = resource_page;
+    let bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: root_rows,
+        next_cursor: _,
+        summary: root_summary,
+    } = root_page;
+
+    resource_rows.extend(root_rows);
+    resource_rows.sort_by(|left, right| {
+        left.subject
+            .cmp(&right.subject)
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+            .then_with(|| left.scope.storage_key().cmp(&right.scope.storage_key()))
+    });
+
+    let page_size = usize::try_from(page_size).expect("bounded role page_size must fit usize");
+    let next_cursor = if resource_rows.len() > page_size {
+        resource_rows.truncate(page_size);
+        resource_rows
+            .last()
+            .map(bigname_storage::PermissionsCurrentAccountResourceCursor::from)
+    } else {
+        None
+    };
+
+    bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: resource_rows,
+        next_cursor,
+        summary: merge_role_summaries(resource_summary, root_summary),
+    }
+}
+
+fn merge_role_summaries(
+    mut resource_summary: bigname_storage::PermissionsCurrentFullFilterSummary,
+    root_summary: bigname_storage::PermissionsCurrentFullFilterSummary,
+) -> bigname_storage::PermissionsCurrentFullFilterSummary {
+    resource_summary.row_count = resource_summary
+        .row_count
+        .saturating_add(root_summary.row_count);
+    if resource_summary.coverage.is_none() {
+        resource_summary.coverage = root_summary.coverage;
+    }
+    resource_summary.provenance.extend(root_summary.provenance);
+    resource_summary
+        .chain_positions
+        .extend(root_summary.chain_positions);
+    resource_summary
+        .canonicality_summaries
+        .extend(root_summary.canonicality_summaries);
+    resource_summary.last_recomputed_at =
+        match (resource_summary.last_recomputed_at, root_summary.last_recomputed_at) {
+            (Some(resource), Some(root)) => Some(resource.max(root)),
+            (Some(resource), None) => Some(resource),
+            (None, Some(root)) => Some(root),
+            (None, None) => None,
+        };
+    resource_summary
+}
+
+async fn load_ensv2_root_resource_id_for_name_resource(
+    pool: &PgPool,
+    resource_id: Uuid,
+    route: &'static str,
+) -> ApiResult<Option<Uuid>> {
+    let Some(resource) = load_resource(pool, resource_id).await.map_err(|load_error| {
+        error!(
+            service = "api",
+            route = route,
+            resource_id = %resource_id,
+            error = ?load_error,
+            "failed to load resource provenance for ENSv2 root fallback roles"
+        );
+        ApiError::internal_error("failed to load resource provenance for roles")
+    })?
+    else {
+        return Ok(None);
+    };
+
+    Ok(ensv2_root_resource_id_from_resource(&resource).filter(|root| *root != resource_id))
+}
+
+fn ensv2_root_resource_id_from_resource(resource: &bigname_storage::Resource) -> Option<Uuid> {
+    let provenance = resource.provenance.as_object()?;
+    let source_family = provenance.get("source_family")?.as_str()?;
+    if !matches!(
+        source_family,
+        ENSV2_ROOT_SOURCE_FAMILY | ENSV2_REGISTRY_SOURCE_FAMILY
+    ) {
+        return None;
+    }
+
+    let chain_id = provenance.get("chain_id")?.as_str()?;
+    let registry_contract_instance_id = provenance
+        .get("registry_contract_instance_id")?
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    provenance.get("upstream_resource")?.as_str()?;
+
+    Some(ensv2_registry_permission_resource_id(
+        chain_id,
+        registry_contract_instance_id,
+        ENSV2_ROOT_UPSTREAM_RESOURCE,
+    ))
+}
+
+fn ensv2_registry_permission_resource_id(
+    chain_id: &str,
+    registry_contract_instance_id: Uuid,
+    upstream_resource: &str,
+) -> Uuid {
+    let seed =
+        format!("{ENSV2_RESOURCE_UUID_PREFIX}:{chain_id}:{registry_contract_instance_id}:{upstream_resource}");
+    let digest = alloy_primitives::keccak256(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 async fn load_associated_role_names(

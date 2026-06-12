@@ -297,7 +297,10 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
         .context("name roles first page request failed")?;
     assert_eq!(first_page_response.status(), StatusCode::OK);
     let first_page_payload: Value = read_json(first_page_response).await?;
-    assert_eq!(first_page_payload["page"]["sort"], json!("account_scope_asc"));
+    assert_eq!(
+        first_page_payload["page"]["sort"],
+        json!("account_resource_scope_asc")
+    );
     assert_eq!(first_page_payload["meta"]["total_count"], json!(2));
     assert_eq!(first_page_payload["data"].as_array().unwrap().len(), 1);
     assert_eq!(first_page_payload["data"][0]["account"], json!(first_account));
@@ -322,6 +325,178 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     assert_eq!(second_page_payload["data"][0]["account"], json!(second_account));
     assert_eq!(second_page_payload["page"]["next_cursor"], JsonValue::Null);
     assert_eq!(second_page_payload["meta"]["total_count"], json!(2));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let registry_contract_instance_id = Uuid::from_u128(0xe201);
+    let resource_id = Uuid::from_u128(0xe202);
+    let root_resource_id = ensv2_registry_resource_id(
+        "ethereum-mainnet",
+        registry_contract_instance_id,
+        ENSV2_ROOT_UPSTREAM_RESOURCE,
+    );
+    let token_lineage_id = Uuid::from_u128(0xe203);
+    let surface_binding_id = Uuid::from_u128(0xe204);
+    let local_account = "0x0000000000000000000000000000000000000a01";
+    let root_account = "0x0000000000000000000000000000000000000b02";
+    let registry_address = "0x0000000000000000000000000000000000000eac";
+    let upstream_resource =
+        "0x00000000000000000000000000000000000000000000000000000000000073c0";
+
+    database
+        .seed_name_current_binding_migrated(
+            "ens:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            "ens:alice.eth",
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[
+            ensv2_registry_resource(
+                resource_id,
+                registry_contract_instance_id,
+                registry_address,
+                upstream_resource,
+            ),
+            ensv2_registry_resource(
+                root_resource_id,
+                registry_contract_instance_id,
+                registry_address,
+                ENSV2_ROOT_UPSTREAM_RESOURCE,
+            ),
+        ],
+    )
+    .await?;
+
+    let mut root_grant =
+        permission_current_row(root_resource_id, root_account, PermissionScope::Root, 24, 54);
+    root_grant.grant_source = json!({
+        "kind": "normalized_event",
+        "event_kind": "RootPermissionChanged",
+        "root_resource": true,
+        "registry_address": registry_address,
+    });
+    root_grant.inheritance_path = json!([
+        {
+            "kind": "registry_root_fallback",
+            "chain_id": "ethereum-mainnet",
+            "registry_address": registry_address,
+            "upstream_resource": ENSV2_ROOT_UPSTREAM_RESOURCE,
+        }
+    ]);
+    root_grant.transfer_behavior = json!({});
+
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(resource_id, local_account, PermissionScope::Resource, 22, 53),
+            root_grant,
+        ],
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/roles")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name roles root fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    let rows = payload["data"].as_array().expect("data must be an array");
+    assert_eq!(payload["meta"]["total_count"], json!(2));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| {
+        row["account"] == json!(local_account)
+            && row["resource_id"] == json!(resource_id.to_string())
+            && row["name"] == json!("Alice.eth")
+    }));
+    assert!(rows.iter().any(|row| {
+        row["account"] == json!(root_account)
+            && row["resource_id"] == json!(root_resource_id.to_string())
+            && row["name"] == JsonValue::Null
+    }));
+
+    let query_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/roles?namespace=ens&name=alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles query root fallback request failed")?;
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let query_payload: Value = read_json(query_response).await?;
+    let query_rows = query_payload["data"]
+        .as_array()
+        .expect("query data must be an array");
+    assert_eq!(query_payload["meta"]["total_count"], json!(2));
+    assert_eq!(query_rows.len(), 2);
+    assert!(query_rows.iter().any(|row| {
+        row["account"] == json!(local_account)
+            && row["resource_id"] == json!(resource_id.to_string())
+            && row["name"] == json!("Alice.eth")
+    }));
+    assert!(query_rows.iter().any(|row| {
+        row["account"] == json!(root_account)
+            && row["resource_id"] == json!(root_resource_id.to_string())
+            && row["name"] == JsonValue::Null
+    }));
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/roles?page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name roles root fallback first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: Value = read_json(first_page_response).await?;
+    assert_eq!(first_page_payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(first_page_payload["data"][0]["account"], json!(local_account));
+    let cursor = first_page_payload["page"]["next_cursor"]
+        .as_str()
+        .expect("first composed page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/alice.eth/roles?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name roles root fallback second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: Value = read_json(second_page_response).await?;
+    assert_eq!(second_page_payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(second_page_payload["data"][0]["account"], json!(root_account));
+    assert_eq!(second_page_payload["page"]["next_cursor"], JsonValue::Null);
 
     database.cleanup().await?;
     Ok(())
@@ -428,4 +603,43 @@ async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> R
     .context("failed to mark permissions_current projection ready")?;
 
     Ok(())
+}
+
+const ENSV2_ROOT_UPSTREAM_RESOURCE: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+fn ensv2_registry_resource_id(
+    chain_id: &str,
+    registry_contract_instance_id: Uuid,
+    upstream_resource: &str,
+) -> Uuid {
+    let seed = format!(
+        "ens-v2-resource:{chain_id}:{registry_contract_instance_id}:{upstream_resource}"
+    );
+    let digest = alloy_primitives::keccak256(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn ensv2_registry_resource(
+    resource_id: Uuid,
+    registry_contract_instance_id: Uuid,
+    registry_address: &str,
+    upstream_resource: &str,
+) -> Resource {
+    let mut resource = resource(resource_id);
+    resource.provenance = json!({
+        "adapter": "ens_v2_registry_resource_surface",
+        "chain_id": "ethereum-mainnet",
+        "registry_contract_instance_id": registry_contract_instance_id,
+        "registry_address": registry_address,
+        "upstream_resource": upstream_resource,
+        "source_family": "ens_v2_registry_l1",
+        "source_manifest_id": "ens-v2-registry-l1:ethereum-mainnet",
+        "manifest_version": 1,
+    });
+    resource
 }
