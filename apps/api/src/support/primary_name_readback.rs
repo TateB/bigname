@@ -31,22 +31,8 @@ pub(super) fn ensure_persisted_primary_name_execution_source_family(
     namespace: &str,
     coin_type: &str,
 ) -> ApiResult<()> {
-    let expected_source_family = match namespace {
-        "ens" => "ens_execution",
-        "basenames" => "basenames_execution",
-        _ => {
-            error!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                "persisted verified primary-name namespace unsupported for execution source-family check"
-            );
-            return Err(ApiError::internal_error(format!(
-                "persisted verified primary-name provenance mismatch for address {address}"
-            )));
-        }
-    };
+    let expected_source_family =
+        persisted_primary_name_execution_source_family(address, namespace, coin_type)?;
 
     let includes_expected_source_family = manifest_versions_contain_source_family(
         &outcome.cache_key.manifest_versions,
@@ -86,6 +72,138 @@ pub(super) fn ensure_persisted_primary_name_execution_source_family(
     }
 
     Ok(())
+}
+
+pub(super) fn persisted_verified_primary_name_cache_identity_is_current(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<bool> {
+    if !trace_cache_identity_matches_outcome(trace, outcome, address, namespace, coin_type)? {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn persisted_primary_name_execution_source_family(
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<&'static str> {
+    match namespace {
+        "ens" => Ok("ens_execution"),
+        "basenames" => Ok("basenames_execution"),
+        _ => {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                "persisted verified primary-name namespace unsupported for execution source-family check"
+            );
+            Err(ApiError::internal_error(format!(
+                "persisted verified primary-name provenance mismatch for address {address}"
+            )))
+        }
+    }
+}
+
+fn warn_cache_miss(
+    trace: &ExecutionTrace,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+    reason: &str,
+) {
+    warn!(
+        service = "api",
+        address = %address,
+        namespace = %namespace,
+        coin_type = %coin_type,
+        execution_trace_id = %trace.execution_trace_id,
+        reason = %reason,
+        "persisted verified primary-name cache identity mismatch"
+    );
+}
+
+fn trace_cache_identity_matches_outcome(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<bool> {
+    let expected_request_key = primary_name_verified_request_key(namespace, address, coin_type);
+    if trace.request_type != VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+        || trace.namespace != namespace
+        || trace.request_key != expected_request_key
+    {
+        warn_cache_miss(trace, address, namespace, coin_type, "trace tuple identity");
+        return Ok(false);
+    }
+
+    let Some(trace_metadata) = trace.request_metadata.as_object() else {
+        warn_cache_miss(trace, address, namespace, coin_type, "trace metadata");
+        return Ok(false);
+    };
+    let metadata_address = trace_metadata
+        .get("normalized_address")
+        .and_then(JsonValue::as_str);
+    let metadata_namespace = trace_metadata.get("namespace").and_then(JsonValue::as_str);
+    let metadata_coin_type = trace_metadata.get("coin_type").and_then(JsonValue::as_str);
+    if metadata_address != Some(address)
+        || metadata_namespace != Some(namespace)
+        || metadata_coin_type != Some(coin_type)
+    {
+        warn_cache_miss(trace, address, namespace, coin_type, "trace metadata tuple");
+        return Ok(false);
+    }
+
+    let Some(cache_identity) = trace_metadata.get("cache_identity").and_then(JsonValue::as_object)
+    else {
+        warn_cache_miss(trace, address, namespace, coin_type, "trace cache_identity");
+        return Ok(false);
+    };
+
+    if trace.chain_context.get("requested_positions")
+        != Some(&outcome.cache_key.requested_chain_positions)
+    {
+        warn_cache_miss(trace, address, namespace, coin_type, "requested positions");
+        return Ok(false);
+    }
+
+    if trace.manifest_context.get("manifest_versions") != Some(&outcome.cache_key.manifest_versions)
+    {
+        warn_cache_miss(trace, address, namespace, coin_type, "trace manifest versions");
+        return Ok(false);
+    }
+
+    let expected_fields = [
+        (
+            "requested_chain_positions",
+            &outcome.cache_key.requested_chain_positions,
+        ),
+        ("manifest_versions", &outcome.cache_key.manifest_versions),
+        (
+            "topology_version_boundary",
+            &outcome.cache_key.topology_version_boundary,
+        ),
+        (
+            "record_version_boundary",
+            &outcome.cache_key.record_version_boundary,
+        ),
+    ];
+    for (field, expected) in expected_fields {
+        if cache_identity.get(field) != Some(expected) {
+            warn_cache_miss(trace, address, namespace, coin_type, field);
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 pub(super) fn persisted_verified_primary_name_section(

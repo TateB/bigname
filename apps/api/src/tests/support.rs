@@ -33,6 +33,49 @@ use tower::ServiceExt;
 
 use super::*;
 
+mod execution {
+    use anyhow::{Context, Result, bail};
+    use bigname_storage::{
+        ExecutionOutcomeInvalidationSummary, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+    };
+    use sqlx::PgPool;
+
+    pub async fn invalidate_verified_primary_name_claim_change(
+        pool: &PgPool,
+        namespace: &str,
+        request_key: &str,
+    ) -> Result<ExecutionOutcomeInvalidationSummary> {
+        if namespace.trim().is_empty() {
+            bail!("verified primary-name claim invalidation namespace must not be blank");
+        }
+        if request_key.trim().is_empty() {
+            bail!("verified primary-name claim invalidation request_key must not be blank");
+        }
+        let result = sqlx::query(
+            r#"
+            DELETE FROM execution_cache_outcomes
+            WHERE request_type = $1
+              AND namespace = $2
+              AND request_key = $3
+            "#,
+        )
+        .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+        .bind(namespace)
+        .bind(request_key)
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
+            )
+        })?;
+
+        Ok(ExecutionOutcomeInvalidationSummary {
+            deleted_outcome_count: result.rows_affected(),
+        })
+    }
+}
+
 #[path = "../../../worker/src/primary_name.rs"]
 mod worker_primary_name;
 
@@ -3408,6 +3451,20 @@ fn primary_name_execution_manifest_versions() -> Value {
     primary_name_execution_manifest_versions_for_namespace("ens")
 }
 
+fn primary_name_topology_version_boundary() -> Value {
+    record_inventory_boundary(
+        "ens:alice.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1),
+    )
+}
+
+fn primary_name_record_version_boundary() -> Value {
+    record_inventory_boundary(
+        "ens:alice.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2),
+    )
+}
+
 fn primary_name_execution_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
     format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
 }
@@ -3587,7 +3644,13 @@ fn primary_name_execution_trace(
         request_metadata: json!({
             "normalized_address": normalized_address,
             "coin_type": coin_type,
-            "namespace": namespace
+            "namespace": namespace,
+            "cache_identity": {
+                "requested_chain_positions": primary_name_execution_requested_chain_positions(),
+                "manifest_versions": manifest_versions,
+                "topology_version_boundary": primary_name_topology_version_boundary(),
+                "record_version_boundary": primary_name_record_version_boundary(),
+            }
         }),
         finished_at: Some(finished_at),
         steps,
@@ -3612,14 +3675,8 @@ fn primary_name_execution_outcome(
             ),
             requested_chain_positions: primary_name_execution_requested_chain_positions(),
             manifest_versions: primary_name_execution_manifest_versions_for_namespace(namespace),
-            topology_version_boundary: record_inventory_boundary(
-                "ens:alice.eth",
-                Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1),
-            ),
-            record_version_boundary: record_inventory_boundary(
-                "ens:alice.eth",
-                Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2),
-            ),
+            topology_version_boundary: primary_name_topology_version_boundary(),
+            record_version_boundary: primary_name_record_version_boundary(),
         },
         execution_trace_id,
         request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),

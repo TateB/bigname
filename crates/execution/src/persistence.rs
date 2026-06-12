@@ -203,6 +203,8 @@ pub async fn persist_ens_verified_primary_name(
         .await
         .with_context(|| format!("failed to open transaction for {context} persistence"))?;
 
+    // Validation requires request_metadata.cache_identity to mirror the outcome cache key; the
+    // trace write carries that full identity for API readback.
     let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
     let outcome =
         upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;

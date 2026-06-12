@@ -6224,6 +6224,29 @@ fn primary_name_execution_trace(
     verified_primary_name: Value,
     finished_at: OffsetDateTime,
 ) -> ExecutionTrace {
+    primary_name_execution_trace_with_cache_identity(
+        execution_trace_id,
+        namespace,
+        address,
+        coin_type,
+        verified_primary_name,
+        finished_at,
+        primary_name_shared_topology_boundary(),
+        primary_name_shared_record_boundary(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primary_name_execution_trace_with_cache_identity(
+    execution_trace_id: Uuid,
+    namespace: &str,
+    address: &str,
+    coin_type: &str,
+    verified_primary_name: Value,
+    finished_at: OffsetDateTime,
+    topology_version_boundary: Value,
+    record_version_boundary: Value,
+) -> ExecutionTrace {
     let normalized_address = address.to_ascii_lowercase();
     let manifest_versions = primary_name_execution_manifest_versions_for_namespace(namespace);
     let status = verified_primary_name
@@ -6392,6 +6415,12 @@ fn primary_name_execution_trace(
             "normalized_address": normalized_address,
             "coin_type": coin_type,
             "namespace": namespace,
+            "cache_identity": {
+                "requested_chain_positions": primary_name_execution_requested_chain_positions(),
+                "manifest_versions": manifest_versions,
+                "topology_version_boundary": topology_version_boundary,
+                "record_version_boundary": record_version_boundary,
+            }
         }),
         finished_at: Some(finished_at),
         steps,

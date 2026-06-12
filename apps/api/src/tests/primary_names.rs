@@ -1672,6 +1672,105 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
 }
 
 #[tokio::test]
+async fn get_primary_names_reads_execution_persisted_verified_primary_name_for_exact_tuple()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let expected_data = json!({
+        "address": address,
+        "namespace": "ens",
+        "coin_type": "60",
+    });
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000051);
+    let finished_at = timestamp(1_717_172_417);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    bigname_execution::persist_ens_verified_primary_name(
+        &database.pool,
+        &bigname_execution::PersistEnsVerifiedPrimaryNameRequest {
+            trace,
+            outcome: outcome.clone(),
+        },
+    )
+    .await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("execution-persisted verified primary-name request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let verified_section_provenance = json!({
+        "manifest_versions": primary_name_execution_manifest_versions(),
+        "execution_trace_id": execution_trace_id.to_string(),
+    });
+    assert_eq!(verified_payload.data, expected_data);
+    assert_eq!(verified_payload.coverage, primary_name_supported_coverage("ens"));
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": {
+                    "logical_name_id": "ens:alice.eth",
+                    "namespace": "ens",
+                    "normalized_name": "alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+                    "resource_id": "00000000-0000-0000-0000-000000000456",
+                    "binding_kind": "declared_registry_path"
+                },
+                "provenance": verified_section_provenance,
+            }
+        }))
+    );
+    assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:17Z");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_exact_tuple()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2276,7 +2375,7 @@ async fn get_primary_names_rejects_malformed_persisted_verified_primary_name_sec
 }
 
 #[tokio::test]
-async fn get_primary_names_rejects_persisted_verified_primary_name_manifest_version_drift()
+async fn get_primary_names_treats_persisted_verified_primary_name_trace_manifest_drift_as_miss()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -2335,14 +2434,90 @@ async fn get_primary_names_rejects_persisted_verified_primary_name_manifest_vers
         .await
         .context("manifest-drift verified primary-name request failed")?;
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "internal_error");
+    let payload: PrimaryNameResponse = read_json(response).await?;
     assert_eq!(
-        payload.error.message,
-        format!("persisted verified primary-name provenance mismatch for address {address}")
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
     );
+    assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_treats_persisted_verified_primary_name_trace_tuple_drift_as_miss()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000050);
+    let finished_at = timestamp(1_717_172_416);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+
+    let mut trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    trace.request_key = "ens:0x0000000000000000000000000000000000000def:60".to_owned();
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("tuple-drift verified primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
 
     database.cleanup().await?;
     Ok(())
@@ -2386,6 +2561,10 @@ async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_wit
             "source_family": "basenames_base_primary"
         }],
     });
+    trace.request_metadata["cache_identity"]["manifest_versions"] = json!([{
+        "manifest_version": 99,
+        "source_family": "basenames_base_primary"
+    }]);
     let mut outcome = primary_name_execution_outcome(
         execution_trace_id,
         "basenames",
@@ -2422,6 +2601,165 @@ async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_wit
         payload.error.message,
         format!("persisted verified primary-name provenance mismatch for address {address}")
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_treats_persisted_verified_primary_name_cache_boundary_drift_as_miss()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004e);
+    let finished_at = timestamp(1_717_172_414);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let mut outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+    outcome.cache_key.requested_chain_positions = json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_000_099,
+        "block_hash": "0xstaleprimary"
+    }]);
+    outcome.cache_key.topology_version_boundary = record_inventory_boundary(
+        "ens:stale.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c001),
+    );
+    outcome.cache_key.record_version_boundary = record_inventory_boundary(
+        "ens:stale.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c002),
+    );
+
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("cache-boundary-drift verified primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_treats_persisted_verified_primary_name_manifest_drift_as_miss()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004f);
+    let finished_at = timestamp(1_717_172_415);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+
+    let mut trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    trace.request_metadata["cache_identity"]["manifest_versions"] = json!([{
+        "manifest_version": 4,
+        "source_family": "ens_execution"
+    }]);
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("manifest-drift-as-miss verified primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
 
     database.cleanup().await?;
     Ok(())

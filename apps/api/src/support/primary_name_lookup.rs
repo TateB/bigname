@@ -340,6 +340,12 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
             ))
         })?;
 
+    if !persisted_verified_primary_name_cache_identity_is_current(
+        &trace, &outcome, address, namespace, coin_type,
+    )? {
+        return Ok(None);
+    }
+
     let verified_primary_name =
         persisted_verified_primary_name_section(&trace, &outcome, address, namespace, coin_type)?;
     let provenance =

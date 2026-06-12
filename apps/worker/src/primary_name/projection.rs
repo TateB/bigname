@@ -2,11 +2,12 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    delete_primary_name_current, normalize_evm_address, upsert_primary_name_current_snapshots,
+    delete_primary_name_current, load_primary_name_current_snapshot, normalize_evm_address,
+    upsert_primary_name_current_snapshots, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Row};
 
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
@@ -89,6 +90,9 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
                 as usize;
     }
+    let invalidation_targets =
+        load_full_rebuild_claim_change_invalidation_targets(&mut conn, &stage_table).await?;
+    invalidate_verified_primary_name_claim_changes(pool, &invalidation_targets).await?;
     let (_deleted_row_count, published_row_count) = publish_stage_table(
         &mut conn,
         "primary_names_current",
@@ -128,8 +132,25 @@ async fn rebuild_one_primary_name(
         }
         None => None,
     };
+    let previous_row = load_primary_name_current_snapshot(
+        pool,
+        &target.address,
+        &target.namespace,
+        &target.coin_type,
+    )
+    .await?;
     let upserted_row_count = match projected_row.as_ref() {
         Some(projection) => {
+            let claim_row_changed = previous_row.as_ref() != Some(projection);
+            if claim_row_changed {
+                let hooks = verified_primary_name_claim_hooks(&projection.row)?;
+                super::super::execution::invalidate_verified_primary_name_claim_change(
+                    pool,
+                    &hooks.lookup.namespace,
+                    &hooks.lookup.request_key(),
+                )
+                .await?;
+            }
             upsert_primary_name_current_snapshots(pool, std::slice::from_ref(projection))
                 .await?
                 .len()
@@ -139,6 +160,18 @@ async fn rebuild_one_primary_name(
     let deleted_row_count = match projected_row.as_ref() {
         Some(_) => 0,
         None => {
+            if previous_row.is_some() {
+                super::super::execution::invalidate_verified_primary_name_claim_change(
+                    pool,
+                    &target.namespace,
+                    &verified_primary_name_request_key(
+                        &target.namespace,
+                        &target.address,
+                        &target.coin_type,
+                    ),
+                )
+                .await?;
+            }
             delete_primary_name_current(pool, &target.address, &target.namespace, &target.coin_type)
                 .await?
         }
@@ -157,6 +190,75 @@ async fn rebuild_one_primary_name(
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,
     })
+}
+
+async fn load_full_rebuild_claim_change_invalidation_targets(
+    conn: &mut PgConnection,
+    stage_table: &str,
+) -> Result<Vec<VerifiedPrimaryNameClaimChangeTarget>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT DISTINCT
+            COALESCE(stage.namespace, current.namespace) AS namespace,
+            COALESCE(stage.address, current.address) AS address,
+            COALESCE(stage.coin_type, current.coin_type) AS coin_type
+        FROM primary_names_current AS current
+        FULL OUTER JOIN {stage_table} AS stage
+          ON stage.address = current.address
+         AND stage.namespace = current.namespace
+         AND stage.coin_type = current.coin_type
+        WHERE current.address IS NULL
+           OR stage.address IS NULL
+           OR current.claim_status IS DISTINCT FROM stage.claim_status
+           OR current.raw_claim_name IS DISTINCT FROM stage.raw_claim_name
+           OR current.normalized_claim_name IS DISTINCT FROM stage.normalized_claim_name
+           OR current.claim_provenance IS DISTINCT FROM stage.claim_provenance
+        "#
+    ))
+    .fetch_all(conn)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load verified primary-name claim invalidation targets from staging table {stage_table}"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let namespace: String = row.try_get("namespace")?;
+            let address: String = row.try_get("address")?;
+            let coin_type: String = row.try_get("coin_type")?;
+            Ok(VerifiedPrimaryNameClaimChangeTarget {
+                request_key: verified_primary_name_request_key(&namespace, &address, &coin_type),
+                namespace,
+            })
+        })
+        .collect()
+}
+
+async fn invalidate_verified_primary_name_claim_changes(
+    pool: &PgPool,
+    targets: &[VerifiedPrimaryNameClaimChangeTarget],
+) -> Result<()> {
+    for target in targets {
+        super::super::execution::invalidate_verified_primary_name_claim_change(
+            pool,
+            &target.namespace,
+            &target.request_key,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedPrimaryNameClaimChangeTarget {
+    namespace: String,
+    request_key: String,
+}
+
+fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
+    format!("{namespace}:{}:{coin_type}", normalize_evm_address(address))
 }
 
 pub(super) fn primary_name_row(

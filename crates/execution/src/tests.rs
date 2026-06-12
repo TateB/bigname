@@ -4048,6 +4048,17 @@ fn verified_primary_request_for_namespace(
         BASENAMES_NAMESPACE => basenames_manifest_versions(),
         other => panic!("unsupported verified-primary test namespace {other}"),
     };
+    let requested_chain_positions = requested_chain_positions();
+    let topology_version_boundary =
+        version_boundary(Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1));
+    let record_version_boundary =
+        version_boundary(Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2));
+    let cache_identity = json!({
+        "requested_chain_positions": requested_chain_positions.clone(),
+        "manifest_versions": manifest_versions.clone(),
+        "topology_version_boundary": topology_version_boundary.clone(),
+        "record_version_boundary": record_version_boundary.clone(),
+    });
     let contracts_called = match namespace {
         ENS_NAMESPACE => json!([
             {
@@ -4190,7 +4201,7 @@ fn verified_primary_request_for_namespace(
             request_key: request_key.clone(),
             namespace: namespace.to_owned(),
             chain_context: json!({
-                "requested_positions": requested_chain_positions(),
+                "requested_positions": requested_chain_positions.clone(),
                 "topology_version_boundary": {
                     ETHEREUM_MAINNET_CHAIN_ID: 21_000_000
                 }
@@ -4208,7 +4219,8 @@ fn verified_primary_request_for_namespace(
             request_metadata: json!({
                 "normalized_address": normalized_address,
                 "coin_type": coin_type,
-                "namespace": namespace
+                "namespace": namespace,
+                "cache_identity": cache_identity
             }),
             finished_at: Some(finished_at),
             steps,
@@ -4216,14 +4228,10 @@ fn verified_primary_request_for_namespace(
         outcome: ExecutionOutcome {
             cache_key: ExecutionCacheKey {
                 request_key,
-                requested_chain_positions: requested_chain_positions(),
+                requested_chain_positions,
                 manifest_versions,
-                topology_version_boundary: version_boundary(Uuid::from_u128(
-                    0x0e7ec7ace0000000000000000000bbb1,
-                )),
-                record_version_boundary: version_boundary(Uuid::from_u128(
-                    0x0e7ec7ace0000000000000000000bbb2,
-                )),
+                topology_version_boundary,
+                record_version_boundary,
             },
             execution_trace_id,
             request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
@@ -4259,6 +4267,15 @@ fn expected_verified_primary_readback_provenance(
         execution_trace_id: request.trace.execution_trace_id,
         manifest_versions: request.outcome.cache_key.manifest_versions.clone(),
     }
+}
+
+fn verified_primary_cache_identity(request: &PersistEnsVerifiedPrimaryNameRequest) -> Value {
+    json!({
+        "requested_chain_positions": request.outcome.cache_key.requested_chain_positions.clone(),
+        "manifest_versions": request.outcome.cache_key.manifest_versions.clone(),
+        "topology_version_boundary": request.outcome.cache_key.topology_version_boundary.clone(),
+        "record_version_boundary": request.outcome.cache_key.record_version_boundary.clone(),
+    })
 }
 
 fn verified_primary_success_request() -> PersistEnsVerifiedPrimaryNameRequest {
@@ -4891,6 +4908,88 @@ async fn rejects_verified_primary_noncanonical_metadata_coin_type() -> Result<()
         .expect_err("noncanonical metadata coin_type must be rejected before persistence");
     assert!(
         error.to_string().contains("must be canonical decimal text"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_missing_cache_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request
+        .trace
+        .request_metadata
+        .as_object_mut()
+        .expect("verified-primary request_metadata must be an object")
+        .remove("cache_identity");
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("missing verified-primary cache_identity must be rejected");
+    assert!(
+        error.to_string().contains("cache_identity"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_mismatched_cache_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.request_metadata["cache_identity"] = verified_primary_cache_identity(&request);
+    request.trace.request_metadata["cache_identity"]["record_version_boundary"] = json!({
+        "drift": true
+    });
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("mismatched verified-primary cache_identity must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cache_identity.record_version_boundary"),
         "unexpected error: {error:#}"
     );
     assert!(

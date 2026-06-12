@@ -1,5 +1,5 @@
-use anyhow::{Result, bail};
-use bigname_storage::ExecutionTrace;
+use anyhow::{Context, Result, bail};
+use bigname_storage::{ExecutionOutcome, ExecutionTrace};
 use serde_json::Value;
 
 use crate::json_helpers::{
@@ -57,6 +57,58 @@ pub(super) fn extract_verified_primary_tuple(
         normalized_address,
         coin_type,
     })
+}
+
+pub(super) fn validate_verified_primary_cache_identity(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    tuple: &VerifiedPrimaryNameTuple,
+) -> Result<()> {
+    let context = verified_primary_context_label(&tuple.namespace)?;
+    let metadata_context = format!("{context} trace.request_metadata");
+    let request_metadata = required_object(Some(&trace.request_metadata), &metadata_context)?;
+    let cache_identity_context = format!("{metadata_context}.cache_identity");
+    let cache_identity = required_object(
+        request_metadata.get("cache_identity"),
+        &cache_identity_context,
+    )?;
+    ensure_only_allowed_fields(
+        cache_identity,
+        &[
+            "requested_chain_positions",
+            "manifest_versions",
+            "topology_version_boundary",
+            "record_version_boundary",
+        ],
+        &cache_identity_context,
+    )?;
+
+    let expected_fields = [
+        (
+            "requested_chain_positions",
+            &outcome.cache_key.requested_chain_positions,
+        ),
+        ("manifest_versions", &outcome.cache_key.manifest_versions),
+        (
+            "topology_version_boundary",
+            &outcome.cache_key.topology_version_boundary,
+        ),
+        (
+            "record_version_boundary",
+            &outcome.cache_key.record_version_boundary,
+        ),
+    ];
+    for (field, expected) in expected_fields {
+        let field_context = format!("{cache_identity_context}.{field}");
+        let actual = cache_identity
+            .get(field)
+            .with_context(|| format!("{field_context} must be set"))?;
+        if actual != expected {
+            bail!("{field_context} must match cache_key.{field}");
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) fn extract_verified_primary_name_section(

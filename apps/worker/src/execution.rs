@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionBoundaryInvalidation, ExecutionManifestInvalidation,
     ExecutionOutcomeInvalidationSummary, invalidate_execution_outcomes_for_manifest_version,
@@ -159,6 +159,36 @@ pub async fn invalidate_verified_primary_name_record_boundary(
     .await
 }
 
+pub async fn invalidate_verified_primary_name_claim_change(
+    pool: &PgPool,
+    namespace: &str,
+    request_key: &str,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    validate_claim_change_scope(namespace, request_key)?;
+    let result = sqlx::query(
+        r#"
+        DELETE FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND namespace = $2
+          AND request_key = $3
+        "#,
+    )
+    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+    .bind(namespace)
+    .bind(request_key)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
+        )
+    })?;
+
+    Ok(ExecutionOutcomeInvalidationSummary {
+        deleted_outcome_count: result.rows_affected(),
+    })
+}
+
 impl VerifiedResolutionBoundaryInvalidation {
     fn boundary(&self) -> Value {
         json!({
@@ -205,6 +235,16 @@ impl VerifiedPrimaryNameBoundaryInvalidation {
 
 fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
     format!("{namespace}:{}:{coin_type}", normalize_evm_address(address))
+}
+
+fn validate_claim_change_scope(namespace: &str, request_key: &str) -> Result<()> {
+    if namespace.trim().is_empty() {
+        bail!("verified primary-name claim invalidation namespace must not be blank");
+    }
+    if request_key.trim().is_empty() {
+        bail!("verified primary-name claim invalidation request_key must not be blank");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
