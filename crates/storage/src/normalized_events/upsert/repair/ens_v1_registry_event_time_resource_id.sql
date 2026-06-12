@@ -161,7 +161,7 @@
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 1) =
                                         'registrar'
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 2) =
-                                        'ethereum-mainnet'
+                                        new_resource.chain_id
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 5) =
                                         input.block_hash
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 6) ~
