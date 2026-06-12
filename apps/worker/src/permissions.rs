@@ -27,6 +27,7 @@ use staged_rebuild::{
 };
 
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
+const EVENT_KIND_ROOT_PERMISSION_CHANGED: &str = "RootPermissionChanged";
 const EVENT_KIND_PERMISSION_SCOPE_CHANGED: &str = "PermissionScopeChanged";
 const PERMISSIONS_CURRENT_DERIVATION_KIND: &str = "permissions_current_rebuild";
 const PERMISSIONS_ENUMERATION_BASIS: &str = "resource_permissions";

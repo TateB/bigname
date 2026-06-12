@@ -16,7 +16,7 @@ candidate_keys AS (
         change_id,
         changed_at
     FROM changed_events
-    WHERE event_kind IN ('PermissionChanged', 'PermissionScopeChanged')
+    WHERE event_kind IN ('PermissionChanged', 'RootPermissionChanged', 'PermissionScopeChanged')
       AND resource_id IS NOT NULL
 )
 "#;

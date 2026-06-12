@@ -13,7 +13,10 @@ use super::json::{
 };
 use super::load::load_permission_events;
 use super::types::{PermissionKey, RelevantEvent};
-use super::{EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED};
+use super::{
+    EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+    EVENT_KIND_ROOT_PERMISSION_CHANGED,
+};
 
 const CANNOT_UNWRAP: i64 = 1;
 const CANNOT_BURN_FUSES: i64 = 2;
@@ -68,7 +71,7 @@ fn project_rows(resource_id: Uuid, events: &[RelevantEvent]) -> Result<Vec<Permi
             scope_modifiers.push(event);
             continue;
         }
-        if event.event_kind != EVENT_KIND_PERMISSION_CHANGED {
+        if !is_permission_grant_event(&event.event_kind) {
             continue;
         }
         let subject = json_text(&event.after_state, &["subject"])?;
@@ -137,6 +140,10 @@ fn project_rows(resource_id: Uuid, events: &[RelevantEvent]) -> Result<Vec<Permi
     }
 
     Ok(rows)
+}
+
+fn is_permission_grant_event(event_kind: &str) -> bool {
+    event_kind == EVENT_KIND_PERMISSION_CHANGED || event_kind == EVENT_KIND_ROOT_PERMISSION_CHANGED
 }
 
 fn latest_scope_modifier<'a>(scope_modifiers: &[&'a RelevantEvent]) -> Option<&'a RelevantEvent> {

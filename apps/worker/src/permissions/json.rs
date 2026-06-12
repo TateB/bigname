@@ -21,7 +21,7 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
         .context("PermissionChanged after_state.scope.kind must be a string")?;
 
     match kind {
-        "root" => Ok(PermissionScope::Root),
+        "root" | "registry_root" => Ok(PermissionScope::Root),
         "registry" => Ok(PermissionScope::Registry),
         "resource" => Ok(PermissionScope::Resource),
         "resolver" => Ok(PermissionScope::Resolver {

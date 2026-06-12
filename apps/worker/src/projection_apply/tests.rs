@@ -792,6 +792,56 @@ async fn generation_bump_releases_in_flight_claim_for_serialized_reapply() -> Re
 }
 
 #[tokio::test]
+async fn root_permission_changes_invalidate_permissions_current() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:root-permission-change",
+            namespace: "ens",
+            logical_name_id: Some("ens:root-permission.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RootPermissionChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_permissions",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(23),
+            block_hash: Some("0xroot23"),
+            before_state: json!({
+                "subject": "0x0000000000000000000000000000000000000bbb",
+                "role_bitmap": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "effective_powers": []
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "registry_root",
+                    "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x0000000000000000000000000000000000000eee"
+                },
+                "subject": "0x0000000000000000000000000000000000000bbb",
+                "role_bitmap": "0x0000000000000000000000000000000000000000000000000000000000000011",
+                "effective_powers": ["registrar", "register_reserved"]
+            }),
+            observed_at: timestamp(1_800_000_210),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "permissions_current",
+        &resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn derives_record_inventory_cross_resource_invalidations_for_logical_name_dependencies()
 -> Result<()> {
     let database = test_database().await?;

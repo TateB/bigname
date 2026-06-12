@@ -413,6 +413,93 @@ async fn permissions_current_keyed_rebuild_projects_basenames_resolver_scope_fro
 }
 
 #[tokio::test]
+async fn ensv2_registry_and_root_permission_events_project_registry_vocabulary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73c0);
+    let registry_subject = "0x0000000000000000000000000000000000000aaa";
+    let root_subject = "0x0000000000000000000000000000000000000bbb";
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm008e", 142, 1_776_100_142),
+            raw_block("ethereum-mainnet", "0xperm008f", 143, 1_776_100_143),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            ensv2_permission_event(
+                "ensv2-registry-permission",
+                "PermissionChanged",
+                "ens_v2_registry_l1",
+                resource_id,
+                registry_subject,
+                json!({
+                    "kind": "registry",
+                    "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x0000000000000000000000000000000000000eee"
+                }),
+                json!(["set_subregistry", "admin_set_subregistry"]),
+                json!(["set_subregistry"]),
+                142,
+                0,
+            ),
+            ensv2_permission_event(
+                "ensv2-root-permission",
+                "RootPermissionChanged",
+                "ens_v2_registry_l1",
+                resource_id,
+                root_subject,
+                json!({
+                    "kind": "registry_root",
+                    "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x0000000000000000000000000000000000000eee"
+                }),
+                json!(["registrar", "register_reserved"]),
+                json!(["registrar"]),
+                143,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(summary.requested_resource_count, 1);
+    assert_eq!(summary.upserted_row_count, 2);
+
+    let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+    assert_eq!(rows.len(), 2);
+    let registry_row = rows
+        .iter()
+        .find(|row| row.subject == registry_subject)
+        .context("missing registry-scope ENSv2 permission row")?;
+    assert_eq!(registry_row.scope, PermissionScope::Registry);
+    assert_eq!(
+        registry_row.effective_powers,
+        json!(["set_subregistry", "admin_set_subregistry"])
+    );
+    assert_eq!(registry_row.provenance["normalized_event_ids"], json!([1]));
+
+    let root_row = rows
+        .iter()
+        .find(|row| row.subject == root_subject)
+        .context("missing root ENSv2 permission row")?;
+    assert_eq!(root_row.scope, PermissionScope::Root);
+    assert_eq!(
+        root_row.effective_powers,
+        json!(["registrar", "register_reserved"])
+    );
+    assert_eq!(root_row.provenance["normalized_event_ids"], json!([2]));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn wrapper_scope_fuses_mask_resource_control_powers() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x73b1);
@@ -1043,6 +1130,78 @@ fn permission_event_with_context(
             }
         }),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensv2_permission_event(
+    event_identity: &str,
+    event_kind: &str,
+    source_family: &str,
+    resource_id: Uuid,
+    subject: &str,
+    scope: Value,
+    effective_powers: Value,
+    before_effective_powers: Value,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let mut event = permission_event_with_context(
+        event_identity,
+        "ens",
+        source_family,
+        "ethereum-mainnet",
+        2,
+        resource_id,
+        subject,
+        scope,
+        effective_powers.clone(),
+        Some(json!({
+            "kind": "raw_log",
+            "source_event": "EACRolesChanged",
+            "registry_contract_instance_id": "11111111-1111-5111-8111-111111111111",
+            "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "changed_powers": effective_powers
+        })),
+        None,
+        block_number,
+        log_index,
+    );
+    event.event_kind = event_kind.to_owned();
+    event.derivation_kind = "ens_v2_permissions".to_owned();
+    event.before_state = json!({
+        "subject": subject,
+        "role_bitmap": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "effective_powers": before_effective_powers
+    });
+    if let Some(object) = event.after_state.as_object_mut() {
+        object.insert(
+            "source_event".to_owned(),
+            Value::String("EACRolesChanged".to_owned()),
+        );
+        object.insert(
+            "registry_contract_instance_id".to_owned(),
+            Value::String("11111111-1111-5111-8111-111111111111".to_owned()),
+        );
+        object.insert(
+            "role_bitmap".to_owned(),
+            Value::String(
+                "0x0000000000000000000000000000000000000000000000000000000000000011".to_owned(),
+            ),
+        );
+        object.insert(
+            "old_role_bitmap".to_owned(),
+            Value::String(
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
+            ),
+        );
+        object.insert(
+            "upstream_resource".to_owned(),
+            Value::String(
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+    }
+    event
 }
 
 fn permission_scope_event(

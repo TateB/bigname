@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::types::RelevantEvent;
 use super::{
     CANONICAL_STATE_FILTER, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+    EVENT_KIND_ROOT_PERMISSION_CHANGED,
 };
 
 pub(super) fn stream_target_resource_ids<'a>(
@@ -22,7 +23,7 @@ pub(super) fn stream_target_resource_ids<'a>(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        WHERE ne.event_kind IN ($1, $2)
+        WHERE ne.event_kind IN ($1, $2, $3)
           AND ne.resource_id IS NOT NULL
           AND ne.canonicality_state IN (
               'canonical'::canonicality_state,
@@ -33,6 +34,7 @@ pub(super) fn stream_target_resource_ids<'a>(
         "#,
     )
     .bind(EVENT_KIND_PERMISSION_CHANGED)
+    .bind(EVENT_KIND_ROOT_PERMISSION_CHANGED)
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .fetch(pool)
     .map(|row| {
@@ -73,8 +75,8 @@ pub(super) async fn load_permission_events(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.event_kind IN ($1, $2)
-          AND ne.resource_id = $3
+        WHERE ne.event_kind IN ($1, $2, $3)
+          AND ne.resource_id = $4
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC NULLS FIRST,
@@ -83,6 +85,7 @@ pub(super) async fn load_permission_events(
         "#
     ))
     .bind(EVENT_KIND_PERMISSION_CHANGED)
+    .bind(EVENT_KIND_ROOT_PERMISSION_CHANGED)
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .bind(resource_id)
     .fetch_all(pool)
