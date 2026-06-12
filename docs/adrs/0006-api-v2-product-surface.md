@@ -565,8 +565,8 @@ tests.
    `v1`.
 
 Sequencing with the 2026-06 remediation
-(`docs/internal/remediation-2026-06.md`, a temporary tracking doc): the
-remediation completes before `v2` implementation begins (planning decision,
+(`docs/internal/remediation-2026-06-postmortem.md`, the closed-out record):
+the remediation completes before `v2` implementation begins (planning decision,
 2026-06-10). Steps 1–2 (docs only) conflict with nothing and may proceed
 during the remediation; step 3 starts after the remediation closes out, so
 `v2` inherits the corrected semantics (primary-name status classification,
