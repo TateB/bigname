@@ -1,18 +1,6 @@
-use std::{collections::BTreeMap, time::Instant};
-
-use anyhow::{Context, Result, bail};
-use bigname_manifests::WatchedSourceSelectorPlan;
-use bigname_storage::{
-    BackfillLifecycleStatus, BackfillRange, advance_backfill_range, complete_backfill_range,
-    load_backfill_job, reserve_backfill_range,
-};
-use tracing::{info, warn};
-
-use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
-
 use super::{
     backfill_lease_duration_secs, create_coinbase_sql_backfill_job,
-    refreshed_backfill_lease_expires_at,
+    refreshed_backfill_lease_expires_at, run_with_backfill_lease_heartbeat,
 };
 use crate::backfill::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillOutcome,
@@ -27,7 +15,15 @@ use crate::backfill::{
     range_resolution::{resolve_backfill_block_numbers, resolve_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
-
+use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
+use anyhow::{Context, Result, bail};
+use bigname_manifests::WatchedSourceSelectorPlan;
+use bigname_storage::{
+    BackfillLifecycleStatus, BackfillRange, advance_backfill_range, complete_backfill_range,
+    load_backfill_job, reserve_backfill_range,
+};
+use std::{collections::BTreeMap, time::Instant};
+use tracing::{info, warn};
 const MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS: usize = 512;
 const MAX_COINBASE_SQL_SAMPLE_PROVIDER_PAYLOAD_LOGS: usize = 2_000;
 const MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 5_000;
@@ -37,7 +33,6 @@ const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY: &str = "basenames_base_registrar";
 const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
-
 pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -64,7 +59,6 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
             .await?;
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
     let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
-
     info!(
         service = "indexer",
         command = "backfill",
@@ -169,10 +163,15 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
     let mut window_blocks = coinbase_config.initial_window_blocks;
     let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
     let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
-    let canonicality_evidence = match load_backfill_canonicality_evidence(
+    let canonicality_evidence = match run_with_backfill_lease_heartbeat(
         pool,
-        &source_plan.watched_chain_plan.chain,
-        validation_provider,
+        &active_range,
+        config,
+        load_backfill_canonicality_evidence(
+            pool,
+            &source_plan.watched_chain_plan.chain,
+            validation_provider,
+        ),
     )
     .await
     {
@@ -191,7 +190,6 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
             .await);
         }
     };
-
     while block_number <= active_range.range_end_block_number {
         let window_end = block_number
             .checked_add(window_blocks - 1)
@@ -200,19 +198,23 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
         let window_range = BackfillBlockRange::new(block_number, window_end)?;
         let selected_target_addresses_for_chunk = selected_target_range_cursor
             .active_addresses_for_monotonic_range(window_range.from_block, window_range.to_block);
-
-        let window_outcome = match run_coinbase_sql_backfill_window(
+        let window_outcome = match run_with_backfill_lease_heartbeat(
             pool,
-            source_plan,
-            &selected_target_index,
-            &selected_target_addresses_for_chunk,
-            validation_provider,
-            historical_source,
-            topic_plan,
-            window_range,
-            canonicality_evidence.clone(),
+            &active_range,
             config,
-            coinbase_config,
+            run_coinbase_sql_backfill_window(
+                pool,
+                source_plan,
+                &selected_target_index,
+                &selected_target_addresses_for_chunk,
+                validation_provider,
+                historical_source,
+                topic_plan,
+                window_range,
+                canonicality_evidence.clone(),
+                config,
+                coinbase_config,
+            ),
         )
         .await
         {
@@ -304,10 +306,8 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
         })
         .await);
     }
-
     Ok(())
 }
-
 fn next_coinbase_sql_window_blocks(
     current_window_blocks: i64,
     coinbase_config: &CoinbaseSqlBackfillConfig,

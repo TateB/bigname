@@ -127,7 +127,9 @@ pub use label_preimages::{
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
     load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
+    upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
 pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
@@ -166,7 +168,7 @@ pub use raw::{
     RawBlock, RawLogReplayInput, list_canonical_raw_log_replay_inputs,
     list_canonical_raw_log_replay_inputs_for_block_hashes, load_raw_block,
     load_raw_blocks_by_hashes, mark_raw_block_range_orphaned, upsert_raw_blocks,
-    upsert_raw_blocks_without_snapshots,
+    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_blocks_without_snapshots,
 };
 pub use raw_calls::{
     RawCallSnapshot, load_raw_call_snapshots_by_block_hash, upsert_raw_call_snapshots,

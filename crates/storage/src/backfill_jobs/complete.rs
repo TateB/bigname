@@ -145,7 +145,7 @@ async fn maybe_complete_backfill_job(
     Ok(())
 }
 
-async fn set_backfill_job_completed(
+pub(super) async fn set_backfill_job_completed(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     backfill_job_id: i64,
 ) -> Result<BackfillJob> {

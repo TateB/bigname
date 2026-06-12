@@ -2,7 +2,9 @@ use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
     chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
-    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_without_snapshots,
+    upsert_chain_lineage_blocks_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks,
+    upsert_chain_lineage_blocks_without_snapshots,
+    upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks_without_snapshots,
 };
 use tracing::{info, warn};
 
@@ -232,7 +234,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         .await?;
 
     if let Some(safe_head) = &heads.safe {
-        upsert_chain_lineage_blocks(
+        upsert_recanonicalized_lineage_blocks(
             pool,
             &[provider_block_to_lineage_with_header_audit_mode(
                 &task.chain,
@@ -244,7 +246,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         .await?;
     }
     if let Some(finalized_head) = &heads.finalized {
-        upsert_chain_lineage_blocks(
+        upsert_recanonicalized_lineage_blocks(
             pool,
             &[provider_block_to_lineage_with_header_audit_mode(
                 &task.chain,
@@ -319,10 +321,8 @@ async fn reconcile_fetched_heads_with_gap_policy(
     {
         return Ok(None);
     }
-
     let mut next_task = task.clone();
     next_task.checkpoint = next_checkpoint.clone();
-
     Ok(Some((
         next_task,
         ChainReconciliationOutcome {
@@ -353,7 +353,7 @@ pub(crate) async fn reconcile_canonical_head(
     let current_canonical_number = checkpoint.canonical_block_number;
 
     if current_canonical_hash.is_none() {
-        upsert_chain_lineage_blocks(
+        upsert_recanonicalized_lineage_blocks(
             pool,
             &[provider_block_to_lineage_with_header_audit_mode(
                 chain,
@@ -374,7 +374,7 @@ pub(crate) async fn reconcile_canonical_head(
     }
 
     if current_canonical_hash == Some(latest_hash) {
-        upsert_chain_lineage_blocks(
+        upsert_recanonicalized_lineage_blocks(
             pool,
             &[provider_block_to_lineage_with_header_audit_mode(
                 chain,
@@ -521,7 +521,7 @@ pub(crate) async fn reconcile_canonical_head(
             )
         })
         .collect::<Vec<_>>();
-    upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+    upsert_recanonicalized_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
 
     Ok(CanonicalReconciliation {
         status,
@@ -588,7 +588,7 @@ async fn reconcile_contiguous_checkpoint_gap(
             )
         })
         .collect::<Vec<_>>();
-    upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+    upsert_recanonicalized_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
 
     let status = if path.len() == 1 {
         CanonicalReconciliationStatus::Appended

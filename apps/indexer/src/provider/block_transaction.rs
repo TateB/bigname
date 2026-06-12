@@ -10,8 +10,9 @@ use super::{
     decode::{block_hash_from_value, normalize_hash},
     logs_receipts::ProviderBlockLogFetch,
     provider_batch_item_limit,
-    request::JsonRpcBatchCall,
+    request::{JsonRpcBatchCall, is_retryable_provider_error},
 };
+use tracing::warn;
 
 mod cache_fill;
 
@@ -98,41 +99,52 @@ impl JsonRpcProvider {
     }
 
     async fn fetch_chain_head_hashes(&self) -> Result<ProviderHeadHashSnapshot> {
-        let tags = ["latest", "safe", "finalized"];
-        let calls = tags
-            .iter()
-            .map(|tag| JsonRpcBatchCall {
-                method: "eth_getBlockByNumber",
-                params: vec![Value::String((*tag).to_owned()), Value::Bool(false)],
-            })
-            .collect::<Vec<_>>();
-        let mut results = self.fetch_json_rpc_batch_results(calls).await?.into_iter();
-
-        let canonical = head_hash_from_tag_result(
-            "latest",
-            results
-                .next()
-                .context("provider omitted latest head hash result")?,
-        )?
-        .context("provider did not return a latest block")?;
-        let safe = head_hash_from_tag_result(
-            "safe",
-            results
-                .next()
-                .context("provider omitted safe head hash result")?,
-        )?;
-        let finalized = head_hash_from_tag_result(
-            "finalized",
-            results
-                .next()
-                .context("provider omitted finalized head hash result")?,
-        )?;
+        let canonical = self
+            .fetch_head_hash_for_tag("latest")
+            .await?
+            .context("provider did not return a latest block")?;
+        let safe = self
+            .fetch_optional_checkpoint_head_hash_for_tag("safe")
+            .await?;
+        let finalized = self
+            .fetch_optional_checkpoint_head_hash_for_tag("finalized")
+            .await?;
 
         Ok(ProviderHeadHashSnapshot {
             canonical,
             safe,
             finalized,
         })
+    }
+
+    async fn fetch_head_hash_for_tag(&self, tag: &str) -> Result<Option<String>> {
+        let result = self
+            .fetch_json_rpc_result(
+                "eth_getBlockByNumber",
+                vec![Value::String(tag.to_owned()), Value::Bool(false)],
+            )
+            .await?;
+        head_hash_from_tag_result(tag, result)
+    }
+
+    async fn fetch_optional_checkpoint_head_hash_for_tag(
+        &self,
+        tag: &str,
+    ) -> Result<Option<String>> {
+        match self.fetch_head_hash_for_tag(tag).await {
+            Ok(hash) => Ok(hash),
+            Err(error) if is_optional_checkpoint_tag_error(tag, &error) => {
+                warn!(
+                    service = "indexer",
+                    component = "provider",
+                    tag,
+                    error = %format!("{error:#}"),
+                    "provider checkpoint tag is unavailable; degrading to absent optional head"
+                );
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[allow(dead_code, reason = "staged provider helper covered by tests")]
@@ -510,4 +522,30 @@ fn head_hash_from_tag_result(tag: &str, result: Option<Value>) -> Result<Option<
                 .with_context(|| format!("failed to decode {tag} block hash from provider result"))
         })
         .transpose()
+}
+
+fn is_optional_checkpoint_tag_error(tag: &str, error: &anyhow::Error) -> bool {
+    if is_retryable_provider_error(error) {
+        return false;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if !message.contains("provider returned json-rpc error for eth_getblockbynumber") {
+        return false;
+    }
+
+    let tag = tag.to_ascii_lowercase();
+    let tag_is_named = message.contains(&tag);
+    let unsupported_tag = message.contains("unsupported block tag")
+        || message.contains("unsupported block parameter")
+        || message.contains("unknown block tag")
+        || message.contains("unknown block parameter")
+        || message.contains("invalid block tag")
+        || message.contains("invalid block parameter")
+        || message.contains("not support");
+    let invalid_params = message.contains("invalid params")
+        || message.contains("-32602")
+        || message.contains("invalid argument 0");
+
+    (tag_is_named && unsupported_tag) || invalid_params
 }

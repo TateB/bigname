@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, RawBlock, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
     RawTransaction, load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
-    load_raw_code_hash_counts_by_block_hashes, upsert_raw_blocks, upsert_raw_code_hashes,
-    upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
-    upsert_raw_transactions,
+    load_raw_code_hash_counts_by_block_hashes, upsert_raw_blocks,
+    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
 
@@ -27,7 +27,9 @@ use super::{
         raw_payload_candidate_hashes, retained_transaction_keys_from_live_payload,
         selected_address_set,
     },
-    types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode},
+    types::{
+        CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
+    },
 };
 
 pub(crate) async fn persist_reconciled_raw_blocks(
@@ -68,7 +70,12 @@ pub(crate) async fn persist_reconciled_raw_blocks(
         );
     }
 
-    upsert_raw_blocks(pool, &blocks.into_values().collect::<Vec<_>>()).await?;
+    let blocks = blocks.into_values().collect::<Vec<_>>();
+    if canonical.status == CanonicalReconciliationStatus::AwaitingAncestor {
+        upsert_raw_blocks(pool, &blocks).await?;
+    } else {
+        upsert_raw_blocks_recanonicalizing_orphaned(pool, &blocks).await?;
+    }
     Ok(())
 }
 

@@ -399,14 +399,33 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
 }
 
 #[tokio::test]
-async fn reobserving_orphaned_raw_block_revives_observed_state() -> Result<()> {
+async fn generic_raw_block_reobserve_preserves_orphaned_state() -> Result<()> {
     let database = TestDatabase::new().await?;
 
     upsert_raw_blocks(database.pool(), &[raw_block(CanonicalityState::Orphaned)]).await?;
     let refreshed =
         upsert_raw_blocks(database.pool(), &[raw_block(CanonicalityState::Observed)]).await?;
 
-    assert_eq!(refreshed[0].canonicality_state, CanonicalityState::Observed);
+    assert_eq!(refreshed[0].canonicality_state, CanonicalityState::Orphaned);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn explicit_raw_block_recanonicalization_revives_orphaned_state() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_blocks(database.pool(), &[raw_block(CanonicalityState::Orphaned)]).await?;
+    let refreshed = upsert_raw_blocks_recanonicalizing_orphaned(
+        database.pool(),
+        &[raw_block(CanonicalityState::Canonical)],
+    )
+    .await?;
+
+    assert_eq!(
+        refreshed[0].canonicality_state,
+        CanonicalityState::Canonical
+    );
 
     database.cleanup().await
 }

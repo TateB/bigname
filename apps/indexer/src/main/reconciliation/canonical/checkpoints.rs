@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, CheckpointBlockRef, chain_lineage_contains_ancestor,
-    load_chain_lineage_block, upsert_chain_lineage_blocks,
+    load_chain_lineage_block, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
 };
 use tracing::{info, warn};
 
@@ -63,7 +63,7 @@ pub(super) async fn fill_checkpoint_ancestor_path(
             fetched_parent_count += 1;
             provider.fetch_block_by_hash(&parent_hash).await?
         };
-        upsert_chain_lineage_blocks(
+        upsert_chain_lineage_blocks_recanonicalizing_orphaned(
             pool,
             &[provider_block_to_lineage_with_header_audit_mode(
                 chain,

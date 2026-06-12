@@ -8,7 +8,10 @@ use bigname_manifests::{
     WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelector, WatchedSourceSelectorKind,
     WatchedSourceSelectorPlan, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
-use bigname_storage::{BackfillLifecycleStatus, load_backfill_job, load_backfill_ranges};
+use bigname_storage::{
+    BackfillLifecycleStatus, CanonicalityState, load_backfill_job, load_backfill_ranges,
+    load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+};
 
 include!("support.rs");
 
@@ -786,6 +789,75 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn hash_pinned_backfill_preserves_orphaned_lineage_when_reorg_lands_after_evidence_load()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "ethereum-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let block = provider_block(
+        "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) =
+        number_resolving_provider(vec![block.clone()], Arc::clone(&requests)).await?;
+
+    let evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        "ethereum-mainnet",
+        &block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    mark_chain_lineage_range_orphaned(database.pool(), "ethereum-mainnet", &block.block_hash, None)
+        .await?;
+
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let selected_target_addresses = Vec::new();
+    let outcome = backfill::run_hash_pinned_backfill_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &selected_target_addresses,
+        &provider,
+        BackfillBlockRange::new(42, 42)?,
+        evidence,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(outcome.resolved_block_count, 1);
+
+    let lineage = load_chain_lineage_block(database.pool(), "ethereum-mainnet", &block.block_hash)
+        .await?
+        .expect("backfill must leave a lineage row for the orphaned hash");
+    assert_eq!(lineage.canonicality_state, CanonicalityState::Orphaned);
 
     server.abort();
     database.cleanup().await

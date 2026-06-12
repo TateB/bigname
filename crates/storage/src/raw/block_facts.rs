@@ -5,6 +5,7 @@ use super::types::RawBlock;
 use super::validation::validate_raw_block;
 use crate::{
     ChainLineageBlock, load_chain_lineage_block, upsert_chain_lineage_blocks,
+    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
 };
 
@@ -45,6 +46,30 @@ pub async fn upsert_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<Vec
         .into_iter()
         .map(lineage_to_raw_block)
         .collect())
+}
+
+/// Insert missing block header anchors or refresh canonicality using explicitly
+/// fresh reconciliation evidence, allowing a stored orphaned row to be restored.
+pub async fn upsert_raw_blocks_recanonicalizing_orphaned(
+    pool: &PgPool,
+    blocks: &[RawBlock],
+) -> Result<Vec<RawBlock>> {
+    if blocks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for block in blocks {
+        validate_raw_block(block)?;
+    }
+
+    let lineage_blocks = blocks.iter().map(raw_block_to_lineage).collect::<Vec<_>>();
+    Ok(
+        upsert_chain_lineage_blocks_recanonicalizing_orphaned(pool, &lineage_blocks)
+            .await?
+            .into_iter()
+            .map(lineage_to_raw_block)
+            .collect(),
+    )
 }
 
 /// Insert or refresh block header anchors without returning row snapshots.

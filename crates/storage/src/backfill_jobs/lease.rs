@@ -3,14 +3,15 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row};
 
 use super::{
+    complete::set_backfill_job_completed,
     decode::decode_backfill_range,
     read::{
-        load_active_backfill_range_by_lease, load_backfill_job_for_update,
+        incomplete_range_count, load_active_backfill_range_by_lease, load_backfill_job_for_update,
         load_backfill_range_for_update,
     },
     sql::backfill_range_returning_sql,
     types::{BackfillLifecycleStatus, BackfillRange},
-    validate::{ensure_lease_matches, validate_lease, validate_non_empty},
+    validate::{ensure_lease_is_active, ensure_lease_matches, validate_lease, validate_non_empty},
 };
 
 /// Atomically reserve the next pending, failed, or expired range for a job.
@@ -86,6 +87,9 @@ pub async fn reserve_backfill_range(
     .with_context(|| format!("failed to select reservable range for backfill job {backfill_job_id}"))?;
 
     let Some(candidate) = candidate else {
+        if incomplete_range_count(&mut *transaction, backfill_job_id).await? == 0 {
+            set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
+        }
         transaction
             .commit()
             .await
@@ -180,6 +184,7 @@ pub async fn advance_backfill_range(
         bail!("failed backfill range {backfill_range_id} must be reserved again before advancing");
     }
     ensure_lease_matches(&current, lease_token)?;
+    ensure_lease_is_active(&current)?;
     if checkpoint_block_number > current.range_end_block_number {
         bail!(
             "backfill range {backfill_range_id} checkpoint {checkpoint_block_number} is beyond declared range end {}",
@@ -200,6 +205,10 @@ pub async fn advance_backfill_range(
         SET
             checkpoint_block_number = $2,
             status = 'running'::backfill_lifecycle_status,
+            lease_expires_at = now() + GREATEST(
+                lease_expires_at - updated_at,
+                interval '5 seconds'
+            ),
             updated_at = now()
         WHERE backfill_range_id = $1
         "#,

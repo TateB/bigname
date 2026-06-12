@@ -30,6 +30,8 @@ pub(crate) use concurrent_execution::{
     run_resumable_coinbase_sql_backfill_job_concurrently,
     run_resumable_hash_pinned_backfill_job_concurrently,
 };
+#[cfg(test)]
+pub(crate) use fetching::load_backfill_canonicality_evidence;
 #[allow(unused_imports)]
 pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_backfill_range};
 #[cfg(test)]
@@ -41,6 +43,8 @@ pub(crate) use reservation_execution::{
     create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
     run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
 };
+#[cfg(test)]
+pub(crate) use selection::SelectedTargetIntervalIndex;
 pub(crate) use source::{
     BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps,
     HistoricalCodeObservationScope, HistoricalLogPayload, HistoricalLogPayloadRequest,

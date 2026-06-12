@@ -2,6 +2,8 @@ use std::io::{self, Write};
 
 #[path = "reservation_execution/coinbase_sql.rs"]
 mod coinbase_sql_execution;
+#[path = "reservation_execution/lease_heartbeat.rs"]
+mod lease_heartbeat;
 
 use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
@@ -35,6 +37,9 @@ pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
     ensure_coinbase_sql_registry_range_start_is_replay_safe,
     run_reserved_coinbase_sql_backfill_range, run_resumable_coinbase_sql_backfill_job,
+};
+pub(super) use lease_heartbeat::{
+    run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
@@ -481,10 +486,11 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
         .context("backfill checkpoint overflowed while computing resume block")?;
     let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
     let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
-    let canonicality_evidence = match load_backfill_canonicality_evidence(
+    let canonicality_evidence = match run_with_backfill_lease_heartbeat(
         pool,
-        &source_plan.watched_chain_plan.chain,
-        provider,
+        &active_range,
+        config,
+        load_backfill_canonicality_evidence(pool, &source_plan.watched_chain_plan.chain, provider),
     )
     .await
     {
@@ -511,16 +517,21 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
         let selected_target_addresses_for_chunk = selected_target_range_cursor
             .active_addresses_for_monotonic_range(chunk_range.from_block, chunk_range.to_block);
-        let chunk_outcome = match run_hash_pinned_backfill_range(
+        let chunk_outcome = match run_with_backfill_lease_heartbeat(
             pool,
-            source_plan,
-            &selected_target_index,
-            &selected_target_addresses_for_chunk,
-            provider,
-            chunk_range,
-            canonicality_evidence.clone(),
-            config.adapter_sync_mode,
-            config.header_audit_mode,
+            &active_range,
+            config,
+            run_hash_pinned_backfill_range(
+                pool,
+                source_plan,
+                &selected_target_index,
+                &selected_target_addresses_for_chunk,
+                provider,
+                chunk_range,
+                canonicality_evidence.clone(),
+                config.adapter_sync_mode,
+                config.header_audit_mode,
+            ),
         )
         .await
         {
@@ -591,15 +602,6 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
 
     Ok(())
 }
-
-pub(super) fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
-    if chunk_blocks <= 0 {
-        bail!("hash-pinned backfill chunk blocks must be positive, got {chunk_blocks}");
-    }
-
-    Ok(())
-}
-
 pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
     let duration_secs = lease_expires_at
         .unix_timestamp()
@@ -608,10 +610,8 @@ pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> 
     if duration_secs <= 0 {
         bail!("lease_expires_at must be in the future");
     }
-
     Ok(duration_secs)
 }
-
 pub(super) fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
     let deadline = OffsetDateTime::now_utc()
         .unix_timestamp()

@@ -905,6 +905,94 @@ async fn reorg_common_ancestor_must_be_on_current_canonical_branch() -> Result<(
 }
 
 #[tokio::test]
+async fn awaiting_ancestor_raw_persistence_preserves_walked_orphaned_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let old_head = provider_block(
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        None,
+        3,
+    );
+    let orphaned_parent = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+        4,
+    );
+    let new_head = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&orphaned_parent.block_hash),
+        5,
+    );
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            provider_block_to_lineage("ethereum-mainnet", &old_head, CanonicalityState::Canonical),
+            provider_block_to_lineage(
+                "ethereum-mainnet",
+                &orphaned_parent,
+                CanonicalityState::Orphaned,
+            ),
+        ],
+    )
+    .await?;
+
+    let (provider, server) =
+        bundle_provider(vec![orphaned_parent.clone(), new_head.clone()]).await?;
+    let reconciliation = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        "ethereum-mainnet",
+        &ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: Some(old_head.block_hash.clone()),
+            canonical_block_number: Some(old_head.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+        &new_head,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(
+        reconciliation.status,
+        CanonicalReconciliationStatus::AwaitingAncestor
+    );
+    assert!(
+        reconciliation
+            .reconciled_blocks
+            .iter()
+            .any(|block| block.block_hash == orphaned_parent.block_hash),
+        "AwaitingAncestor path must include the stored-orphaned parent"
+    );
+
+    persist_reconciled_raw_blocks(
+        database.pool(),
+        "ethereum-mainnet",
+        &ProviderHeadSnapshot {
+            canonical: new_head,
+            safe: None,
+            finalized: None,
+        },
+        &reconciliation,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+
+    let state = sqlx::query_scalar::<_, String>(
+        "SELECT canonicality_state::TEXT FROM chain_lineage WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(&orphaned_parent.block_hash)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(state, "orphaned".to_owned());
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block_is_missing()
 -> Result<()> {
     let database = TestDatabase::new().await?;
