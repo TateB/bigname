@@ -120,7 +120,7 @@ where
     }
 }
 
-fn canonical_addr_coin_type(coin_type: &str) -> Option<String> {
+pub fn canonical_addr_coin_type(coin_type: &str) -> Option<String> {
     if coin_type.is_empty() || !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
         return None;
     }

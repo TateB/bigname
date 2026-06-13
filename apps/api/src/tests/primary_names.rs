@@ -1697,7 +1697,16 @@ async fn get_primary_names_reads_execution_persisted_verified_primary_name_for_e
     });
 
     database
-        .insert_primary_name_current_row(address, "ens", "60")
+        .insert_primary_name_current_claim_row(
+            address,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
         .await?;
 
     let trace = primary_name_execution_trace(
@@ -2685,6 +2694,116 @@ async fn get_primary_names_treats_persisted_verified_primary_name_cache_boundary
         }))
     );
     assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_scans_past_newer_drifted_verified_primary_name_outcome()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+
+    let older_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000052);
+    let older_finished_at = timestamp(1_717_172_418);
+    let older_trace = primary_name_execution_trace(
+        older_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        older_finished_at,
+    );
+    let older_outcome = primary_name_execution_outcome(
+        older_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        older_finished_at,
+    );
+    upsert_execution_trace(&database.pool, &older_trace).await?;
+    upsert_execution_outcome(&database.pool, &older_outcome).await?;
+
+    let newer_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000053);
+    let newer_finished_at = timestamp(1_717_172_519);
+    let newer_trace = primary_name_execution_trace(
+        newer_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        newer_finished_at,
+    );
+    let mut newer_outcome = primary_name_execution_outcome(
+        newer_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name,
+        newer_finished_at,
+    );
+    newer_outcome.cache_key.record_version_boundary = record_inventory_boundary(
+        "ens:stale.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c003),
+    );
+    upsert_execution_trace(&database.pool, &newer_trace).await?;
+    upsert_execution_outcome(&database.pool, &newer_outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("masked persisted verified primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": {
+                    "logical_name_id": "ens:alice.eth",
+                    "namespace": "ens",
+                    "normalized_name": "alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+                    "resource_id": "00000000-0000-0000-0000-000000000456",
+                    "binding_kind": "declared_registry_path"
+                },
+                "provenance": {
+                    "manifest_versions": primary_name_execution_manifest_versions(),
+                    "execution_trace_id": older_trace_id.to_string(),
+                },
+            }
+        }))
+    );
+    assert_eq!(payload.last_updated, "2024-05-31T16:20:18Z");
 
     database.cleanup().await?;
     Ok(())

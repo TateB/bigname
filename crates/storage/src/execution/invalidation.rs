@@ -17,6 +17,11 @@ use super::{
     },
 };
 
+#[cfg(not(test))]
+const REORG_INVALIDATION_BATCH_SIZE: i64 = 500;
+#[cfg(test)]
+const REORG_INVALIDATION_BATCH_SIZE: i64 = 2;
+
 #[derive(Clone, Debug)]
 struct ExecutionOutcomeReorgInvalidationCandidate {
     execution_cache_key: String,
@@ -182,33 +187,44 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
         .context("failed to open transaction for execution reorg invalidation")?;
 
     let orphaned_blocks = load_orphaned_block_dependencies_internal(&mut *transaction).await?;
-    let outcomes =
-        load_execution_outcomes_for_reorg_invalidation_scope_internal(&mut *transaction).await?;
-
-    let mut cache_keys = Vec::new();
-    for outcome in outcomes {
-        let dependencies = match execution_outcome_block_dependencies(
-            &outcome.request_key,
-            &outcome.requested_chain_positions,
-            &outcome.topology_version_boundary,
-            &outcome.record_version_boundary,
-        ) {
-            Ok(dependencies) => dependencies,
-            Err(_) => {
-                cache_keys.push(outcome.execution_cache_key);
-                continue;
-            }
+    let mut deleted_outcome_count = 0;
+    let mut last_seen_cache_key = None;
+    loop {
+        let outcomes = load_execution_outcome_reorg_invalidation_candidate_batch_internal(
+            &mut *transaction,
+            last_seen_cache_key.as_deref(),
+        )
+        .await?;
+        let Some(last_outcome) = outcomes.last() else {
+            break;
         };
-        if dependencies
-            .iter()
-            .any(|dependency| orphaned_blocks.contains(dependency))
-        {
-            cache_keys.push(outcome.execution_cache_key);
-        }
-    }
+        last_seen_cache_key = Some(last_outcome.execution_cache_key.clone());
 
-    let deleted_outcome_count =
-        delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+        let mut cache_keys = Vec::new();
+        for outcome in outcomes {
+            let dependencies = match execution_outcome_block_dependencies(
+                &outcome.request_key,
+                &outcome.requested_chain_positions,
+                &outcome.topology_version_boundary,
+                &outcome.record_version_boundary,
+            ) {
+                Ok(dependencies) => dependencies,
+                Err(_) => {
+                    cache_keys.push(outcome.execution_cache_key);
+                    continue;
+                }
+            };
+            if dependencies
+                .iter()
+                .any(|dependency| orphaned_blocks.contains(dependency))
+            {
+                cache_keys.push(outcome.execution_cache_key);
+            }
+        }
+
+        deleted_outcome_count +=
+            delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+    }
 
     transaction
         .commit()
@@ -372,8 +388,9 @@ fn outcome_matches_request_key(outcome: &ExecutionOutcome, request_key: Option<&
     request_key.is_none_or(|request_key| outcome.cache_key.request_key == request_key)
 }
 
-async fn load_execution_outcomes_for_reorg_invalidation_scope_internal<'e, E>(
+async fn load_execution_outcome_reorg_invalidation_candidate_batch_internal<'e, E>(
     executor: E,
+    after_execution_cache_key: Option<&str>,
 ) -> Result<Vec<ExecutionOutcomeReorgInvalidationCandidate>>
 where
     E: Executor<'e, Database = Postgres>,
@@ -388,12 +405,16 @@ where
             record_version_boundary
         FROM execution_cache_outcomes
         WHERE request_type IN ('verified_resolution', 'verified_primary_name')
+          AND ($1::text IS NULL OR execution_cache_key > $1)
         ORDER BY execution_cache_key
+        LIMIT $2
         "#,
     )
+    .bind(after_execution_cache_key)
+    .bind(REORG_INVALIDATION_BATCH_SIZE)
     .fetch_all(executor)
     .await
-    .context("failed to load execution outcomes for reorg invalidation scope")?;
+    .context("failed to load execution outcome batch for reorg invalidation scope")?;
 
     rows.into_iter()
         .map(decode_execution_outcome_reorg_invalidation_candidate_row)
@@ -434,22 +455,21 @@ async fn delete_execution_outcomes_by_keys(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     execution_cache_keys: &[String],
 ) -> Result<u64> {
-    let mut deleted_outcome_count = 0;
-    for execution_cache_key in execution_cache_keys {
-        deleted_outcome_count += sqlx::query(
-            r#"
-            DELETE FROM execution_cache_outcomes
-            WHERE execution_cache_key = $1
-            "#,
-        )
-        .bind(execution_cache_key)
-        .execute(&mut **executor)
-        .await
-        .with_context(|| {
-            format!("failed to delete execution outcome for cache key {execution_cache_key}")
-        })?
-        .rows_affected();
+    if execution_cache_keys.is_empty() {
+        return Ok(0);
     }
+
+    let deleted_outcome_count = sqlx::query(
+        r#"
+        DELETE FROM execution_cache_outcomes
+        WHERE execution_cache_key = ANY($1::text[])
+        "#,
+    )
+    .bind(execution_cache_keys)
+    .execute(&mut **executor)
+    .await
+    .context("failed to delete execution outcomes by cache key batch")?
+    .rows_affected();
 
     Ok(deleted_outcome_count)
 }

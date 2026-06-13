@@ -529,6 +529,104 @@ async fn row_path_resource_upsert_preserves_concurrent_orphan_update() -> Result
 }
 
 #[tokio::test]
+async fn row_path_resource_batch_retries_deadlock() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let first_resource_id = Uuid::from_u128(0x2016);
+    let second_resource_id = Uuid::from_u128(0x2017);
+    let first_resource = resource(
+        first_resource_id,
+        None,
+        "ens",
+        "resource_deadlock_first",
+        130,
+        CanonicalityState::Canonical,
+    );
+    let second_resource = resource(
+        second_resource_id,
+        None,
+        "ens",
+        "resource_deadlock_second",
+        131,
+        CanonicalityState::Canonical,
+    );
+    upsert_resources(
+        database.pool(),
+        &[first_resource.clone(), second_resource.clone()],
+    )
+    .await?;
+
+    let mut first_replay = first_resource.clone();
+    first_replay.canonicality_state = CanonicalityState::Finalized;
+    let mut second_replay = second_resource.clone();
+    second_replay.canonicality_state = CanonicalityState::Finalized;
+
+    let first_hook = super::write_rows::test_hooks::RowPathReloadHook::new(
+        "resources",
+        first_resource_id.to_string(),
+    );
+    let second_hook = super::write_rows::test_hooks::RowPathReloadHook::new(
+        "resources",
+        second_resource_id.to_string(),
+    );
+    super::write_rows::test_hooks::install_row_path_reload_hook(first_hook.clone());
+    super::write_rows::test_hooks::install_row_path_reload_hook(second_hook.clone());
+
+    let first_pool = database.pool().clone();
+    let first_task = tokio::spawn({
+        let first_replay = first_replay.clone();
+        let second_replay = second_replay.clone();
+        async move { upsert_resources(&first_pool, &[first_replay, second_replay]).await }
+    });
+
+    let second_pool = database.pool().clone();
+    let second_task = tokio::spawn({
+        let first_replay = first_replay.clone();
+        let second_replay = second_replay.clone();
+        async move { upsert_resources(&second_pool, &[second_replay, first_replay]).await }
+    });
+
+    timeout(
+        std::time::Duration::from_secs(5),
+        first_hook.wait_until_reached(),
+    )
+    .await
+    .context("timed out waiting for first resource row-path reload hook")?;
+    timeout(
+        std::time::Duration::from_secs(5),
+        second_hook.wait_until_reached(),
+    )
+    .await
+    .context("timed out waiting for second resource row-path reload hook")?;
+
+    first_hook.release();
+    second_hook.release();
+
+    first_task
+        .await
+        .context("first resource deadlock retry task panicked")??;
+    second_task
+        .await
+        .context("second resource deadlock retry task panicked")??;
+
+    assert_eq!(
+        load_resource(database.pool(), first_resource_id)
+            .await?
+            .expect("first resource must remain readable")
+            .canonicality_state,
+        CanonicalityState::Finalized
+    );
+    assert_eq!(
+        load_resource(database.pool(), second_resource_id)
+            .await?
+            .expect("second resource must remain readable")
+            .canonicality_state,
+        CanonicalityState::Finalized
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn row_path_surface_binding_upsert_preserves_concurrent_tighten() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x2015);
@@ -2749,6 +2847,181 @@ async fn identity_count_statement_triggers_recompute_name_current_resource_eligi
         .context("failed to orphan name_current resource")?;
 
     assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn identity_count_resource_observed_to_orphaned_does_not_recompute() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000ab0";
+    let logical_name_id = "ens:observed-gate.eth";
+    let resource_id = Uuid::from_u128(0xf051);
+    let surface_binding_id = Uuid::from_u128(0xf052);
+    let sentinel_updated_at = timestamp(1_717_174_000);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            logical_name_id,
+            "observed-gate.eth",
+            "observed-gate.eth",
+            "observed_gate_surface",
+            720,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "observed_gate_resource",
+            721,
+            CanonicalityState::Observed,
+        )],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[binding(BindingSeed {
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_173_900),
+            active_to: None,
+            source: "observed_gate_relation",
+            chain_label: "observed_gate_binding",
+            block_number: 722,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            'ens',
+            'observed-gate.eth',
+            'observed-gate.eth',
+            'namehash:observed-gate.eth',
+            $2,
+            $3,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed name_current for observed gate test")?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            $2,
+            'registrant',
+            'ens',
+            'observed-gate.eth',
+            'observed-gate.eth',
+            'namehash:observed-gate.eth',
+            $3,
+            $4,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed address_names_current for observed gate test")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current_identity_counts (
+            address,
+            roles,
+            total_count,
+            updated_at
+        )
+        VALUES ($1, 'owned', 0, $2)
+        "#,
+    )
+    .bind(address)
+    .bind(sentinel_updated_at)
+    .execute(database.pool())
+    .await
+    .context("failed to seed identity count sentinel")?;
+
+    sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
+        .bind(resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to orphan observed resource")?;
+
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
+    assert_eq!(
+        identity_count_updated_at(database.pool(), address, "owned").await?,
+        sentinel_updated_at,
+        "observed-to-orphaned resource updates must not fire the identity count recompute trigger"
+    );
 
     database.cleanup().await
 }

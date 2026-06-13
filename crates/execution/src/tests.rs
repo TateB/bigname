@@ -3,7 +3,7 @@ use std::{
     process::Command,
     str::FromStr,
     sync::{
-        Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -39,12 +39,13 @@ use super::*;
 use bigname_storage::{
     ChainLineageBlock, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, MIGRATOR,
     NameCurrentRow, NameSurface, NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
-    RawCallSnapshot, RecordInventoryCurrentRow, Resource,
+    PrimaryNameCurrentSnapshot, RawCallSnapshot, RecordInventoryCurrentRow, Resource,
     SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey, SurfaceBinding,
     SurfaceBindingKind, TokenLineage, default_database_url, upsert_chain_lineage_blocks,
     upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_record_inventory_current_rows,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_primary_name_current_snapshots,
+    upsert_record_inventory_current_rows, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 use uuid::Uuid;
 
@@ -4998,7 +4999,7 @@ async fn persists_basenames_verified_primary_not_found_without_l1_resolver_call(
         &database,
         "0x00000000000000000000000000000000000000bb",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
@@ -5093,7 +5094,7 @@ async fn persists_verified_primary_not_found_without_resolver_call() -> Result<(
         &database,
         "0x00000000000000000000000000000000000000ac",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
@@ -5268,6 +5269,196 @@ async fn verified_primary_readback_returns_none_when_anchor_is_missing() -> Resu
             .await?
             .is_none(),
         "readback must stay gated on primary_names_current tuple presence"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_stale_success_after_claim_name_changes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = verified_primary_success_request();
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+        }],
+    )
+    .await?;
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("bob.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("stale verified-primary producer must fail after claim-name change");
+    assert!(
+        error.to_string().contains("claim content"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected stale verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected stale verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_transaction()
+-> Result<()> {
+    struct HookState {
+        reached: bool,
+        release: bool,
+    }
+
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+    request.trace.execution_trace_id = execution_trace_id;
+    request.outcome.execution_trace_id = execution_trace_id;
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    let hook_state = Arc::new((
+        Mutex::new(HookState {
+            reached: false,
+            release: false,
+        }),
+        Condvar::new(),
+    ));
+    let hook_trace_id = request.trace.execution_trace_id;
+    let hook_state_for_hook = Arc::clone(&hook_state);
+    let _hook_guard = super::persistence::test_hooks::install_verified_primary_pre_transaction_hook(
+        Arc::new(move |execution_trace_id| {
+            if execution_trace_id != hook_trace_id {
+                return;
+            }
+            let (lock, condvar) = &*hook_state_for_hook;
+            let mut state = lock
+                .lock()
+                .expect("verified-primary hook state mutex poisoned");
+            state.reached = true;
+            condvar.notify_all();
+            while !state.release {
+                state = condvar
+                    .wait(state)
+                    .expect("verified-primary hook state mutex poisoned while waiting");
+            }
+        }),
+    );
+
+    let pool = database.pool().clone();
+    let request_for_thread = request.clone();
+    let persist_thread = std::thread::spawn(move || -> Result<_> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verified-primary persistence test runtime")?;
+        runtime.block_on(persist_ens_verified_primary_name(
+            &pool,
+            &request_for_thread,
+        ))
+    });
+
+    let hook_state_for_wait = Arc::clone(&hook_state);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let (lock, condvar) = &*hook_state_for_wait;
+        let mut state = lock
+            .lock()
+            .expect("verified-primary hook state mutex poisoned");
+        while !state.reached {
+            state = condvar
+                .wait(state)
+                .expect("verified-primary hook state mutex poisoned while waiting");
+        }
+        Ok(())
+    })
+    .await
+    .context("verified-primary hook wait task panicked")??;
+
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("bob.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    {
+        let (lock, condvar) = &*hook_state;
+        let mut state = lock
+            .lock()
+            .expect("verified-primary hook state mutex poisoned");
+        state.release = true;
+        condvar.notify_all();
+    }
+
+    let persist_result = tokio::task::spawn_blocking(move || {
+        persist_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("verified-primary persistence test thread panicked"))
+    })
+    .await
+    .context("verified-primary persistence join task panicked")??;
+    let error = persist_result
+        .expect_err("stale verified-primary producer must fail after interleaved claim change");
+    assert!(
+        error.to_string().contains("claim content"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "interleaved stale verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "interleaved stale verified-primary request must not persist outcome rows"
     );
 
     database.cleanup().await

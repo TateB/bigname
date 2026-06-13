@@ -43,6 +43,26 @@ pub async fn upsert_primary_name_current_snapshots(
         .await
         .context("failed to open transaction for primary_names_current snapshot upsert")?;
 
+    let persisted =
+        upsert_primary_name_current_snapshots_in_transaction(&mut transaction, snapshots).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit primary_names_current snapshot upsert")?;
+
+    Ok(persisted)
+}
+
+/// Insert or replace declared primary-name claim-state snapshots in a caller-owned transaction.
+pub async fn upsert_primary_name_current_snapshots_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    snapshots: &[PrimaryNameCurrentSnapshot],
+) -> Result<Vec<PrimaryNameCurrentSnapshot>> {
+    if snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut ordered_snapshots = snapshots.iter().enumerate().collect::<Vec<_>>();
     ordered_snapshots.sort_by(|(_, left), (_, right)| {
         (
@@ -61,7 +81,7 @@ pub async fn upsert_primary_name_current_snapshots(
     for (input_index, snapshot) in ordered_snapshots {
         validate_primary_name_current_snapshot(snapshot)?;
         persisted[input_index] = Some(
-            upsert_primary_name_current_snapshot(&mut transaction, snapshot)
+            upsert_primary_name_current_snapshot(transaction, snapshot)
                 .await
                 .with_context(|| {
                     format!(
@@ -70,11 +90,6 @@ pub async fn upsert_primary_name_current_snapshots(
                 })?,
         );
     }
-
-    transaction
-        .commit()
-        .await
-        .context("failed to commit primary_names_current snapshot upsert")?;
 
     persisted
         .into_iter()

@@ -10,6 +10,9 @@ use anyhow::{Context, Result, bail};
 use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest};
+
+const SUPPORTED_NORMALIZER_VERSION: &str = "ensip15@ens-normalize-0.1.1";
+
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     let root = root.as_ref();
     let display_root = canonicalize_for_logging(root);
@@ -103,7 +106,7 @@ fn load_manifest_file(root: &Path, path: &Path) -> Result<LoadedManifest> {
         .with_context(|| format!("failed to parse manifest TOML {}", path.display()))?
         .into();
 
-    validate_manifest_metadata(&manifest, path, &relative_path)?;
+    validate_manifest_metadata(&manifest, path, &relative_path, &version_tag)?;
 
     Ok(LoadedManifest {
         path: path.to_path_buf(),
@@ -117,6 +120,7 @@ fn validate_manifest_metadata(
     manifest: &SourceManifest,
     path: &Path,
     relative_path: &Path,
+    version_tag: &str,
 ) -> Result<()> {
     let parts = relative_path
         .iter()
@@ -181,11 +185,38 @@ fn validate_manifest_metadata(
         );
     }
 
+    let expected_version_tag = format!("v{}", manifest.manifest_version);
+    if version_tag != expected_version_tag {
+        bail!(
+            "manifest_version {} does not match version tag {} for {}",
+            manifest.manifest_version,
+            version_tag,
+            path.display()
+        );
+    }
+
+    if manifest.normalizer_version != SUPPORTED_NORMALIZER_VERSION {
+        bail!(
+            "manifest {} declares unsupported normalizer_version {}; expected {}",
+            path.display(),
+            manifest.normalizer_version,
+            SUPPORTED_NORMALIZER_VERSION
+        );
+    }
+
     for root in &manifest.roots {
         validate_start_block_fits_i64(root.start_block, "root", &root.name, path)?;
     }
 
+    let mut contract_roles = BTreeSet::new();
     for contract in &manifest.contracts {
+        if !contract_roles.insert(contract.role.as_str()) {
+            bail!(
+                "manifest {} duplicates contract role {}",
+                path.display(),
+                contract.role
+            );
+        }
         validate_start_block_fits_i64(contract.start_block, "contract", &contract.role, path)?;
     }
 

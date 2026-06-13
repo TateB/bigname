@@ -8,10 +8,50 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    type VerifiedPrimaryPreTransactionHook = Arc<dyn Fn(Uuid) + Send + Sync + 'static>;
+
+    static VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK: Mutex<Option<VerifiedPrimaryPreTransactionHook>> =
+        Mutex::new(None);
+
+    pub(crate) struct VerifiedPrimaryPreTransactionHookGuard;
+
+    impl Drop for VerifiedPrimaryPreTransactionHookGuard {
+        fn drop(&mut self) {
+            *VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK
+                .lock()
+                .expect("verified-primary pre-transaction hook mutex poisoned") = None;
+        }
+    }
+
+    pub(crate) fn install_verified_primary_pre_transaction_hook(
+        hook: VerifiedPrimaryPreTransactionHook,
+    ) -> VerifiedPrimaryPreTransactionHookGuard {
+        *VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK
+            .lock()
+            .expect("verified-primary pre-transaction hook mutex poisoned") = Some(hook);
+        VerifiedPrimaryPreTransactionHookGuard
+    }
+
+    pub(super) fn run_verified_primary_pre_transaction_hook(execution_trace_id: Uuid) {
+        let hook = VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK
+            .lock()
+            .expect("verified-primary pre-transaction hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(execution_trace_id);
+        }
+    }
+}
+
 use crate::primary_name::{
-    ensure_primary_name_anchor_exists, extract_verified_primary_readback_provenance,
-    validate_verified_primary_request, validate_verified_primary_trace_and_outcome,
-    verified_primary_context_label,
+    ensure_primary_name_anchor_matches, ensure_primary_name_anchor_matches_in_transaction,
+    extract_verified_primary_readback_provenance, validate_verified_primary_request,
+    validate_verified_primary_trace_and_outcome, verified_primary_context_label,
 };
 use crate::revalidation::revalidate_supported_resolution_persistence_from_storage;
 use crate::validation::{validate_basenames_transport_direct_request, validate_direct_request};
@@ -196,12 +236,22 @@ pub async fn persist_ens_verified_primary_name(
 ) -> Result<PersistedVerifiedPrimaryNameIdentity> {
     let validated = validate_verified_primary_request(request)?;
     let context = verified_primary_context_label(&validated.tuple.namespace)?;
-    ensure_primary_name_anchor_exists(pool, &validated.tuple).await?;
+    ensure_primary_name_anchor_matches(pool, &validated.tuple, &validated.verified_primary_name)
+        .await?;
+    #[cfg(test)]
+    test_hooks::run_verified_primary_pre_transaction_hook(request.trace.execution_trace_id);
 
     let mut transaction = pool
         .begin()
         .await
         .with_context(|| format!("failed to open transaction for {context} persistence"))?;
+
+    ensure_primary_name_anchor_matches_in_transaction(
+        &mut transaction,
+        &validated.tuple,
+        &validated.verified_primary_name,
+    )
+    .await?;
 
     // Validation requires request_metadata.cache_identity to mirror the outcome cache key; the
     // trace write carries that full identity for API readback.

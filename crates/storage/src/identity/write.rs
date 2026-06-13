@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{Error as SqlxError, PgPool};
 
 use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 use super::validate::{
@@ -19,9 +19,26 @@ use super::write_rows::{
 };
 
 const IDENTITY_UPSERT_WITHOUT_SNAPSHOTS_BATCH_SIZE: usize = 10_000;
+const IDENTITY_ROW_PATH_UPSERT_MAX_ATTEMPTS: usize = 3;
 
 /// Insert missing token lineage rows or refresh canonicality on re-observation.
 pub async fn upsert_token_lineages(
+    pool: &PgPool,
+    token_lineages: &[TokenLineage],
+) -> Result<Vec<TokenLineage>> {
+    let mut attempt = 1;
+    loop {
+        match upsert_token_lineages_once(pool, token_lineages).await {
+            Ok(snapshots) => return Ok(snapshots),
+            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn upsert_token_lineages_once(
     pool: &PgPool,
     token_lineages: &[TokenLineage],
 ) -> Result<Vec<TokenLineage>> {
@@ -80,6 +97,19 @@ pub async fn upsert_token_lineages_without_snapshots(
 
 /// Insert missing resource rows or anchor an existing resource to a token lineage.
 pub async fn upsert_resources(pool: &PgPool, resources: &[Resource]) -> Result<Vec<Resource>> {
+    let mut attempt = 1;
+    loop {
+        match upsert_resources_once(pool, resources).await {
+            Ok(snapshots) => return Ok(snapshots),
+            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn upsert_resources_once(pool: &PgPool, resources: &[Resource]) -> Result<Vec<Resource>> {
     if resources.is_empty() {
         return Ok(Vec::new());
     }
@@ -134,6 +164,22 @@ pub async fn upsert_resources_without_snapshots(
 
 /// Insert missing canonical surface rows or refresh canonicality on re-observation.
 pub async fn upsert_name_surfaces(
+    pool: &PgPool,
+    name_surfaces: &[NameSurface],
+) -> Result<Vec<NameSurface>> {
+    let mut attempt = 1;
+    loop {
+        match upsert_name_surfaces_once(pool, name_surfaces).await {
+            Ok(snapshots) => return Ok(snapshots),
+            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn upsert_name_surfaces_once(
     pool: &PgPool,
     name_surfaces: &[NameSurface],
 ) -> Result<Vec<NameSurface>> {
@@ -211,6 +257,22 @@ pub async fn upsert_surface_bindings(
     pool: &PgPool,
     bindings: &[SurfaceBinding],
 ) -> Result<Vec<SurfaceBinding>> {
+    let mut attempt = 1;
+    loop {
+        match upsert_surface_bindings_once(pool, bindings).await {
+            Ok(snapshots) => return Ok(snapshots),
+            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn upsert_surface_bindings_once(
+    pool: &PgPool,
+    bindings: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
     if bindings.is_empty() {
         return Ok(Vec::new());
     }
@@ -258,6 +320,17 @@ pub async fn upsert_surface_bindings(
         .context("failed to commit surface-binding upsert")?;
 
     Ok(snapshots)
+}
+
+fn retry_identity_row_path_upsert(error: &anyhow::Error, attempt: usize) -> bool {
+    attempt < IDENTITY_ROW_PATH_UPSERT_MAX_ATTEMPTS
+        && error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<SqlxError>(),
+                Some(SqlxError::Database(database_error))
+                    if matches!(database_error.code().as_deref(), Some("40P01" | "40001"))
+            )
+        })
 }
 
 /// Insert missing surface-binding rows or close existing intervals without retaining snapshots.

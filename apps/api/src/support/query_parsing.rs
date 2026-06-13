@@ -142,15 +142,19 @@ pub(super) fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult
         });
     };
 
-    if coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
-        Ok(coin_type.to_owned())
-    } else {
-        Err(ApiError {
+    if !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+        return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_input",
             message: "coin_type must contain only decimal digits".to_owned(),
-        })
+        });
     }
+
+    bigname_storage::canonical_addr_coin_type(coin_type).ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
+    })
 }
 
 pub(super) fn parse_resolution_record_keys(
@@ -218,7 +222,7 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
             selector_key: None,
         }),
         Some(("addr", selector)) if !selector.is_empty() => {
-            let selector_key = canonical_addr_coin_type_selector(selector)?;
+            let selector_key = bigname_storage::canonical_addr_coin_type(selector)?;
             Some(ResolutionRecordKey {
                 record_key: format!("addr:{selector_key}"),
                 record_family: "addr".to_owned(),
@@ -234,14 +238,6 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
         }
         _ => None,
     }
-}
-
-fn canonical_addr_coin_type_selector(selector: &str) -> Option<String> {
-    if !selector.as_bytes().iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-
-    selector.parse::<u64>().ok().map(|value| value.to_string())
 }
 
 pub(super) fn parse_permissions_subject(subject: Option<&str>) -> Option<String> {
@@ -528,6 +524,14 @@ mod tests {
         );
         assert!(parse_primary_name_address("0xABC").is_err());
         assert!(parse_primary_name_address("00000000000000000000000000000000000000AA").is_err());
+    }
+
+    #[test]
+    fn primary_name_coin_type_is_canonicalized_at_parse_boundary() {
+        assert_eq!(
+            must_parse(parse_primary_name_coin_type(Some("060"))),
+            "60"
+        );
     }
 
     #[test]

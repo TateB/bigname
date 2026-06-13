@@ -12,7 +12,7 @@ pub use boundaries::{
     resolution_verified_support_boundary, try_resolution_verified_support_boundary,
 };
 pub use record_keys::{
-    SupportedVerifiedResolutionRecordKey, is_resolution_avatar_record,
+    SupportedVerifiedResolutionRecordKey, canonical_addr_coin_type, is_resolution_avatar_record,
     parse_supported_verified_resolution_record_key, resolution_execution_cache_lookup_records,
     supported_resolution_verified_lookup_records, supported_resolution_verified_readback_records,
     supports_resolution_verified_lookup_record,
