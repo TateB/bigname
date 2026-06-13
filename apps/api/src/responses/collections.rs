@@ -360,12 +360,13 @@ fn build_collection_provenance_from_refs(
 
 fn collect_collection_provenance_values(provenances: &[&JsonValue], key: &str) -> Vec<JsonValue> {
     let mut deduped = Vec::new();
+    let mut seen = BTreeSet::new();
     for provenance in provenances {
         let Some(JsonValue::Array(values)) = provenance_field(provenance, key) else {
             continue;
         };
         for value in values {
-            if !deduped.contains(value) {
+            if seen.insert(value.to_string()) {
                 deduped.push(value.clone());
             }
         }

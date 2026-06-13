@@ -202,7 +202,7 @@ pub(super) async fn name_children(
                 .iter()
                 .map(|row| row.child_logical_name_id.clone())
                 .collect::<Vec<_>>();
-            let child_name_rows =
+            let child_name_rows = async {
                 bigname_storage::load_name_current_by_logical_name_ids(
                     &state.pool,
                     &child_logical_name_ids,
@@ -220,34 +220,39 @@ pub(super) async fn name_children(
                     ApiError::internal_error(format!(
                         "failed to load compact child collection for name {namespace}/{name}"
                     ))
-                })?;
-            let child_summaries = if include_counts {
-                let summaries = bigname_storage::load_children_current_summaries(
-                    &state.pool,
-                    &child_logical_name_ids,
-                )
-                .await
-                .map_err(|load_error| {
-                    error!(
-                        service = "api",
-                        namespace = %namespace,
-                        name = %name,
-                        logical_name_id = %logical_name_id,
-                        error = ?load_error,
-                        "failed to batch load children_current summaries for compact children route"
-                    );
-                    ApiError::internal_error(format!(
-                        "failed to load compact child counts for name {namespace}/{name}"
-                    ))
-                })?;
-
-                summaries
-                    .into_iter()
-                    .map(|summary| (summary.parent_logical_name_id.clone(), summary))
-                    .collect()
-            } else {
-                BTreeMap::new()
+                })
             };
+            let child_summaries = async {
+                if include_counts {
+                    bigname_storage::load_children_current_summaries(
+                        &state.pool,
+                        &child_logical_name_ids,
+                    )
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            namespace = %namespace,
+                            name = %name,
+                            logical_name_id = %logical_name_id,
+                            error = ?load_error,
+                            "failed to batch load children_current summaries for compact children route"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load compact child counts for name {namespace}/{name}"
+                        ))
+                    })
+                } else {
+                    Ok(Vec::new())
+                }
+            };
+
+            let (child_name_rows, child_summaries) =
+                tokio::try_join!(child_name_rows, child_summaries)?;
+            let child_summaries = child_summaries
+                .into_iter()
+                .map(|summary| (summary.parent_logical_name_id.clone(), summary))
+                .collect();
             let mut child_surface_labelhashes = BTreeMap::new();
             let mut child_surface_ids = BTreeSet::new();
             for row in storage_page
