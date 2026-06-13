@@ -605,6 +605,71 @@ async fn roles_return_stale_until_permissions_projection_is_available() -> Resul
 }
 
 #[tokio::test]
+async fn roles_treat_stale_permissions_replay_marker_as_unavailable() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let account = "0x0000000000000000000000000000000000000aaa";
+
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ('permissions_current', 1, 0, 0, 0, 0)
+        "#,
+    )
+    .execute(&database.pool)
+    .await
+    .context("failed to insert stale permissions_current replay marker")?;
+
+    let stale_marker_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?account={account}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles request with stale permissions marker failed")?;
+    assert_eq!(stale_marker_response.status(), StatusCode::CONFLICT);
+    let stale_marker_payload: ErrorResponse = read_json(stale_marker_response).await?;
+    assert_eq!(stale_marker_payload.error.code, "stale");
+
+    sqlx::query(
+        r#"
+        INSERT INTO projection_apply_cursors (
+            cursor_name,
+            last_change_id
+        )
+        VALUES ('normalized_events_to_projection_invalidations', 1)
+        "#,
+    )
+    .execute(&database.pool)
+    .await
+    .context("failed to insert normalized-event projection apply cursor")?;
+
+    let cursor_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?account={account}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles request with stale marker and apply cursor failed")?;
+    assert_eq!(cursor_response.status(), StatusCode::CONFLICT);
+    let cursor_payload: ErrorResponse = read_json(cursor_response).await?;
+    assert_eq!(cursor_payload.error.code, "stale");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn roles_reject_unsupported_bitmap_filter_and_missing_primary_filter() -> Result<()> {
     let database = TestDatabase::new(false).await?;
 
@@ -661,7 +726,7 @@ async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> R
             upserted_row_count,
             deleted_row_count
         )
-        VALUES ('permissions_current', 1, 0, 0, 0, 0)
+        VALUES ('permissions_current', 5, 0, 0, 0, 0)
         ON CONFLICT (projection) DO UPDATE SET
             replay_version = EXCLUDED.replay_version,
             completed_normalized_target_block = EXCLUDED.completed_normalized_target_block,

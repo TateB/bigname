@@ -19,6 +19,8 @@ const ENSV2_ROOT_UPSTREAM_RESOURCE: &str =
 const ENSV2_RESOURCE_UUID_PREFIX: &str = "ens-v2-resource";
 const ENSV2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
 const ENSV2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
+// Keep in sync with apps/worker replay::CURRENT_PROJECTION_REPLAY_VERSION.
+const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 5;
 
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())
@@ -97,18 +99,15 @@ async fn ensure_permissions_current_projection_available(
 ) -> ApiResult<()> {
     let available = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT
-            EXISTS (
-                SELECT 1
-                FROM current_projection_replay_status
-                WHERE projection = 'permissions_current'
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM projection_apply_cursors
-            )
+        SELECT EXISTS (
+            SELECT 1
+            FROM current_projection_replay_status
+            WHERE projection = 'permissions_current'
+              AND replay_version = $1
+        )
         "#,
     )
+    .bind(CURRENT_PROJECTION_REPLAY_VERSION)
     .fetch_one(pool)
     .await
     .map_err(|load_error| {
