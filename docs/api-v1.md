@@ -417,6 +417,8 @@ The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as hel
 
 Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports and retained-fact backfills may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_input`.
 
+Deploy note: name-role pagination now orders the `account_resource_scope_asc` text components with bytewise PostgreSQL `COLLATE "C"`, and the cursor envelope version is `2`. Cursors issued before that ordering change fail with `400 invalid_input` after rollout; clients must restart pagination from the first page.
+
 ## Error model
 
 ```json
