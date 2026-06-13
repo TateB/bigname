@@ -1,5 +1,8 @@
 use super::*;
-use crate::projection_apply::apply_locks::invalidation_apply_lock_key;
+use crate::projection_apply::apply_locks::{
+    acquire_invalidation_apply_locks_with_timeout, ensure_invalidation_apply_locks_alive,
+    invalidation_apply_lock_key, invalidation_apply_locks_backend_pid,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
 async fn test_database() -> Result<TestDatabase> {
@@ -317,6 +320,81 @@ async fn projection_invalidation_apply_locks_serialize_same_key() -> Result<()> 
             .context("failed to release second projection invalidation apply lock")?;
     assert!(released_probe_lock);
     drop(second_conn);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn projection_invalidation_apply_lock_acquisition_is_bounded_when_blocked() -> Result<()> {
+    let database = test_database().await?;
+    let invalidation = ClaimedInvalidation {
+        projection: "permissions_current".to_owned(),
+        projection_key: Uuid::new_v4().to_string(),
+        key_payload: Value::Object(Default::default()),
+        generation: 0,
+        claim_token: Uuid::new_v4(),
+        attempt_count: 0,
+    };
+
+    let mut first_lock =
+        acquire_invalidation_apply_locks(database.pool(), std::slice::from_ref(&invalidation))
+            .await?;
+
+    let blocked = timeout(
+        Duration::from_secs(1),
+        acquire_invalidation_apply_locks_with_timeout(
+            database.pool(),
+            std::slice::from_ref(&invalidation),
+            Duration::from_millis(100),
+        ),
+    )
+    .await;
+
+    release_invalidation_apply_locks(&mut first_lock).await?;
+    let result = blocked.context("lock acquisition blocked past outer test timeout")?;
+    let error = match result {
+        Ok(mut locks) => {
+            release_invalidation_apply_locks(&mut locks).await?;
+            bail!("blocked lock acquisition unexpectedly succeeded");
+        }
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("timed out acquiring projection invalidation apply lock"),
+        "unexpected blocked lock acquisition error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn projection_invalidation_apply_lock_liveness_detects_dead_connection() -> Result<()> {
+    let database = test_database().await?;
+    let invalidation = ClaimedInvalidation {
+        projection: "permissions_current".to_owned(),
+        projection_key: Uuid::new_v4().to_string(),
+        key_payload: Value::Object(Default::default()),
+        generation: 0,
+        claim_token: Uuid::new_v4(),
+        attempt_count: 0,
+    };
+
+    let mut locks =
+        acquire_invalidation_apply_locks(database.pool(), std::slice::from_ref(&invalidation))
+            .await?;
+    let lock_backend_pid = invalidation_apply_locks_backend_pid(&mut locks).await?;
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(lock_backend_pid)
+        .fetch_one(database.pool())
+        .await
+        .context("failed to terminate projection invalidation apply lock backend")?;
+    assert!(terminated);
+
+    let liveness = ensure_invalidation_apply_locks_alive(&mut locks).await;
+    assert!(
+        liveness.is_err(),
+        "dead projection invalidation apply lock connection must fail liveness check"
+    );
 
     database.cleanup().await
 }

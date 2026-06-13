@@ -15,7 +15,10 @@ use crate::{
 
 use super::{
     CLAIM_RETRY_DELAY, FAILURE_RETRY_DELAY,
-    apply_locks::{acquire_invalidation_apply_locks, release_invalidation_apply_locks},
+    apply_locks::{
+        acquire_invalidation_apply_locks, ensure_invalidation_apply_locks_alive,
+        release_invalidation_apply_locks,
+    },
     dead_letters::dead_letter_invalidation,
 };
 
@@ -65,6 +68,7 @@ pub(super) async fn apply_pending_invalidations(
                 let mut locks = acquire_invalidation_apply_locks(pool, &group).await?;
                 let result = apply_address_names_group(pool, &group).await;
                 let finish = async {
+                    ensure_invalidation_apply_locks_alive(&mut locks).await?;
                     match result {
                         Ok(()) => {
                             for invalidation in &group {
@@ -97,6 +101,7 @@ pub(super) async fn apply_pending_invalidations(
                 apply_one(pool, &invalidation, text_hydration_config).await
             };
             let finish = async {
+                ensure_invalidation_apply_locks_alive(&mut locks).await?;
                 match result {
                     Ok(()) => {
                         complete_invalidation(pool, &invalidation).await?;
