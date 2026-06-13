@@ -129,7 +129,10 @@ Field ownership:
   the same object. The profile portion uses `name`, `display_name`, `namespace`,
   `namehash`, `resolver`, `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
-  `unsupported_fields` when those fields are served.
+  `unsupported_fields` when those fields are served. On a `200` profile,
+  `status` is the flat-record result: `ok` for clean indexed reads; `failed`
+  or `stale` may appear only when `source=verified` cannot serve the verified
+  sections; `not_found` and `invalid_name` are unreachable in-record.
 - Pagination behavior: none.
 - Status semantics: valid names with no profile return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -254,16 +257,21 @@ Field ownership:
   `{address, coin_type, namespace, answers, verification?}`. `answers` is an
   array of `{source, status, name?, raw_claim_name?, unsupported_reason?,
   failure_reason?}` entries. When `source` is omitted, the route returns one
-  entry per supported answer source in stable `indexed`, then `verified` order.
+  entry for each answer source in stable `indexed`, then `verified` order;
+  unsupported sources are represented by an entry with `status=unsupported`,
+  not omitted.
   Supplying `source=indexed` or `source=verified` narrows the `answers` array
   to that source for single-source callers. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears whenever
-  a persisted or on-demand verified outcome exists. Claimed-vs-verified remains
-  one call without `declared_state`/`verified_state`.
+  a persisted or on-demand verified outcome exists. The `verified` answer
+  entry is the source-specific payload; `verification` is the typed comparison
+  summary and must not contradict that entry. Claimed-vs-verified remains one
+  call without `declared_state`/`verified_state`.
 - Pagination behavior: none.
-- Status semantics: valid tuples with no claim return `200` with in-band
-  `status=not_found`. Unsupported and mismatched verification outcomes also
-  return `200` with in-band `status`. Malformed addresses return
+- Status semantics: answer entries use in-band `status`. Valid tuples with no
+  indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
+  not-found, failed, and mismatched verified outcomes return `200` with the
+  corresponding `verified` entry status. Malformed addresses return
   `400 invalid_input`.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
@@ -358,12 +366,16 @@ Diagnostic snapshot rules:
 - `/v2/diagnostics/names/{name}/coverage`,
   `/v2/diagnostics/names/{name}/binding`,
   `/v2/diagnostics/names/{name}/authority`,
-  `/v2/diagnostics/names/{name}/records`, and `/v2/diagnostics/events`
+  `/v2/diagnostics/names/{name}/records`,
+  `/v2/diagnostics/names/{name}/execution`, and `/v2/diagnostics/events`
   accept `at` and `finality` and carry `meta.as_of` because they explain the
   same selected snapshot as product reads.
-- `/v2/diagnostics/names/{name}/execution` does not accept `at` or `finality`;
-  it explains a persisted verified-execution artifact selected by exact name
-  and `keys`.
+- Diagnostics execution selection uses the exact name, `keys`, and selected
+  snapshot. Omitting `at` selects the latest persisted execution artifact.
+  RFC 3339 `at` selects the newest persisted artifact whose requested chain
+  positions are at or before the selected positions. If multiple artifacts
+  match, the deterministic tie-break is newest `finished_at`, then greatest
+  `execution_trace_id`.
 - `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of`; it is
   control-plane metadata.
 
