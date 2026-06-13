@@ -111,7 +111,7 @@ pub async fn upsert_raw_transactions_without_snapshots(
             ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
             SET
                 canonicality_state = CASE
-                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
                         AND raw_transactions.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
@@ -221,7 +221,7 @@ async fn upsert_raw_transactions_bulk(
             ON CONFLICT (chain_id, block_hash, transaction_index) DO UPDATE
             SET
                 canonicality_state = CASE
-                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN raw_transactions.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
                         AND raw_transactions.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)

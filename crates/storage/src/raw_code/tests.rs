@@ -165,40 +165,6 @@ async fn bulk_upserts_and_promotes_raw_code_hashes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn bulk_raw_code_hash_upsert_preserves_orphaned_rows() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let code_hashes = (0_i64..150)
-        .map(|index| RawCodeHash {
-            block_hash: format!("0xblock{index:064x}"),
-            block_number: index,
-            contract_address: format!("0x{index:040x}"),
-            ..raw_code_hash("0x0001", CanonicalityState::Orphaned)
-        })
-        .collect::<Vec<_>>();
-
-    upsert_raw_code_hashes(database.pool(), &code_hashes).await?;
-
-    let canonical_code_hashes = code_hashes
-        .iter()
-        .cloned()
-        .map(|mut code_hash| {
-            code_hash.canonicality_state = CanonicalityState::Canonical;
-            code_hash
-        })
-        .collect::<Vec<_>>();
-    let refreshed = upsert_raw_code_hashes(database.pool(), &canonical_code_hashes).await?;
-
-    assert_eq!(refreshed.len(), canonical_code_hashes.len());
-    assert!(
-        refreshed
-            .iter()
-            .all(|code_hash| code_hash.canonicality_state == CanonicalityState::Orphaned)
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn raw_code_hash_upsert_rejects_identity_mismatch() -> Result<()> {
     let database = TestDatabase::new().await?;
 

@@ -117,7 +117,7 @@ pub async fn upsert_raw_logs_without_snapshots(pool: &PgPool, logs: &[RawLog]) -
             ON CONFLICT (chain_id, block_hash, log_index) DO UPDATE
             SET
                 canonicality_state = CASE
-                    WHEN raw_logs.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN raw_logs.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
                         AND raw_logs.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
@@ -234,7 +234,7 @@ async fn upsert_raw_logs_bulk(pool: &PgPool, logs: &[RawLog]) -> Result<Vec<RawL
             ON CONFLICT (chain_id, block_hash, log_index) DO UPDATE
             SET
                 canonicality_state = CASE
-                    WHEN raw_logs.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
+                    WHEN raw_logs.canonicality_state = 'orphaned'::canonicality_state THEN EXCLUDED.canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
                     WHEN EXCLUDED.canonicality_state = 'canonical'::canonicality_state
                         AND raw_logs.canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
