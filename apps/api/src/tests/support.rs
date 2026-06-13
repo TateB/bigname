@@ -38,7 +38,7 @@ mod execution {
     use bigname_storage::{
         ExecutionOutcomeInvalidationSummary, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
     };
-    use sqlx::PgPool;
+    use sqlx::{PgPool, Postgres, Transaction};
 
     // Test-local SQL copy of the canonical worker invalidation helper. Keep this in sync with
     // apps/worker/src/execution.rs::invalidate_verified_primary_name_claim_change.
@@ -65,6 +65,41 @@ mod execution {
         .bind(namespace)
         .bind(request_key)
         .execute(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
+            )
+        })?;
+
+        Ok(ExecutionOutcomeInvalidationSummary {
+            deleted_outcome_count: result.rows_affected(),
+        })
+    }
+
+    pub async fn invalidate_verified_primary_name_claim_change_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        namespace: &str,
+        request_key: &str,
+    ) -> Result<ExecutionOutcomeInvalidationSummary> {
+        if namespace.trim().is_empty() {
+            bail!("verified primary-name claim invalidation namespace must not be blank");
+        }
+        if request_key.trim().is_empty() {
+            bail!("verified primary-name claim invalidation request_key must not be blank");
+        }
+        let result = sqlx::query(
+            r#"
+            DELETE FROM execution_cache_outcomes
+            WHERE request_type = $1
+              AND namespace = $2
+              AND request_key = $3
+            "#,
+        )
+        .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+        .bind(namespace)
+        .bind(request_key)
+        .execute(&mut **transaction)
         .await
         .with_context(|| {
             format!(

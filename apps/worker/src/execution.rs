@@ -9,7 +9,7 @@ use bigname_storage::{
     invalidate_execution_outcomes_for_topology_boundary_and_request_key, normalize_evm_address,
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
@@ -177,6 +177,36 @@ pub async fn invalidate_verified_primary_name_claim_change(
     .bind(namespace)
     .bind(request_key)
     .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
+        )
+    })?;
+
+    Ok(ExecutionOutcomeInvalidationSummary {
+        deleted_outcome_count: result.rows_affected(),
+    })
+}
+
+pub async fn invalidate_verified_primary_name_claim_change_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    namespace: &str,
+    request_key: &str,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    validate_claim_change_scope(namespace, request_key)?;
+    let result = sqlx::query(
+        r#"
+        DELETE FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND namespace = $2
+          AND request_key = $3
+        "#,
+    )
+    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+    .bind(namespace)
+    .bind(request_key)
+    .execute(&mut **transaction)
     .await
     .with_context(|| {
         format!(

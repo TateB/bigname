@@ -30,6 +30,10 @@ pub(super) struct TestDatabase {
 
 impl TestDatabase {
     pub(super) async fn new() -> Result<Self> {
+        Self::new_with_max_connections(5).await
+    }
+
+    pub(super) async fn new_with_max_connections(max_connections: u32) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -54,7 +58,7 @@ impl TestDatabase {
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect worker primary_names_current test pool")?;
