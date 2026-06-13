@@ -48,6 +48,7 @@ mod query;
 mod routes;
 mod state;
 mod types;
+mod v2;
 
 use crate::{
     cli::*,
