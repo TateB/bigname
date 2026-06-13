@@ -8,6 +8,7 @@ use crate::{
 
 use super::{
     boundaries::resolution_verified_support_boundary,
+    record_keys::canonical_resolution_record_key,
     support_classes::{
         VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition, array_or_empty,
         json_field, json_string_field, resolution_projection_chain_position_from_value,
@@ -65,7 +66,7 @@ where
 {
     let mut record_keys = records
         .iter()
-        .map(|record| record.record_key().to_owned())
+        .map(|record| canonical_resolution_record_key(record.record_key()))
         .collect::<Vec<_>>();
     format_normalized_resolution_request_key(namespace, normalized_name, &mut record_keys)
 }
@@ -75,7 +76,10 @@ pub fn normalized_resolution_request_key_from_record_keys(
     normalized_name: &str,
     record_keys: &[String],
 ) -> String {
-    let mut normalized_record_keys = record_keys.to_vec();
+    let mut normalized_record_keys = record_keys
+        .iter()
+        .map(|record_key| canonical_resolution_record_key(record_key))
+        .collect::<Vec<_>>();
     format_normalized_resolution_request_key(
         namespace,
         normalized_name,
@@ -159,4 +163,26 @@ fn format_normalized_resolution_request_key(
 ) -> String {
     record_keys.sort_unstable();
     format!("{namespace}:{normalized_name}:{}", record_keys.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalized_resolution_request_key_from_record_keys;
+
+    #[test]
+    fn resolution_request_key_canonicalizes_addr_coin_type_text() {
+        let canonical = normalized_resolution_request_key_from_record_keys(
+            "ens",
+            "alice.eth",
+            &["addr:60".to_owned()],
+        );
+        let padded = normalized_resolution_request_key_from_record_keys(
+            "ens",
+            "alice.eth",
+            &["addr:060".to_owned()],
+        );
+
+        assert_eq!(padded, canonical);
+        assert_eq!(padded, "ens:alice.eth:addr:60");
+    }
 }

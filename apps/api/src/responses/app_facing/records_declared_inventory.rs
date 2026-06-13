@@ -36,7 +36,8 @@ fn compact_record_items_by_key_slice(items: &[JsonValue]) -> BTreeMap<String, Js
         .iter()
         .filter_map(|item| {
             let record_key = string_field(provenance_field(item, "record_key"))?;
-            Some((record_key, item.clone()))
+            let record = parse_resolution_record_key(&record_key)?;
+            Some((record.record_key, item.clone()))
         })
         .collect()
 }

@@ -60,7 +60,8 @@ const ADDRESS_NAMES_CURRENT_SIDECAR_TRIGGERS: &[&str] = &[
     "address_names_current_identity_counts_after_delete",
     "address_names_current_identity_counts_after_insert",
     "address_names_current_identity_counts_after_update",
-    "address_names_current_identity_feed_after_change",
+    "address_names_current_identity_feed_after_insert_delete",
+    "address_names_current_identity_feed_after_anchor_update",
 ];
 
 pub(super) async fn set_address_names_current_sidecar_triggers(

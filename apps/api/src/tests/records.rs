@@ -557,6 +557,85 @@ async fn get_resolve_records_defaults_auto_to_declared_all_available_records() -
 }
 
 #[tokio::test]
+async fn get_name_records_canonicalizes_inventory_coin_selectors_before_compact_coin_output(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2215);
+    let token_lineage_id = Uuid::from_u128(0x1115);
+    let surface_binding_id = Uuid::from_u128(0x3315);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "cacheable": true,
+        },
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc",
+            },
+        },
+    ]);
+    database.insert_record_inventory_current_row(inventory).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?include=coins&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact records canonical inventory coin request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+    assert!(
+        payload.pointer("/data/coin_addresses/060").is_none(),
+        "compact coin output must use canonical coin selector keys"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolve_records_returns_stale_when_default_snapshot_outruns_projection() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1136,6 +1215,110 @@ async fn get_resolve_records_auto_probes_basic_verified_records_without_declared
 }
 
 #[tokio::test]
+async fn get_resolve_records_auto_probes_basic_verified_records_when_inventory_has_no_public_selectors(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2223);
+    let token_lineage_id = Uuid::from_u128(0x1123);
+    let surface_binding_id = Uuid::from_u128(0x3323);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000063);
+    let fallback_record_keys = ["addr:60"];
+    let request_key = resolution_execution_request_key(&fallback_record_keys);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000f0"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:18446744073709551616",
+            "record_family": "addr",
+            "selector_key": "18446744073709551616",
+            "cacheable": true,
+        }
+    ]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:18446744073709551616",
+            "record_family": "addr",
+            "selector_key": "18446744073709551616",
+            "status": "not_found",
+        }
+    ]);
+    database.insert_record_inventory_current_row(inventory).await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &fallback_record_keys,
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?include=coins&mode=auto")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto fallback compact records request with non-public inventory failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x00000000000000000000000000000000000000f0"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_records_returns_persisted_verified_compact_summary() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
@@ -1402,6 +1585,84 @@ async fn get_name_records_rejects_full_view_until_full_envelope_is_documented_he
     assert_eq!(
         payload.error.message,
         "view=full is not supported for compact name records"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_rejects_canonical_duplicate_coin_types() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?coin_types=060,60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("canonical duplicate compact coin_types request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "coin_types must not contain duplicate selectors"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_rejects_exact_duplicate_coin_types() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?coin_types=60,60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("exact duplicate compact coin_types request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "coin_types must not contain duplicate selectors"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_rejects_overflowing_coin_types() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?coin_types=18446744073709551616")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("overflowing compact coin_types request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "coin_types must contain only u64 decimal coin-type selectors"
     );
 
     database.cleanup().await?;

@@ -108,9 +108,10 @@ fn validate_ordered_record_keys(record_keys: &[String], context: &str) -> Result
 
     let mut seen = BTreeSet::new();
     for record_key in record_keys {
-        parse_supported_verified_record_key(record_key)?;
-        if !seen.insert(record_key.clone()) {
-            bail!("{context} must not contain duplicate selectors ({record_key})");
+        let selector = parse_canonical_supported_record_key(record_key, context)?;
+        let canonical_record_key = canonical_supported_record_key(record_key, &selector);
+        if !seen.insert(canonical_record_key.clone()) {
+            bail!("{context} must not contain duplicate selectors ({canonical_record_key})");
         }
     }
 
@@ -150,11 +151,13 @@ pub(super) fn extract_verified_queries_from_payload(
         let query = required_object(Some(query), &query_context)?;
 
         let record_key = required_string(query, "record_key", &query_context)?.to_owned();
-        if !seen_record_keys.insert(record_key.clone()) {
-            bail!("{context}.verified_queries must not contain duplicate selectors ({record_key})");
+        let selector = parse_canonical_supported_record_key(&record_key, &query_context)?;
+        let canonical_record_key = canonical_supported_record_key(&record_key, &selector);
+        if !seen_record_keys.insert(canonical_record_key.clone()) {
+            bail!(
+                "{context}.verified_queries must not contain duplicate selectors ({canonical_record_key})"
+            );
         }
-
-        let selector = parse_supported_verified_record_key(&record_key)?;
         let (status, value, failure_reason) = match required_string(
             query,
             "status",
@@ -267,4 +270,28 @@ pub(super) fn ensure_requested_selectors_match_queries(
 
 fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVerifiedRecordKey> {
     parse_supported_verified_resolution_record_key(record_key)
+}
+
+fn parse_canonical_supported_record_key(
+    record_key: &str,
+    context: &str,
+) -> Result<SupportedVerifiedRecordKey> {
+    let selector = parse_supported_verified_record_key(record_key)?;
+    let canonical_record_key = canonical_supported_record_key(record_key, &selector);
+    if canonical_record_key != record_key {
+        bail!("{context} selector {record_key} must use canonical selector {canonical_record_key}");
+    }
+    Ok(selector)
+}
+
+fn canonical_supported_record_key(
+    record_key: &str,
+    selector: &SupportedVerifiedRecordKey,
+) -> String {
+    match selector {
+        SupportedVerifiedRecordKey::Addr { coin_type } => format!("addr:{coin_type}"),
+        SupportedVerifiedRecordKey::Avatar => "avatar".to_owned(),
+        SupportedVerifiedRecordKey::Contenthash => "contenthash".to_owned(),
+        SupportedVerifiedRecordKey::Text => record_key.to_owned(),
+    }
 }

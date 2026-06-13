@@ -256,6 +256,78 @@ async fn identity_forward_matches_record_inventory_to_active_boundary() -> Resul
 }
 
 #[tokio::test]
+async fn identity_lookup_canonicalizes_retained_addr_coin_type_selectors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:canonical-coin.eth";
+    let resource_id = Uuid::from_u128(0x1d0281);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "canonical-coin.eth",
+        "canonical-coin.eth",
+        "namehash:canonical-coin.eth",
+        resource_id,
+        Uuid::from_u128(0x1d0282),
+        Uuid::from_u128(0x1d0283),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        34,
+    )
+    .await?;
+
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "cacheable": true
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "status": "success",
+            "value": {
+                "coin_type": "060",
+                "value": address,
+            },
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let payload = identity_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [
+                {
+                    "id": "canonical-coin",
+                    "kind": "name",
+                    "name": "canonical-coin.eth",
+                    "coin_type": 60
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let record = &payload["results"][0]["record"];
+    assert_eq!(record["primary_address"], json!(address));
+    assert_eq!(record["coin_type_addresses"]["60"], json!(address));
+    assert_eq!(record["coin_type_addresses"].get("060"), None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";

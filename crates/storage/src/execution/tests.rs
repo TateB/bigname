@@ -18,6 +18,42 @@ use crate::{
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn migration_prunes_noncanonical_addr_selector_execution_artifacts() {
+    let migration = include_str!(
+        "../../../../migrations/20260612133200_noncanonical_addr_selector_cache_cleanup.sql"
+    );
+
+    assert!(
+        !migration.contains("DELETE FROM public.execution_traces"),
+        "migration must retain durable execution trace and step audit artifacts"
+    );
+    assert!(
+        migration.contains("DELETE FROM public.execution_cache_outcomes"),
+        "migration may delete noncanonical reusable cache outcomes"
+    );
+    assert!(
+        !migration.contains("DELETE FROM public.record_inventory_current"),
+        "migration must not delete declared record-inventory projection rows"
+    );
+    assert!(
+        migration.contains("jsonb_path_query"),
+        "migration must match structured record selector fields"
+    );
+    assert!(
+        migration.contains("substring(record_key FROM 6) <>"),
+        "migration must match leading-zero addr selectors without deleting canonical addr:0"
+    );
+    assert!(
+        migration.contains("18446744073709551615"),
+        "migration must compare digit selectors against u64::MAX"
+    );
+    assert!(
+        migration.contains("string_to_table(selector_part[1], ',')"),
+        "migration must parse comma-separated request selectors instead of matching addr text anywhere in the key"
+    );
+}
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
@@ -301,6 +337,257 @@ async fn insert_trace_and_outcome(
     Ok(())
 }
 
+async fn insert_legacy_resolution_cache_row(
+    database: &TestDatabase,
+    execution_trace_id: Uuid,
+    execution_cache_key: &str,
+    request_key: &str,
+    record_key: &str,
+) -> Result<()> {
+    let finished_at = timestamp(1_717_173_000);
+    let final_payload = json!({
+        "verified_queries": [
+            {
+                "record_key": record_key,
+                "status": "not_found",
+                "failure_reason": "legacy_test"
+            }
+        ]
+    });
+    let requested_chain_positions = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123"
+        }
+    ]);
+    let manifest_versions = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        }
+    ]);
+    let topology_boundary = version_boundary(
+        "ens:legacy.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000b001),
+        Some(2_000),
+        Some("ResolverChanged"),
+        21_000_000,
+        "0xabc123",
+        "2024-06-09T00:00:00Z",
+    );
+    let record_boundary = version_boundary(
+        "ens:legacy.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000b002),
+        Some(2_001),
+        Some("RecordsChanged"),
+        21_000_001,
+        "0xabc124",
+        "2024-06-09T00:00:01Z",
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO execution_traces (
+            execution_trace_id,
+            request_type,
+            request_key,
+            namespace,
+            chain_context,
+            manifest_context,
+            contracts_called,
+            gateway_digests,
+            final_payload,
+            request_metadata,
+            finished_at
+        )
+        VALUES (
+            $1,
+            'verified_resolution',
+            $2,
+            'ens',
+            $3::jsonb,
+            $4::jsonb,
+            '[]'::jsonb,
+            '[]'::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7
+        )
+        "#,
+    )
+    .bind(execution_trace_id)
+    .bind(request_key)
+    .bind(
+        json!({
+            "requested_positions": requested_chain_positions,
+            "topology_version_boundary": topology_boundary,
+            "record_version_boundary": record_boundary,
+        })
+        .to_string(),
+    )
+    .bind(
+        json!({
+            "manifest_versions": manifest_versions,
+        })
+        .to_string(),
+    )
+    .bind(final_payload.to_string())
+    .bind(
+        json!({
+            "surface": "legacy.eth",
+            "record_keys": [record_key],
+        })
+        .to_string(),
+    )
+    .bind(finished_at)
+    .execute(database.pool())
+    .await
+    .context("failed to insert legacy execution trace fixture")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            finished_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3::jsonb,
+            $4::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7,
+            'verified_resolution',
+            'ens',
+            $8::jsonb,
+            $9
+        )
+        "#,
+    )
+    .bind(execution_cache_key)
+    .bind(request_key)
+    .bind(requested_chain_positions.to_string())
+    .bind(manifest_versions.to_string())
+    .bind(topology_boundary.to_string())
+    .bind(record_boundary.to_string())
+    .bind(execution_trace_id)
+    .bind(final_payload.to_string())
+    .bind(finished_at)
+    .execute(database.pool())
+    .await
+    .context("failed to insert legacy execution cache outcome fixture")?;
+
+    Ok(())
+}
+
+async fn execution_cache_outcome_count(
+    database: &TestDatabase,
+    execution_cache_key: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_cache_outcomes WHERE execution_cache_key = $1",
+    )
+    .bind(execution_cache_key)
+    .fetch_one(database.pool())
+    .await
+    .with_context(|| format!("failed to count execution cache outcome {execution_cache_key}"))
+}
+
+#[tokio::test]
+async fn noncanonical_addr_selector_cleanup_prunes_only_reusable_resolution_outcomes() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    insert_legacy_resolution_cache_row(
+        &database,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001001),
+        "legacy-leading-zero-addr-selector",
+        "ens:legacy.eth:addr:060",
+        "addr:060",
+    )
+    .await?;
+    insert_legacy_resolution_cache_row(
+        &database,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001002),
+        "legacy-overflow-addr-selector",
+        "ens:legacy.eth:addr:18446744073709551616",
+        "addr:18446744073709551616",
+    )
+    .await?;
+    insert_legacy_resolution_cache_row(
+        &database,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001003),
+        "legacy-text-selector-containing-addr-text",
+        "ens:legacy.eth:text:xaddr:060",
+        "text:xaddr:060",
+    )
+    .await?;
+    insert_legacy_resolution_cache_row(
+        &database,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001004),
+        "legacy-canonical-addr-selector",
+        "ens:legacy.eth:addr:60",
+        "addr:60",
+    )
+    .await?;
+
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/20260612133200_noncanonical_addr_selector_cache_cleanup.sql"
+    ))
+    .execute(database.pool())
+    .await
+    .context("failed to rerun noncanonical addr selector cleanup migration")?;
+
+    assert_eq!(
+        execution_cache_outcome_count(&database, "legacy-leading-zero-addr-selector").await?,
+        0,
+        "leading-zero addr selector outcomes are not byte-comparable with canonical request keys"
+    );
+    assert_eq!(
+        execution_cache_outcome_count(&database, "legacy-overflow-addr-selector").await?,
+        0,
+        "overflowing addr selector outcomes are outside bigname's public selector grammar"
+    );
+    assert_eq!(
+        execution_cache_outcome_count(&database, "legacy-text-selector-containing-addr-text")
+            .await?,
+        1,
+        "text selectors that merely contain addr-like text must not be pruned"
+    );
+    assert_eq!(
+        execution_cache_outcome_count(&database, "legacy-canonical-addr-selector").await?,
+        1,
+        "canonical addr selector outcomes remain reusable"
+    );
+
+    let trace_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_traces WHERE execution_trace_id IN ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::from_u128(0x0e7ec7ace00000000000000000001001))
+    .bind(Uuid::from_u128(0x0e7ec7ace00000000000000000001002))
+    .bind(Uuid::from_u128(0x0e7ec7ace00000000000000000001003))
+    .bind(Uuid::from_u128(0x0e7ec7ace00000000000000000001004))
+    .fetch_one(database.pool())
+    .await
+    .context("failed to count durable legacy execution trace fixtures")?;
+    assert_eq!(
+        trace_count, 4,
+        "cleanup must retain durable execution trace audit artifacts"
+    );
+
+    database.cleanup().await
+}
+
 fn execution_outcome(trace: &ExecutionTrace) -> ExecutionOutcome {
     ExecutionOutcome {
         cache_key: ExecutionCacheKey {
@@ -559,6 +846,18 @@ async fn rejects_execution_trace_with_empty_step_canonicality_dependency() -> Re
         "field canonicality_dependency must not be empty",
     )
     .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_execution_trace_with_missing_step_latency() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut trace = execution_trace();
+    trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000008);
+    trace.steps[0].latency_ms = None;
+
+    expect_trace_validation_error(&database, &trace, "must set latency_ms").await?;
 
     database.cleanup().await
 }

@@ -17,7 +17,7 @@ Every step is attributable in provenance. One request may cover multiple explici
 
 Before persisting a selector-local result as a supported, cache-eligible outcome, execution reloads from storage the manifest versions, the same declared topology snapshot the mixed route would serve, and any resolver-profile admission state required by the participating resolver-local fact families. The namespace support class is derived from those stored inputs, not from transient trace shape. If revalidation cannot re-establish a frozen supported class, audit material may persist but supported-outcome persistence fails closed.
 
-Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`.
+Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side call errors remain `resolver_call_failed`.
 
 ### Namespaces and entrypoints
 
@@ -104,7 +104,7 @@ Each step row in `execution_steps` records:
 
 - step index, step kind
 - input digest, output digest
-- latency
+- latency. Producer-generated trace rows must write a numeric `latency_ms`; deterministic local bookkeeping steps may use `0`.
 - canonicality dependency
 
 Admitted exact block-anchored `raw_call_snapshots` are not part of this schema. They remain intake-owned raw facts keyed by exact block identity even when verified-resolution persistence hands them off alongside the trace.
@@ -127,7 +127,7 @@ Persisted outcomes live in `execution_cache_outcomes`, keyed by:
 - topology version boundary
 - record version boundary
 
-For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. For `GET /v1/profiles/names/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
+For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. `addr:<coin_type>` selectors canonicalize digit text to unsigned 64-bit decimal form before selector dedupe and cache-key construction; `addr:060` and `addr:60` are the same execution identity, and digit text outside `u64` fails input validation. This is a bigname cache-identity narrowing relative to upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; the divergence is recorded in `docs/upstream.md`. For `GET /v1/profiles/names/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
 
 For verified primary, the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup/invalidation anchor; targeted projection updates, full projection rebuilds, and legacy reverse-resolver hydration writes/deletes invalidate request-matching answers for tuples whose claim row appeared, disappeared, or changed, but claim projection and hydration do not persist verified payloads or trace IDs.
 

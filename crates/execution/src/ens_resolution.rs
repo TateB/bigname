@@ -266,6 +266,11 @@ async fn build_on_demand_request(
             &selector_call,
             &block,
         ));
+        if let Some(summary) = &selector_call.ccip_summary {
+            for payload in &summary.step_payloads {
+                steps.push(ccip_step(steps.len() as i64, payload, &block));
+            }
+        }
         verified_queries.push(selector_call.verified_query(execution_trace_id));
         if let Some(summary) = &selector_call.ccip_summary {
             gateway_digests.extend(summary.gateway_digests.iter().cloned());
@@ -280,9 +285,18 @@ async fn build_on_demand_request(
             .and_then(Value::as_str)
             .is_some_and(|status| status == "execution_failed")
     });
-    let failure_payload = all_execution_failed.then(|| {
+    let all_execution_failure_reason = all_execution_failed.then(|| {
+        verified_queries
+            .iter()
+            .filter_map(|query| query.get("failure_reason"))
+            .filter_map(Value::as_str)
+            .next()
+            .unwrap_or("resolver_call_failed")
+            .to_owned()
+    });
+    let failure_payload = all_execution_failure_reason.as_ref().map(|failure_reason| {
         json!({
-            "failure_reason": "resolver_call_failed",
+            "failure_reason": failure_reason,
             "stage": "call_universal_resolver",
         })
     });
@@ -291,9 +305,9 @@ async fn build_on_demand_request(
             "verified_queries": verified_queries.clone(),
         })
     });
-    let outcome_failure_payload = all_execution_failed.then(|| {
+    let outcome_failure_payload = all_execution_failure_reason.as_ref().map(|failure_reason| {
         json!({
-            "failure_reason": "resolver_call_failed",
+            "failure_reason": failure_reason,
             "selector_count": verified_queries.len(),
         })
     });
@@ -364,7 +378,7 @@ fn ethereum_mainnet_block(cache_key: &ExecutionCacheKey) -> Result<ExecutionBloc
     })
 }
 
-fn declared_topology_step(
+pub(super) fn declared_topology_step(
     row: &NameCurrentRow,
     cache_key: &ExecutionCacheKey,
     block: &ExecutionBlock,
@@ -380,7 +394,7 @@ fn declared_topology_step(
         step_kind: "load_declared_topology".to_owned(),
         input_digest: Some(digest_json(&row.declared_summary)),
         output_digest: Some(digest_json(&payload)),
-        latency_ms: None,
+        latency_ms: Some(0),
         canonicality_dependency: canonicality_dependency(block),
         step_payload: payload,
     }
@@ -414,9 +428,30 @@ fn call_step(
         step_kind: "call_universal_resolver".to_owned(),
         input_digest: call.request_hash.clone(),
         output_digest: call.response_hash.clone(),
-        latency_ms: None,
+        latency_ms: Some(call.latency_ms),
         canonicality_dependency: canonicality_dependency(block),
         step_payload: payload,
+    }
+}
+
+pub(super) fn ccip_step(
+    step_index: i64,
+    payload: &Value,
+    block: &ExecutionBlock,
+) -> ExecutionTraceStep {
+    let latency_ms = payload
+        .get("latency_ms")
+        .and_then(Value::as_i64)
+        .filter(|latency_ms| *latency_ms >= 0)
+        .unwrap_or(0);
+    ExecutionTraceStep {
+        step_index,
+        step_kind: "ccip_offchain_lookup".to_owned(),
+        input_digest: None,
+        output_digest: Some(digest_json(payload)),
+        latency_ms: Some(latency_ms),
+        canonicality_dependency: canonicality_dependency(block),
+        step_payload: payload.clone(),
     }
 }
 

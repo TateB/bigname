@@ -1,5 +1,5 @@
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
@@ -92,6 +92,7 @@ pub(crate) async fn follow_ccip_read(
     let mut step_payloads = Vec::new();
     for redirect_index in 0..MAX_CCIP_REDIRECTS {
         validate_offchain_lookup_sender(&lookup, &expected_sender)?;
+        let started = Instant::now();
         let gateway_response = fetch_ccip_gateway_response(&lookup)
             .await
             .with_context(|| {
@@ -120,6 +121,7 @@ pub(crate) async fn follow_ccip_read(
             "gateway_count": lookup.urls.len(),
             "used_local_batch_gateway": gateway_response.used_local_batch_gateway,
             "response_bytes": gateway_response.body.len(),
+            "latency_ms": elapsed_latency_ms(started),
         }));
 
         match &callback_result.result {
@@ -143,6 +145,10 @@ pub(crate) async fn follow_ccip_read(
     }
 
     bail!("CCIP-Read exceeded maximum redirect depth");
+}
+
+fn elapsed_latency_ms(started: Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
 fn validate_offchain_lookup_sender(lookup: &OffchainLookup, expected_sender: &str) -> Result<()> {

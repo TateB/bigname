@@ -16,7 +16,12 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     types::time::OffsetDateTime,
 };
-use tokio::time::{Duration, timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    task::JoinHandle,
+    time::{Duration, timeout},
+};
 
 use super::primary_name::{
     normalized_verified_primary_name_request_key, validate_verified_primary_request,
@@ -45,6 +50,206 @@ use uuid::Uuid;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
+
+struct ResolutionMockRpcResponse {
+    code: i64,
+    message: &'static str,
+}
+
+async fn spawn_resolution_mock_rpc(
+    responses: Vec<ResolutionMockRpcResponse>,
+) -> Result<(String, JoinHandle<Result<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind resolution mock RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept resolution mock RPC request")?;
+            requests.push(read_mock_http_json_body(&mut socket).await?);
+            write_mock_json_rpc_error(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn read_mock_http_json_body(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let (body_start, content_length) = loop {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read resolution mock RPC request")?;
+        if bytes_read == 0 {
+            bail!("resolution mock RPC request closed before headers finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+        if let Some(body_start) = find_mock_header_end(&buffer) {
+            let headers = std::str::from_utf8(&buffer[..body_start])
+                .context("resolution mock RPC request headers were not utf8")?;
+            let content_length = parse_mock_content_length(headers)?;
+            break (body_start, content_length);
+        }
+    };
+
+    while buffer.len() < body_start + content_length {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read resolution mock RPC request body")?;
+        if bytes_read == 0 {
+            bail!("resolution mock RPC request closed before body finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+    }
+
+    serde_json::from_slice(&buffer[body_start..body_start + content_length])
+        .context("failed to parse resolution mock RPC request body")
+}
+
+fn find_mock_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+}
+
+fn parse_mock_content_length(headers: &str) -> Result<usize> {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>())
+        })
+        .transpose()
+        .context("resolution mock RPC request content-length was invalid")?
+        .with_context(|| "resolution mock RPC request did not include content-length")
+}
+
+async fn write_mock_json_rpc_error(
+    socket: &mut tokio::net::TcpStream,
+    response: ResolutionMockRpcResponse,
+) -> Result<()> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": response.code,
+            "message": response.message,
+        },
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write resolution mock RPC response")
+}
+
+async fn join_resolution_mock_requests(
+    handle: JoinHandle<Result<Vec<Value>>>,
+) -> Result<Vec<Value>> {
+    handle
+        .await
+        .context("resolution mock RPC task panicked")?
+        .context("resolution mock RPC task failed")
+}
+
+#[test]
+fn ccip_step_records_trace_payload_digest_and_latency() {
+    let payload = json!({
+        "sender": "0x00000000000000000000000000000000000000cc",
+        "gateway_count": 1,
+        "used_local_batch_gateway": false,
+        "response_bytes": 32,
+        "latency_ms": 17,
+    });
+    let block = ens_resolution::ExecutionBlock {
+        chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+        block_number: 21_000_000,
+        block_hash: "0xabc123".to_owned(),
+    };
+
+    let step = ens_resolution::ccip_step(2, &payload, &block);
+
+    assert_eq!(step.step_index, 2);
+    assert_eq!(step.step_kind, "ccip_offchain_lookup");
+    assert_eq!(step.input_digest, None);
+    assert_eq!(
+        step.output_digest,
+        Some(ens_resolution_abi::digest_json(&payload))
+    );
+    assert_eq!(step.latency_ms, Some(17));
+    assert_eq!(
+        step.canonicality_dependency,
+        json!({
+            ETHEREUM_MAINNET_CHAIN_ID: {
+                "block_hash": "0xabc123",
+                "block_number": 21_000_000,
+                "state": "canonical",
+            }
+        })
+    );
+    assert_eq!(step.step_payload, payload);
+}
+
+#[test]
+fn declared_topology_step_records_latency() {
+    let row = NameCurrentRow {
+        logical_name_id: "ens:alice.eth".to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        canonical_display_name: "alice.eth".to_owned(),
+        normalized_name: "alice.eth".to_owned(),
+        namehash: "namehash:alice.eth".to_owned(),
+        surface_binding_id: None,
+        resource_id: None,
+        token_lineage_id: None,
+        binding_kind: None,
+        declared_summary: json!({"resolver": {"address": ENS_UNIVERSAL_RESOLVER_ADDRESS}}),
+        provenance: json!({}),
+        coverage: json!({}),
+        chain_positions: json!({}),
+        canonicality_summary: json!({"state": "canonical"}),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1),
+    };
+    let block = ens_resolution::ExecutionBlock {
+        chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+        block_number: 21_000_000,
+        block_hash: "0xabc123".to_owned(),
+    };
+    let cache_key = ExecutionCacheKey {
+        request_key: "ens:alice.eth:addr:60".to_owned(),
+        requested_chain_positions: json!([{
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123"
+        }]),
+        manifest_versions: json!([{
+            "source_family": ENS_EXECUTION_SOURCE_FAMILY,
+            "manifest_version": 1
+        }]),
+        topology_version_boundary: json!({"logical_name_id": "ens:alice.eth"}),
+        record_version_boundary: json!({"logical_name_id": "ens:alice.eth"}),
+    };
+
+    assert_eq!(
+        ens_resolution::declared_topology_step(&row, &cache_key, &block).latency_ms,
+        Some(0)
+    );
+}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -3029,6 +3234,82 @@ async fn persists_execution_failed_direct_path_without_raw_call_snapshots() -> R
 }
 
 #[tokio::test]
+async fn on_demand_all_failed_persists_typed_failure_payloads() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("on-demand resolution test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("on-demand resolution test must load record_inventory_current row")?;
+    let (rpc_url, handle) = spawn_resolution_mock_rpc(vec![ResolutionMockRpcResponse {
+        code: 3,
+        message: "execution reverted",
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+
+    let outcome = execute_ens_universal_resolver_verified_resolution(
+        database.pool(),
+        OnDemandEnsResolutionRequest {
+            row: &row,
+            records: &records,
+            record_inventory_row: Some(&record_inventory_row),
+            chain_positions: row.chain_positions.clone(),
+            chain_rpc_urls: &chain_rpc_urls,
+            use_latest_block_tag: false,
+            persist_execution: true,
+        },
+    )
+    .await
+    .context("on-demand resolution execution failed")?;
+    assert_eq!(join_resolution_mock_requests(handle).await?.len(), 1);
+
+    assert_eq!(
+        outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    let loaded_trace = load_execution_trace(database.pool(), outcome.execution_trace_id)
+        .await?
+        .context("on-demand resolution trace must persist")?;
+    assert_eq!(
+        loaded_trace
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    let loaded_outcome = load_execution_outcome(database.pool(), &outcome.cache_key)
+        .await?
+        .context("on-demand resolution outcome must persist")?;
+    assert_eq!(
+        loaded_outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn persists_contenthash_success_direct_path() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = contenthash_success_request();
@@ -3409,6 +3690,126 @@ async fn rejects_duplicate_selectors_before_writing_any_storage() -> Result<()> 
         .await?
         .is_empty(),
         "rejected request must not persist raw call snapshots"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_noncanonical_addr_selector_before_writing_any_storage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = multi_selector_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+
+    let mut request = seed_request;
+    let record_keys = vec!["addr:060".to_owned()];
+    let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &record_keys);
+    request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000016);
+    request.trace.request_key = request_key.clone();
+    request.trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": record_keys,
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
+    });
+    request.trace.final_payload = Some(json!({
+        "verified_queries": [{
+            "record_key": "addr:060",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            }
+        }]
+    }));
+    request.outcome.execution_trace_id = request.trace.execution_trace_id;
+    request.outcome.cache_key.request_key = request_key;
+    request.outcome.outcome_payload = request.trace.final_payload.clone();
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("non-canonical addr selector must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must use canonical selector addr:60"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_canonical_duplicate_addr_selectors_before_writing_any_storage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = multi_selector_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+
+    let mut request = seed_request;
+    let record_keys = vec!["addr:060".to_owned(), "addr:60".to_owned()];
+    let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &record_keys);
+    request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000017);
+    request.trace.request_key = request_key.clone();
+    request.trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": record_keys,
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
+    });
+    request.trace.final_payload = Some(json!({
+        "verified_queries": [
+            {
+                "record_key": "addr:060",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "not_found",
+                "failure_reason": "no_addr_record"
+            }
+        ]
+    }));
+    request.outcome.execution_trace_id = request.trace.execution_trace_id;
+    request.outcome.cache_key.request_key = request_key;
+    request.outcome.outcome_payload = request.trace.final_payload.clone();
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("canonical duplicate selectors must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must use canonical selector addr:60")
+            || error
+                .to_string()
+                .contains("must not contain duplicate selectors"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
     );
 
     database.cleanup().await

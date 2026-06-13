@@ -382,6 +382,18 @@ fn parse_compact_records_csv(field_name: &str, value: Option<&str>) -> ApiResult
     let mut parsed = Vec::new();
     let mut deduped = BTreeSet::new();
 
+    for item in parse_compact_records_csv_items(field_name, value)? {
+        if deduped.insert(item.clone()) {
+            parsed.push(item);
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn parse_compact_records_csv_items(field_name: &str, value: Option<&str>) -> ApiResult<Vec<String>> {
+    let mut parsed = Vec::new();
+
     for item in value
         .unwrap_or_default()
         .split(',')
@@ -395,28 +407,43 @@ fn parse_compact_records_csv(field_name: &str, value: Option<&str>) -> ApiResult
                 message: format!("{field_name} must be a comma-separated selector list"),
             });
         }
-        if deduped.insert(item.to_owned()) {
-            parsed.push(item.to_owned());
-        }
+        parsed.push(item.to_owned());
     }
 
     Ok(parsed)
 }
 
 fn parse_compact_records_coin_types(value: Option<&str>) -> ApiResult<Vec<String>> {
-    let coin_types = parse_compact_records_csv("coin_types", value)?;
-    if coin_types
-        .iter()
-        .all(|coin_type| coin_type.as_bytes().iter().all(u8::is_ascii_digit))
-    {
-        Ok(coin_types)
-    } else {
-        Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_input",
-            message: "coin_types must contain only decimal coin-type selectors".to_owned(),
-        })
+    let coin_types = parse_compact_records_csv_items("coin_types", value)?;
+    let mut parsed = Vec::with_capacity(coin_types.len());
+    let mut deduped = BTreeSet::new();
+    for coin_type in coin_types {
+        if !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "coin_types must contain only decimal coin-type selectors".to_owned(),
+            });
+        }
+        let canonical = coin_type
+            .parse::<u64>()
+            .map(|coin_type| coin_type.to_string())
+            .map_err(|_| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "coin_types must contain only u64 decimal coin-type selectors".to_owned(),
+            })?;
+        if !deduped.insert(canonical.clone()) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: "coin_types must not contain duplicate selectors".to_owned(),
+            });
+        }
+        parsed.push(canonical);
     }
+
+    Ok(parsed)
 }
 
 include!("records_declared_inventory.rs");

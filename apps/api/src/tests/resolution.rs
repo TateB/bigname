@@ -4772,6 +4772,171 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
 }
 
 #[tokio::test]
+async fn get_resolution_profile_defaults_when_inventory_has_no_public_selectors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x22c1);
+    let token_lineage_id = Uuid::from_u128(0x11c1);
+    let surface_binding_id = Uuid::from_u128(0x33c1);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000023);
+    let fallback_record_keys = [
+        "addr:60",
+        "avatar",
+        "contenthash",
+        "text:description",
+        "text:url",
+        "text:email",
+    ];
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "contenthash",
+            "status": "not_found",
+            "failure_reason": "no_contenthash"
+        },
+        {
+            "record_key": "text:description",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "text:url",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "text:email",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:18446744073709551616",
+            "record_family": "addr",
+            "selector_key": "18446744073709551616",
+            "cacheable": true,
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:18446744073709551616",
+            "record_family": "addr",
+            "selector_key": "18446744073709551616",
+            "status": "not_found",
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory.clone())
+        .await?;
+    let name_row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    let fallback_records = fallback_record_keys
+        .iter()
+        .map(|record_key| {
+            parse_resolution_record_key(record_key).expect("fallback profile selector must parse")
+        })
+        .collect::<Vec<_>>();
+    let fallback_cache_records =
+        bigname_storage::resolution_execution_cache_lookup_records(&name_row, &fallback_records);
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
+        &name_row,
+        &fallback_cache_records,
+        Some(&inventory),
+        name_row.chain_positions.clone(),
+    )?;
+    let request_key = cache_key.request_key.clone();
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &fallback_record_keys,
+        persisted_verified_queries.clone(),
+    );
+    let mut outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries.clone(),
+        logical_name_id,
+        resource_id,
+    );
+    outcome.cache_key = cache_key;
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/profiles/names/alice.eth?mode=both&meta=full")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("profile fallback request with non-public inventory failed")?;
+
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    if status != StatusCode::OK {
+        anyhow::bail!("expected profile response 200, got {status}: {payload}");
+    }
+    let payload: ResolutionResponse = serde_json::from_value(payload)?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.pointer("/record_inventory/selectors")),
+        Some(&json!([]))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": persisted_verified_queries
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_preserves_request_order()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -6620,6 +6785,162 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
 }
 
 #[tokio::test]
+async fn get_resolution_canonicalizes_public_declared_addr_selectors() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x22c0);
+    let token_lineage_id = Uuid::from_u128(0x11c0);
+    let surface_binding_id = Uuid::from_u128(0x33c0);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let mut inventory_row = record_inventory_current_row(logical_name_id, resource_id);
+    inventory_row.selectors = json!([
+        {
+            "record_key": "addr:09",
+            "record_family": "addr",
+            "selector_key": "09",
+            "cacheable": true,
+        },
+        {
+            "record_key": "addr:10",
+            "record_family": "addr",
+            "selector_key": "10",
+            "cacheable": true,
+        }
+    ]);
+    inventory_row.explicit_gaps = json!([
+        {
+            "record_key": "addr:09",
+            "record_family": "addr",
+            "selector_key": "09",
+            "gap_reason": "not_observed_on_current_resolver",
+        },
+        {
+            "record_key": "addr:10",
+            "record_family": "addr",
+            "selector_key": "10",
+            "gap_reason": "not_observed_on_current_resolver",
+        }
+    ]);
+    inventory_row.entries = json!([
+        {
+            "record_key": "addr:09",
+            "record_family": "addr",
+            "selector_key": "09",
+            "status": "success",
+            "value": {
+                "coin_type": "9",
+                "value": "0x0000000000000000000000000000000000000009",
+            },
+        },
+        {
+            "record_key": "addr:10",
+            "record_family": "addr",
+            "selector_key": "10",
+            "status": "success",
+            "value": {
+                "coin_type": "10",
+                "value": "0x0000000000000000000000000000000000000010",
+            },
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory_row)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution canonical selector request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/record_inventory/selectors"),
+        Some(&json!([
+            {
+                "record_key": "addr:10",
+                "record_family": "addr",
+                "selector_key": "10",
+                "cacheable": true,
+            },
+            {
+                "record_key": "addr:9",
+                "record_family": "addr",
+                "selector_key": "9",
+                "cacheable": true,
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_inventory/explicit_gaps"),
+        Some(&json!([
+            {
+                "record_key": "addr:10",
+                "record_family": "addr",
+                "selector_key": "10",
+                "gap_reason": "not_observed_on_current_resolver",
+            },
+            {
+                "record_key": "addr:9",
+                "record_family": "addr",
+                "selector_key": "9",
+                "gap_reason": "not_observed_on_current_resolver",
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries/0/record_key"),
+        Some(&json!("addr:9"))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries/0/selector_key"),
+        Some(&json!("9"))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries/1/record_key"),
+        Some(&json!("addr:10"))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries/1/selector_key"),
+        Some(&json!("10"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_preserves_worker_record_inventory_boundary_pointer() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
@@ -8067,6 +8388,62 @@ fn get_resolution_declared_default_record_cache_keeps_missing_cacheable_selector
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
+                }
+            ]
+        })
+    );
+}
+
+#[test]
+fn get_resolution_declared_default_record_cache_sorts_after_addr_canonicalization() {
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2211);
+    let mut inventory_row = worker_record_inventory_current_row(logical_name_id, resource_id);
+    let record_version_boundary = inventory_row.record_version_boundary.clone();
+    inventory_row.selectors = json!([
+        {
+            "record_key": "addr:09",
+            "record_family": "addr",
+            "selector_key": "09",
+            "cacheable": true,
+        },
+        {
+            "record_key": "addr:10",
+            "record_family": "addr",
+            "selector_key": "10",
+            "cacheable": true,
+        }
+    ]);
+    inventory_row.entries = json!([
+        {
+            "record_key": "addr:09",
+            "record_family": "addr",
+            "selector_key": "09",
+            "status": "not_found",
+        },
+        {
+            "record_key": "addr:10",
+            "record_family": "addr",
+            "selector_key": "10",
+            "status": "not_found",
+        }
+    ]);
+    assert_eq!(
+        build_record_cache_section(Some(&inventory_row), &[], "unused"),
+        json!({
+            "record_version_boundary": record_version_boundary,
+            "entries": [
+                {
+                    "record_key": "addr:10",
+                    "record_family": "addr",
+                    "selector_key": "10",
+                    "status": "not_found",
+                },
+                {
+                    "record_key": "addr:9",
+                    "record_family": "addr",
+                    "selector_key": "9",
+                    "status": "not_found",
                 }
             ]
         })

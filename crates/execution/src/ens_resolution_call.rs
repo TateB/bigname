@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::{Result, bail};
 use bigname_storage::{
     CanonicalityState, NameCurrentRow, RawCallSnapshot, SupportedVerifiedResolutionRecordKey,
@@ -25,6 +27,7 @@ pub(super) struct SelectorCall {
     pub(super) resolver_selector: String,
     pub(super) block_selector: Value,
     pub(super) ccip_summary: Option<CcipReadSummary>,
+    pub(super) latency_ms: i64,
 }
 
 enum SelectorStatus {
@@ -102,6 +105,7 @@ pub(super) async fn execute_record_call(
     };
 
     let mut ccip_summary = None;
+    let started = Instant::now();
     let result = rpc
         .call("eth_call", vec![call, block_selector.clone()])
         .await?;
@@ -136,6 +140,7 @@ pub(super) async fn execute_record_call(
         block_selector,
         persist_raw_call_snapshot: !use_latest_block_tag,
         ccip_summary,
+        latency_ms: elapsed_latency_ms(started),
     })
 }
 
@@ -151,6 +156,7 @@ struct SelectorCallRpcContext<'a> {
     block_selector: Value,
     persist_raw_call_snapshot: bool,
     ccip_summary: Option<CcipReadSummary>,
+    latency_ms: i64,
 }
 
 fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<SelectorCall> {
@@ -166,6 +172,7 @@ fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<
         block_selector,
         persist_raw_call_snapshot,
         ccip_summary,
+        latency_ms,
     } = context;
     let JsonRpcCallResult {
         request_payload,
@@ -199,6 +206,7 @@ fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<
         resolver_selector,
         block_selector,
         ccip_summary,
+        latency_ms,
     })
 }
 
@@ -262,8 +270,25 @@ fn decode_rpc_error(error: &JsonRpcCallError) -> Result<SelectorStatus> {
     }
 
     Ok(SelectorStatus::ExecutionFailed {
-        failure_reason: "resolver_call_failed",
+        failure_reason: rpc_error_failure_reason(error),
     })
+}
+
+fn rpc_error_failure_reason(error: &JsonRpcCallError) -> &'static str {
+    let mut text = error.message.to_ascii_lowercase();
+    if let Some(data) = &error.data {
+        text.push(' ');
+        text.push_str(&data.to_string().to_ascii_lowercase());
+    }
+    if text.contains("execution reverted") || text.contains("revert") {
+        "resolver_call_reverted"
+    } else {
+        "resolver_call_failed"
+    }
+}
+
+fn elapsed_latency_ms(started: Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
 fn rpc_error_provider_unavailable_for_selected_block(error: &JsonRpcCallError) -> bool {
@@ -367,6 +392,7 @@ mod tests {
             block_selector: json!("latest"),
             persist_raw_call_snapshot: false,
             ccip_summary: None,
+            latency_ms: 7,
         })?;
 
         assert_eq!(selector_call.block_selector, json!("latest"));
@@ -451,6 +477,7 @@ mod tests {
             }),
             persist_raw_call_snapshot: true,
             ccip_summary: None,
+            latency_ms: 7,
         })?;
 
         let verified_query = selector_call.verified_query(Uuid::from_u128(1));
@@ -488,6 +515,34 @@ mod tests {
                 .contains("verified resolution RPC provider could not serve selected block"),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[test]
+    fn plain_execution_revert_uses_typed_failure_reason() -> Result<()> {
+        let status = decode_rpc_error(&JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: None,
+        })?;
+        let selector_call = SelectorCall {
+            status,
+            request_hash: None,
+            response_hash: None,
+            raw_call_snapshot: None,
+            contract_call: json!({ "record_key": "avatar" }),
+            universal_calldata: "0x9061b923".to_owned(),
+            resolver_selector: "0x59d1d43c".to_owned(),
+            block_selector: json!("latest"),
+            ccip_summary: None,
+            latency_ms: 7,
+        };
+        let verified_query = selector_call.verified_query(Uuid::from_u128(1));
+
+        assert_eq!(
+            verified_query.get("failure_reason").and_then(Value::as_str),
+            Some("resolver_call_reverted")
+        );
+        Ok(())
     }
 
     fn test_name_current_row() -> NameCurrentRow {
