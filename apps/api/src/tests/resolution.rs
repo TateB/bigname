@@ -5809,6 +5809,102 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
 }
 
 #[tokio::test]
+async fn get_resolution_execution_summary_coalesces_resolver_path_fields() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x6020);
+    let token_lineage_id = Uuid::from_u128(0x6021);
+    let surface_binding_id = Uuid::from_u128(0x6022);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000006020);
+    let trace_resolver_address = "0x0000000000000000000000000000000000006023";
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut name_row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    name_row
+        .declared_summary
+        .get_mut("resolver")
+        .and_then(Value::as_object_mut)
+        .expect("test fixture must include resolver summary")
+        .remove("address");
+    database.insert_name_current_row(name_row).await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    trace.steps[0].step_payload = json!({
+        "entrypoint": "universal_resolver",
+        "resolver": trace_resolver_address,
+    });
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("coalesced resolver path execution explain request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: ResolutionResponse = read_json(response).await?;
+    let execution = payload
+        .verified_state
+        .as_ref()
+        .and_then(|state| state.get("execution"))
+        .expect("execution summary must be present");
+
+    assert_eq!(
+        execution.pointer("/resolver_discovery_path/0/chain_id"),
+        Some(&json!("ethereum-mainnet"))
+    );
+    assert_eq!(
+        execution.pointer("/resolver_discovery_path/0/address"),
+        Some(&json!(trace_resolver_address))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ancestor_selected_path()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
