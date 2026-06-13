@@ -106,9 +106,6 @@ pub(super) fn apply_record_changed(
     let Some(name) = history.name.clone() else {
         return Ok(());
     };
-    if !current_resolver_matches(history, &event.resolver) {
-        return Ok(());
-    }
     let Some(authority) = active_anchor_for_observation(history, &event.reference) else {
         return Ok(());
     };

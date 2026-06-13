@@ -13,17 +13,19 @@ pub(super) fn transition_authority(
 
     history.current_record_version = None;
 
-    if let Some(open_binding) = history.open_binding.take()
-        && open_binding.active_from < effective_time
-    {
-        history.bindings.push(BindingSegment {
-            surface_binding_id: open_binding.surface_binding_id,
-            authority: open_binding.authority.clone(),
-            active_from: open_binding.active_from,
-            active_to: Some(effective_time),
-            anchor_ref: open_binding.anchor_ref.clone(),
-        });
-        if let Some(name) = history.name.as_ref() {
+    if let Some(open_binding) = history.open_binding.take() {
+        if open_binding.active_from < effective_time {
+            history.bindings.push(BindingSegment {
+                surface_binding_id: open_binding.surface_binding_id,
+                authority: open_binding.authority.clone(),
+                active_from: open_binding.active_from,
+                active_to: Some(effective_time),
+                anchor_ref: open_binding.anchor_ref.clone(),
+            });
+        }
+        if open_binding.active_from <= effective_time
+            && let Some(name) = history.name.as_ref()
+        {
             history.events.push(build_boundary_event(
                 reference,
                 BoundaryEventPayload {

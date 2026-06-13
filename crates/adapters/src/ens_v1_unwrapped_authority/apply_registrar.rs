@@ -41,6 +41,10 @@ pub(super) fn apply_registration_granted(
         .current_registration
         .as_ref()
         .map(|value| value.expiry);
+    let before_registrant = history
+        .current_registration
+        .as_ref()
+        .map(|value| value.registrant.clone());
     history.current_registration = Some(lease.clone());
     history.superseded_registration = None;
 
@@ -51,7 +55,7 @@ pub(super) fn apply_registration_granted(
         EVENT_KIND_REGISTRATION_GRANTED,
         json!({
             "authority_kind": before_anchor.as_ref().map(|value| value.kind.as_str()),
-            "registrant": before_anchor.as_ref().and_then(|value| value.token_lineage_id).map(|_| serde_json::Value::Null),
+            "registrant": before_registrant,
         }),
         json!({
             "authority_kind": "registrar",
@@ -63,7 +67,11 @@ pub(super) fn apply_registration_granted(
         format!(
             "grant:{}:{}:{}",
             event.reference.block_hash,
-            event.reference.transaction_hash.as_deref().unwrap_or_default(),
+            event
+                .reference
+                .transaction_hash
+                .as_deref()
+                .unwrap_or_default(),
             event.reference.log_index.unwrap_or_default()
         ),
     ));
