@@ -343,7 +343,7 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     let token_lineage_id = Uuid::from_u128(0xe203);
     let surface_binding_id = Uuid::from_u128(0xe204);
     let local_account = "0x0000000000000000000000000000000000000a01";
-    let root_account = "0x0000000000000000000000000000000000000b02";
+    let root_account = "0x0000000000000000000000000000000000000902";
     let registry_address = "0x0000000000000000000000000000000000000eac";
     let upstream_resource =
         "0x00000000000000000000000000000000000000000000000000000000000073c0";
@@ -464,6 +464,31 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
             && row["name"] == JsonValue::Null
     }));
 
+    let account_filtered_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/alice.eth/roles?account={root_account}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name roles account-filtered root fallback request failed")?;
+    assert_eq!(account_filtered_response.status(), StatusCode::OK);
+    let account_filtered_payload: Value = read_json(account_filtered_response).await?;
+    let account_filtered_rows = account_filtered_payload["data"]
+        .as_array()
+        .expect("query data must be an array");
+    assert_eq!(account_filtered_payload["meta"]["total_count"], json!(1));
+    assert_eq!(account_filtered_rows.len(), 1);
+    assert_eq!(account_filtered_rows[0]["account"], json!(root_account));
+    assert_eq!(
+        account_filtered_rows[0]["resource_id"],
+        json!(root_resource_id.to_string())
+    );
+    assert_eq!(account_filtered_rows[0]["name"], JsonValue::Null);
+
     let unrelated_resource_id = Uuid::from_u128(0xe299);
     let unrelated_filtered_query_response = app_router(database.app_state())
         .oneshot(
@@ -549,10 +574,29 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     assert_eq!(first_page_response.status(), StatusCode::OK);
     let first_page_payload: Value = read_json(first_page_response).await?;
     assert_eq!(first_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(first_page_payload["data"][0]["account"], json!(local_account));
+    assert_eq!(first_page_payload["data"][0]["account"], json!(root_account));
+    assert_eq!(
+        first_page_payload["data"][0]["resource_id"],
+        json!(root_resource_id.to_string())
+    );
     let cursor = first_page_payload["page"]["next_cursor"]
         .as_str()
         .expect("first composed page must include next_cursor");
+
+    let filtered_cursor_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/roles?namespace=ens&name=alice.eth&resource_id={resource_id}&page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles query filtered cursor replay request failed")?;
+    assert_eq!(filtered_cursor_response.status(), StatusCode::BAD_REQUEST);
+    let filtered_cursor_payload: ErrorResponse = read_json(filtered_cursor_response).await?;
+    assert_eq!(filtered_cursor_payload.error.code, "invalid_input");
 
     let second_page_response = app_router(database.app_state())
         .oneshot(
@@ -568,7 +612,11 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     assert_eq!(second_page_response.status(), StatusCode::OK);
     let second_page_payload: Value = read_json(second_page_response).await?;
     assert_eq!(second_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(second_page_payload["data"][0]["account"], json!(root_account));
+    assert_eq!(second_page_payload["data"][0]["account"], json!(local_account));
+    assert_eq!(
+        second_page_payload["data"][0]["resource_id"],
+        json!(resource_id.to_string())
+    );
     assert_eq!(second_page_payload["page"]["next_cursor"], JsonValue::Null);
 
     database.cleanup().await?;

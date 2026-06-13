@@ -112,6 +112,50 @@ pub async fn load_permissions_current_account_resource_page(
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<PermissionsCurrentAccountResourcePage> {
+    load_permissions_current_account_resource_page_with_summary(
+        pool,
+        subject,
+        resource_id,
+        cursor,
+        page_size,
+        AccountResourceSummaryMode::Full,
+    )
+    .await
+}
+
+/// Load one bounded app-facing account/resource role page with count-only summary metadata.
+pub async fn load_permissions_current_account_resource_page_count_summary(
+    pool: &PgPool,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+    cursor: Option<&PermissionsCurrentAccountResourceCursor>,
+    page_size: u64,
+) -> Result<PermissionsCurrentAccountResourcePage> {
+    load_permissions_current_account_resource_page_with_summary(
+        pool,
+        subject,
+        resource_id,
+        cursor,
+        page_size,
+        AccountResourceSummaryMode::CountOnly,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum AccountResourceSummaryMode {
+    Full,
+    CountOnly,
+}
+
+async fn load_permissions_current_account_resource_page_with_summary(
+    pool: &PgPool,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+    cursor: Option<&PermissionsCurrentAccountResourceCursor>,
+    page_size: u64,
+    summary_mode: AccountResourceSummaryMode,
+) -> Result<PermissionsCurrentAccountResourcePage> {
     let limit = checked_page_limit_i64(
         page_size,
         "permissions_current page_size must be positive",
@@ -151,7 +195,9 @@ pub async fn load_permissions_current_account_resource_page(
         );
         push_permissions_current_account_resource_filters(&mut page_builder, subject, resource_id);
         push_permissions_current_account_resource_cursor(&mut page_builder, cursor);
-        page_builder.push(" ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC LIMIT ");
+        page_builder.push(
+            r#" ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC LIMIT "#,
+        );
         page_builder.push_bind(limit);
 
         page_builder
@@ -169,8 +215,15 @@ pub async fn load_permissions_current_account_resource_page(
         PermissionsCurrentAccountResourceCursor::from(row)
     });
 
-    let summary =
-        load_permissions_current_account_resource_summary(pool, subject, resource_id).await?;
+    let summary = match summary_mode {
+        AccountResourceSummaryMode::Full => {
+            load_permissions_current_account_resource_summary(pool, subject, resource_id).await?
+        }
+        AccountResourceSummaryMode::CountOnly => {
+            load_permissions_current_account_resource_count_summary(pool, subject, resource_id)
+                .await?
+        }
+    };
 
     Ok(PermissionsCurrentAccountResourcePage {
         rows,
@@ -217,10 +270,10 @@ async fn load_permissions_current_account_resource_summary(
         r#"
         SELECT
             COUNT(*)::BIGINT AS row_count,
-            COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS provenance,
-            (jsonb_agg(pc.coverage ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC)->0) AS coverage,
-            COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS chain_positions,
-            COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS canonicality_summaries,
+            COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS provenance,
+            (jsonb_agg(pc.coverage ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC)->0) AS coverage,
+            COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS chain_positions,
+            COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS canonicality_summaries,
             MAX(pc.last_recomputed_at) AS last_recomputed_at
         FROM permissions_current pc
         JOIN resources resource
@@ -235,6 +288,37 @@ async fn load_permissions_current_account_resource_summary(
         .fetch_one(pool)
         .await
         .context("failed to summarize permissions_current account/resource rows")?;
+
+    decode_permissions_current_full_filter_summary(row)
+}
+
+async fn load_permissions_current_account_resource_count_summary(
+    pool: &PgPool,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+) -> Result<PermissionsCurrentFullFilterSummary> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT AS row_count,
+            '[]'::jsonb AS provenance,
+            NULL::jsonb AS coverage,
+            '[]'::jsonb AS chain_positions,
+            '[]'::jsonb AS canonicality_summaries,
+            NULL::TIMESTAMPTZ AS last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
+        WHERE TRUE
+        "#,
+    );
+    push_permissions_current_account_resource_filters(&mut builder, subject, resource_id);
+
+    let row = builder
+        .build()
+        .fetch_one(pool)
+        .await
+        .context("failed to count permissions_current account/resource rows")?;
 
     decode_permissions_current_full_filter_summary(row)
 }
@@ -275,12 +359,12 @@ fn push_permissions_current_account_resource_cursor<'a>(
     cursor: Option<&'a PermissionsCurrentAccountResourceCursor>,
 ) {
     if let Some(cursor) = cursor {
-        builder.push(" AND (pc.subject, pc.resource_id, pc.scope) > (");
+        builder.push(r#" AND (pc.subject COLLATE "C", pc.resource_id, pc.scope COLLATE "C") > ("#);
         builder.push_bind(&cursor.subject);
-        builder.push(", ");
+        builder.push(r#" COLLATE "C", "#);
         builder.push_bind(cursor.resource_id);
         builder.push(", ");
         builder.push_bind(&cursor.scope);
-        builder.push(")");
+        builder.push(r#" COLLATE "C")"#);
     }
 }

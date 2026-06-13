@@ -153,9 +153,11 @@ pub use permissions::{
     PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
     PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentRow,
     clear_permissions_current, delete_permissions_current, load_permissions_current,
-    load_permissions_current_account_resource_page, load_permissions_current_by_resource_ids,
-    load_permissions_current_for_resolver_scope, load_permissions_current_page,
-    load_permissions_current_resolver_targets, upsert_permissions_current_rows,
+    load_permissions_current_account_resource_page,
+    load_permissions_current_account_resource_page_count_summary,
+    load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
+    load_permissions_current_page, load_permissions_current_resolver_targets,
+    upsert_permissions_current_rows,
 };
 pub use primary_name::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,

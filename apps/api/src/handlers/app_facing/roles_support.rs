@@ -306,15 +306,32 @@ async fn load_roles_page(
     cursor: Option<&bigname_storage::PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
     route: &'static str,
+    summary_mode: RolesSummaryMode,
 ) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
-    bigname_storage::load_permissions_current_account_resource_page(
-        pool,
-        account,
-        resource_id,
-        cursor,
-        page_size,
-    )
-    .await
+    let page = match summary_mode {
+        RolesSummaryMode::Full => {
+            bigname_storage::load_permissions_current_account_resource_page(
+                pool,
+                account,
+                resource_id,
+                cursor,
+                page_size,
+            )
+            .await
+        }
+        RolesSummaryMode::CountOnly => {
+            bigname_storage::load_permissions_current_account_resource_page_count_summary(
+                pool,
+                account,
+                resource_id,
+                cursor,
+                page_size,
+            )
+            .await
+        }
+    };
+
+    page
     .map_err(|load_error| {
         error!(
             service = "api",
@@ -328,6 +345,12 @@ async fn load_roles_page(
     })
 }
 
+#[derive(Clone, Copy)]
+enum RolesSummaryMode {
+    Full,
+    CountOnly,
+}
+
 async fn load_composed_roles_page(
     pool: &PgPool,
     account: Option<&str>,
@@ -338,17 +361,44 @@ async fn load_composed_roles_page(
     route: &'static str,
 ) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
     let Some(resource_id) = resource_id else {
-        return load_roles_page(pool, account, None, cursor, page_size, route).await;
+        return load_roles_page(pool, account, None, cursor, page_size, route, RolesSummaryMode::Full)
+            .await;
     };
     let Some(root_resource_id) = root_resource_id.filter(|root| *root != resource_id) else {
-        return load_roles_page(pool, account, Some(resource_id), cursor, page_size, route).await;
+        return load_roles_page(
+            pool,
+            account,
+            Some(resource_id),
+            cursor,
+            page_size,
+            route,
+            RolesSummaryMode::Full,
+        )
+        .await;
     };
 
     let fetch_size = page_size.saturating_add(1);
     let resource_page =
-        load_roles_page(pool, account, Some(resource_id), cursor, fetch_size, route).await?;
-    let root_page =
-        load_roles_page(pool, account, Some(root_resource_id), cursor, fetch_size, route).await?;
+        load_roles_page(
+            pool,
+            account,
+            Some(resource_id),
+            cursor,
+            fetch_size,
+            route,
+            RolesSummaryMode::Full,
+        )
+        .await?;
+    let root_page = load_roles_page(
+        pool,
+        account,
+        Some(root_resource_id),
+        cursor,
+        fetch_size,
+        route,
+        RolesSummaryMode::CountOnly,
+    )
+    .await?;
 
     Ok(merge_roles_pages(resource_page, root_page, page_size))
 }
@@ -440,7 +490,32 @@ async fn load_ensv2_root_resource_id_for_name_resource(
         return Ok(None);
     };
 
-    Ok(ensv2_root_resource_id_from_resource(&resource).filter(|root| *root != resource_id))
+    let root_resource_id = ensv2_root_resource_id_from_resource(&resource);
+    if root_resource_id.is_none() && is_ensv2_registry_or_root_resource(&resource) {
+        warn!(
+            service = "api",
+            route = route,
+            resource_id = %resource_id,
+            provenance = ?resource.provenance,
+            "skipped ENSv2 root fallback roles because resource provenance was malformed"
+        );
+    }
+
+    Ok(root_resource_id.filter(|root| *root != resource_id))
+}
+
+fn is_ensv2_registry_or_root_resource(resource: &bigname_storage::Resource) -> bool {
+    resource
+        .provenance
+        .as_object()
+        .and_then(|provenance| provenance.get("source_family"))
+        .and_then(JsonValue::as_str)
+        .is_some_and(|source_family| {
+            matches!(
+                source_family,
+                ENSV2_ROOT_SOURCE_FAMILY | ENSV2_REGISTRY_SOURCE_FAMILY
+            )
+        })
 }
 
 fn ensv2_root_resource_id_from_resource(resource: &bigname_storage::Resource) -> Option<Uuid> {
