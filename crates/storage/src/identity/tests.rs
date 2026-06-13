@@ -2359,6 +2359,216 @@ async fn identity_feed_row_triggers_gate_metadata_only_updates() -> Result<()> {
 }
 
 #[tokio::test]
+async fn identity_feed_row_trigger_recomputes_only_for_anchor_updates() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000f33";
+    let logical_name_id = "ens:feed-row-trigger.eth";
+    let resource_id = Uuid::from_u128(0xf031);
+    let surface_binding_id = Uuid::from_u128(0xf032);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            logical_name_id,
+            "feed-row-trigger.eth",
+            "feed-row-trigger.eth",
+            "feed_row_trigger_surface",
+            830,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "feed_row_trigger_resource",
+            831,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[binding(BindingSeed {
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_173_300),
+            active_to: None,
+            source: "feed_row_trigger_relation",
+            chain_label: "feed_row_trigger_binding",
+            block_number: 832,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            'ens',
+            'feed-row-trigger.eth',
+            'feed-row-trigger.eth',
+            'namehash:feed-row-trigger.eth',
+            $2,
+            $3,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed name_current for identity feed row trigger test")?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            $2,
+            'registrant',
+            'ens',
+            'feed-row-trigger.eth',
+            'feed-row-trigger.eth',
+            'namehash:feed-row-trigger.eth',
+            $3,
+            $4,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed address_names_current for identity feed row trigger test")?;
+
+    sqlx::query("SELECT public.address_names_current_identity_feed_recompute_address($1)")
+        .bind(address)
+        .execute(database.pool())
+        .await
+        .context("failed to seed identity feed row trigger sidecar")?;
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "owned").await?,
+        1
+    );
+    let initial_recomputed_at =
+        identity_feed_recomputed_at(database.pool(), address, "owned").await?;
+
+    sleep(std::time::Duration::from_millis(10)).await;
+    sqlx::query(
+        r#"
+        UPDATE address_names_current
+        SET
+            canonicality_summary = '{"status":"finalized"}'::jsonb,
+            last_recomputed_at = $2
+        WHERE address = $1
+        "#,
+    )
+    .bind(address)
+    .bind(timestamp(1_817_173_300))
+    .execute(database.pool())
+    .await
+    .context("failed to update address_names_current metadata-only fields")?;
+
+    assert_eq!(
+        identity_feed_recomputed_at(database.pool(), address, "owned").await?,
+        initial_recomputed_at,
+        "metadata-only updates must not fire the identity feed row trigger"
+    );
+
+    sleep(std::time::Duration::from_millis(10)).await;
+    sqlx::query(
+        r#"
+        UPDATE address_names_current
+        SET canonical_display_name = 'feed-row-trigger-renamed.eth'
+        WHERE address = $1
+        "#,
+    )
+    .bind(address)
+    .execute(database.pool())
+    .await
+    .context("failed to update address_names_current anchor field")?;
+
+    let anchor_recomputed_at =
+        identity_feed_recomputed_at(database.pool(), address, "owned").await?;
+    assert!(
+        anchor_recomputed_at > initial_recomputed_at,
+        "anchor-column updates must fire the identity feed row trigger"
+    );
+    let feed_display_name = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT canonical_display_name
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = 'owned' AND coin_type = ''
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load identity feed display name after anchor update")?;
+    assert_eq!(feed_display_name, "feed-row-trigger-renamed.eth");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn identity_count_statement_triggers_recompute_name_current_resource_eligibility()
 -> Result<()> {
     let database = TestDatabase::new().await?;

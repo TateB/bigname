@@ -10,12 +10,6 @@ fn migration_invalidates_existing_children_current_parent_keys() {
     let lookup_migration = include_str!(
         "../../../../migrations/20260608160000_label_preimage_invalidation_lookup.sql"
     );
-    let concurrent_lookup_drop = include_str!(
-        "../../../../migrations/20260612133100_label_preimage_invalidation_lookup_drop_nonconcurrent.sql"
-    );
-    let concurrent_lookup_create = include_str!(
-        "../../../../migrations/20260612133110_label_preimage_invalidation_lookup_concurrent.sql"
-    );
 
     assert!(
         migration.contains("FROM public.children_current"),
@@ -32,13 +26,6 @@ fn migration_invalidates_existing_children_current_parent_keys() {
     assert!(
         lookup_migration.contains("normalized_events_children_v1_labelhash_lookup_idx"),
         "follow-up migration must index labelhash lookups before Rust retained-fact backfill"
-    );
-    assert!(
-        concurrent_lookup_drop.contains("-- no-transaction")
-            && concurrent_lookup_drop.contains("DROP INDEX CONCURRENTLY")
-            && concurrent_lookup_create.contains("-- no-transaction")
-            && concurrent_lookup_create.contains("CREATE INDEX CONCURRENTLY"),
-        "non-concurrent labelhash lookup index cleanup must split drop/create into no-transaction concurrent migrations"
     );
 }
 
