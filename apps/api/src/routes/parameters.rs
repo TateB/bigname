@@ -394,7 +394,7 @@ pub(crate) const EXPLAIN_RESOLUTION_EXECUTION_PARAMETERS: &[ApiRouteParameter] =
     NAME_PATH,
     ApiRouteParameter::required_csv_query(
         "records",
-        "Comma-separated record selectors. Required for the persisted execution explain lookup.",
+        "Comma-separated record selectors. Required for the persisted execution explain lookup. addr:<coin_type> selectors are canonicalized as unsigned 64-bit decimal text before selector dedupe.",
         ApiParameterSchema::String,
     ),
 ];

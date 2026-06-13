@@ -56,12 +56,12 @@ fn build_record_inventory_state(row: &RecordInventoryCurrentRow) -> JsonValue {
     insert_value_field(
         &mut record_inventory,
         "selectors",
-        array_or_empty(Some(&row.selectors)),
+        canonical_record_inventory_items(&row.selectors),
     );
     insert_value_field(
         &mut record_inventory,
         "explicit_gaps",
-        array_or_empty(Some(&row.explicit_gaps)),
+        canonical_record_inventory_items(&row.explicit_gaps),
     );
     insert_value_field(
         &mut record_inventory,
@@ -74,6 +74,21 @@ fn build_record_inventory_state(row: &RecordInventoryCurrentRow) -> JsonValue {
         row.last_change.clone().unwrap_or(JsonValue::Null),
     );
     record_inventory
+}
+
+fn canonical_record_inventory_items(value: &JsonValue) -> JsonValue {
+    let mut items = BTreeMap::new();
+    for item in value.as_array().into_iter().flatten() {
+        let Some((record_key, item)) = canonical_record_cache_item(item) else {
+            continue;
+        };
+        items.entry(record_key).or_insert(item);
+    }
+    JsonValue::Array(
+        items
+            .into_values()
+            .collect(),
+    )
 }
 
 fn build_no_declared_resolver_inventory_state(record_version_boundary: JsonValue) -> JsonValue {
@@ -166,11 +181,7 @@ fn build_record_cache_entries(
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            string_field(provenance_field(entry, "record_key"))
-                .map(|record_key| (record_key, entry))
-        })
-        .map(|(record_key, entry)| (record_key, entry.clone()))
+        .filter_map(canonical_record_cache_item)
         .collect::<BTreeMap<_, _>>();
     let unsupported_family_lookup = row
         .unsupported_families
@@ -192,36 +203,38 @@ fn build_record_cache_entries(
         .filter(|selector| {
             provenance_field(selector, "cacheable").and_then(JsonValue::as_bool) == Some(true)
         })
-        .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
+        .filter_map(|selector| {
+            let record_key = string_field(provenance_field(selector, "record_key"))?;
+            parse_resolution_record_key(&record_key).map(|record| record.record_key)
+        })
         .collect::<BTreeSet<_>>();
 
     if records.is_empty() {
-        return JsonValue::Array(
-            row.selectors
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|selector| {
-                    provenance_field(selector, "cacheable").and_then(JsonValue::as_bool)
-                        == Some(true)
-                })
-                .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
-                .filter_map(|record_key| {
-                    parse_resolution_record_key(&record_key).map(|record| {
-                        entry_lookup
-                            .get(&record_key)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                build_missing_record_cache_entry(
-                                    &record,
-                                    &unsupported_family_lookup,
-                                    &cacheable_selector_lookup,
-                                )
-                            })
+        let mut entries = BTreeMap::new();
+        for selector in row.selectors.as_array().into_iter().flatten().filter(|selector| {
+            provenance_field(selector, "cacheable").and_then(JsonValue::as_bool) == Some(true)
+        }) {
+            let Some(record_key) = string_field(provenance_field(selector, "record_key")) else {
+                continue;
+            };
+            let Some(record) = parse_resolution_record_key(&record_key) else {
+                continue;
+            };
+            let record_key = record.record_key.clone();
+            entries.entry(record_key).or_insert_with(|| {
+                entry_lookup
+                    .get(&record.record_key)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        build_missing_record_cache_entry(
+                            &record,
+                            &unsupported_family_lookup,
+                            &cacheable_selector_lookup,
+                        )
                     })
-                })
-                .collect(),
-        );
+            });
+        }
+        return JsonValue::Array(entries.into_values().collect());
     }
 
     JsonValue::Array(
@@ -241,6 +254,27 @@ fn build_record_cache_entries(
             })
             .collect(),
     )
+}
+
+fn canonical_record_cache_item(entry: &JsonValue) -> Option<(String, JsonValue)> {
+    let record_key = string_field(provenance_field(entry, "record_key"))?;
+    let record = parse_resolution_record_key(&record_key)?;
+    let mut entry = entry.clone();
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "record_key".to_owned(),
+            JsonValue::String(record.record_key.clone()),
+        );
+        object.insert(
+            "record_family".to_owned(),
+            JsonValue::String(record.record_family.clone()),
+        );
+        object.insert(
+            "selector_key".to_owned(),
+            record.selector_key.clone().map_or(JsonValue::Null, JsonValue::String),
+        );
+    }
+    Some((record.record_key, entry))
 }
 
 fn phase_unsupported_record_family_reason(record_family: &str) -> Option<&'static str> {

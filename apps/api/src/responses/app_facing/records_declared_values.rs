@@ -64,15 +64,21 @@ fn compact_should_probe_basic_selector_fallbacks(
     matches!(
         request.mode,
         CompactNameRecordsMode::Auto | CompactNameRecordsMode::Verified | CompactNameRecordsMode::Both
-    ) && !compact_has_declared_record_selectors(record_inventory_row)
+    ) && !compact_has_public_declared_record_selectors(record_inventory_row)
 }
 
-fn compact_has_declared_record_selectors(
+fn compact_has_public_declared_record_selectors(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> bool {
     record_inventory_row
         .and_then(|row| row.selectors.as_array())
-        .is_some_and(|selectors| !selectors.is_empty())
+        .is_some_and(|selectors| {
+            selectors.iter().any(|selector| {
+                string_field(provenance_field(selector, "record_key"))
+                    .and_then(|record_key| parse_resolution_record_key(&record_key))
+                    .is_some()
+            })
+        })
 }
 
 fn compact_push_record_key(
@@ -80,11 +86,11 @@ fn compact_push_record_key(
     seen: &mut BTreeSet<String>,
     record_key: &str,
 ) {
-    if !seen.insert(record_key.to_owned()) {
-        return;
-    }
     let record = parse_resolution_record_key(record_key)
         .expect("compact record request builder must produce valid record selectors");
+    if !seen.insert(record.record_key.clone()) {
+        return;
+    }
     records.push(record);
 }
 
@@ -335,11 +341,18 @@ fn compact_coin_addresses(
         let record_key = format!("addr:{coin_type}");
         let record = parse_resolution_record_key(&record_key)
             .expect("compact coin selector must be a valid record key");
+        let coin_type = record
+            .selector_key
+            .clone()
+            .expect("compact addr selector must include coin type");
+        if coin_addresses.contains_key(&coin_type) {
+            continue;
+        }
         coin_addresses.insert(
             coin_type,
             compact_record_payload(
                 &record,
-                value_entries.get(&record_key),
+                value_entries.get(&record.record_key),
                 inventory_lookup,
             ),
         );
@@ -388,14 +401,21 @@ fn compact_known_selector_keys(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     record_family: &str,
 ) -> Vec<String> {
-    record_inventory_row
+    let mut seen = BTreeSet::new();
+    let mut keys = Vec::new();
+    for selector_key in record_inventory_row
         .and_then(|row| row.selectors.as_array())
         .into_iter()
         .flatten()
-        .filter(|selector| {
-            string_field(provenance_field(selector, "record_family")).as_deref()
-                == Some(record_family)
+        .filter_map(|selector| {
+            let record_key = string_field(provenance_field(selector, "record_key"))?;
+            let record = parse_resolution_record_key(&record_key)?;
+            (record.record_family == record_family).then_some(record.selector_key)?
         })
-        .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
-        .collect()
+    {
+        if seen.insert(selector_key.clone()) {
+            keys.push(selector_key);
+        }
+    }
+    keys
 }

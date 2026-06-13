@@ -2294,6 +2294,71 @@ async fn identity_facade_statement_triggers_replace_row_level_feed_triggers() ->
 }
 
 #[tokio::test]
+async fn identity_feed_row_triggers_gate_metadata_only_updates() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    let old_trigger_names = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT tgname
+        FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgrelid IN (
+              'public.address_names_current'::regclass,
+              'public.primary_names_current'::regclass
+          )
+          AND tgname IN (
+              'address_names_current_identity_feed_after_change',
+              'primary_names_current_identity_feed_after_change'
+          )
+        ORDER BY tgname
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await
+    .context("failed to inspect legacy identity feed row triggers")?;
+    assert!(
+        old_trigger_names.is_empty(),
+        "broad identity feed row triggers must be replaced by column-gated triggers, found {old_trigger_names:?}"
+    );
+
+    let trigger_defs = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT pg_get_triggerdef(oid)
+        FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgname IN (
+              'address_names_current_identity_feed_after_anchor_update',
+              'primary_names_current_identity_feed_after_claim_update'
+          )
+        ORDER BY tgname
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await
+    .context("failed to inspect gated identity feed row triggers")?;
+
+    assert_eq!(
+        trigger_defs.len(),
+        2,
+        "address and primary-name feed update triggers must both be present"
+    );
+    assert!(
+        trigger_defs
+            .iter()
+            .all(|definition| definition.contains("UPDATE OF ")),
+        "identity feed update triggers must be UPDATE OF column-gated: {trigger_defs:?}"
+    );
+    assert!(
+        trigger_defs
+            .iter()
+            .all(|definition| definition.contains("WHEN")),
+        "identity feed update triggers must include value-change WHEN guards: {trigger_defs:?}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn identity_count_statement_triggers_recompute_name_current_resource_eligibility()
 -> Result<()> {
     let database = TestDatabase::new().await?;

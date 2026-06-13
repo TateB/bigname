@@ -217,6 +217,14 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
             record_family: record_key.to_owned(),
             selector_key: None,
         }),
+        Some(("addr", selector)) if !selector.is_empty() => {
+            let selector_key = canonical_addr_coin_type_selector(selector)?;
+            Some(ResolutionRecordKey {
+                record_key: format!("addr:{selector_key}"),
+                record_family: "addr".to_owned(),
+                selector_key: Some(selector_key),
+            })
+        }
         Some((family, selector)) if is_valid_family(family) && !selector.is_empty() => {
             Some(ResolutionRecordKey {
                 record_key: record_key.to_owned(),
@@ -226,6 +234,14 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
         }
         _ => None,
     }
+}
+
+fn canonical_addr_coin_type_selector(selector: &str) -> Option<String> {
+    if !selector.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    selector.parse::<u64>().ok().map(|value| value.to_string())
 }
 
 pub(super) fn parse_permissions_subject(subject: Option<&str>) -> Option<String> {
@@ -543,6 +559,28 @@ mod tests {
             "alice.eth"
         );
         assert!(parse_exact_name_path_name("ens", "bad name.eth").is_err());
+    }
+
+    #[test]
+    fn resolution_record_keys_reject_overflowing_addr_coin_type() {
+        let error = parse_resolution_record_keys(
+            Some("addr:18446744073709551616"),
+            ResolutionMode::Verified,
+        )
+        .expect_err("overflowing coin_type selectors must be invalid input");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn resolution_record_keys_canonicalize_addr_coin_type_before_dedupe() {
+        let error = parse_resolution_record_keys(Some("addr:060,addr:60"), ResolutionMode::Verified)
+            .expect_err("canonical duplicate addr selectors must be rejected");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.message, "records must not contain duplicate selectors");
     }
 
     fn must_parse<T>(result: ApiResult<T>) -> T {

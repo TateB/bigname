@@ -14,16 +14,23 @@ pub enum SupportedVerifiedResolutionRecordKey {
     Text,
 }
 
+pub(super) fn canonical_resolution_record_key(record_key: &str) -> String {
+    let Some(coin_type) = record_key.strip_prefix("addr:") else {
+        return record_key.to_owned();
+    };
+
+    canonical_addr_coin_type(coin_type)
+        .map(|coin_type| format!("addr:{coin_type}"))
+        .unwrap_or_else(|| record_key.to_owned())
+}
+
 pub fn parse_supported_verified_resolution_record_key(
     record_key: &str,
 ) -> Result<SupportedVerifiedResolutionRecordKey> {
     if let Some(coin_type) = record_key.strip_prefix("addr:")
-        && !coin_type.is_empty()
-        && coin_type.as_bytes().iter().all(u8::is_ascii_digit)
+        && let Some(coin_type) = canonical_addr_coin_type(coin_type)
     {
-        return Ok(SupportedVerifiedResolutionRecordKey::Addr {
-            coin_type: coin_type.to_owned(),
-        });
+        return Ok(SupportedVerifiedResolutionRecordKey::Addr { coin_type });
     }
 
     if record_key == "contenthash" {
@@ -79,7 +86,7 @@ pub fn supports_resolution_verified_lookup_record(record: &impl VerifiedResoluti
     match record.record_family() {
         "addr" => record
             .selector_key()
-            .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit)),
+            .is_some_and(|selector| canonical_addr_coin_type(selector).is_some()),
         "contenthash" => record.record_key() == "contenthash" && record.selector_key().is_none(),
         "text" => record.selector_key().is_some(),
         _ => false,
@@ -110,5 +117,36 @@ where
         records.to_vec()
     } else {
         lookup_records
+    }
+}
+
+fn canonical_addr_coin_type(coin_type: &str) -> Option<String> {
+    if coin_type.is_empty() || !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    coin_type
+        .parse::<u64>()
+        .ok()
+        .map(|coin_type| coin_type.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SupportedVerifiedResolutionRecordKey, parse_supported_verified_resolution_record_key,
+    };
+
+    #[test]
+    fn supported_verified_addr_record_key_canonicalizes_coin_type() {
+        assert_eq!(
+            parse_supported_verified_resolution_record_key("addr:060").unwrap(),
+            SupportedVerifiedResolutionRecordKey::Addr {
+                coin_type: "60".to_owned()
+            }
+        );
+        assert!(
+            parse_supported_verified_resolution_record_key("addr:18446744073709551616").is_err()
+        );
     }
 }

@@ -125,15 +125,23 @@ fn validate_execution_step(execution_trace_id: Uuid, step: &ExecutionTraceStep) 
             step.step_index
         );
     }
-    if let Some(latency_ms) = step.latency_ms
-        && latency_ms < 0
-    {
-        bail!(
-            "execution trace {} step {} has negative latency_ms {}",
-            execution_trace_id,
-            step.step_index,
-            latency_ms
-        );
+    match step.latency_ms {
+        Some(latency_ms) if latency_ms < 0 => {
+            bail!(
+                "execution trace {} step {} has negative latency_ms {}",
+                execution_trace_id,
+                step.step_index,
+                latency_ms
+            );
+        }
+        Some(_) => {}
+        None => {
+            bail!(
+                "execution trace {} step {} must set latency_ms",
+                execution_trace_id,
+                step.step_index
+            );
+        }
     }
     ensure_nonempty_json_object(
         &step.canonicality_dependency,

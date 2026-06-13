@@ -198,8 +198,8 @@ fn profile_push_record_keys_from_section<'a>(
 ) {
     for record_key in values.filter_map(|value| string_field(provenance_field(value, "record_key")))
     {
-        if seen.insert(record_key.clone())
-            && let Some(record) = parse_resolution_record_key(&record_key)
+        if let Some(record) = parse_resolution_record_key(&record_key)
+            && seen.insert(record.record_key.clone())
         {
             records.push(record);
         }
@@ -536,4 +536,50 @@ async fn load_compact_records_verified_outcome(
     )
     .await
     .map_err(snapshot_selection_api_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_record_keys_canonicalize_inventory_addr_selectors_before_dedupe() {
+        let row = RecordInventoryCurrentRow {
+            resource_id: Uuid::from_u128(1),
+            record_version_boundary: json!({}),
+            enumeration_basis: json!({}),
+            selectors: json!([
+                {
+                    "record_key": "addr:060",
+                    "record_family": "addr",
+                    "selector_key": "060",
+                    "cacheable": true,
+                },
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true,
+                }
+            ]),
+            explicit_gaps: json!([]),
+            unsupported_families: json!([]),
+            last_change: None,
+            entries: json!([]),
+            provenance: json!({}),
+            coverage: json!({ "status": "full" }),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: OffsetDateTime::from_unix_timestamp(1)
+                .expect("test timestamp must be valid"),
+        };
+
+        let record_keys = profile_record_keys(Some(&row))
+            .into_iter()
+            .map(|record| record.record_key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(record_keys, vec!["addr:60"]);
+    }
 }

@@ -2694,7 +2694,7 @@
             }
           },
           {
-            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup.",
+            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup. addr:<coin_type> selectors are canonicalized as unsigned 64-bit decimal text before selector dedupe.",
             "explode": false,
             "in": "query",
             "name": "records",
@@ -3864,7 +3864,7 @@
             }
           },
           {
-            "description": "Requested textual coin-type selector keys.",
+            "description": "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input.",
             "explode": false,
             "in": "query",
             "name": "coin_types",
