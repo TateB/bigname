@@ -102,4 +102,6 @@ include!("tests/namespaces.rs");
 
 include!("tests/primary_names.rs");
 
+include!("tests/v2_name_record.rs");
+
 include!("tests/openapi.rs");

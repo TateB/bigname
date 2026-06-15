@@ -4,6 +4,7 @@ mod chains;
 mod cursor;
 mod envelope;
 mod error;
+mod name_record;
 mod params;
 mod router;
 mod snapshots;
@@ -13,6 +14,7 @@ pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
 pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
 pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};
+pub(crate) use name_record::{NameRecord, build_name_record, classify_registration_status};
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder,
