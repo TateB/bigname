@@ -528,6 +528,37 @@ async fn post_graphql(state: AppState, query: &str, variables: Value) -> Result<
     Ok(payload)
 }
 
+#[tokio::test]
+async fn graphql_endpoint_answers_cors_preflight_with_wildcard() -> Result<()> {
+    // The Manager dev build calls the endpoint cross-origin, so the browser sends a preflight for
+    // the application/json POST. The permissive CORS layer must answer it with a wildcard origin
+    // (no credentials) or the browser blocks the real request.
+    let database = TestDatabase::new_migrated().await?;
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/graphql")
+                .header("origin", "https://manager.example")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("preflight request must build"),
+        )
+        .await
+        .context("cors preflight request failed")?;
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*"),
+        "GraphQL endpoint must answer the cross-origin preflight with a wildcard ACAO"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[test]
 fn graphql_sdl_matches_subgraph_codegen_contract() {
     let sdl = crate::graphql::subgraph_sdl();
