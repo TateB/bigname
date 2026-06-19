@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -109,6 +109,112 @@ pub async fn load_record_inventory_current_with_anchor_fallback(
             )
         })
         .map(Some)
+}
+
+/// Batch variant of [`load_record_inventory_current_with_anchor_fallback`]: resolve many
+/// `(resource_id, boundary)` pairs in a single exact query, then apply the per-row anchor fallback
+/// only to the exact-key misses (the common case is an exact hit, so the fallback runs rarely).
+/// Returns rows aligned to `keys` (`None` = no row for that pair). This is what the GraphQL
+/// `Domain.resolver` DataLoader calls so a page of N domains costs one query plus a handful of
+/// fallbacks instead of N point reads.
+pub async fn load_record_inventory_current_batch(
+    pool: &PgPool,
+    keys: &[(Uuid, Value)],
+) -> Result<Vec<Option<RecordInventoryCurrentRow>>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Derive the storage boundary key for each pair up front; this is the same key the exact
+    // single-row read binds, so the batched `IN` matches the identical rows.
+    let mut resource_ids = Vec::with_capacity(keys.len());
+    let mut boundary_keys = Vec::with_capacity(keys.len());
+    for (resource_id, boundary) in keys {
+        let boundary_key =
+            record_version_boundary_storage_key(boundary, *resource_id).with_context(|| {
+                format!(
+                    "failed to derive record_inventory_current boundary key for resource_id {resource_id}"
+                )
+            })?;
+        resource_ids.push(*resource_id);
+        boundary_keys.push(boundary_key);
+    }
+
+    // Stage 1: one query for every exact `(resource_id, boundary_key)` hit. `unnest` zips the two
+    // bound arrays into the composite-key set the `IN` filters on.
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            ric.resource_id,
+            ric.record_version_boundary_key,
+            ric.record_version_boundary,
+            ric.enumeration_basis,
+            ric.selectors,
+            ric.explicit_gaps,
+            ric.unsupported_families,
+            ric.last_change,
+            ric.entries,
+            ric.provenance,
+            ric.coverage,
+            ric.chain_positions,
+            ric.canonicality_summary,
+            ric.manifest_version,
+            ric.last_recomputed_at
+        FROM record_inventory_current ric
+        JOIN resources resource
+          ON resource.resource_id = ric.resource_id
+        WHERE (ric.resource_id, ric.record_version_boundary_key) IN (
+            SELECT * FROM unnest($1::uuid[], $2::text[])
+        )
+        {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
+        "#,
+    ))
+    .bind(&resource_ids)
+    .bind(&boundary_keys)
+    .fetch_all(pool)
+    .await
+    .context("failed to batch-load record_inventory_current rows")?;
+
+    // Key the map by the DB-returned `record_version_boundary_key` so the zip-back below can look
+    // each input up by its derived key. This relies on the stored key being canonical, which
+    // `decode_record_inventory_current_row` validates (it re-derives the key from the row's
+    // boundary JSON and bails on mismatch) — keep that validation if this insert is ever refactored.
+    let mut by_key = HashMap::<(Uuid, String), RecordInventoryCurrentRow>::new();
+    for row in rows {
+        let resource_id = crate::sql_row::get::<Uuid>(&row, "resource_id")?;
+        let boundary_key = crate::sql_row::get::<String>(&row, "record_version_boundary_key")?;
+        by_key.insert(
+            (resource_id, boundary_key),
+            decode_record_inventory_current_row(row)?,
+        );
+    }
+
+    // Assemble output aligned to the input. Misses fall back to the shared single-row anchor logic
+    // (only when the boundary is pointer-less), so the fallback semantics and the ambiguity guard
+    // stay identical to the non-batched path — including treating a matched-but-unloadable anchor as
+    // a hard error rather than silently serving `None`.
+    let mut output = Vec::with_capacity(keys.len());
+    for ((resource_id, boundary), boundary_key) in keys.iter().zip(boundary_keys) {
+        if let Some(row) = by_key.get(&(*resource_id, boundary_key)) {
+            output.push(Some(row.clone()));
+        } else if boundary_has_event_pointer(boundary) {
+            output.push(None);
+        } else if let Some(anchored_boundary) =
+            find_record_inventory_boundary_by_anchor(pool, *resource_id, boundary).await?
+        {
+            let row = load_record_inventory_current(pool, *resource_id, &anchored_boundary)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "matched record_inventory_current anchor for resource_id {resource_id} but the projection row was not loadable"
+                    )
+                })?;
+            output.push(Some(row));
+        } else {
+            output.push(None);
+        }
+    }
+    Ok(output)
 }
 
 fn boundary_has_event_pointer(record_version_boundary: &Value) -> bool {

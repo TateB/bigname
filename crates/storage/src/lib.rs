@@ -199,7 +199,8 @@ pub use raw_payload_cache::{
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
-    load_record_inventory_current, load_record_inventory_current_for_snapshot,
+    load_record_inventory_current, load_record_inventory_current_batch,
+    load_record_inventory_current_for_snapshot,
     load_record_inventory_current_with_anchor_fallback, upsert_record_inventory_current_rows,
 };
 pub use resolution_support::{

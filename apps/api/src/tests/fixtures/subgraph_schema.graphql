@@ -23,9 +23,10 @@ type Domain {
 	createdAt: Int!
 	expiryDate: Int
 	"""
-	One exact-PK projection read per domain that actually selects `resolver`; page items
-	resolve concurrently, and names without a projected inventory row (the common case until
-	the resolver-log sweep lands) serve the empty record shapes.
+	The page's `resolver` reads are coalesced through a DataLoader, so a list of N domains costs
+	one batched `record_inventory_current` query (plus a fallback only for rare exact-key misses)
+	rather than N point reads. Names without a projected inventory row (the common case until the
+	resolver-log sweep lands) serve the empty record shapes without contributing a key.
 	"""
 	resolver: Resolver
 	owner: Account!

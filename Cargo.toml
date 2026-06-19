@@ -32,7 +32,7 @@ alloy-rpc-types-eth = "2.0.1"
 alloy-sol-types = "1.5.7"
 alloy-transport-http = { version = "2.0.1", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
 anyhow = "1.0.100"
-async-graphql = { version = "7", default-features = false, features = ["graphiql"] }
+async-graphql = { version = "7", default-features = false, features = ["graphiql", "dataloader"] }
 async-graphql-axum = "7"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 clap = { version = "4.5.49", features = ["derive", "env"] }

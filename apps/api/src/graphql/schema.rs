@@ -1,9 +1,11 @@
+use async_graphql::dataloader::DataLoader;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use axum::{Router, routing::post};
 
 use crate::state::AppState;
 
 use super::http::{graphiql, graphql_handler};
+use super::loader::RecordInventoryLoader;
 use super::query::QueryRoot;
 
 pub(crate) type SubgraphSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
@@ -16,10 +18,16 @@ const MAX_QUERY_DEPTH: usize = 32;
 const MAX_QUERY_COMPLEXITY: usize = 4_000;
 
 fn build_schema(state: AppState) -> SubgraphSchema {
+    // Batches the per-domain `record_inventory_current` reads behind `Domain.resolver` (the list
+    // N+1). `DataLoader::new` uses `NoCache`, so the loader only coalesces a request's reads into
+    // one query and never memoizes rows across requests (the projection changes under the indexer).
+    let record_inventory_loader =
+        DataLoader::new(RecordInventoryLoader::new(state.pool.clone()), tokio::spawn);
     Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
         .limit_depth(MAX_QUERY_DEPTH)
         .limit_complexity(MAX_QUERY_COMPLEXITY)
         .data(state)
+        .data(record_inventory_loader)
         .finish()
 }
 

@@ -9,7 +9,7 @@ build = "build.rs"
 [dependencies]
 anyhow = "1.0.100"
 alloy-primitives = "1.5.7"
-async-graphql = { version = "7", default-features = false, features = ["graphiql"] }
+async-graphql = { version = "7", default-features = false, features = ["graphiql", "dataloader"] }
 async-graphql-axum = "7"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 bigname-domain = { path = "../../crates/domain" }

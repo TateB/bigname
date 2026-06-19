@@ -434,6 +434,106 @@ async fn record_inventory_current_upserts_and_loads_by_exact_key() -> Result<()>
 }
 
 #[tokio::test]
+async fn load_record_inventory_current_batch_aligns_hits_misses_and_fallback() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let alice = Uuid::from_u128(0x7150);
+    let bob = Uuid::from_u128(0x7151);
+    let carol_missing = Uuid::from_u128(0x7152);
+    seed_resources(&database, &[alice, bob, carol_missing]).await?;
+
+    let alice_row = record_inventory_current_row(
+        alice,
+        "ens:alice.eth",
+        Some(901),
+        Some("RecordsChanged"),
+        21_500_001,
+        "0xbatchalice",
+        4,
+    );
+    let bob_row = record_inventory_current_row(
+        bob,
+        "ens:bob.eth",
+        Some(902),
+        Some("RecordsChanged"),
+        21_500_002,
+        "0xbatchbob",
+        4,
+    );
+    upsert_record_inventory_current_rows(
+        database.pool(),
+        &[alice_row.clone(), bob_row.clone()],
+    )
+    .await?;
+
+    // carol has a seeded resource but no inventory row; its boundary carries an event pointer, so
+    // the read reports a clean miss without attempting the anchor fallback.
+    let carol_boundary = record_version_boundary(
+        carol_missing,
+        "ens:carol.eth",
+        Some(903),
+        Some("RecordsChanged"),
+        21_500_003,
+        "0xbatchcarol",
+    );
+    // A pointer-less boundary for alice misses the exact key (which encodes the event pointer) and
+    // must resolve through the anchor fallback to alice's stored row.
+    let alice_anchor_boundary = record_version_boundary(
+        alice,
+        "ens:alice.eth",
+        None,
+        None,
+        21_500_001,
+        "0xbatchalice",
+    );
+    // A pointer-less boundary for carol has no row AND no anchor match, exercising the fallback's
+    // terminal `None` branch (anchor lookup returns nothing).
+    let carol_anchor_boundary = record_version_boundary(
+        carol_missing,
+        "ens:carol.eth",
+        None,
+        None,
+        21_500_003,
+        "0xbatchcarol",
+    );
+
+    // The input interleaves: exact hit, pointer-ful clean miss, exact hit, pointer-less fallback
+    // hit, a DUPLICATE of the first exact key (both slots must resolve), and a pointer-less miss
+    // that finds no anchor. Output must align 1:1 to input order.
+    let rows = load_record_inventory_current_batch(
+        database.pool(),
+        &[
+            (bob, bob_row.record_version_boundary.clone()),
+            (carol_missing, carol_boundary),
+            (alice, alice_row.record_version_boundary.clone()),
+            (alice, alice_anchor_boundary),
+            (bob, bob_row.record_version_boundary.clone()),
+            (carol_missing, carol_anchor_boundary),
+        ],
+    )
+    .await?;
+
+    assert_eq!(
+        rows,
+        vec![
+            Some(bob_row.clone()),
+            None,
+            Some(alice_row.clone()),
+            Some(alice_row),
+            Some(bob_row),
+            None,
+        ]
+    );
+
+    // Empty input short-circuits to an empty result without touching the pool.
+    assert_eq!(
+        load_record_inventory_current_batch(database.pool(), &[]).await?,
+        Vec::new()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_snapshot_read_fails_stale_on_position_mismatch() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x7110);

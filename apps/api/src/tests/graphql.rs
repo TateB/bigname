@@ -390,6 +390,180 @@ async fn seed_alice_record_inventory(database: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
+/// Seed a record inventory for bob with records DISTINCT from alice's, so a multi-domain list
+/// query can assert the DataLoader batch attributes each domain its own records (no cross-talk).
+async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
+    let bob_row = address_name_name_current_row(
+        "ens:bob.eth",
+        "Bob.eth",
+        "bob.eth",
+        GRAPHQL_BOB_NAMEHASH,
+        Uuid::from_u128(0x6_b003),
+        Uuid::from_u128(0x6_b002),
+        Some(Uuid::from_u128(0x6_b001)),
+        412,
+        graphql_declared_summary(GRAPHQL_OWNER, GRAPHQL_RESOLVER, "registrar", 1_800_000_000, 1_650_000_000),
+    );
+    let (resource_id, record_version_boundary) =
+        bigname_storage::resolution_record_inventory_lookup_key_any_chain(&bob_row)
+            .expect("bob fixture row must yield a record-inventory lookup key");
+
+    bigname_storage::upsert_record_inventory_current_rows(
+        &database.pool,
+        &[bigname_storage::RecordInventoryCurrentRow {
+            resource_id,
+            record_version_boundary,
+            enumeration_basis: json!({
+                "observed_selectors": true,
+                "capability_declared_families": false,
+                "globally_enumerable": false,
+            }),
+            selectors: json!([
+                {"record_key": "addr:60", "record_family": "addr", "selector_key": "60", "cacheable": true},
+                {"record_key": "contenthash", "record_family": "contenthash", "selector_key": null, "cacheable": true},
+            ]),
+            explicit_gaps: json!([]),
+            unsupported_families: json!([]),
+            last_change: None,
+            entries: json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": "0x00000000000000000000000000000000000000cc",
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "success",
+                    "value": "0xe301017012209988",
+                },
+            ]),
+            provenance: json!({"seed": "graphql_record_inventory_test_bob"}),
+            coverage: json!({"status": "full"}),
+            chain_positions: json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 412,
+                    "block_hash": "0xsb-bob",
+                    "timestamp": "2026-04-17T00:00:04Z",
+                }
+            }),
+            canonicality_summary: json!({"status": "finalized"}),
+            manifest_version: 3,
+            last_recomputed_at: sqlx::types::time::OffsetDateTime::from_unix_timestamp(
+                1_717_171_718,
+            )
+            .expect("valid timestamp"),
+        }],
+    )
+    .await?;
+    Ok(())
+}
+
+/// The N+1 fix end-to-end: a `domains` list that selects `resolver` for every row resolves its
+/// per-domain record reads through the DataLoader (one batched `record_inventory_current` query),
+/// and each domain must carry ITS OWN records — the batch must not cross-attribute alice's records
+/// to bob or vice versa.
+#[tokio::test]
+async fn graphql_domains_list_batches_resolver_records_per_domain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_dashboard_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    seed_bob_record_inventory(&database).await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where, orderBy: name, orderDirection: asc) {
+                name
+                resolver { contentHash addresses { coinType address } }
+            }
+        }"#,
+        json!({ "where": { "owner": GRAPHQL_OWNER } }),
+    )
+    .await?;
+
+    let domains = payload["data"]["domains"]
+        .as_array()
+        .expect("domains array");
+    let alice = domains
+        .iter()
+        .find(|domain| domain["name"] == json!("Alice.eth"))
+        .expect("alice present");
+    let bob = domains
+        .iter()
+        .find(|domain| domain["name"] == json!("Bob.eth"))
+        .expect("bob present");
+
+    assert_eq!(alice["resolver"]["contentHash"], json!("0xe30101701220aabbccdd"));
+    assert_eq!(
+        alice["resolver"]["addresses"],
+        json!([
+            { "coinType": 2_147_483_658u32, "address": "0x00000000000000000000000000000000000000bb" },
+            { "coinType": 60, "address": "0x00000000000000000000000000000000000000aa" },
+        ])
+    );
+    assert_eq!(bob["resolver"]["contentHash"], json!("0xe301017012209988"));
+    assert_eq!(
+        bob["resolver"]["addresses"],
+        json!([{ "coinType": 60, "address": "0x00000000000000000000000000000000000000cc" }])
+    );
+
+    database.cleanup().await
+}
+
+/// A heterogeneous batched page: alice has a seeded inventory (hit) while bob is keyed but unseeded
+/// (clean miss). In one request/one batch, the hit must keep its records and the miss must serve the
+/// empty resolver shapes — the batch must not cross-attribute alice's records to bob or shift slots.
+#[tokio::test]
+async fn graphql_domains_list_batch_mixes_hit_and_clean_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_dashboard_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    // Deliberately do NOT seed bob's inventory: bob is keyed (has a resolver) but has no row.
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where, orderBy: name, orderDirection: asc) {
+                name
+                resolver { address contentHash texts addresses { coinType address } }
+            }
+        }"#,
+        json!({ "where": { "owner": GRAPHQL_OWNER } }),
+    )
+    .await?;
+
+    let domains = payload["data"]["domains"]
+        .as_array()
+        .expect("domains array");
+    let alice = domains
+        .iter()
+        .find(|domain| domain["name"] == json!("Alice.eth"))
+        .expect("alice present");
+    let bob = domains
+        .iter()
+        .find(|domain| domain["name"] == json!("Bob.eth"))
+        .expect("bob present");
+
+    // alice (hit) keeps her records.
+    assert_eq!(alice["resolver"]["contentHash"], json!("0xe30101701220aabbccdd"));
+    assert_eq!(
+        alice["resolver"]["addresses"].as_array().map(Vec::len),
+        Some(2)
+    );
+    // bob (clean miss in the same batch) serves the empty shapes, resolver address still present.
+    assert_eq!(bob["resolver"]["address"], json!(GRAPHQL_RESOLVER));
+    assert_eq!(bob["resolver"]["contentHash"], Value::Null);
+    assert_eq!(bob["resolver"]["texts"], json!([]));
+    assert_eq!(bob["resolver"]["addresses"], json!([]));
+
+    database.cleanup().await
+}
+
 /// Reproduce the live Sepolia shape end-to-end: erin's `name_current` row is positioned on
 /// `ethereum-sepolia` (which the mainnet-gated verified-resolution lookup rejects — the any-chain
 /// key must serve it), and her inventory row is keyed by a *pointered* boundary (the worker fills

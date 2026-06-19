@@ -11,6 +11,7 @@ mod enums;
 mod error;
 mod http;
 mod inputs;
+mod loader;
 mod objects;
 mod query;
 mod schema;

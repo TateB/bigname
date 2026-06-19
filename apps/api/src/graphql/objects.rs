@@ -1,11 +1,10 @@
+use async_graphql::dataloader::DataLoader;
 use async_graphql::{Context, Object, Result, SimpleObject};
-use bigname_storage::load_record_inventory_current_with_anchor_fallback;
 use sqlx::types::Uuid;
-
-use crate::state::AppState;
 
 use super::convert::resolver_from_store;
 use super::error::internal_error;
+use super::loader::{RecordInventoryLoader, record_inventory_key};
 
 /// Subgraph `Account` — the lowercased address as `id`.
 #[derive(SimpleObject)]
@@ -103,23 +102,28 @@ impl Domain {
         self.expiry_date
     }
 
-    /// One exact-PK projection read per domain that actually selects `resolver`; page items
-    /// resolve concurrently, and names without a projected inventory row (the common case until
-    /// the resolver-log sweep lands) serve the empty record shapes.
+    /// The page's `resolver` reads are coalesced through a DataLoader, so a list of N domains costs
+    /// one batched `record_inventory_current` query (plus a fallback only for rare exact-key misses)
+    /// rather than N point reads. Names without a projected inventory row (the common case until the
+    /// resolver-log sweep lands) serve the empty record shapes without contributing a key.
     async fn resolver(&self, ctx: &Context<'_>) -> Result<Option<Resolver>> {
         let Some(address) = self.resolver_address.clone() else {
             return Ok(None);
         };
         let inventory = match self.record_inventory_key.as_ref() {
             Some((resource_id, boundary)) => {
-                let state = ctx.data::<AppState>()?;
-                load_record_inventory_current_with_anchor_fallback(
-                    &state.pool,
-                    *resource_id,
-                    boundary,
-                )
-                .await
-                .map_err(|error| internal_error("Domain.resolver", error))?
+                let loader = ctx.data::<DataLoader<RecordInventoryLoader>>()?;
+                loader
+                    .load_one(record_inventory_key(*resource_id, boundary))
+                    .await
+                    .map_err(|error| {
+                        // `{error:#}` keeps the storage layer's full anyhow cause chain in the log
+                        // (plain `{error}` would flatten it to just the outermost message).
+                        internal_error(
+                            "Domain.resolver",
+                            anyhow::anyhow!("record inventory batch load failed: {error:#}"),
+                        )
+                    })?
             }
             None => None,
         };
