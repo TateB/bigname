@@ -134,10 +134,24 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
     )
     .await?;
     emitters.extend(load_registry_active_emitters(pool, chain).await?);
+    // Order intervals by activation within each (address, source_family) group, then by identity.
+    // Including active_from/active_to keeps this sort TOTAL: one address can now carry several
+    // distinct intervals that share a (source_manifest_id, contract_instance_id) — without the
+    // interval bounds in the key, their order would fall back to HashMap-iteration order and make
+    // `active_emitter_for_block`'s first-match selection nondeterministic for overlapping windows.
+    // This matches the resolver path's earliest-activation-first ordering (ens_v2_common).
     emitters.sort_by(|left, right| {
         left.address
             .cmp(&right.address)
             .then(left.source_family.cmp(&right.source_family))
+            .then(
+                left.active_from_block_number
+                    .cmp(&right.active_from_block_number),
+            )
+            .then(
+                left.active_to_block_number
+                    .cmp(&right.active_to_block_number),
+            )
             .then(left.source_manifest_id.cmp(&right.source_manifest_id))
             .then(left.contract_instance_id.cmp(&right.contract_instance_id))
     });

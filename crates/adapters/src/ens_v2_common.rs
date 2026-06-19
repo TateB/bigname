@@ -24,6 +24,12 @@ pub(crate) struct ActiveEmitter {
     pub(crate) active_to_block_number: Option<i64>,
 }
 
+/// Identifies one distinct discovery/watched interval for an emitting address:
+/// `(address, active_from_block_number, active_to_block_number)`. Two rows that share this key are
+/// the same interval reported by different sources and are deduplicated; rows that differ are kept
+/// as separate [`ActiveEmitter`]s so disjoint windows survive (see [`insert_distinct_emitter`]).
+type EmitterScopeKey = (String, Option<i64>, Option<i64>);
+
 pub(crate) fn source_scope_bindings(
     source_scope: Option<&[(String, String, i64, i64)]>,
     source_family_filter: &str,
@@ -42,37 +48,45 @@ pub(crate) fn source_scope_bindings(
     (addresses, from_blocks, to_blocks)
 }
 
-/// Collapse multiple watched/discovery rows for one emitting address into a single envelope
-/// interval. A discovered resolver carries one discovery edge per (name, registry) that referenced
-/// it, each with its own activation block — the emitter is in scope from the EARLIEST activation
-/// to the latest deactivation (open-ended when any edge is open). Keeping a single arbitrary
-/// edge's interval instead silently dropped every raw log emitted before that edge's activation
-/// block, which is how record events written around a name's registration went un-normalized.
-fn merge_active_emitter(
-    emitters_by_address: &mut HashMap<String, ActiveEmitter>,
+/// Record each emitting address's discovery/watched intervals as DISTINCT emitters — without
+/// collapsing them. A discovered resolver carries one discovery edge per (name, registry) that
+/// referenced it, and those edges can be disjoint in block space (a name points at the resolver,
+/// drops it, and a different name points at it again later). Keeping each edge as its own
+/// [`ActiveEmitter`] lets [`active_emitter_for_block`] match the interval that actually covers a
+/// log — and skip blocks that fall in the GAPS between edges — while still honouring every edge
+/// (the bug this guards against was keeping a single arbitrary edge, which dropped logs covered
+/// only by the others). Two sources reporting the identical interval are deduplicated, preferring
+/// the lower `(source_manifest_id, contract_instance_id)` for determinism. Collapsing to a hull
+/// (`min(from)..max(to)`) instead would admit gap blocks and stamp them with the wrong edge's
+/// identity.
+///
+/// This mirrors the *keying* of `ens_v2_registry::preferred_emitters_by_scope`
+/// (`(source_family, address, active_from, active_to)`); it deliberately does NOT match its
+/// selection bound or tie-break. The registry selects with an inclusive upper bound and breaks
+/// ties by `source_rank`; here selection is exclusive (`active_emitter_for_block`, correct for
+/// discovery-edge `active_to`) and the dedup tie-break is plain id ordering — `ActiveEmitter` here
+/// carries no `source_rank`, and a collision only happens on an exact identical interval.
+fn insert_distinct_emitter(
+    emitters_by_scope: &mut HashMap<EmitterScopeKey, ActiveEmitter>,
     emitter: ActiveEmitter,
 ) {
     use std::collections::hash_map::Entry;
-    match emitters_by_address.entry(emitter.address.clone()) {
+    let scope_key = (
+        emitter.address.clone(),
+        emitter.active_from_block_number,
+        emitter.active_to_block_number,
+    );
+    match emitters_by_scope.entry(scope_key) {
         Entry::Vacant(entry) => {
             entry.insert(emitter);
         }
         Entry::Occupied(mut entry) => {
             let existing = entry.get_mut();
-            existing.active_from_block_number = match (
-                existing.active_from_block_number,
-                emitter.active_from_block_number,
-            ) {
-                (Some(existing_from), Some(merged_from)) => Some(existing_from.min(merged_from)),
-                _ => None,
-            };
-            existing.active_to_block_number = match (
-                existing.active_to_block_number,
-                emitter.active_to_block_number,
-            ) {
-                (Some(existing_to), Some(merged_to)) => Some(existing_to.max(merged_to)),
-                _ => None,
-            };
+            if (emitter.source_manifest_id, emitter.contract_instance_id)
+                < (existing.source_manifest_id, existing.contract_instance_id)
+            {
+                *existing = emitter;
+            }
         }
     }
 }
@@ -90,6 +104,12 @@ pub(crate) fn emitters_by_address(
     output
 }
 
+/// Find the interval covering `block_number`, matching the half-open range `[active_from,
+/// active_to)`. The upper bound is EXCLUSIVE on purpose and must not be "reconciled" with the
+/// inclusive bound used by `ens_v2_registry::emitter_active_at_block`: a superseded discovery
+/// edge's `active_to` is written as the successor edge's `active_from` (the repoint block), so two
+/// adjacent edges `[from, X)` and `[X, ..)` partition cleanly — block `X` belongs to the successor
+/// only. An inclusive bound would match both edges at `X` and double-attribute the repoint log.
 pub(crate) fn active_emitter_for_block(
     emitters: &[ActiveEmitter],
     block_number: i64,
@@ -127,7 +147,7 @@ pub(crate) async fn load_active_emitters(
     let active_manifests =
         load_active_manifest_metadata(pool, &manifest_ids, &context_label).await?;
 
-    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
+    let mut emitters_by_scope = HashMap::<EmitterScopeKey, ActiveEmitter>::new();
     for watched_contract in watched_contracts {
         let (source_manifest_id, manifest) =
             active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
@@ -136,8 +156,8 @@ pub(crate) async fn load_active_emitters(
         }
         ensure_watched_contract_manifest_chain(&watched_contract, manifest, source_manifest_id)?;
 
-        merge_active_emitter(
-            &mut emitters_by_address,
+        insert_distinct_emitter(
+            &mut emitters_by_scope,
             ActiveEmitter {
                 address: watched_contract.address,
                 contract_instance_id: watched_contract.contract_instance_id,
@@ -156,14 +176,22 @@ pub(crate) async fn load_active_emitters(
         for emitter in
             load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest).await?
         {
-            merge_active_emitter(&mut emitters_by_address, emitter);
+            insert_distinct_emitter(&mut emitters_by_scope, emitter);
         }
     }
 
-    let mut emitters = emitters_by_address.into_values().collect::<Vec<_>>();
+    let mut emitters = emitters_by_scope.into_values().collect::<Vec<_>>();
     emitters.sort_by(|left, right| {
         left.address
             .cmp(&right.address)
+            .then(
+                left.active_from_block_number
+                    .cmp(&right.active_from_block_number),
+            )
+            .then(
+                left.active_to_block_number
+                    .cmp(&right.active_to_block_number),
+            )
             .then(left.source_manifest_id.cmp(&right.source_manifest_id))
             .then(left.contract_instance_id.cmp(&right.contract_instance_id))
     });
@@ -262,11 +290,17 @@ pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
-    fn emitter(active_from: Option<i64>, active_to: Option<i64>) -> ActiveEmitter {
+    fn emitter_with(
+        address: &str,
+        instance: u128,
+        source_manifest_id: i64,
+        active_from: Option<i64>,
+        active_to: Option<i64>,
+    ) -> ActiveEmitter {
         ActiveEmitter {
-            address: "0xresolver".to_owned(),
-            contract_instance_id: Uuid::from_u128(1),
-            source_manifest_id: 1,
+            address: address.to_owned(),
+            contract_instance_id: Uuid::from_u128(instance),
+            source_manifest_id,
             namespace: "ens".to_owned(),
             source_family: "ens_v2_resolver_l1".to_owned(),
             manifest_version: 1,
@@ -275,32 +309,131 @@ mod tests {
         }
     }
 
-    #[test]
-    fn merge_active_emitter_unions_edge_intervals_per_address() {
-        let mut by_address = HashMap::new();
-
-        // The discovery order is arbitrary — a later-discovered edge must not shadow earlier
-        // coverage (the bug this guards against: only the kept edge's interval was honoured, so
-        // logs before its activation block were silently dropped).
-        merge_active_emitter(&mut by_address, emitter(Some(10_710_418), Some(10_800_000)));
-        merge_active_emitter(&mut by_address, emitter(Some(10_696_215), Some(10_750_000)));
-        let merged = by_address.get("0xresolver").expect("merged emitter");
-        assert_eq!(merged.active_from_block_number, Some(10_696_215));
-        assert_eq!(merged.active_to_block_number, Some(10_800_000));
-
-        // An open-ended edge (no activation / no deactivation bound) opens that side of the
-        // envelope for the address.
-        merge_active_emitter(&mut by_address, emitter(None, None));
-        let merged = by_address.get("0xresolver").expect("merged emitter");
-        assert_eq!(merged.active_from_block_number, None);
-        assert_eq!(merged.active_to_block_number, None);
+    fn emitter(active_from: Option<i64>, active_to: Option<i64>) -> ActiveEmitter {
+        emitter_with("0xresolver", 1, 1, active_from, active_to)
     }
 
     #[test]
-    fn active_emitter_for_block_respects_the_merged_envelope() {
-        let merged = [emitter(Some(10_696_215), None)];
-        assert!(active_emitter_for_block(&merged, 10_696_215).is_some());
-        assert!(active_emitter_for_block(&merged, 10_704_585).is_some());
-        assert!(active_emitter_for_block(&merged, 10_696_214).is_none());
+    fn insert_distinct_emitter_preserves_disjoint_intervals_per_address() {
+        let mut by_scope = HashMap::new();
+
+        // Two genuinely disjoint discovery edges for the same resolver address, discovered in
+        // arbitrary order. They must NOT collapse into one envelope [100, 600): the gap [200, 500)
+        // is covered by neither edge, and each edge keeps its own manifest/instance identity.
+        insert_distinct_emitter(
+            &mut by_scope,
+            emitter_with("0xresolver", 2, 2, Some(500), Some(600)),
+        );
+        insert_distinct_emitter(
+            &mut by_scope,
+            emitter_with("0xresolver", 1, 1, Some(100), Some(200)),
+        );
+        // The same interval reported by a second source deduplicates, keeping the lower
+        // (source_manifest_id, contract_instance_id).
+        insert_distinct_emitter(
+            &mut by_scope,
+            emitter_with("0xresolver", 9, 9, Some(100), Some(200)),
+        );
+        assert_eq!(by_scope.len(), 2);
+
+        let emitters = by_scope.into_values().collect::<Vec<_>>();
+        let by_address = emitters_by_address(&emitters);
+        let resolver = by_address.get("0xresolver").expect("address present");
+
+        // Inside either edge: covered, and attributed to THAT edge's identity (not the first).
+        let first = active_emitter_for_block(resolver, 150).expect("first edge covers 150");
+        assert_eq!(first.active_from_block_number, Some(100));
+        assert_eq!(first.source_manifest_id, 1);
+        assert_eq!(first.contract_instance_id, Uuid::from_u128(1));
+        let second = active_emitter_for_block(resolver, 550).expect("second edge covers 550");
+        assert_eq!(second.active_from_block_number, Some(500));
+        assert_eq!(second.source_manifest_id, 2);
+        assert_eq!(second.contract_instance_id, Uuid::from_u128(2));
+
+        // In the gap between the disjoint edges, and outside both: NOT covered. The old envelope
+        // (hull) bug admitted block 300 here and mis-attributed it to the first edge's identity.
+        assert!(active_emitter_for_block(resolver, 300).is_none());
+        assert!(active_emitter_for_block(resolver, 50).is_none());
+        assert!(active_emitter_for_block(resolver, 700).is_none());
+    }
+
+    #[test]
+    fn active_emitter_for_block_matches_the_covering_interval() {
+        // A single open-ended edge covers from its activation block onward; exclusive upper bound.
+        let open = [emitter(Some(10_696_215), None)];
+        assert!(active_emitter_for_block(&open, 10_696_215).is_some());
+        assert!(active_emitter_for_block(&open, 10_704_585).is_some());
+        assert!(active_emitter_for_block(&open, 10_696_214).is_none());
+    }
+
+    #[test]
+    fn adjacent_edges_attribute_the_boundary_block_to_the_successor() {
+        // A superseded edge's active_to is the successor's active_from (the repoint block), so two
+        // touching edges [100, 200) and [200, 300) partition cleanly: block 200 belongs to the
+        // successor only, with no block falling through a crack. This is the case the exclusive
+        // upper bound exists for.
+        let emitters = vec![
+            emitter_with("0xresolver", 1, 1, Some(100), Some(200)),
+            emitter_with("0xresolver", 2, 2, Some(200), Some(300)),
+        ];
+        let by_address = emitters_by_address(&emitters);
+        let resolver = by_address.get("0xresolver").expect("address present");
+
+        assert_eq!(
+            active_emitter_for_block(resolver, 199)
+                .expect("predecessor covers 199")
+                .source_manifest_id,
+            1
+        );
+        let boundary = active_emitter_for_block(resolver, 200).expect("successor covers 200");
+        assert_eq!(boundary.source_manifest_id, 2);
+        assert_eq!(boundary.active_from_block_number, Some(200));
+    }
+
+    #[test]
+    fn overlapping_edges_select_the_earliest_activating_interval() {
+        // Two genuinely overlapping intervals for one address with distinct identity. Given the
+        // loader's active_from-asc ordering, active_emitter_for_block's first match is the
+        // earliest-activating edge — a stable, order-independent choice for a block in the overlap.
+        let mut emitters = vec![
+            emitter_with("0xresolver", 2, 2, Some(200), Some(600)),
+            emitter_with("0xresolver", 1, 1, Some(100), Some(400)),
+        ];
+        emitters.sort_by(|left, right| {
+            left.active_from_block_number
+                .cmp(&right.active_from_block_number)
+                .then(
+                    left.active_to_block_number
+                        .cmp(&right.active_to_block_number),
+                )
+                .then(left.source_manifest_id.cmp(&right.source_manifest_id))
+        });
+        let by_address = emitters_by_address(&emitters);
+        let resolver = by_address.get("0xresolver").expect("address present");
+
+        // Block 300 is inside both [100, 400) and [200, 600); the earliest-activating edge wins.
+        let covering = active_emitter_for_block(resolver, 300).expect("overlap covered");
+        assert_eq!(covering.active_from_block_number, Some(100));
+        assert_eq!(covering.source_manifest_id, 1);
+    }
+
+    #[test]
+    fn insert_distinct_emitter_dedup_prefers_lower_identity_across_sources() {
+        // The same interval reported by two different sources (a watched-contract row and a
+        // discovered-resolver row carry different source_manifest_id) dedups to one emitter,
+        // keeping the lower (source_manifest_id, contract_instance_id).
+        let mut by_scope = HashMap::new();
+        insert_distinct_emitter(
+            &mut by_scope,
+            emitter_with("0xresolver", 7, 5, Some(100), Some(200)),
+        );
+        insert_distinct_emitter(
+            &mut by_scope,
+            emitter_with("0xresolver", 3, 2, Some(100), Some(200)),
+        );
+        assert_eq!(by_scope.len(), 1);
+        let kept = by_scope.values().next().expect("one emitter");
+        assert_eq!(kept.source_manifest_id, 2);
+        assert_eq!(kept.contract_instance_id, Uuid::from_u128(3));
     }
 }
