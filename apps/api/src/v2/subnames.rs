@@ -13,6 +13,7 @@ const SUBNAMES_SORT: &str = "display_name_asc";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const CHILD_LOGICAL_NAME_ID_CURSOR_KEY: &str = "child_logical_name_id";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
+const PARENT_FILTER_KEY: &str = "parent";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Subname {
@@ -67,11 +68,18 @@ pub(crate) fn build_subname(
 pub(crate) fn subname_cursor_payload(
     cursor: &ChildrenCurrentKeysetCursor,
     namespace: &str,
+    parent_logical_name_id: &str,
     snapshot_token: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         SUBNAMES_SORT,
-        BTreeMap::from([(NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned())]),
+        BTreeMap::from([
+            (NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned()),
+            (
+                PARENT_FILTER_KEY.to_owned(),
+                parent_logical_name_id.to_owned(),
+            ),
+        ]),
         BTreeMap::from([
             (
                 DISPLAY_NAME_CURSOR_KEY.to_owned(),
@@ -89,6 +97,7 @@ pub(crate) fn subname_cursor_payload(
 pub(crate) fn subname_storage_cursor(
     payload: &CursorPayload,
     namespace: &str,
+    parent_logical_name_id: &str,
     snapshot_token: &str,
 ) -> V2Result<ChildrenCurrentKeysetCursor> {
     if payload.sort != SUBNAMES_SORT {
@@ -97,12 +106,14 @@ pub(crate) fn subname_storage_cursor(
     if payload.snapshot.as_deref() != Some(snapshot_token) {
         return Err(invalid_subname_cursor());
     }
-    if payload.filters.len() != 1
+    if payload.filters.len() != 2
         || payload
             .filters
             .get(NAMESPACE_FILTER_KEY)
             .map(String::as_str)
             != Some(namespace)
+        || payload.filters.get(PARENT_FILTER_KEY).map(String::as_str)
+            != Some(parent_logical_name_id)
     {
         return Err(invalid_subname_cursor());
     }
@@ -142,10 +153,19 @@ mod tests {
             canonical_display_name: "alice.eth".to_owned(),
             child_logical_name_id: "ens:alice.eth".to_owned(),
         };
-        let payload = subname_cursor_payload(&cursor, "ens", "snapshot-1");
+        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
 
         assert_eq!(
-            subname_storage_cursor(&payload, "ens", "snapshot-1").expect("cursor must decode"),
+            payload.filters,
+            BTreeMap::from([
+                ("namespace".to_owned(), "ens".to_owned()),
+                ("parent".to_owned(), "ens:parent.eth".to_owned()),
+            ])
+        );
+
+        assert_eq!(
+            subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1")
+                .expect("cursor must decode"),
             cursor
         );
     }
@@ -156,19 +176,30 @@ mod tests {
             canonical_display_name: "alice.eth".to_owned(),
             child_logical_name_id: "ens:alice.eth".to_owned(),
         };
-        let mut payload = subname_cursor_payload(&cursor, "ens", "snapshot-1");
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
 
         payload.sort = "wrong".to_owned();
-        assert!(subname_storage_cursor(&payload, "ens", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
 
-        let mut payload = subname_cursor_payload(&cursor, "ens", "snapshot-1");
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
         payload
             .filters
             .insert("namespace".to_owned(), "basenames".to_owned());
-        assert!(subname_storage_cursor(&payload, "ens", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
 
-        let mut payload = subname_cursor_payload(&cursor, "ens", "snapshot-1");
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
         payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(subname_storage_cursor(&payload, "ens", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
+    }
+
+    #[test]
+    fn subname_cursor_rejects_wrong_parent_filter() {
+        let cursor = ChildrenCurrentKeysetCursor {
+            canonical_display_name: "alice.eth".to_owned(),
+            child_logical_name_id: "ens:alice.eth".to_owned(),
+        };
+        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent-a.eth", "snapshot-1");
+
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent-b.eth", "snapshot-1").is_err());
     }
 }

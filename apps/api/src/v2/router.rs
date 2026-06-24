@@ -107,7 +107,12 @@ async fn get_subnames(
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            subname_storage_cursor(&payload, &namespace, &snapshot_token)
+            subname_storage_cursor(
+                &payload,
+                &namespace,
+                &parent.logical_name_id,
+                &snapshot_token,
+            )
         })
         .transpose()?;
 
@@ -157,10 +162,14 @@ async fn get_subnames(
         std::collections::BTreeMap::new()
     };
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&subname_cursor_payload(cursor, &namespace, &snapshot_token)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&subname_cursor_payload(
+            cursor,
+            &namespace,
+            &parent.logical_name_id,
+            &snapshot_token,
+        ))
+    });
     let has_more = next_cursor.is_some();
     let data = storage_page
         .rows

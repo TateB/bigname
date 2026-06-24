@@ -1039,7 +1039,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(data[0]["name"], json!("alpha.parent.eth"));
     assert_eq!(data[1]["name"], json!("beta.parent.eth"));
     assert_eq!(data[2]["name"], json!("gamma.parent.eth"));
-    assert_eq!(data[0]["display_name"], json!("alpha.parent.eth"));
+    assert_eq!(data[0]["display_name"], json!("Alpha.Parent.eth"));
     assert_eq!(data[0]["namespace"], json!("ens"));
     assert_eq!(data[0]["namehash"], json!("node:alpha.parent.eth"));
     assert_eq!(
@@ -1108,6 +1108,84 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
             .collect::<Vec<_>>(),
         vec!["gamma.parent.eth"]
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:other.eth",
+        "other.eth",
+        "node:other.eth",
+        79,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000002"
+            }
+        }),
+    )
+    .await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:one.other.eth",
+        "one.other.eth",
+        "node:one.other.eth",
+        80,
+        Uuid::from_u128(0x4040),
+        Uuid::from_u128(0x5040),
+        Uuid::from_u128(0x6040),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000003"
+            }
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:other.eth",
+            "ens:one.other.eth",
+            "one.other.eth",
+            "node:one.other.eth",
+            905,
+            80,
+        )],
+    )
+    .await?;
+
+    let first_page =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=2")
+            .await?;
+    let next_cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include a next cursor");
+
+    let response = v2_subnames_response_for_database(
+        &database,
+        &format!("/v2/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
     database.cleanup().await?;
     Ok(())
@@ -1203,7 +1281,10 @@ async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
 
     let wrong_sort = crate::v2::encode(&crate::v2::CursorPayload::new(
         "wrong",
-        BTreeMap::from([("namespace".to_owned(), "ens".to_owned())]),
+        BTreeMap::from([
+            ("namespace".to_owned(), "ens".to_owned()),
+            ("parent".to_owned(), "ens:parent.eth".to_owned()),
+        ]),
         BTreeMap::from([
             ("display_name".to_owned(), "alpha.parent.eth".to_owned()),
             (
@@ -1228,7 +1309,10 @@ async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
 
     let wrong_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
         "display_name_asc",
-        BTreeMap::from([("namespace".to_owned(), "ens".to_owned())]),
+        BTreeMap::from([
+            ("namespace".to_owned(), "ens".to_owned()),
+            ("parent".to_owned(), "ens:parent.eth".to_owned()),
+        ]),
         BTreeMap::from([
             ("display_name".to_owned(), "alpha.parent.eth".to_owned()),
             (
@@ -1635,7 +1719,17 @@ async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
 }
 
 async fn v2_subnames_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
-    let response = app_router(database.app_state())
+    let response = v2_subnames_response_for_database(database, uri).await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
+}
+
+async fn v2_subnames_response_for_database(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Response> {
+    app_router(database.app_state())
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -1643,10 +1737,7 @@ async fn v2_subnames_payload_for_database(database: &TestDatabase, uri: &str) ->
                 .expect("request must build"),
         )
         .await
-        .context("v2 subnames request failed")?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+        .context("v2 subnames request failed")
 }
 
 async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
@@ -1655,7 +1746,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
     seed_v2_subnames_bound_child(
         database,
         "ens:alpha.parent.eth",
-        "alpha.parent.eth",
+        "Alpha.Parent.eth",
         "node:alpha.parent.eth",
         81,
         Uuid::from_u128(0x4010),
@@ -1736,7 +1827,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
     bigname_storage::upsert_children_current_rows(
         &database.pool,
         &[
-            declared_child_row(
+            v2_subnames_declared_child_row(
                 "ens:parent.eth",
                 "ens:gamma.parent.eth",
                 "gamma.parent.eth",
@@ -1744,7 +1835,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
                 903,
                 83,
             ),
-            declared_child_row(
+            v2_subnames_declared_child_row(
                 "ens:parent.eth",
                 "ens:beta.parent.eth",
                 "beta.parent.eth",
@@ -1752,15 +1843,15 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
                 902,
                 82,
             ),
-            declared_child_row(
+            v2_subnames_declared_child_row(
                 "ens:parent.eth",
                 "ens:alpha.parent.eth",
-                "alpha.parent.eth",
+                "Alpha.Parent.eth",
                 "node:alpha.parent.eth",
                 901,
                 81,
             ),
-            declared_child_row(
+            v2_subnames_declared_child_row(
                 "ens:alpha.parent.eth",
                 "ens:delta.alpha.parent.eth",
                 "delta.alpha.parent.eth",
@@ -1826,14 +1917,22 @@ async fn seed_v2_subnames_bound_child(
     surface_binding_id: Uuid,
     declared_summary: Value,
 ) -> Result<()> {
+    let normalized_name = normalized_name_from_logical_name_id(logical_name_id);
+    let mut surface = collection_name_surface(
+        logical_name_id,
+        display_name,
+        namehash,
+        block_number,
+    );
+    surface.normalized_name = normalized_name.to_owned();
+    surface.dns_encoded_name = normalized_name.as_bytes().to_vec();
+    surface.labelhashes = labelhash_for_display_name(normalized_name)
+        .into_iter()
+        .collect();
+
     bigname_storage::upsert_name_surfaces(
         &database.pool,
-        &[collection_name_surface(
-            logical_name_id,
-            display_name,
-            namehash,
-            block_number,
-        )],
+        &[surface],
     )
     .await?;
     bigname_storage::upsert_token_lineages(
@@ -1881,6 +1980,27 @@ async fn seed_v2_subnames_bound_child(
         .await
 }
 
+fn v2_subnames_declared_child_row(
+    parent_logical_name_id: &str,
+    child_logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    normalized_event_id: i64,
+    block_number: i64,
+) -> bigname_storage::ChildrenCurrentRow {
+    let mut row = declared_child_row(
+        parent_logical_name_id,
+        child_logical_name_id,
+        display_name,
+        namehash,
+        normalized_event_id,
+        block_number,
+    );
+    row.normalized_name = normalized_name_from_logical_name_id(child_logical_name_id).to_owned();
+    row.labelhash = labelhash_for_display_name(&row.normalized_name);
+    row
+}
+
 #[allow(clippy::too_many_arguments)]
 fn v2_subnames_name_current_row(
     logical_name_id: &str,
@@ -1892,9 +2012,7 @@ fn v2_subnames_name_current_row(
     token_lineage_id: Option<Uuid>,
     declared_summary: Value,
 ) -> bigname_storage::NameCurrentRow {
-    let (namespace, normalized_name) = logical_name_id
-        .split_once(':')
-        .expect("logical_name_id must include namespace");
+    let (namespace, normalized_name) = split_logical_name_id(logical_name_id);
     let chain_id = chain_id_for_namespace(namespace);
     let chain_slot = chain_slot_for_namespace(namespace);
 
@@ -1949,6 +2067,16 @@ fn v2_subnames_name_current_row(
         manifest_version: 1,
         last_recomputed_at: timestamp(1_717_176_000 + block_number),
     }
+}
+
+fn split_logical_name_id(logical_name_id: &str) -> (&str, &str) {
+    logical_name_id
+        .split_once(':')
+        .expect("logical_name_id must include namespace")
+}
+
+fn normalized_name_from_logical_name_id(logical_name_id: &str) -> &str {
+    split_logical_name_id(logical_name_id).1
 }
 
 fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
