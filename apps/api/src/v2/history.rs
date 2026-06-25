@@ -180,7 +180,7 @@ pub(crate) fn history_event_type(event_kind: &str) -> Option<HistoryEventType> {
         "RegistrationReleased" => Some(HistoryEventType::Release),
         "ExpiryChanged" => Some(HistoryEventType::Expiry),
         "TokenControlTransferred" => Some(HistoryEventType::Transfer),
-        "AuthorityTransferred" => Some(HistoryEventType::Authority),
+        "AuthorityTransferred" | "AuthorityEpochChanged" => Some(HistoryEventType::Authority),
         "ResolverChanged" => Some(HistoryEventType::Resolver),
         "RecordChanged" | "RecordVersionChanged" => Some(HistoryEventType::Record),
         "ReverseChanged" => Some(HistoryEventType::PrimaryName),
@@ -467,6 +467,10 @@ mod tests {
         assert_eq!(
             history_event_type("ExpiryChanged"),
             Some(HistoryEventType::Expiry)
+        );
+        assert_eq!(
+            history_event_type("AuthorityEpochChanged"),
+            Some(HistoryEventType::Authority)
         );
         assert_eq!(history_event_type("SurfaceBound"), None);
         assert_eq!(history_event_type("PreimageObserved"), None);

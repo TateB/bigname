@@ -306,8 +306,9 @@ normalized-event payloads, or a `data` change object. Product event rows use
 the friendly `type` vocabulary (`registration` from `RegistrationGranted` and
 `LabelRegistered`; `renewal` from `RegistrationRenewed`; `release` from
 `RegistrationReleased`; `expiry` from `ExpiryChanged`; `transfer` from
-`TokenControlTransferred`; `authority` from `AuthorityTransferred`; `resolver`
-from `ResolverChanged`; `record` from `RecordChanged` and
+`TokenControlTransferred`; `authority` from `AuthorityTransferred` and
+`AuthorityEpochChanged`; `resolver` from `ResolverChanged`; `record` from
+`RecordChanged` and
 `RecordVersionChanged`; `primary_name` from `ReverseChanged`; `permission`
 from `PermissionChanged`, `PermissionScopeChanged`, `RolesChanged`, and
 `EACRolesChanged`). Raw upstream event kinds are diagnostics-only.

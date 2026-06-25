@@ -25,6 +25,7 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
             "release",
             "permission",
             "record",
+            "authority",
             "resolver",
             "transfer",
             "registration",
@@ -35,7 +36,7 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
         data.iter()
             .map(|row| row["block_number"].as_i64().expect("block number"))
             .collect::<Vec<_>>(),
-        vec![110, 109, 108, 107, 106, 104, 103, 102, 101]
+        vec![110, 109, 108, 107, 106, 105, 104, 103, 102, 101]
     );
     assert_eq!(data[0]["name"], json!("history.eth"));
     assert_eq!(data[0]["namespace"], json!("ens"));
@@ -50,6 +51,15 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
         data.iter()
             .any(|row| row["type"] == json!("record") && row.get("registration_id").is_none()),
         "surface-only rows must omit registration_id"
+    );
+    assert!(
+        data.iter().any(|row| {
+            row["block_number"] == json!(105)
+                && row["transaction_hash"] == json!("0xtx105")
+                && row["type"] == json!("authority")
+                && row.get("registration_id").is_none()
+        }),
+        "AuthorityEpochChanged must surface as an authority history row"
     );
     for row in data {
         assert!(row.get("data").is_none());
@@ -192,6 +202,7 @@ async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()>
 
     assert_eq!(history_types(name_scope["data"].as_array().expect("data")), vec![
         "record",
+        "authority",
         "resolver",
         "authority",
     ]);
@@ -206,7 +217,7 @@ async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()>
             "registration",
         ]
     );
-    assert_eq!(both_scope["data"].as_array().expect("data").len(), 9);
+    assert_eq!(both_scope["data"].as_array().expect("data").len(), 10);
 
     database.cleanup().await?;
     Ok(())
@@ -345,6 +356,13 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
                 106,
             ),
             v2_history_event(
+                "history-authority-epoch",
+                Some(logical_name_id),
+                None,
+                "AuthorityEpochChanged",
+                105,
+            ),
+            v2_history_event(
                 "history-resolver",
                 Some(logical_name_id),
                 None,
@@ -476,6 +494,11 @@ fn v2_history_after_state(event_kind: &str) -> Value {
         }),
         "AuthorityTransferred" => json!({
             "owner": "0x00000000000000000000000000000000000000cc",
+        }),
+        "AuthorityEpochChanged" => json!({
+            "authority_kind": "registrar",
+            "authority_key": "registrar:ethereum-mainnet:history",
+            "registry_owner": "0x00000000000000000000000000000000000000cc",
         }),
         "ResolverChanged" => json!({
             "resolver": "0x0000000000000000000000000000000000000abc",
