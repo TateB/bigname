@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -302,6 +302,80 @@ fn name_current_row(row: &AddressNameCurrentRow) -> NameCurrentRow {
     }
 }
 
+fn name_current_row_with_registration(
+    row: &AddressNameCurrentRow,
+    expiry: JsonValue,
+    registered_at: JsonValue,
+) -> NameCurrentRow {
+    let mut current = name_current_row(row);
+    current.declared_summary = json!({
+        "registration": {
+            "status": "registered",
+            "expiry": expiry,
+            "registered_at": registered_at
+        }
+    });
+    current
+}
+
+struct SortedAddressNameSeed {
+    logical_name_id: &'static str,
+    display_name: &'static str,
+    resource_id: u128,
+    token_lineage_id: u128,
+    surface_binding_id: u128,
+    expiry: JsonValue,
+    registered_at: JsonValue,
+}
+
+async fn seed_sorted_address_name_rows(
+    database: &TestDatabase,
+    address: &str,
+    seeds: Vec<SortedAddressNameSeed>,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    let mut rows = Vec::new();
+    let mut name_rows = Vec::new();
+
+    for (index, seed) in seeds.into_iter().enumerate() {
+        let resource_id = Uuid::from_u128(seed.resource_id);
+        let token_lineage_id = Uuid::from_u128(seed.token_lineage_id);
+        let surface_binding_id = Uuid::from_u128(seed.surface_binding_id);
+        seed_relation_references(
+            database,
+            seed.logical_name_id,
+            seed.display_name,
+            resource_id,
+            Some(token_lineage_id),
+            surface_binding_id,
+            CanonicalityState::Finalized,
+        )
+        .await?;
+
+        let row = address_name_current_row(AddressNameCurrentRowSeed {
+            address,
+            logical_name_id: seed.logical_name_id,
+            display_name: seed.display_name,
+            relation: AddressNameRelation::Registrant,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+            manifest_version: i64::try_from(index + 1)
+                .context("sorted address-name seed index overflow")?,
+        });
+        name_rows.push(name_current_row_with_registration(
+            &row,
+            seed.expiry,
+            seed.registered_at,
+        ));
+        rows.push(row);
+    }
+
+    upsert_name_current_rows(database.pool(), &name_rows).await?;
+    upsert_address_names_current_rows(database.pool(), &rows).await?;
+
+    Ok(rows)
+}
+
 async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
@@ -445,6 +519,233 @@ fn expected_consistency(entries: &[AddressNameCurrentEntry]) -> &'static str {
     }
 
     if saw_any { consistency } else { "head" }
+}
+
+async fn seed_timestamp_sort_rows(database: &TestDatabase, address: &str) -> Result<()> {
+    seed_sorted_address_name_rows(
+        database,
+        address,
+        vec![
+            SortedAddressNameSeed {
+                logical_name_id: "ens:alpha.eth",
+                display_name: "alpha.eth",
+                resource_id: 0xf201,
+                token_lineage_id: 0xf101,
+                surface_binding_id: 0xf301,
+                expiry: json!(1_798_761_600),
+                registered_at: json!("2025-01-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:beta.eth",
+                display_name: "beta.eth",
+                resource_id: 0xf202,
+                token_lineage_id: 0xf102,
+                surface_binding_id: 0xf302,
+                expiry: json!(1_767_225_600),
+                registered_at: json!("2025-03-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:delta.eth",
+                display_name: "delta.eth",
+                resource_id: 0xf203,
+                token_lineage_id: 0xf103,
+                surface_binding_id: 0xf303,
+                expiry: json!(1_767_225_600),
+                registered_at: json!(1_738_368_000),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:gamma.eth",
+                display_name: "gamma.eth",
+                resource_id: 0xf204,
+                token_lineage_id: 0xf104,
+                surface_binding_id: 0xf304,
+                expiry: json!("2028-01-01T00:00:00Z"),
+                registered_at: json!(1_701_388_800),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:null-expiry.eth",
+                display_name: "null-expiry.eth",
+                resource_id: 0xf205,
+                token_lineage_id: 0xf105,
+                surface_binding_id: 0xf305,
+                expiry: JsonValue::Null,
+                registered_at: json!("2025-04-01T00:00:00Z"),
+            },
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn seed_desc_null_boundary_timestamp_sort_rows(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<()> {
+    seed_sorted_address_name_rows(
+        database,
+        address,
+        vec![
+            SortedAddressNameSeed {
+                logical_name_id: "ens:null-gamma.eth",
+                display_name: "null-gamma.eth",
+                resource_id: 0xf213,
+                token_lineage_id: 0xf113,
+                surface_binding_id: 0xf313,
+                expiry: JsonValue::Null,
+                registered_at: json!("2025-03-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:middle.eth",
+                display_name: "middle.eth",
+                resource_id: 0xf221,
+                token_lineage_id: 0xf121,
+                surface_binding_id: 0xf321,
+                expiry: json!(1_798_761_600),
+                registered_at: json!("2025-04-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:null-alpha.eth",
+                display_name: "null-alpha.eth",
+                resource_id: 0xf211,
+                token_lineage_id: 0xf111,
+                surface_binding_id: 0xf311,
+                expiry: JsonValue::Null,
+                registered_at: json!("2025-01-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:future.eth",
+                display_name: "future.eth",
+                resource_id: 0xf220,
+                token_lineage_id: 0xf120,
+                surface_binding_id: 0xf320,
+                expiry: json!("2028-01-01T00:00:00Z"),
+                registered_at: json!("2025-05-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:null-beta.eth",
+                display_name: "null-beta.eth",
+                resource_id: 0xf212,
+                token_lineage_id: 0xf112,
+                surface_binding_id: 0xf312,
+                expiry: JsonValue::Null,
+                registered_at: json!("2025-02-01T00:00:00Z"),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:past.eth",
+                display_name: "past.eth",
+                resource_id: 0xf222,
+                token_lineage_id: 0xf122,
+                surface_binding_id: 0xf322,
+                expiry: json!(1_767_225_600),
+                registered_at: json!("2025-06-01T00:00:00Z"),
+            },
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+fn sorted_page_names(page: &AddressNamesCurrentSortedPage) -> Vec<String> {
+    page.entries
+        .iter()
+        .map(|entry| entry.normalized_name.clone())
+        .collect()
+}
+
+async fn assert_sorted_page_order(
+    pool: &PgPool,
+    address: &str,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    expected: &[&str],
+) -> Result<()> {
+    let page = load_address_names_current_page_sorted(
+        pool,
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        None,
+        sort,
+        order,
+        None,
+        20,
+    )
+    .await?;
+    assert_eq!(
+        sorted_page_names(&page),
+        expected
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(page.summary.grouped_entry_count, expected.len() as u64);
+    assert_eq!(page.next_cursor, None);
+    Ok(())
+}
+
+async fn assert_sorted_keyset_pages(
+    pool: &PgPool,
+    address: &str,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    expected: &[&str],
+) -> Result<()> {
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    let mut unique = BTreeSet::new();
+    let mut page_count = 0;
+
+    loop {
+        let page = load_address_names_current_page_sorted(
+            pool,
+            address,
+            Some("ens"),
+            None,
+            AddressNamesCurrentDedupe::Surface,
+            None,
+            sort,
+            order,
+            cursor.as_ref(),
+            2,
+        )
+        .await?;
+        page_count += 1;
+        for entry in &page.entries {
+            assert!(
+                unique.insert(entry.logical_name_id.clone()),
+                "duplicate entry {} while paginating {:?} {:?}",
+                entry.logical_name_id,
+                sort,
+                order
+            );
+            seen.push(entry.normalized_name.clone());
+        }
+
+        match page.next_cursor {
+            Some(next_cursor) => {
+                assert_eq!(page.entries.len(), 2);
+                cursor = Some(next_cursor);
+            }
+            None => break,
+        }
+    }
+
+    assert!(
+        page_count > 1,
+        "pagination assertion did not cross a cursor for {:?} {:?}",
+        sort,
+        order
+    );
+    assert_eq!(
+        seen,
+        expected
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(unique.len(), expected.len());
+    Ok(())
 }
 
 #[tokio::test]
@@ -1835,6 +2136,378 @@ async fn address_names_current_page_resource_dedupe_matches_collapsed_full_read(
             AddressNameRelation::TokenHolder,
             AddressNameRelation::EffectiveController
         ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_sorted_page_filters_q_prefix() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_sorted_address_name_rows(
+        &database,
+        address,
+        vec![
+            SortedAddressNameSeed {
+                logical_name_id: "ens:al%ice.eth",
+                display_name: "al%ice.eth",
+                resource_id: 0xe201,
+                token_lineage_id: 0xe101,
+                surface_binding_id: 0xe301,
+                expiry: json!(1_767_225_600),
+                registered_at: json!(1_704_067_200),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:alpha.eth",
+                display_name: "alpha.eth",
+                resource_id: 0xe202,
+                token_lineage_id: 0xe102,
+                surface_binding_id: 0xe302,
+                expiry: json!(1_798_761_600),
+                registered_at: json!(1_707_004_800),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:alpine.eth",
+                display_name: "alpine.eth",
+                resource_id: 0xe203,
+                token_lineage_id: 0xe103,
+                surface_binding_id: 0xe303,
+                expiry: json!(1_830_297_600),
+                registered_at: json!(1_709_424_000),
+            },
+            SortedAddressNameSeed {
+                logical_name_id: "ens:beta.eth",
+                display_name: "beta.eth",
+                resource_id: 0xe204,
+                token_lineage_id: 0xe104,
+                surface_binding_id: 0xe304,
+                expiry: json!(1_861_833_600),
+                registered_at: json!(1_712_102_400),
+            },
+        ],
+    )
+    .await?;
+
+    let wildcard_literal_page = load_address_names_current_page_sorted(
+        database.pool(),
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        Some("al%"),
+        AddressNamesCurrentSort::Name,
+        AddressNamesCurrentOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(
+        sorted_page_names(&wildcard_literal_page),
+        vec!["al%ice.eth".to_owned()]
+    );
+    assert_eq!(wildcard_literal_page.summary.grouped_entry_count, 1);
+
+    let prefix_page = load_address_names_current_page_sorted(
+        database.pool(),
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        Some("alp"),
+        AddressNamesCurrentSort::Name,
+        AddressNamesCurrentOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(
+        sorted_page_names(&prefix_page),
+        vec!["alpha.eth".to_owned(), "alpine.eth".to_owned()]
+    );
+    assert_eq!(prefix_page.summary.grouped_entry_count, 2);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_sorted_page_orders_expiry_and_registered_at() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_timestamp_sort_rows(&database, address).await?;
+
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::ExpiresAt,
+        AddressNamesCurrentOrder::Asc,
+        &[
+            "beta.eth",
+            "delta.eth",
+            "alpha.eth",
+            "gamma.eth",
+            "null-expiry.eth",
+        ],
+    )
+    .await?;
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::ExpiresAt,
+        AddressNamesCurrentOrder::Desc,
+        &[
+            "null-expiry.eth",
+            "gamma.eth",
+            "alpha.eth",
+            "beta.eth",
+            "delta.eth",
+        ],
+    )
+    .await?;
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::RegisteredAt,
+        AddressNamesCurrentOrder::Asc,
+        &[
+            "gamma.eth",
+            "alpha.eth",
+            "delta.eth",
+            "beta.eth",
+            "null-expiry.eth",
+        ],
+    )
+    .await?;
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::RegisteredAt,
+        AddressNamesCurrentOrder::Desc,
+        &[
+            "null-expiry.eth",
+            "beta.eth",
+            "delta.eth",
+            "alpha.eth",
+            "gamma.eth",
+        ],
+    )
+    .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_sorted_page_keysets_each_timestamp_sort_order() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_timestamp_sort_rows(&database, address).await?;
+
+    for (sort, order, expected) in [
+        (
+            AddressNamesCurrentSort::ExpiresAt,
+            AddressNamesCurrentOrder::Asc,
+            vec![
+                "beta.eth",
+                "delta.eth",
+                "alpha.eth",
+                "gamma.eth",
+                "null-expiry.eth",
+            ],
+        ),
+        (
+            AddressNamesCurrentSort::ExpiresAt,
+            AddressNamesCurrentOrder::Desc,
+            vec![
+                "null-expiry.eth",
+                "gamma.eth",
+                "alpha.eth",
+                "beta.eth",
+                "delta.eth",
+            ],
+        ),
+        (
+            AddressNamesCurrentSort::RegisteredAt,
+            AddressNamesCurrentOrder::Asc,
+            vec![
+                "gamma.eth",
+                "alpha.eth",
+                "delta.eth",
+                "beta.eth",
+                "null-expiry.eth",
+            ],
+        ),
+        (
+            AddressNamesCurrentSort::RegisteredAt,
+            AddressNamesCurrentOrder::Desc,
+            vec![
+                "null-expiry.eth",
+                "beta.eth",
+                "delta.eth",
+                "alpha.eth",
+                "gamma.eth",
+            ],
+        ),
+    ] {
+        assert_sorted_keyset_pages(database.pool(), address, sort, order, &expected).await?;
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_sorted_page_keysets_desc_expiry_across_null_boundary() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_desc_null_boundary_timestamp_sort_rows(&database, address).await?;
+
+    let expected = [
+        ("null-alpha.eth", "ens:null-alpha.eth", 0xf211),
+        ("null-beta.eth", "ens:null-beta.eth", 0xf212),
+        ("null-gamma.eth", "ens:null-gamma.eth", 0xf213),
+        ("future.eth", "ens:future.eth", 0xf220),
+        ("middle.eth", "ens:middle.eth", 0xf221),
+        ("past.eth", "ens:past.eth", 0xf222),
+    ];
+    let expected_names = expected
+        .iter()
+        .map(|(name, _, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let expected_keys = expected
+        .iter()
+        .map(|(_, logical_name_id, resource_id)| {
+            ((*logical_name_id).to_owned(), Uuid::from_u128(*resource_id))
+        })
+        .collect::<Vec<_>>();
+
+    let mut cursor = None;
+    let mut seen_names = Vec::new();
+    let mut seen_keys = Vec::new();
+    let mut unique = BTreeSet::new();
+    let mut page_count = 0;
+    let page_size = 2_usize;
+
+    loop {
+        let start = seen_names.len();
+        let page = load_address_names_current_page_sorted(
+            database.pool(),
+            address,
+            Some("ens"),
+            None,
+            AddressNamesCurrentDedupe::Surface,
+            None,
+            AddressNamesCurrentSort::ExpiresAt,
+            AddressNamesCurrentOrder::Desc,
+            cursor.as_ref(),
+            page_size as u64,
+        )
+        .await?;
+        page_count += 1;
+
+        let page_names = sorted_page_names(&page);
+        let expected_page_names = expected_names[start..start + page_names.len()].to_vec();
+        assert_eq!(
+            page_names, expected_page_names,
+            "cursor resumed at the wrong row after page {page_count}"
+        );
+
+        for entry in &page.entries {
+            assert!(
+                unique.insert(entry.logical_name_id.clone()),
+                "duplicate entry {} while paginating {:?} {:?}",
+                entry.logical_name_id,
+                AddressNamesCurrentSort::ExpiresAt,
+                AddressNamesCurrentOrder::Desc
+            );
+            seen_names.push(entry.normalized_name.clone());
+            seen_keys.push((entry.logical_name_id.clone(), entry.resource_id));
+        }
+
+        match page.next_cursor {
+            Some(next_cursor) => {
+                assert_eq!(page.entries.len(), page_size);
+                if page_count == 1 {
+                    assert_eq!(
+                        next_cursor,
+                        AddressNamesCurrentSortedCursor {
+                            sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(None),
+                            logical_name_id: "ens:null-beta.eth".to_owned(),
+                            resource_id: Uuid::from_u128(0xf212),
+                        }
+                    );
+                }
+                cursor = Some(next_cursor);
+            }
+            None => break,
+        }
+    }
+
+    assert!(
+        page_count > 1,
+        "pagination assertion did not cross a cursor for {:?} {:?}",
+        AddressNamesCurrentSort::ExpiresAt,
+        AddressNamesCurrentOrder::Desc
+    );
+    assert_eq!(
+        &seen_names[..3],
+        &expected_names[..3],
+        "DESC expiry should place NULL rows first"
+    );
+    assert_eq!(
+        &seen_keys[..3],
+        &expected_keys[..3],
+        "NULL expiry rows should follow the logical_name_id/resource_id tiebreak"
+    );
+    assert_eq!(seen_names, expected_names);
+    assert_eq!(unique.len(), expected.len());
+    assert_eq!(seen_keys, expected_keys);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_sorted_name_default_matches_legacy_page() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_timestamp_sort_rows(&database, address).await?;
+
+    let legacy_page = load_address_names_current_page(
+        database.pool(),
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        None,
+        2,
+    )
+    .await?;
+    let sorted_page = load_address_names_current_page_sorted(
+        database.pool(),
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        None,
+        AddressNamesCurrentSort::Name,
+        AddressNamesCurrentOrder::Asc,
+        None,
+        2,
+    )
+    .await?;
+
+    assert_eq!(sorted_page.entries, legacy_page.entries);
+    assert_eq!(sorted_page.summary, legacy_page.summary);
+    assert_eq!(
+        sorted_page.next_cursor,
+        legacy_page.next_cursor.as_ref().map(|cursor| {
+            AddressNamesCurrentSortedCursor {
+                sort_value: AddressNamesCurrentSortedCursorValue::Name(
+                    cursor.canonical_display_name.clone(),
+                ),
+                logical_name_id: cursor.logical_name_id.clone(),
+                resource_id: cursor.resource_id,
+            }
+        })
     );
 
     database.cleanup().await

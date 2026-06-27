@@ -37,7 +37,9 @@ pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentAddressReplacement, AddressNamesCurrentCountFilter,
     AddressNamesCurrentCursor, AddressNamesCurrentDedupe, AddressNamesCurrentFullRebuild,
-    AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
+    AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
     begin_address_names_current_address_replacement, begin_address_names_current_full_rebuild,
     clear_address_names_current, collapse_address_name_current_rows,
     count_address_names_current_for_app_filter, delete_address_names_current,
@@ -45,9 +47,9 @@ pub use address_names::{
     insert_address_names_current_address_replacement_rows,
     insert_address_names_current_full_rebuild_rows, load_address_names_current,
     load_address_names_current_including_noncanonical, load_address_names_current_page,
-    publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
-    rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
-    upsert_address_names_current_rows,
+    load_address_names_current_page_sorted, publish_address_names_current_address_replacement,
+    publish_address_names_current_full_rebuild, rebuild_address_names_current_identity_sidecars,
+    replace_address_names_current_logical_names, upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,

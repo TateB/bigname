@@ -1,14 +1,20 @@
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
 use super::{
     decode::{decode_address_name_current_entry, decode_address_names_current_summary},
     query::{
-        push_address_names_current_cursor_after, push_address_names_current_grouped_entries_cte,
+        push_address_names_current_cursor_after, push_address_names_current_cursor_identity_match,
+        push_address_names_current_cursor_sort_value_match,
+        push_address_names_current_grouped_entries_cte, push_address_names_current_order,
+        push_address_names_current_sortable_entries_cte,
     },
     types::{
         AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentCursor,
-        AddressNamesCurrentDedupe, AddressNamesCurrentPage, AddressNamesCurrentSummary,
+        AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
+        AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
+        AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
+        AddressNamesCurrentSummary,
     },
 };
 use crate::projection_helpers::{
@@ -25,6 +31,66 @@ pub async fn load_address_names_current_page(
     cursor: Option<&AddressNamesCurrentCursor>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentPage> {
+    let sorted_cursor = cursor.map(address_names_current_sorted_cursor_from_legacy);
+    let page = load_address_names_current_page_impl(
+        pool,
+        address,
+        namespace,
+        relation,
+        dedupe_by,
+        None,
+        AddressNamesCurrentSort::Name,
+        AddressNamesCurrentOrder::Asc,
+        sorted_cursor.as_ref(),
+        page_size,
+    )
+    .await?;
+
+    let next_cursor = page
+        .next_cursor
+        .map(address_names_current_legacy_cursor_from_sorted)
+        .transpose()?;
+
+    Ok(AddressNamesCurrentPage {
+        entries: page.entries,
+        next_cursor,
+        summary: page.summary,
+    })
+}
+
+/// Load a bounded page of grouped current address-name entries with v2 read controls.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_address_names_current_page_sorted(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<AddressNamesCurrentSortedPage> {
+    load_address_names_current_page_impl(
+        pool, address, namespace, relation, dedupe_by, q, sort, order, cursor, page_size,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_address_names_current_page_impl(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<AddressNamesCurrentSortedPage> {
     let page_size = checked_page_size_usize(
         page_size,
         "address_names_current page_size must be positive",
@@ -37,11 +103,13 @@ pub async fn load_address_names_current_page(
     )?;
 
     let summary =
-        load_address_names_current_summary(pool, address, namespace, relation, dedupe_by).await?;
+        load_address_names_current_summary(pool, address, namespace, relation, dedupe_by, q)
+            .await?;
 
     if let Some(cursor) = cursor {
+        ensure_address_names_current_cursor_matches_sort(sort, cursor)?;
         ensure_address_names_current_cursor_exists(
-            pool, address, namespace, relation, dedupe_by, cursor,
+            pool, address, namespace, relation, dedupe_by, q, sort, cursor,
         )
         .await?;
     }
@@ -53,7 +121,9 @@ pub async fn load_address_names_current_page(
         namespace,
         relation,
         dedupe_by,
+        q,
     );
+    push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(
         r#"
         SELECT
@@ -73,51 +143,73 @@ pub async fn load_address_names_current_page(
             chain_positions,
             canonicality_summary,
             manifest_version,
-            last_recomputed_at
-        FROM entries
+            last_recomputed_at,
         "#,
     );
-    if let Some(cursor) = cursor {
-        push_address_names_current_cursor_after(&mut builder, cursor);
+    if sort.is_timestamp() {
+        builder.push("sort_timestamp");
+    } else {
+        builder.push("NULL::TIMESTAMPTZ AS sort_timestamp");
     }
-    builder.push(
-        r#"
-        ORDER BY
-            canonical_display_name ASC,
-            logical_name_id ASC,
-            resource_id::TEXT ASC
-        LIMIT
-        "#,
-    );
+    builder.push(" FROM ");
+    builder.push(if sort.is_timestamp() {
+        "sortable_entries"
+    } else {
+        "entries"
+    });
+    builder.push(" WHERE TRUE ");
+    if let Some(cursor) = cursor {
+        push_address_names_current_cursor_after(&mut builder, sort, order, cursor);
+    }
+    push_address_names_current_order(&mut builder, sort, order);
+    builder.push(" LIMIT ");
     builder.push_bind(page_limit);
 
     let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        let mut parts = vec![format!("address {address}")];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relation) = relation {
-            parts.push(format!("relation {}", relation.as_str()));
-        }
-        parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
+        let mut parts = load_context_parts(address, namespace, relation, dedupe_by, q);
+        parts.push(format!("sort {}", sort.as_str()));
+        parts.push(format!("order {}", order.as_str()));
         format!(
             "failed to load address_names_current grouped page for {}",
             parts.join(" ")
         )
     })?;
 
-    let entries = rows
+    let rows = rows
         .into_iter()
-        .map(decode_address_name_current_entry)
+        .map(|row| decode_address_name_current_sorted_entry(row, sort))
         .collect::<Result<Vec<_>>>()?;
-    let (entries, next_cursor) =
-        split_keyset_page(entries, page_size, address_names_current_cursor_from_entry);
+    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
+        address_names_current_sorted_cursor_from_entry(row, sort)
+    });
+    let entries = rows.into_iter().map(|row| row.entry).collect();
 
-    Ok(AddressNamesCurrentPage {
+    Ok(AddressNamesCurrentSortedPage {
         entries,
         next_cursor,
         summary,
     })
+}
+
+fn load_context_parts(
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+) -> Vec<String> {
+    let mut parts = vec![format!("address {address}")];
+    if let Some(namespace) = namespace {
+        parts.push(format!("namespace {namespace}"));
+    }
+    if let Some(relation) = relation {
+        parts.push(format!("relation {}", relation.as_str()));
+    }
+    if let Some(q) = q {
+        parts.push(format!("q {q}"));
+    }
+    parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
+    parts
 }
 
 async fn load_address_names_current_summary(
@@ -126,6 +218,7 @@ async fn load_address_names_current_summary(
     namespace: Option<&str>,
     relation: Option<AddressNameRelation>,
     dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
 ) -> Result<AddressNamesCurrentSummary> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_address_names_current_grouped_entries_cte(
@@ -134,6 +227,7 @@ async fn load_address_names_current_summary(
         namespace,
         relation,
         dedupe_by,
+        q,
     );
     builder.push(
         r#",
@@ -270,14 +364,7 @@ async fn load_address_names_current_summary(
     );
 
     let row = builder.build().fetch_one(pool).await.with_context(|| {
-        let mut parts = vec![format!("address {address}")];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relation) = relation {
-            parts.push(format!("relation {}", relation.as_str()));
-        }
-        parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
+        let parts = load_context_parts(address, namespace, relation, dedupe_by, q);
         format!(
             "failed to load address_names_current grouped summary for {}",
             parts.join(" ")
@@ -287,13 +374,16 @@ async fn load_address_names_current_summary(
     decode_address_names_current_summary(row)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_address_names_current_cursor_exists(
     pool: &PgPool,
     address: &str,
     namespace: Option<&str>,
     relation: Option<AddressNameRelation>,
     dedupe_by: AddressNamesCurrentDedupe,
-    cursor: &AddressNamesCurrentCursor,
+    q: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    cursor: &AddressNamesCurrentSortedCursor,
 ) -> Result<()> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_address_names_current_grouped_entries_cte(
@@ -302,21 +392,24 @@ async fn ensure_address_names_current_cursor_exists(
         namespace,
         relation,
         dedupe_by,
+        q,
     );
+    push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM entries
-            WHERE canonical_display_name =
+            FROM
         "#,
     );
-    builder.push(" ");
-    builder.push_bind(&cursor.canonical_display_name);
-    builder.push(" AND logical_name_id = ");
-    builder.push_bind(&cursor.logical_name_id);
-    builder.push(" AND resource_id::TEXT = ");
-    builder.push_bind(cursor.resource_id.to_string());
+    builder.push(if sort.is_timestamp() {
+        "sortable_entries"
+    } else {
+        "entries"
+    });
+    builder.push(" WHERE ");
+    push_address_names_current_cursor_identity_match(&mut builder, cursor);
+    push_address_names_current_cursor_sort_value_match(&mut builder, sort, cursor);
     builder.push(
         r#"
         ) AS cursor_exists
@@ -324,14 +417,8 @@ async fn ensure_address_names_current_cursor_exists(
     );
 
     let row = builder.build().fetch_one(pool).await.with_context(|| {
-        let mut parts = vec![format!("address {address}")];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relation) = relation {
-            parts.push(format!("relation {}", relation.as_str()));
-        }
-        parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
+        let mut parts = load_context_parts(address, namespace, relation, dedupe_by, q);
+        parts.push(format!("sort {}", sort.as_str()));
         format!(
             "failed to validate address_names_current grouped page cursor for {}",
             parts.join(" ")
@@ -345,6 +432,7 @@ async fn ensure_address_names_current_cursor_exists(
     }
 }
 
+#[cfg(test)]
 pub(super) fn address_names_current_cursor_from_entry(
     entry: &AddressNameCurrentEntry,
 ) -> AddressNamesCurrentCursor {
@@ -352,5 +440,89 @@ pub(super) fn address_names_current_cursor_from_entry(
         canonical_display_name: entry.canonical_display_name.clone(),
         logical_name_id: entry.logical_name_id.clone(),
         resource_id: entry.resource_id,
+    }
+}
+
+struct AddressNameCurrentSortedEntry {
+    entry: AddressNameCurrentEntry,
+    sort_timestamp: Option<OffsetDateTime>,
+}
+
+fn decode_address_name_current_sorted_entry(
+    row: PgRow,
+    sort: AddressNamesCurrentSort,
+) -> Result<AddressNameCurrentSortedEntry> {
+    let sort_timestamp = sort
+        .is_timestamp()
+        .then(|| crate::sql_row::get::<Option<OffsetDateTime>>(&row, "sort_timestamp"))
+        .transpose()?
+        .flatten();
+    let entry = decode_address_name_current_entry(row)?;
+
+    Ok(AddressNameCurrentSortedEntry {
+        entry,
+        sort_timestamp,
+    })
+}
+
+fn address_names_current_sorted_cursor_from_entry(
+    row: &AddressNameCurrentSortedEntry,
+    sort: AddressNamesCurrentSort,
+) -> AddressNamesCurrentSortedCursor {
+    AddressNamesCurrentSortedCursor {
+        sort_value: match sort {
+            AddressNamesCurrentSort::Name => {
+                AddressNamesCurrentSortedCursorValue::Name(row.entry.canonical_display_name.clone())
+            }
+            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+                AddressNamesCurrentSortedCursorValue::Timestamp(row.sort_timestamp)
+            }
+        },
+        logical_name_id: row.entry.logical_name_id.clone(),
+        resource_id: row.entry.resource_id,
+    }
+}
+
+fn address_names_current_sorted_cursor_from_legacy(
+    cursor: &AddressNamesCurrentCursor,
+) -> AddressNamesCurrentSortedCursor {
+    AddressNamesCurrentSortedCursor {
+        sort_value: AddressNamesCurrentSortedCursorValue::Name(
+            cursor.canonical_display_name.clone(),
+        ),
+        logical_name_id: cursor.logical_name_id.clone(),
+        resource_id: cursor.resource_id,
+    }
+}
+
+fn address_names_current_legacy_cursor_from_sorted(
+    cursor: AddressNamesCurrentSortedCursor,
+) -> Result<AddressNamesCurrentCursor> {
+    let AddressNamesCurrentSortedCursorValue::Name(canonical_display_name) = cursor.sort_value
+    else {
+        bail!("address_names_current sorted cursor cannot be converted to legacy name cursor");
+    };
+
+    Ok(AddressNamesCurrentCursor {
+        canonical_display_name,
+        logical_name_id: cursor.logical_name_id,
+        resource_id: cursor.resource_id,
+    })
+}
+
+fn ensure_address_names_current_cursor_matches_sort(
+    sort: AddressNamesCurrentSort,
+    cursor: &AddressNamesCurrentSortedCursor,
+) -> Result<()> {
+    match (sort, &cursor.sort_value) {
+        (AddressNamesCurrentSort::Name, AddressNamesCurrentSortedCursorValue::Name(_))
+        | (
+            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt,
+            AddressNamesCurrentSortedCursorValue::Timestamp(_),
+        ) => Ok(()),
+        _ => bail!(
+            "address_names_current page cursor sort value does not match sort {}",
+            sort.as_str()
+        ),
     }
 }

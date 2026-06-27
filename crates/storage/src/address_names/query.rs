@@ -1,6 +1,10 @@
+use sqlx::types::time::OffsetDateTime;
 use sqlx::{Postgres, QueryBuilder};
 
-use super::types::{AddressNameRelation, AddressNamesCurrentCursor, AddressNamesCurrentDedupe};
+use super::types::{
+    AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+};
 
 pub(super) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND surface.canonicality_state IN (
@@ -35,6 +39,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     namespace: Option<&'a str>,
     relation: Option<AddressNameRelation>,
     dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&'a str>,
 ) {
     builder.push(
         r#"
@@ -85,6 +90,11 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     if let Some(relation) = relation {
         builder.push(" AND anc.relation = ");
         builder.push_bind(relation.as_str());
+    }
+    if let Some(prefix) = q {
+        builder.push(" AND anc.normalized_name LIKE ");
+        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push(" ESCAPE '\\'");
     }
     builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
 
@@ -235,28 +245,276 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     };
 }
 
-pub(super) fn push_address_names_current_cursor_after<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    cursor: &'a AddressNamesCurrentCursor,
+pub(super) fn push_address_names_current_sortable_entries_cte(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    sort: AddressNamesCurrentSort,
 ) {
-    let cursor_resource_id = cursor.resource_id.to_string();
+    if !sort.is_timestamp() {
+        return;
+    }
+
     builder.push(
-        r#"
-        WHERE (
-            canonical_display_name >
+        r#",
+        sortable_entries AS (
+            SELECT
+                entries.*,
         "#,
     );
-    builder.push(" ");
-    builder.push_bind(&cursor.canonical_display_name);
+    push_address_names_current_sort_timestamp_expr(builder, sort);
+    builder.push(
+        r#"
+                AS sort_timestamp
+            FROM entries
+            LEFT JOIN name_current nc
+              ON nc.logical_name_id = entries.logical_name_id
+        )
+        "#,
+    );
+}
+
+pub(super) fn push_address_names_current_cursor_after<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    match sort {
+        AddressNamesCurrentSort::Name => {
+            let AddressNamesCurrentSortedCursorValue::Name(sort_value) = &cursor.sort_value else {
+                return;
+            };
+            builder.push(" AND (canonical_display_name ");
+            builder.push(match order {
+                AddressNamesCurrentOrder::Asc => "> ",
+                AddressNamesCurrentOrder::Desc => "< ",
+            });
+            builder.push_bind(sort_value);
+            push_address_names_current_name_tie_after(builder, sort_value, cursor);
+            builder.push(")");
+        }
+        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+            let sort_value = match &cursor.sort_value {
+                AddressNamesCurrentSortedCursorValue::Timestamp(sort_value) => *sort_value,
+                AddressNamesCurrentSortedCursorValue::Name(_) => return,
+            };
+            let cursor_rank = timestamp_null_rank(sort_value, order);
+            builder.push(" AND (");
+            builder.push(timestamp_rank_expr("sort_timestamp", order));
+            builder.push(" > ");
+            builder.push_bind(cursor_rank);
+            builder.push(" OR (");
+            builder.push(timestamp_rank_expr("sort_timestamp", order));
+            builder.push(" = ");
+            builder.push_bind(cursor_rank);
+            builder.push(" AND ");
+            match sort_value {
+                None => {
+                    push_address_names_current_timestamp_tie_after(builder, None, cursor);
+                }
+                Some(value) => match order {
+                    AddressNamesCurrentOrder::Asc => {
+                        builder.push("(sort_timestamp > ");
+                        builder.push_bind(value);
+                        builder.push(" OR (sort_timestamp = ");
+                        builder.push_bind(value);
+                        builder.push(" AND ");
+                        push_address_names_current_timestamp_tie_after(
+                            builder,
+                            Some(value),
+                            cursor,
+                        );
+                        builder.push("))");
+                    }
+                    AddressNamesCurrentOrder::Desc => {
+                        builder.push("(sort_timestamp < ");
+                        builder.push_bind(value);
+                        builder.push(" OR (sort_timestamp = ");
+                        builder.push_bind(value);
+                        builder.push(" AND ");
+                        push_address_names_current_timestamp_tie_after(
+                            builder,
+                            Some(value),
+                            cursor,
+                        );
+                        builder.push("))");
+                    }
+                },
+            }
+            builder.push("))");
+        }
+    }
+}
+
+pub(super) fn push_address_names_current_order(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+) {
+    match sort {
+        AddressNamesCurrentSort::Name => {
+            builder.push(" ORDER BY canonical_display_name ");
+            builder.push(match order {
+                AddressNamesCurrentOrder::Asc => "ASC",
+                AddressNamesCurrentOrder::Desc => "DESC",
+            });
+            builder.push(", logical_name_id ASC, resource_id::TEXT ASC");
+        }
+        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+            builder.push(" ORDER BY ");
+            builder.push(timestamp_rank_expr("sort_timestamp", order));
+            builder.push(" ASC, sort_timestamp ");
+            builder.push(match order {
+                AddressNamesCurrentOrder::Asc => "ASC",
+                AddressNamesCurrentOrder::Desc => "DESC",
+            });
+            builder.push(", logical_name_id ASC, resource_id::TEXT ASC");
+        }
+    }
+}
+
+pub(super) fn push_address_names_current_cursor_identity_match<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    builder.push("logical_name_id = ");
+    builder.push_bind(&cursor.logical_name_id);
+    builder.push(" AND resource_id::TEXT = ");
+    builder.push_bind(cursor.resource_id.to_string());
+}
+
+pub(super) fn push_address_names_current_cursor_sort_value_match<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    sort: AddressNamesCurrentSort,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    match sort {
+        AddressNamesCurrentSort::Name => {
+            let AddressNamesCurrentSortedCursorValue::Name(sort_value) = &cursor.sort_value else {
+                return;
+            };
+            builder.push(" AND canonical_display_name = ");
+            builder.push_bind(sort_value);
+        }
+        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+            let AddressNamesCurrentSortedCursorValue::Timestamp(sort_value) = &cursor.sort_value
+            else {
+                return;
+            };
+            match *sort_value {
+                None => {
+                    builder.push(" AND sort_timestamp IS NULL");
+                }
+                Some(value) => {
+                    builder.push(" AND sort_timestamp = ");
+                    builder.push_bind(value);
+                }
+            };
+        }
+    }
+}
+
+fn push_address_names_current_name_tie_after<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    sort_value: &'a str,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
     builder.push(" OR (canonical_display_name = ");
-    builder.push_bind(&cursor.canonical_display_name);
-    builder.push(" AND logical_name_id > ");
+    builder.push_bind(sort_value);
+    builder.push(" AND ");
+    push_address_names_current_tie_after(builder, cursor);
+    builder.push(")");
+}
+
+fn push_address_names_current_timestamp_tie_after<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    value: Option<OffsetDateTime>,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    match value {
+        None => {
+            builder.push("sort_timestamp IS NULL AND ");
+        }
+        Some(value) => {
+            builder.push("sort_timestamp = ");
+            builder.push_bind(value);
+            builder.push(" AND ");
+        }
+    }
+    push_address_names_current_tie_after(builder, cursor);
+}
+
+fn push_address_names_current_tie_after<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    builder.push("(logical_name_id, resource_id::TEXT) > (");
     builder.push_bind(&cursor.logical_name_id);
-    builder.push(") OR (canonical_display_name = ");
-    builder.push_bind(&cursor.canonical_display_name);
-    builder.push(" AND logical_name_id = ");
-    builder.push_bind(&cursor.logical_name_id);
-    builder.push(" AND resource_id::TEXT > ");
-    builder.push_bind(cursor_resource_id);
-    builder.push("))");
+    builder.push(", ");
+    builder.push_bind(cursor.resource_id.to_string());
+    builder.push(")");
+}
+
+fn push_address_names_current_sort_timestamp_expr(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    sort: AddressNamesCurrentSort,
+) {
+    match sort {
+        AddressNamesCurrentSort::Name => {
+            builder.push("NULL::TIMESTAMPTZ");
+        }
+        AddressNamesCurrentSort::ExpiresAt => {
+            push_json_timestamp_expr(builder, &["registration", "expiry"]);
+        }
+        AddressNamesCurrentSort::RegisteredAt => {
+            push_json_timestamp_expr(builder, &["registration", "registered_at"]);
+        }
+    };
+}
+
+fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {
+    let path_literal = format!("'{{{}}}'", path.join(","));
+    builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path_literal.as_str());
+    builder.push(") = 'number' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder.push(path_literal.as_str());
+    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path_literal.as_str());
+    builder.push(") = 'string' AND nc.declared_summary #>> ");
+    builder.push(path_literal.as_str());
+    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder.push(path_literal.as_str());
+    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path_literal.as_str());
+    builder.push(") = 'string' AND nc.declared_summary #>> ");
+    builder.push(path_literal.as_str());
+    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' THEN (nc.declared_summary #>> ");
+    builder.push(path_literal.as_str());
+    builder.push(")::TIMESTAMPTZ ELSE NULL END");
+}
+
+fn timestamp_rank_expr(column: &str, order: AddressNamesCurrentOrder) -> String {
+    match order {
+        AddressNamesCurrentOrder::Asc => {
+            format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END")
+        }
+        AddressNamesCurrentOrder::Desc => {
+            format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
+        }
+    }
+}
+
+fn timestamp_null_rank(value: Option<OffsetDateTime>, order: AddressNamesCurrentOrder) -> i32 {
+    match (value.is_none(), order) {
+        (true, AddressNamesCurrentOrder::Asc) => 1,
+        (false, AddressNamesCurrentOrder::Asc) => 0,
+        (true, AddressNamesCurrentOrder::Desc) => 0,
+        (false, AddressNamesCurrentOrder::Desc) => 1,
+    }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_")
 }

@@ -78,6 +78,42 @@ impl AddressNamesCurrentDedupe {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressNamesCurrentSort {
+    Name,
+    ExpiresAt,
+    RegisteredAt,
+}
+
+impl AddressNamesCurrentSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::ExpiresAt => "expires_at",
+            Self::RegisteredAt => "registered_at",
+        }
+    }
+
+    pub(super) const fn is_timestamp(self) -> bool {
+        matches!(self, Self::ExpiresAt | Self::RegisteredAt)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressNamesCurrentOrder {
+    Asc,
+    Desc,
+}
+
+impl AddressNamesCurrentOrder {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
 /// Storage-local grouped collection item built from one or more relation rows.
 ///
 /// Non-relation fields come from the stable representative row chosen by the default collection
@@ -112,6 +148,20 @@ pub struct AddressNamesCurrentCursor {
     pub resource_id: Uuid,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddressNamesCurrentSortedCursorValue {
+    Name(String),
+    Timestamp(Option<OffsetDateTime>),
+}
+
+/// Sort-specific keyset cursor for v2 address-name collection reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressNamesCurrentSortedCursor {
+    pub sort_value: AddressNamesCurrentSortedCursorValue,
+    pub logical_name_id: String,
+    pub resource_id: Uuid,
+}
+
 /// Compact metadata for the full filtered grouped address-name collection.
 ///
 /// These fields are derived from the same representative rows returned by
@@ -138,5 +188,13 @@ pub struct AddressNamesCurrentProvenanceSummary {
 pub struct AddressNamesCurrentPage {
     pub entries: Vec<AddressNameCurrentEntry>,
     pub next_cursor: Option<AddressNamesCurrentCursor>,
+    pub summary: AddressNamesCurrentSummary,
+}
+
+/// Bounded sorted page of grouped current address-name entries for the extended v2 read path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressNamesCurrentSortedPage {
+    pub entries: Vec<AddressNameCurrentEntry>,
+    pub next_cursor: Option<AddressNamesCurrentSortedCursor>,
     pub summary: AddressNamesCurrentSummary,
 }
