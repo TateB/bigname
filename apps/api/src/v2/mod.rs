@@ -8,6 +8,7 @@ mod envelope;
 mod error;
 mod events;
 mod history;
+mod lookup;
 mod name_record;
 mod name_records;
 mod name_records_inventory;
@@ -41,6 +42,7 @@ pub(crate) use history::{
     history_cursor_payload, history_event_type, history_storage_cursor, history_storage_scope,
     v2_exact_name_snapshot_scope,
 };
+pub(crate) use lookup::get_lookup;
 pub(crate) use name_record::{
     NameRecord, build_name_record, classify_registration_status, get_name_record,
 };

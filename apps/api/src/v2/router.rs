@@ -7,14 +7,14 @@ use axum::{
 use crate::AppState;
 
 use super::{
-    get_address_history, get_address_names, get_events, get_history, get_name_record,
+    get_address_history, get_address_names, get_events, get_history, get_lookup, get_name_record,
     get_name_records, get_namespace, get_permissions, get_primary_name, get_resolver, get_status,
     get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
-        .route("/v2/lookup", post(not_implemented))
+        .route("/v2/lookup", post(get_lookup))
         .route("/v2/status", get(get_status))
         .route("/v2/names/{name}", get(get_name_record))
         .route("/v2/names/{name}/records", get(get_name_records))

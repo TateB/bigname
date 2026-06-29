@@ -116,4 +116,6 @@ include!("tests/v2_resolvers.rs");
 
 include!("tests/v2_primary_name.rs");
 
+include!("tests/v2_lookup.rs");
+
 include!("tests/openapi.rs");
