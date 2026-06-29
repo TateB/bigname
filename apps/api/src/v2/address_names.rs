@@ -1,9 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
     AddressNamesCurrentSortedCursorValue, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -12,9 +17,13 @@ use sqlx::types::{
     time::{OffsetDateTime, UtcOffset},
 };
 
+use crate::AppState;
+
 use super::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, RegistrationStatus, Relation, SortOrder,
-    V2Error, V2Result, name_record::name_registration_fields,
+    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParams,
+    RegistrationStatus, Relation, SortOrder, V2Error, V2Result, api_error_to_v2, as_of_meta,
+    decode, encode, encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -63,6 +72,167 @@ pub(crate) struct AddressNameRoleSummary {
 pub(crate) struct AddressNameGrant {
     pub(crate) grant_scope: Value,
     pub(crate) powers: Value,
+}
+
+pub(crate) async fn get_address_names(
+    Path(address): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
+    let normalized_address =
+        crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let namespace_filter = params.namespace.clone();
+    let snapshot_namespace = namespace_filter.as_deref().unwrap_or("ens");
+    let include_role_summary = address_names_include_role_summary(&params.include)?;
+    let storage_relation = params.relation.map(relation_to_storage);
+    let storage_dedupe = dedupe_to_storage(params.dedupe);
+    let storage_sort = sort_to_storage(params.sort);
+    let storage_order = order_to_storage(params.order);
+    let normalized_q = params.q.as_deref().map(str::to_lowercase);
+
+    let scope = v2_exact_name_snapshot_scope(&state, snapshot_namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let snapshot_token = encode_at_token(&selected_snapshot);
+    let cursor_binding = AddressNamesCursorBinding {
+        address: &normalized_address,
+        namespace: namespace_filter.as_deref(),
+        relation: params.relation,
+        dedupe: params.dedupe,
+        q: normalized_q.as_deref(),
+        sort: params.sort,
+        order: params.order,
+        snapshot_token: &snapshot_token,
+    };
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let payload = decode(cursor)?;
+            address_names_storage_cursor(&payload, &cursor_binding)
+        })
+        .transpose()?;
+
+    let storage_page = bigname_storage::load_address_names_current_page_sorted(
+        &state.pool,
+        &normalized_address,
+        namespace_filter.as_deref(),
+        storage_relation,
+        storage_dedupe,
+        normalized_q.as_deref(),
+        storage_sort,
+        storage_order,
+        storage_cursor.as_ref(),
+        params.page_size,
+    )
+    .await
+    .map_err(|error| {
+        if storage_cursor.is_some()
+            && error
+                .to_string()
+                .contains("page cursor does not match a grouped entry")
+        {
+            return V2Error::invalid_input("cursor must be a valid pagination cursor");
+        }
+        V2Error::internal_error(format!(
+            "failed to load address names for {normalized_address}"
+        ))
+    })?;
+
+    let logical_name_ids = storage_page
+        .entries
+        .iter()
+        .map(|entry| entry.logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let name_rows =
+        bigname_storage::load_name_current_by_logical_name_ids(&state.pool, &logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name registration summaries for {normalized_address}"
+                ))
+            })?;
+    let primary_name = bigname_storage::load_primary_name_current_snapshot(
+        &state.pool,
+        &normalized_address,
+        snapshot_namespace,
+        "60",
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load primary name for address {normalized_address}"
+        ))
+    })?
+    .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
+    .and_then(|snapshot| {
+        snapshot
+            .normalized_claim_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    });
+    let permissions_by_resource = if include_role_summary {
+        let resource_ids = storage_page
+            .entries
+            .iter()
+            .map(|entry| entry.resource_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        bigname_storage::load_permissions_current_by_resource_ids(&state.pool, &resource_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name role summaries for {normalized_address}"
+                ))
+            })?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
+    let has_more = next_cursor.is_some();
+    let data = storage_page
+        .entries
+        .iter()
+        .map(|entry| {
+            let role_summary = include_role_summary.then(|| {
+                build_address_name_role_summary(
+                    permissions_by_resource
+                        .get(&entry.resource_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            });
+            build_address_name(
+                entry,
+                name_rows.get(&entry.logical_name_id),
+                primary_name.as_deref(),
+                role_summary,
+            )
+        })
+        .collect();
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: Some(Page {
+            cursor: params.cursor.clone(),
+            next_cursor,
+            page_size: params.page_size,
+            total_count: None,
+            has_more,
+        }),
+        meta,
+    }))
 }
 
 pub(crate) fn build_address_name(
@@ -327,6 +497,21 @@ fn invalid_address_names_cursor() -> V2Error {
     V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
+fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
+    let mut include_role_summary = false;
+    for value in include {
+        match value.as_str() {
+            "role_summary" => include_role_summary = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only role_summary",
+                ));
+            }
+        }
+    }
+    Ok(include_role_summary)
+}
+
 fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
 }
@@ -352,146 +537,4 @@ fn format_timestamp(value: OffsetDateTime) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::v2::decode;
-
-    fn binding(sort: AddressNamesSort) -> AddressNamesCursorBinding<'static> {
-        AddressNamesCursorBinding {
-            address: "0x00000000000000000000000000000000000000aa",
-            namespace: Some("ens"),
-            relation: Some(Relation::Owner),
-            dedupe: AddressNamesDedupe::Name,
-            q: Some("al"),
-            sort,
-            order: SortOrder::Asc,
-            snapshot_token: "snapshot-1",
-        }
-    }
-
-    #[test]
-    fn address_names_cursor_payload_round_trips_name_cursor() {
-        let cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Name("Alice.eth".to_owned()),
-            logical_name_id: "ens:alice.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1234),
-        };
-        let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-
-        assert_eq!(
-            address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name))
-                .expect("cursor must decode"),
-            cursor
-        );
-        assert_eq!(payload.last_item[SORT_KIND_CURSOR_KEY], SORT_KIND_NAME);
-    }
-
-    #[test]
-    fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
-        let null_cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(None),
-            logical_name_id: "ens:missing-expiry.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1235),
-        };
-        let null_payload =
-            address_names_cursor_payload(&null_cursor, &binding(AddressNamesSort::ExpiresAt));
-        assert_eq!(
-            null_payload.last_item[SORT_KIND_CURSOR_KEY],
-            SORT_KIND_TIMESTAMP_NULL
-        );
-        assert_eq!(null_payload.last_item[SORT_VALUE_CURSOR_KEY], "");
-        assert_eq!(
-            address_names_storage_cursor(&null_payload, &binding(AddressNamesSort::ExpiresAt))
-                .expect("null timestamp cursor must decode"),
-            null_cursor
-        );
-
-        let value = bigname_storage::parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z")
-            .expect("timestamp must parse");
-        let value_cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(Some(value)),
-            logical_name_id: "ens:alice.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1236),
-        };
-        let value_payload =
-            address_names_cursor_payload(&value_cursor, &binding(AddressNamesSort::ExpiresAt));
-        assert_eq!(
-            value_payload.last_item[SORT_KIND_CURSOR_KEY],
-            SORT_KIND_TIMESTAMP_VALUE
-        );
-        assert_eq!(
-            value_payload.last_item[SORT_VALUE_CURSOR_KEY],
-            "2027-01-02T03:04:05Z"
-        );
-        assert_eq!(
-            address_names_storage_cursor(&value_payload, &binding(AddressNamesSort::ExpiresAt))
-                .expect("timestamp cursor must decode"),
-            value_cursor
-        );
-    }
-
-    #[test]
-    fn address_names_cursor_rejects_cross_sort_filter_order_or_snapshot() {
-        let cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Name("Alice.eth".to_owned()),
-            logical_name_id: "ens:alice.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1234),
-        };
-
-        let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-        assert!(
-            address_names_storage_cursor(&payload, &binding(AddressNamesSort::ExpiresAt)).is_err()
-        );
-
-        let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-        payload.filters.insert(
-            ADDRESS_FILTER_KEY.to_owned(),
-            "0x00000000000000000000000000000000000000bb".to_owned(),
-        );
-        assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
-
-        let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-        payload
-            .filters
-            .insert(ORDER_FILTER_KEY.to_owned(), "desc".to_owned());
-        assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
-
-        let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-        payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
-    }
-
-    #[test]
-    fn address_names_cursor_rejects_cross_timestamp_sort_reuse() {
-        let cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(Some(
-                bigname_storage::parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z")
-                    .expect("timestamp must parse"),
-            )),
-            logical_name_id: "ens:alice.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1234),
-        };
-        let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::ExpiresAt));
-
-        assert!(
-            address_names_storage_cursor(&payload, &binding(AddressNamesSort::RegisteredAt))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn address_names_cursor_token_decodes_to_bound_payload() {
-        let cursor = AddressNamesCurrentSortedCursor {
-            sort_value: AddressNamesCurrentSortedCursorValue::Name("Alice.eth".to_owned()),
-            logical_name_id: "ens:alice.eth".to_owned(),
-            resource_id: Uuid::from_u128(0x1234),
-        };
-        let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-        let encoded = crate::v2::encode(&payload);
-
-        assert_eq!(
-            decode(&encoded).expect("encoded cursor must decode"),
-            payload
-        );
-    }
-}
+mod tests;

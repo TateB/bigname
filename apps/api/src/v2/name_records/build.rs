@@ -1,53 +1,24 @@
 use std::collections::BTreeMap;
 
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ExecutionOutcome, ResolutionRecordKey, build_resolution_verified_state};
+use crate::{ResolutionRecordKey, build_resolution_verified_state};
 
-use super::{
-    Resolver, Source, Status, V2Error, V2Result,
+use super::super::{
+    Source, Status, V2Error, V2Result,
     name_record::{
         record_addresses, record_content_hash, record_text_records, record_value_string, resolver,
         string_field, value_to_string,
     },
     name_records_inventory::{
-        RecordInventory, inventory_item_for_record, inventory_summary, unsupported_family_reason,
+        inventory_item_for_record, inventory_summary, unsupported_family_reason,
     },
 };
+use super::{NameRecords, RecordAnswer, VerifiedRecordLookup};
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct NameRecords {
-    pub(crate) resolver: Option<Resolver>,
-    pub(crate) addresses: BTreeMap<String, String>,
-    pub(crate) text_records: BTreeMap<String, String>,
-    pub(crate) content_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) records: Option<BTreeMap<String, RecordAnswer>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) inventory: Option<RecordInventory>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct RecordAnswer {
-    pub(crate) status: Status,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unsupported_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) failure_reason: Option<String>,
-}
-
-pub(crate) enum VerifiedRecordLookup {
-    Found(Box<ExecutionOutcome>),
-    Stale(String),
-    NotSupported,
-}
 
 pub(crate) fn build_indexed_name_records(
     row: &NameCurrentRow,

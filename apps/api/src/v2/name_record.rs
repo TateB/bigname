@@ -1,13 +1,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
+use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
+use crate::{
+    AppState, load_name_current_for_selected_snapshot,
+    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
+    normalize_inferred_route_name, snapshot_selection_api_error,
+};
+
 use super::{
+    Envelope, Meta, QueryParams, RequestSource, V2Error, V2Result, api_error_to_v2, as_of_meta,
     chains::slug_to_numeric,
-    vocab::{RegistrationStatus, Resolver, Status},
+    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    vocab::{RegistrationStatus, Resolver, Source, Status},
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -36,6 +48,70 @@ pub(crate) struct NameRecord {
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) unsupported_fields: Vec<String>,
+}
+
+pub(crate) async fn get_name_record(
+    Path(input_name): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<NameRecord>>> {
+    let normalized = normalize_inferred_route_name(&input_name)
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    let namespace = params
+        .namespace
+        .clone()
+        .unwrap_or_else(|| normalized.namespace.to_owned());
+    let route_source = route_source(params.source)?;
+
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let row = load_name_current_for_selected_snapshot(
+        &state.pool,
+        &namespace,
+        &normalized.normalized_name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2(map_internal_api_error(
+            error,
+            format!(
+                "failed to load name profile for {}/{}",
+                namespace, normalized.normalized_name
+            ),
+        ))
+    })?;
+
+    let record_inventory =
+        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+            .await
+            .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))?;
+    let chain_id = response_chain_id(&selected_snapshot);
+    let mut data = build_name_record(
+        &row,
+        record_inventory.as_ref(),
+        chain_id,
+        if route_source == Source::Verified {
+            Status::Failed
+        } else {
+            Status::Ok
+        },
+    );
+    if route_source == Source::Verified {
+        mark_unserved_verified_fields(&mut data);
+    }
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        source: Some(route_source),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: None,
+        meta,
+    }))
 }
 
 pub(crate) fn build_name_record(
@@ -325,6 +401,38 @@ fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> V
     fields.into_iter().collect()
 }
 
+fn mark_unserved_verified_fields(record: &mut NameRecord) {
+    for field in [
+        "addresses",
+        "content_hash",
+        "primary_address",
+        "text_records",
+    ] {
+        if !record.unsupported_fields.iter().any(|value| value == field) {
+            record.unsupported_fields.push(field.to_owned());
+        }
+    }
+    record.unsupported_fields.sort();
+}
+
+fn route_source(source: RequestSource) -> V2Result<Source> {
+    match source {
+        RequestSource::Indexed => Ok(Source::Indexed),
+        RequestSource::Verified => Ok(Source::Verified),
+        RequestSource::Auto => Err(V2Error::invalid_input(
+            "source must be one of: indexed, verified",
+        )),
+    }
+}
+
+fn response_chain_id(selected_snapshot: &SelectedSnapshot) -> Option<u64> {
+    selected_snapshot
+        .chain_positions
+        .as_map()
+        .values()
+        .find_map(|position| super::slug_to_numeric(&position.chain_id))
+}
+
 fn network(row: &NameCurrentRow) -> String {
     match row.namespace.as_str() {
         "basenames" if has_chain_position(&row.chain_positions, "base-sepolia") => {
@@ -437,102 +545,4 @@ fn format_timestamp(value: OffsetDateTime) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn registration_status_classifier_covers_authority_kind_domain() {
-        let active = json!({
-            "status": "active",
-            "authority_kind": "registrar",
-            "released_at": null,
-            "expiry": "2000-01-01T00:00:00Z"
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&active), Some("0xabc"), true),
-            RegistrationStatus::Active
-        );
-        assert_eq!(
-            classify_registration_status("basenames", Some(&active), Some("0xabc"), true),
-            RegistrationStatus::Active
-        );
-
-        let registered = json!({
-            "status": "active",
-            "authority_kind": "registry_only",
-            "released_at": null
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&registered), Some("0xabc"), true),
-            RegistrationStatus::Registered
-        );
-
-        let ens_v2_registered = json!({
-            "status": "active",
-            "authority_kind": "ens_v2_registry",
-            "released_at": null
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&ens_v2_registered), Some("0xabc"), true),
-            RegistrationStatus::Registered
-        );
-
-        let wrapped = json!({
-            "status": "active",
-            "authority_kind": "wrapper",
-            "released_at": null
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&wrapped), Some("0xabc"), true),
-            RegistrationStatus::Wrapped
-        );
-        assert_eq!(
-            classify_registration_status("basenames", Some(&wrapped), Some("0xabc"), true),
-            RegistrationStatus::Unregistered
-        );
-
-        let released = json!({
-            "status": "released",
-            "authority_kind": "registrar",
-            "released_at": "2026-06-14T00:00:00Z"
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&released), Some("0xabc"), true),
-            RegistrationStatus::Released
-        );
-
-        let unregistered = json!({
-            "status": "active",
-            "authority_kind": "unknown_authority",
-            "released_at": null
-        });
-        assert_eq!(
-            classify_registration_status("ens", Some(&active), Some("0xabc"), false),
-            RegistrationStatus::Unregistered
-        );
-        assert_eq!(
-            classify_registration_status("ens", Some(&unregistered), Some("0xabc"), true),
-            RegistrationStatus::Unregistered
-        );
-    }
-
-    #[test]
-    fn resolver_omits_unknown_chain_id_instead_of_guessing_mainnet() {
-        let missing_chain = json!({
-            "resolver": {
-                "address": "0x0000000000000000000000000000000000000abc"
-            }
-        });
-        assert_eq!(resolver(&missing_chain), None);
-
-        let unknown_chain = json!({
-            "resolver": {
-                "chain_id": "unknown-mainnet",
-                "address": "0x0000000000000000000000000000000000000abc"
-            }
-        });
-        assert_eq!(resolver(&unknown_chain), None);
-    }
-}
+mod tests;

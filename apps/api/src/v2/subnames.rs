@@ -1,12 +1,23 @@
 use std::collections::BTreeMap;
 
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use bigname_storage::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentRow, ChildrenCurrentSummary, NameCurrentRow,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    AppState, load_name_current_for_selected_snapshot, map_internal_api_error,
+    normalize_inferred_route_name,
+};
+
 use super::{
-    CursorPayload, RegistrationStatus, V2Error, V2Result, name_record::name_registration_fields,
+    CursorPayload, Envelope, Meta, Page, QueryParams, RegistrationStatus, V2Error, V2Result,
+    api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
+    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -30,6 +41,139 @@ pub(crate) struct Subname {
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
+}
+
+pub(crate) async fn get_subnames(
+    Path(input_name): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<Vec<Subname>>>> {
+    let normalized = normalize_inferred_route_name(&input_name)
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    let namespace = params
+        .namespace
+        .clone()
+        .unwrap_or_else(|| normalized.namespace.to_owned());
+    let include_counts = subnames_include_counts(&params.include)?;
+
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let parent = load_name_current_for_selected_snapshot(
+        &state.pool,
+        &namespace,
+        &normalized.normalized_name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2(map_internal_api_error(
+            error,
+            format!(
+                "failed to load subnames for {}/{}",
+                namespace, normalized.normalized_name
+            ),
+        ))
+    })?;
+
+    let snapshot_token = encode_at_token(&selected_snapshot);
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let payload = decode(cursor)?;
+            subname_storage_cursor(
+                &payload,
+                &namespace,
+                &parent.logical_name_id,
+                &snapshot_token,
+            )
+        })
+        .transpose()?;
+
+    let storage_page = bigname_storage::load_children_current_page(
+        &state.pool,
+        &parent.logical_name_id,
+        storage_cursor.as_ref(),
+        params.page_size,
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load subnames for {}/{}",
+            namespace, normalized.normalized_name
+        ))
+    })?;
+
+    let child_logical_name_ids = storage_page
+        .rows
+        .iter()
+        .map(|row| row.child_logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let child_name_rows = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &child_logical_name_ids,
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load subname registration summaries for {}/{}",
+            namespace, normalized.normalized_name
+        ))
+    })?;
+    let child_summaries = if include_counts {
+        bigname_storage::load_children_current_summaries(&state.pool, &child_logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load subname counts for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            })?
+            .into_iter()
+            .map(|summary| (summary.parent_logical_name_id.clone(), summary))
+            .collect()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&subname_cursor_payload(
+            cursor,
+            &namespace,
+            &parent.logical_name_id,
+            &snapshot_token,
+        ))
+    });
+    let has_more = next_cursor.is_some();
+    let data = storage_page
+        .rows
+        .iter()
+        .map(|row| {
+            build_subname(
+                row,
+                child_name_rows.get(&row.child_logical_name_id),
+                child_summaries.get(&row.child_logical_name_id),
+                include_counts,
+            )
+        })
+        .collect();
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: Some(Page {
+            cursor: params.cursor.clone(),
+            next_cursor,
+            page_size: params.page_size,
+            total_count: None,
+            has_more,
+        }),
+        meta,
+    }))
 }
 
 pub(crate) fn build_subname(
@@ -141,6 +285,17 @@ fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
 
 fn invalid_subname_cursor() -> V2Error {
     V2Error::invalid_input("cursor must be a valid pagination cursor")
+}
+
+fn subnames_include_counts(include: &[String]) -> V2Result<bool> {
+    let mut include_counts = false;
+    for value in include {
+        match value.as_str() {
+            "counts" => include_counts = true,
+            _ => return Err(V2Error::invalid_input("include must contain only counts")),
+        }
+    }
+    Ok(include_counts)
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ pub(crate) use address_history::get_address_history;
 pub(crate) use address_names::{
     AddressName, AddressNamesCursorBinding, address_names_cursor_payload,
     address_names_storage_cursor, build_address_name, build_address_name_role_summary,
-    dedupe_to_storage, order_to_storage, relation_to_storage, sort_to_storage,
+    dedupe_to_storage, get_address_names, order_to_storage, relation_to_storage, sort_to_storage,
 };
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
@@ -35,10 +35,12 @@ pub(crate) use history::{
     history_cursor_payload, history_event_type, history_storage_cursor, history_storage_scope,
     v2_exact_name_snapshot_scope,
 };
-pub(crate) use name_record::{NameRecord, build_name_record, classify_registration_status};
+pub(crate) use name_record::{
+    NameRecord, build_name_record, classify_registration_status, get_name_record,
+};
 pub(crate) use name_records::{
     NameRecords, VerifiedRecordLookup, build_auto_name_records, build_indexed_name_records,
-    build_verified_name_records, indexed_records_requiring_verified_fallback,
+    build_verified_name_records, get_name_records, indexed_records_requiring_verified_fallback,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use params::{
@@ -48,7 +50,9 @@ pub(crate) use params::{
 pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
 };
-pub(crate) use subnames::{Subname, build_subname, subname_cursor_payload, subname_storage_cursor};
+pub(crate) use subnames::{
+    Subname, build_subname, get_subnames, subname_cursor_payload, subname_storage_cursor,
+};
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
     RegistrationStatus, Relation, Resolver, Source, Status,
