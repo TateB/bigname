@@ -270,7 +270,7 @@ fn history_event_name(row: &StorageHistoryEvent, anchor_name: &str) -> String {
         .to_owned()
 }
 
-fn history_storage_scope(scope: HistoryScope) -> bigname_storage::HistoryScope {
+pub(crate) fn history_storage_scope(scope: HistoryScope) -> bigname_storage::HistoryScope {
     match scope {
         HistoryScope::Name => bigname_storage::HistoryScope::Surface,
         HistoryScope::Registration => bigname_storage::HistoryScope::Resource,

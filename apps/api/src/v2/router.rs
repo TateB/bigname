@@ -25,10 +25,10 @@ use super::{
     VerifiedRecordLookup, address_names_cursor_payload, address_names_storage_cursor, as_of_meta,
     build_address_name, build_address_name_role_summary, build_auto_name_records,
     build_indexed_name_records, build_name_record, build_subname, build_verified_name_records,
-    decode, dedupe_to_storage, default_requested_records, encode, encode_at_token, get_events,
-    get_history, indexed_records_requiring_verified_fallback, order_to_storage,
-    relation_to_storage, resolve_v2_snapshot, sort_to_storage, subname_cursor_payload,
-    subname_storage_cursor, validate_product_record,
+    decode, dedupe_to_storage, default_requested_records, encode, encode_at_token,
+    get_address_history, get_events, get_history, indexed_records_requiring_verified_fallback,
+    order_to_storage, relation_to_storage, resolve_v2_snapshot, sort_to_storage,
+    subname_cursor_payload, subname_storage_cursor, validate_product_record,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -44,7 +44,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/permissions", get(not_implemented))
         .route("/v2/addresses/{address}/names", get(get_address_names))
         .route("/v2/addresses/{address}/primary-name", get(not_implemented))
-        .route("/v2/addresses/{address}/history", get(not_implemented))
+        .route("/v2/addresses/{address}/history", get(get_address_history))
         .route("/v2/search", get(not_implemented))
         .route("/v2/events", get(get_events))
         .route("/v2/resolvers/{chain_id}/{address}", get(not_implemented))

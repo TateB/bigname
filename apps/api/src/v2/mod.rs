@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+mod address_history;
 mod address_names;
 mod chains;
 mod cursor;
@@ -16,6 +17,7 @@ mod snapshots;
 mod subnames;
 mod vocab;
 
+pub(crate) use address_history::get_address_history;
 pub(crate) use address_names::{
     AddressName, AddressNamesCursorBinding, address_names_cursor_payload,
     address_names_storage_cursor, build_address_name, build_address_name_role_summary,
@@ -30,7 +32,7 @@ pub(crate) use events::{
 };
 pub(crate) use history::{
     HistoryEvent, api_error_to_v2, build_history_event, format_timestamp, get_history,
-    history_cursor_payload, history_event_type, history_storage_cursor,
+    history_cursor_payload, history_event_type, history_storage_cursor, history_storage_scope,
     v2_exact_name_snapshot_scope,
 };
 pub(crate) use name_record::{NameRecord, build_name_record, classify_registration_status};
