@@ -2081,6 +2081,39 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
         json!(1)
     );
 
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert!(payload.get("page").is_none());
+    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["data"]["status"], json!("stale"));
+
+    let chains = payload["data"]["chains"]
+        .as_object()
+        .expect("v2 chains must be an object");
+    assert!(chains.get("ethereum-mainnet").is_none());
+
+    let chain = chains["1"]
+        .as_object()
+        .expect("v2 chain status must be an object");
+    assert_eq!(chain.get("latest_block"), Some(&json!(10)));
+    assert_eq!(chain.get("indexed_block"), Some(&json!(9)));
+    assert_eq!(chain.get("safe_block"), Some(&json!(9)));
+    assert_eq!(chain.get("finalized_block"), Some(&json!(9)));
+    assert_eq!(chain.get("lag_blocks"), Some(&json!(1)));
+    assert_eq!(chain.get("lag_seconds"), Some(&json!(1)));
+    assert_eq!(chain.get("status"), Some(&json!("stale")));
+    assert!(chain.get("canonical_block").is_none());
+    assert!(chain.get("latest_projected_block").is_none());
+
     sqlx::query("DELETE FROM projection_invalidations")
         .execute(&database.pool)
         .await?;

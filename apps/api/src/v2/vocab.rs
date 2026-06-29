@@ -14,6 +14,14 @@ pub(crate) enum Status {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum OpsStatus {
+    Ready,
+    Degraded,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Completeness {
     Full,
     Partial,
@@ -193,6 +201,13 @@ mod tests {
         assert_wire(Status::Unsupported, "unsupported");
         assert_wire(Status::Stale, "stale");
         assert_wire(Status::Failed, "failed");
+    }
+
+    #[test]
+    fn ops_status_variants_use_exact_wire_spelling() {
+        assert_wire(OpsStatus::Ready, "ready");
+        assert_wire(OpsStatus::Degraded, "degraded");
+        assert_wire(OpsStatus::Stale, "stale");
     }
 
     #[test]
