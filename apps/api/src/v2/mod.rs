@@ -15,6 +15,7 @@ mod namespaces;
 mod params;
 mod permissions;
 mod primary_name;
+mod resolvers;
 mod router;
 mod snapshots;
 mod status;
@@ -57,6 +58,11 @@ pub(crate) use permissions::{PermissionLineage, PermissionRow, get_permissions};
 pub(crate) use primary_name::{
     PrimaryName, PrimaryNameAnswer, PrimaryNameQueryParams, PrimaryNameSourceSelection,
     PrimaryNameVerification, build_primary_name, get_primary_name,
+};
+pub(crate) use resolvers::{
+    BoundNames, BoundNamesCursorBinding, ResolverOverview, bound_names_cursor_payload,
+    bound_names_storage_cursor, build_bound_name_record, build_resolver_overview, get_resolver,
+    resolver_overview_include,
 };
 pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
