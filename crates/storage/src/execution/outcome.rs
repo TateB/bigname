@@ -1,10 +1,17 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
 
+use crate::snapshot_selection::ChainPositions;
+
 use super::{
+    decode::decode_requested_chain_positions,
     keying::{execution_cache_key_storage_key, normalize_execution_cache_key},
     types::{ExecutionCacheKey, ExecutionOutcome},
 };
+
+const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 
 /// Load one cached verified execution outcome by the frozen execution cache key.
 pub async fn load_execution_outcome(
@@ -14,6 +21,94 @@ pub async fn load_execution_outcome(
     let execution_cache_key = execution_cache_key_storage_key(cache_key)
         .context("failed to derive execution cache key")?;
     load_execution_outcome_row_internal(pool, &execution_cache_key).await
+}
+
+/// Load the newest persisted resolution execution outcome for the selected
+/// non-position cache identity whose requested chain positions are at or
+/// before the selected snapshot.
+pub async fn load_resolution_execution_outcome_at_snapshot(
+    pool: &PgPool,
+    cache_key: &ExecutionCacheKey,
+    snapshot_positions: &ChainPositions,
+) -> Result<Option<ExecutionOutcome>> {
+    let normalized_cache_key = normalize_execution_cache_key(cache_key)
+        .context("failed to normalize execution cache key")?;
+    let manifest_versions = serde_json::to_string(&normalized_cache_key.manifest_versions)
+        .context("failed to serialize selected manifest_versions")?;
+    let topology_version_boundary =
+        serde_json::to_string(&normalized_cache_key.topology_version_boundary)
+            .context("failed to serialize selected topology_version_boundary")?;
+    let record_version_boundary =
+        serde_json::to_string(&normalized_cache_key.record_version_boundary)
+            .context("failed to serialize selected record_version_boundary")?;
+    let request_key_prefix = execution_cache_request_key_prefix(&normalized_cache_key.request_key);
+    let request_key_prefix_upper_bound =
+        execution_cache_request_key_prefix_upper_bound(&request_key_prefix);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND request_key = $2
+          AND manifest_versions = $3::jsonb
+          AND topology_version_boundary = $4::jsonb
+          AND record_version_boundary = $5::jsonb
+          AND execution_cache_key >= $6
+          AND execution_cache_key < $7
+        ORDER BY finished_at DESC NULLS LAST, execution_trace_id DESC
+        "#,
+    )
+    .bind(VERIFIED_RESOLUTION_REQUEST_TYPE)
+    .bind(&normalized_cache_key.request_key)
+    .bind(manifest_versions)
+    .bind(topology_version_boundary)
+    .bind(record_version_boundary)
+    .bind(request_key_prefix)
+    .bind(request_key_prefix_upper_bound)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load resolution execution outcome candidates for request_key {}",
+            normalized_cache_key.request_key
+        )
+    })?;
+
+    for row in rows {
+        let outcome = decode_execution_outcome_row(row)?;
+        if resolution_execution_outcome_is_at_or_before_snapshot(&outcome, snapshot_positions)? {
+            return Ok(Some(outcome));
+        }
+    }
+
+    Ok(None)
+}
+
+fn execution_cache_request_key_prefix(request_key: &str) -> String {
+    let mut prefix = String::new();
+    super::decode::append_key_part(&mut prefix, request_key);
+    prefix
+}
+
+fn execution_cache_request_key_prefix_upper_bound(prefix: &str) -> String {
+    debug_assert!(prefix.ends_with(';'));
+    let mut upper_bound = prefix.to_owned();
+    upper_bound.pop();
+    upper_bound.push('<');
+    upper_bound
 }
 
 /// Insert or replace one verified execution outcome keyed by the frozen execution cache key.
@@ -290,6 +385,52 @@ fn validate_optional_nonnull_json_value(
         bail!("execution outcome for request_key {request_key} {field_name} must not be JSON null");
     }
     Ok(())
+}
+
+fn resolution_execution_outcome_is_at_or_before_snapshot(
+    outcome: &ExecutionOutcome,
+    snapshot_positions: &ChainPositions,
+) -> Result<bool> {
+    let requested_positions = decode_requested_chain_positions(
+        &outcome.cache_key.requested_chain_positions,
+        &outcome.cache_key.request_key,
+    )
+    .context("failed to decode resolution execution requested_chain_positions")?;
+
+    for requested_position in &requested_positions {
+        let Some(selected_position) = snapshot_positions
+            .as_map()
+            .values()
+            .find(|selected_position| selected_position.chain_id == requested_position.chain_id)
+        else {
+            return Ok(false);
+        };
+
+        if requested_position.block_number > selected_position.block_number {
+            return Ok(false);
+        }
+        if requested_position.block_number == selected_position.block_number
+            && requested_position.block_hash != selected_position.block_hash
+        {
+            return Ok(false);
+        }
+    }
+
+    let requested_chain_ids = requested_positions
+        .iter()
+        .map(|position| position.chain_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for selected_chain_id in snapshot_positions
+        .as_map()
+        .values()
+        .map(|position| position.chain_id.as_str())
+    {
+        if !requested_chain_ids.contains(selected_chain_id) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 fn ensure_execution_outcome_identity_matches(

@@ -13,7 +13,8 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    CanonicalityState, ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks,
+    CanonicalityState, ChainLineageBlock, ChainPositions, default_database_url,
+    upsert_chain_lineage_blocks,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -655,6 +656,92 @@ fn execution_outcome(trace: &ExecutionTrace) -> ExecutionOutcome {
     }
 }
 
+fn selected_execution_snapshot_positions(block_number: i64, block_hash: &str) -> ChainPositions {
+    ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
+        }
+    }))
+    .expect("selected execution snapshot fixture must parse")
+}
+
+fn selected_execution_snapshot_positions_with_auxiliary() -> ChainPositions {
+    ChainPositions::from_value(&json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 50,
+            "block_hash": execution_block_hash(50),
+            "timestamp": "2026-04-17T00:00:50Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 103,
+            "block_hash": execution_block_hash(103),
+            "timestamp": "2026-04-17T00:00:43Z"
+        }
+    }))
+    .expect("selected cross-chain execution snapshot fixture must parse")
+}
+
+fn execution_block_hash(block_number: i64) -> String {
+    format!("0x{block_number:064x}")
+}
+
+fn requested_execution_positions(block_number: i64, block_hash: &str) -> serde_json::Value {
+    json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": block_number,
+        "block_hash": block_hash
+    }])
+}
+
+fn requested_cross_chain_execution_positions() -> serde_json::Value {
+    json!([
+        {
+            "chain_id": "base-mainnet",
+            "block_number": 50,
+            "block_hash": execution_block_hash(50)
+        },
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 103,
+            "block_hash": execution_block_hash(103)
+        }
+    ])
+}
+
+fn requested_base_only_execution_positions() -> serde_json::Value {
+    json!([{
+        "chain_id": "base-mainnet",
+        "block_number": 50,
+        "block_hash": execution_block_hash(50)
+    }])
+}
+
+fn resolution_execution_outcome_candidate(
+    execution_trace_id: Uuid,
+    request_key: &str,
+    block_number: i64,
+    finished_at: i64,
+    manifest_version: i64,
+) -> (ExecutionTrace, ExecutionOutcome) {
+    let block_hash = execution_block_hash(block_number);
+    let trace = execution_trace_variant(execution_trace_id, request_key, finished_at);
+    let mut outcome = execution_outcome(&trace);
+    outcome.cache_key.request_key = request_key.to_owned();
+    outcome.cache_key.requested_chain_positions =
+        requested_execution_positions(block_number, &block_hash);
+    outcome.cache_key.manifest_versions = json!([{
+        "source_manifest_id": manifest_version,
+        "manifest_version": manifest_version
+    }]);
+    outcome.finished_at = timestamp(finished_at);
+    (trace, outcome)
+}
+
 async fn expect_outcome_validation_error(
     database: &TestDatabase,
     outcome: &ExecutionOutcome,
@@ -936,6 +1023,213 @@ async fn upserts_and_loads_execution_outcome_by_cache_key() -> Result<()> {
         load_execution_outcome(database.pool(), &replacement_outcome.cache_key).await?,
         Some(replacement_outcome)
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn loads_resolution_execution_outcome_at_snapshot_by_candidate_order() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request_key = "ens:alice.eth:addr:60";
+
+    let candidates = [
+        resolution_execution_outcome_candidate(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000001001),
+            request_key,
+            103,
+            1_717_171_800,
+            31,
+        ),
+        resolution_execution_outcome_candidate(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000001002),
+            request_key,
+            102,
+            1_717_171_900,
+            31,
+        ),
+        resolution_execution_outcome_candidate(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000001003),
+            request_key,
+            101,
+            1_717_171_900,
+            31,
+        ),
+        resolution_execution_outcome_candidate(
+            Uuid::from_u128(0x0e7ec7ace00000000000000000001004),
+            request_key,
+            104,
+            1_717_172_000,
+            31,
+        ),
+    ];
+
+    for (trace, outcome) in &candidates {
+        insert_trace_and_outcome(&database, trace, outcome).await?;
+    }
+    let selected_cache_key = &candidates[0].1.cache_key;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        selected_cache_key,
+        &selected_execution_snapshot_positions(103, &execution_block_hash(103)),
+    )
+    .await?
+    .expect("eligible candidate must be selected");
+    assert_eq!(
+        selected.execution_trace_id,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001003),
+        "same-finished_at candidates must tie-break by greatest execution_trace_id"
+    );
+
+    let earlier_snapshot = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        selected_cache_key,
+        &selected_execution_snapshot_positions(101, &execution_block_hash(101)),
+    )
+    .await?
+    .expect("older eligible candidate must be selected");
+    assert_eq!(
+        earlier_snapshot.execution_trace_id,
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001003)
+    );
+
+    assert!(
+        load_resolution_execution_outcome_at_snapshot(
+            database.pool(),
+            selected_cache_key,
+            &selected_execution_snapshot_positions(100, &execution_block_hash(100)),
+        )
+        .await?
+        .is_none(),
+        "snapshots before all persisted candidates must miss"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolution_execution_outcome_at_snapshot_rejects_wrong_hash_at_same_height() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let request_key = "ens:alice.eth:addr:60";
+    let selected_block = 103;
+    let selected_hash = execution_block_hash(selected_block);
+    let wrong_hash = execution_block_hash(9_999);
+
+    let (correct_trace, correct_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001011),
+        request_key,
+        selected_block,
+        1_717_171_800,
+        41,
+    );
+    let (mut wrong_trace, mut wrong_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001012),
+        request_key,
+        selected_block,
+        1_717_171_900,
+        41,
+    );
+    wrong_trace.steps[0].canonicality_dependency = json!({
+        "ethereum-mainnet": {
+            "block_hash": wrong_hash,
+            "block_number": selected_block,
+            "state": "canonical"
+        }
+    });
+    wrong_outcome.cache_key.requested_chain_positions =
+        requested_execution_positions(selected_block, &wrong_hash);
+
+    insert_trace_and_outcome(&database, &correct_trace, &correct_outcome).await?;
+    insert_trace_and_outcome(&database, &wrong_trace, &wrong_outcome).await?;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &correct_outcome.cache_key,
+        &selected_execution_snapshot_positions(selected_block, &selected_hash),
+    )
+    .await?
+    .expect("same-height correct-hash candidate must be selected");
+
+    assert_eq!(
+        selected.execution_trace_id,
+        correct_trace.execution_trace_id
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolution_execution_outcome_at_snapshot_requires_selected_cache_boundaries() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let request_key = "ens:alice.eth:addr:60";
+    let (older_trace, older_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001021),
+        request_key,
+        101,
+        1_717_171_800,
+        51,
+    );
+    let (newer_trace, newer_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001022),
+        request_key,
+        101,
+        1_717_171_900,
+        52,
+    );
+
+    insert_trace_and_outcome(&database, &older_trace, &older_outcome).await?;
+    insert_trace_and_outcome(&database, &newer_trace, &newer_outcome).await?;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &older_outcome.cache_key,
+        &selected_execution_snapshot_positions(101, &execution_block_hash(101)),
+    )
+    .await?
+    .expect("matching selected cache boundary must be selected");
+
+    assert_eq!(selected.execution_trace_id, older_trace.execution_trace_id);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolution_execution_outcome_at_snapshot_requires_all_selected_chains() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request_key = "basenames:alice.base.eth:addr:60";
+
+    let (full_trace, mut full_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001031),
+        request_key,
+        103,
+        1_717_171_800,
+        61,
+    );
+    full_outcome.cache_key.requested_chain_positions = requested_cross_chain_execution_positions();
+    let (base_only_trace, mut base_only_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001032),
+        request_key,
+        50,
+        1_717_171_900,
+        61,
+    );
+    base_only_outcome.cache_key.requested_chain_positions =
+        requested_base_only_execution_positions();
+
+    insert_trace_and_outcome(&database, &full_trace, &full_outcome).await?;
+    insert_trace_and_outcome(&database, &base_only_trace, &base_only_outcome).await?;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &full_outcome.cache_key,
+        &selected_execution_snapshot_positions_with_auxiliary(),
+    )
+    .await?
+    .expect("candidate covering all selected chains must be selected");
+
+    assert_eq!(selected.execution_trace_id, full_trace.execution_trace_id);
 
     database.cleanup().await
 }

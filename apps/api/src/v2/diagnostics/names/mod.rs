@@ -7,21 +7,26 @@ use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
-use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferred_route_name};
+use crate::{
+    AppState, ExactNameSnapshotSelector, exact_name_snapshot_scope,
+    load_name_current_for_selected_snapshot, normalize_inferred_route_name,
+};
 
 use super::super::{
     Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    resolve_v2_snapshot,
 };
 
 mod authority;
 mod binding;
 mod coverage;
+mod execution;
 mod records;
 
 pub(crate) use authority::get_name_authority_diagnostic;
 pub(crate) use binding::get_name_binding_diagnostic;
 pub(crate) use coverage::get_name_coverage_diagnostic;
+pub(crate) use execution::get_name_execution_diagnostic;
 pub(crate) use records::get_name_records_diagnostic;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -70,6 +75,14 @@ async fn resolve_diagnostic_name(
     state: &AppState,
     params: &QueryParams,
 ) -> V2Result<(NameCurrentRow, SelectedSnapshot)> {
+    resolve_diagnostic_name_with_resolution_auxiliary(state, params, false).await
+}
+
+async fn resolve_diagnostic_name_with_resolution_auxiliary(
+    state: &AppState,
+    params: &QueryParams,
+    include_resolution_auxiliary: bool,
+) -> V2Result<(NameCurrentRow, SelectedSnapshot)> {
     let input_name = params
         .name
         .as_deref()
@@ -81,7 +94,14 @@ async fn resolve_diagnostic_name(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let scope = v2_exact_name_snapshot_scope(state, &namespace).await?;
+    let scope = exact_name_snapshot_scope(
+        &state.pool,
+        &namespace,
+        ExactNameSnapshotSelector::default(),
+        include_resolution_auxiliary,
+    )
+    .await
+    .map_err(api_error_to_v2)?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let row = load_name_current_for_selected_snapshot(

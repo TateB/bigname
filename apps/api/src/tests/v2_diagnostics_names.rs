@@ -740,6 +740,469 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_diagnostics_name_execution_requires_keys() -> Result<()> {
+    let state = AppState {
+        phase: "test",
+        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+            .expect("keys rejection does not use the database"),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    };
+
+    for uri in [
+        "/v2/diagnostics/names/alice.eth/execution",
+        "/v2/diagnostics/names/alice.eth/execution?keys=",
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("v2 execution diagnostic keys-required request failed")?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+        assert_eq!(
+            payload["error"]["message"],
+            json!("keys is required"),
+            "{uri}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_rejects_malformed_duplicate_and_unknown_query_params()
+-> Result<()> {
+    let state = AppState {
+        phase: "test",
+        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+            .expect("query rejection does not use the database"),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    };
+
+    for (uri, expected_message) in [
+        (
+            "/v2/diagnostics/names/alice.eth/execution?keys=bad%20key",
+            "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/execution?keys=abi",
+            "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/execution?keys=addr:060,addr:60",
+            "keys must not contain duplicate record keys",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/execution?keys=addr:60&source=verified",
+            "query parameters are invalid",
+        ),
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("v2 execution diagnostic invalid query request failed")?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+        assert_eq!(payload["error"]["message"], json!(expected_message), "{uri}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_returns_not_found_when_persisted_artifact_is_missing()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_diagnostics_execution_name(&database, false).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::NOT_FOUND,
+    )
+    .await?;
+
+    assert_eq!(payload["error"]["code"], json!("not_found"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_ignores_mismatched_cache_boundaries() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002021);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let verified_queries = v2_execution_verified_queries(
+        execution_trace_id,
+        "0x00000000000000000000000000000000000000aa",
+    );
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    let mut outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        verified_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    outcome.cache_key.manifest_versions = json!([{
+        "manifest_version": 99,
+        "source_family": "ens_v1_registry",
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "ens_v1"
+    }]);
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::NOT_FOUND,
+    )
+    .await?;
+
+    assert_eq!(payload["error"]["code"], json!("not_found"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_returns_stale_for_stale_inventory_join() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002022);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let verified_queries = v2_execution_verified_queries(
+        execution_trace_id,
+        "0x00000000000000000000000000000000000000aa",
+    );
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        verified_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    let mut stale_inventory = record_inventory_current_row(&logical_name_id, resource_id);
+    stale_inventory.chain_positions = v2_execution_chain_positions(21_000_004, "0xbinding004");
+
+    database
+        .insert_record_inventory_current_row(stale_inventory)
+        .await?;
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::CONFLICT,
+    )
+    .await?;
+
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_returns_persisted_explain_shape() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002001);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let verified_queries = v2_execution_verified_queries(
+        execution_trace_id,
+        "0x00000000000000000000000000000000000000aa",
+    );
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        verified_queries.clone(),
+        &logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert!(payload.get("page").is_none());
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        })
+    );
+    assert!(
+        payload["data"].get("declared_state").is_none(),
+        "v2 diagnostics execution data must not use the v1 declared_state wrapper"
+    );
+    assert!(
+        payload["data"].get("verified_state").is_none(),
+        "v2 diagnostics execution data must not use the v1 verified_state wrapper"
+    );
+    assert_eq!(
+        payload["data"]["execution_trace_id"],
+        json!(execution_trace_id.to_string())
+    );
+    let mut expected_verified_queries = verified_queries.clone();
+    expected_verified_queries[0]["status"] = json!("ok");
+    assert_eq!(
+        payload["data"]["verified_queries"],
+        expected_verified_queries
+    );
+    assert_eq!(
+        payload["data"]["steps"][0]["step_kind"],
+        json!("load_declared_topology")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_selects_basenames_cross_chain_artifact() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, boundary) =
+        seed_v2_diagnostics_basenames_execution_name(&database).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002031);
+    let request_key = resolution_execution_request_key_for_name(&logical_name_id, &["addr:60"]);
+    let verified_queries = v2_execution_verified_queries(
+        execution_trace_id,
+        "0x00000000000000000000000000000000000000bb",
+    );
+    let base_only_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002032);
+    let base_only_queries = v2_execution_verified_queries(
+        base_only_trace_id,
+        "0x00000000000000000000000000000000000000cc",
+    );
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.chain_context["requested_positions"] = v2_basenames_execution_requested_positions();
+    trace.manifest_context["manifest_versions"] = basenames_execution_manifest_versions();
+    trace.request_metadata["surface"] = json!("alice.base.eth");
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        verified_queries,
+        boundary.clone(),
+        boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.manifest_versions = basenames_execution_manifest_versions();
+    outcome.cache_key.requested_chain_positions = v2_basenames_execution_requested_positions();
+    let mut base_only_trace = resolution_execution_trace(
+        base_only_trace_id,
+        &request_key,
+        &["addr:60"],
+        base_only_queries.clone(),
+    );
+    base_only_trace.namespace = "basenames".to_owned();
+    base_only_trace.chain_context["requested_positions"] =
+        v2_basenames_base_only_execution_requested_positions();
+    base_only_trace.manifest_context["manifest_versions"] = basenames_execution_manifest_versions();
+    base_only_trace.request_metadata["surface"] = json!("alice.base.eth");
+    base_only_trace.finished_at = Some(timestamp(1_717_172_900));
+    let mut base_only_outcome = resolution_execution_outcome_with_boundaries(
+        base_only_trace_id,
+        &request_key,
+        base_only_queries,
+        boundary.clone(),
+        boundary.clone(),
+    );
+    base_only_outcome.namespace = "basenames".to_owned();
+    base_only_outcome.cache_key.manifest_versions = basenames_execution_manifest_versions();
+    base_only_outcome.cache_key.requested_chain_positions =
+        v2_basenames_base_only_execution_requested_positions();
+    base_only_outcome.finished_at = timestamp(1_717_172_900);
+
+    upsert_execution_trace(&database.pool, &base_only_trace).await?;
+    upsert_execution_outcome(&database.pool, &base_only_outcome).await?;
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.base.eth/execution?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["execution_trace_id"],
+        json!(execution_trace_id.to_string())
+    );
+    assert_eq!(
+        payload["meta"]["as_of"]["8453"],
+        json!({
+            "block_number": 84,
+            "block_hash": "0xbase54",
+            "timestamp": "2026-04-17T00:00:24Z"
+        })
+    );
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_selects_artifact_at_or_before_snapshot() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (logical_name_id, resource_id, older_snapshot_token) =
+        seed_v2_diagnostics_execution_name(&database, true).await?;
+    let later_positions = v2_execution_chain_positions(21_000_006, "0xbinding006");
+    database
+        .seed_snapshot_selector_chain_positions(&later_positions)
+        .await?;
+
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let older_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002010);
+    let later_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002011);
+    let older_queries = v2_execution_verified_queries(
+        older_trace_id,
+        "0x00000000000000000000000000000000000000aa",
+    );
+    let later_queries = v2_execution_verified_queries(
+        later_trace_id,
+        "0x00000000000000000000000000000000000000bb",
+    );
+    let older_trace = resolution_execution_trace(
+        older_trace_id,
+        &request_key,
+        &["addr:60"],
+        older_queries.clone(),
+    );
+    let older_outcome = resolution_execution_outcome(
+        older_trace_id,
+        &request_key,
+        older_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    let mut later_trace = resolution_execution_trace(
+        later_trace_id,
+        &request_key,
+        &["addr:60"],
+        later_queries,
+    );
+    let mut later_outcome = resolution_execution_outcome(
+        later_trace_id,
+        &request_key,
+        v2_execution_verified_queries(
+            later_trace_id,
+            "0x00000000000000000000000000000000000000bb",
+        ),
+        &logical_name_id,
+        resource_id,
+    );
+    set_resolution_execution_artifact_position(
+        &mut later_trace,
+        &mut later_outcome,
+        21_000_006,
+        "0xbinding006",
+    );
+    later_trace.finished_at = Some(timestamp(1_717_172_100));
+    later_outcome.finished_at = timestamp(1_717_172_100);
+
+    upsert_execution_trace(&database.pool, &older_trace).await?;
+    upsert_execution_outcome(&database.pool, &older_outcome).await?;
+    upsert_execution_trace(&database.pool, &later_trace).await?;
+    upsert_execution_outcome(&database.pool, &later_outcome).await?;
+
+    let older_payload = request_v2_diagnostics_json(
+        &database,
+        &format!(
+            "/v2/diagnostics/names/alice.eth/execution?keys=addr:60&at={older_snapshot_token}&finality=finalized"
+        ),
+        StatusCode::OK,
+    )
+    .await?;
+    assert_eq!(
+        older_payload["data"]["execution_trace_id"],
+        json!(older_trace_id.to_string())
+    );
+    assert_eq!(
+        older_payload["meta"]["as_of"]["1"]["block_number"],
+        json!(21_000_003)
+    );
+
+    let latest_payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+    assert_eq!(
+        latest_payload["data"]["execution_trace_id"],
+        json!(later_trace_id.to_string())
+    );
+    assert_eq!(
+        latest_payload["meta"]["as_of"]["1"]["block_number"],
+        json!(21_000_006)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn request_v2_diagnostics_json(
     database: &TestDatabase,
     uri: &str,
@@ -754,9 +1217,260 @@ async fn request_v2_diagnostics_json(
         )
         .await
         .with_context(|| format!("v2 diagnostics name request failed for {uri}"))?;
+    let status = response.status();
+    let payload = read_json(response).await?;
 
-    assert_eq!(response.status(), expected_status, "{uri}");
-    read_json(response).await
+    assert_eq!(status, expected_status, "{uri}: {payload}");
+    Ok(payload)
+}
+
+async fn seed_v2_diagnostics_execution_name(
+    database: &TestDatabase,
+    migrated_schema: bool,
+) -> Result<(String, Uuid, String)> {
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    if migrated_schema {
+        database
+            .seed_name_current_binding_migrated(
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+    } else {
+        database
+            .seed_name_current_binding(
+                logical_name_id,
+                "ens",
+                "alice.eth",
+                "alice.eth",
+                "namehash:alice.eth",
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+    }
+    let row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    let snapshot_token = hex::encode(
+        serde_json::to_vec(&row.chain_positions).expect("chain positions must serialize"),
+    );
+    database.insert_name_current_row(row).await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    Ok((logical_name_id.to_owned(), resource_id, snapshot_token))
+}
+
+async fn seed_v2_diagnostics_basenames_execution_name(
+    database: &TestDatabase,
+) -> Result<(String, Value)> {
+    let logical_name_id = "basenames:alice.base.eth";
+    let normalized_name = "alice.base.eth";
+    let resource_id = Uuid::from_u128(0x2231);
+    let token_lineage_id = Uuid::from_u128(0x1131);
+    let surface_binding_id = Uuid::from_u128(0x3331);
+    let chain_positions = v2_basenames_execution_chain_positions();
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            normalized_name,
+            normalized_name,
+            &format!("namehash:{normalized_name}"),
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let row = bigname_storage::NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: "basenames".to_owned(),
+        canonical_display_name: normalized_name.to_owned(),
+        normalized_name: normalized_name.to_owned(),
+        namehash: format!("namehash:{normalized_name}"),
+        surface_binding_id: Some(surface_binding_id),
+        resource_id: Some(resource_id),
+        token_lineage_id: Some(token_lineage_id),
+        binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
+        declared_summary: json!({
+            "resolver": {
+                "chain_id": "base-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged"
+            }
+        }),
+        provenance: json!({
+            "manifest_versions": basenames_execution_manifest_versions()
+        }),
+        coverage: json!({
+            "status": "partial",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["basenames_execution"],
+            "enumeration_basis": "exact_name",
+            "unsupported_reason": null
+        }),
+        chain_positions: chain_positions.clone(),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "base-mainnet": "finalized",
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 2,
+        last_recomputed_at: timestamp(1_717_176_084),
+    };
+    let (_, boundary) = bigname_storage::resolution_record_inventory_lookup_key(&row)
+        .expect("basenames execution row must provide an inventory boundary");
+    database.insert_name_current_row(row).await?;
+
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary = boundary.clone();
+    inventory.chain_positions = chain_positions;
+    inventory.provenance = json!({
+        "manifest_versions": basenames_execution_manifest_versions()
+    });
+    inventory.coverage = json!({
+        "status": "partial",
+        "unsupported_reason": null
+    });
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    Ok((logical_name_id.to_owned(), boundary))
+}
+
+fn resolution_execution_request_key_for_name(logical_name_id: &str, records: &[&str]) -> String {
+    let mut records = records
+        .iter()
+        .map(|record| (*record).to_owned())
+        .collect::<Vec<_>>();
+    records.sort_unstable();
+    format!("{logical_name_id}:{}", records.join(","))
+}
+
+fn v2_execution_verified_queries(execution_trace_id: Uuid, address: &str) -> Value {
+    json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": address
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ])
+}
+
+fn v2_execution_chain_positions(block_number: i64, block_hash: &str) -> Value {
+    json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
+        }
+    })
+}
+
+fn v2_basenames_execution_chain_positions() -> Value {
+    json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 84,
+            "block_hash": "0xbase54",
+            "timestamp": "2026-04-17T00:00:24Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    })
+}
+
+fn v2_basenames_execution_requested_positions() -> Value {
+    json!([
+        {
+            "chain_id": "base-mainnet",
+            "block_number": 84,
+            "block_hash": "0xbase54"
+        },
+        {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding"
+        }
+    ])
+}
+
+fn v2_basenames_base_only_execution_requested_positions() -> Value {
+    json!([{
+        "chain_id": "base-mainnet",
+        "block_number": 84,
+        "block_hash": "0xbase54"
+    }])
+}
+
+fn basenames_execution_manifest_versions() -> Value {
+    json!([
+        {
+            "source_family": "basenames_execution",
+            "manifest_version": 2,
+            "chain": "ethereum-mainnet",
+            "deployment_epoch": "basenames_v1"
+        }
+    ])
+}
+
+fn v2_execution_requested_positions(block_number: i64, block_hash: &str) -> Value {
+    json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": block_number,
+        "block_hash": block_hash
+    }])
+}
+
+fn set_resolution_execution_artifact_position(
+    trace: &mut ExecutionTrace,
+    outcome: &mut ExecutionOutcome,
+    block_number: i64,
+    block_hash: &str,
+) {
+    let requested_positions = v2_execution_requested_positions(block_number, block_hash);
+    trace.chain_context["requested_positions"] = requested_positions.clone();
+    outcome.cache_key.requested_chain_positions = requested_positions;
+    for step in &mut trace.steps {
+        step.canonicality_dependency = json!({
+            "ethereum-mainnet": {
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "state": "finalized"
+            }
+        });
+    }
 }
 
 async fn seed_v2_diagnostics_name_fixture(
