@@ -44,9 +44,9 @@ pub(crate) struct Event {
 }
 
 #[derive(Debug)]
-struct ParsedEventsFilter {
-    storage_filter: EventHistoryFilter,
-    cursor_filters: BTreeMap<String, String>,
+pub(crate) struct ParsedEventsFilter {
+    pub(crate) storage_filter: EventHistoryFilter,
+    pub(crate) cursor_filters: BTreeMap<String, String>,
 }
 
 /// `namespace` defaults to the name's inferred namespace when `name` is provided
@@ -184,7 +184,7 @@ pub(crate) fn events_storage_cursor(
     })
 }
 
-fn resolve_events_namespace(params: &QueryParams) -> V2Result<String> {
+pub(crate) fn resolve_events_namespace(params: &QueryParams) -> V2Result<String> {
     match (params.namespace.as_deref(), params.name.as_deref()) {
         (Some(namespace), _) => Ok(namespace.to_owned()),
         (None, Some(name)) => normalize_inferred_route_name(name)
@@ -194,7 +194,10 @@ fn resolve_events_namespace(params: &QueryParams) -> V2Result<String> {
     }
 }
 
-fn parse_events_filter(params: &QueryParams, namespace: &str) -> V2Result<ParsedEventsFilter> {
+pub(crate) fn parse_events_filter(
+    params: &QueryParams,
+    namespace: &str,
+) -> V2Result<ParsedEventsFilter> {
     if params.relation.is_some() && params.address.is_none() {
         return Err(V2Error::invalid_input("relation requires address"));
     }
@@ -305,6 +308,8 @@ fn invalid_events_cursor() -> V2Error {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use bigname_storage::CanonicalityState;
     use serde_json::json;
 

@@ -110,6 +110,8 @@ include!("tests/v2_diagnostics_names.rs");
 
 include!("tests/v2_history.rs");
 
+include!("tests/v2_diag_events.rs");
+
 include!("tests/v2_address_names.rs");
 
 include!("tests/v2_permissions.rs");

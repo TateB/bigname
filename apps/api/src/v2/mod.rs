@@ -4,6 +4,7 @@ mod address_history;
 mod address_names;
 mod chains;
 mod cursor;
+mod diag_events;
 mod diag_namespace_manifests;
 mod diagnostics;
 mod envelope;
@@ -34,6 +35,7 @@ pub(crate) use address_names::{
 };
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
+pub(crate) use diag_events::{DiagnosticEvent, build_diagnostic_event, get_diagnostic_events};
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
 pub(crate) use diagnostics::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
