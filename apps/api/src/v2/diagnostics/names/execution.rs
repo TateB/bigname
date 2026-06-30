@@ -126,7 +126,7 @@ pub(crate) async fn get_name_execution_diagnostic(
         ))
     })?;
 
-    let outcome = bigname_storage::load_resolution_execution_outcome_at_snapshot(
+    let mut outcome = bigname_storage::load_resolution_execution_outcome_at_snapshot(
         &state.pool,
         &cache_key,
         &selected_snapshot.chain_positions,
@@ -146,6 +146,49 @@ pub(crate) async fn get_name_execution_diagnostic(
             row.normalized_name
         ))
     })?;
+
+    if outcome.is_none() && cache_key_records != records {
+        let full_selector_cache_key = build_resolution_execution_cache_key(
+            &row,
+            &records,
+            record_inventory_current.as_ref(),
+            selected_snapshot.chain_positions_value(),
+        )
+        .map_err(|cache_key_error| {
+            error!(
+                service = "api",
+                logical_name_id = %row.logical_name_id,
+                records = ?records,
+                error = ?cache_key_error,
+                "failed to derive full-selector persisted execution request key for v2 resolution execution diagnostic"
+            );
+            V2Error::internal_error(format!(
+                "failed to load resolution execution diagnostic for name {}",
+                row.normalized_name
+            ))
+        })?;
+
+        outcome = bigname_storage::load_resolution_execution_outcome_at_snapshot(
+            &state.pool,
+            &full_selector_cache_key,
+            &selected_snapshot.chain_positions,
+        )
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                logical_name_id = %row.logical_name_id,
+                request_key = %full_selector_cache_key.request_key,
+                records = ?records,
+                error = ?load_error,
+                "failed to load full-selector persisted execution outcome for v2 resolution execution diagnostic"
+            );
+            V2Error::internal_error(format!(
+                "failed to load resolution execution diagnostic for name {}",
+                row.normalized_name
+            ))
+        })?;
+    }
 
     let Some(outcome) = outcome else {
         return Err(missing_execution_artifact_error(

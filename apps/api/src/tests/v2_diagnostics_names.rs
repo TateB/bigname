@@ -1005,6 +1005,54 @@ async fn v2_diagnostics_name_execution_returns_persisted_explain_shape() -> Resu
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_execution_falls_back_to_full_avatar_selector_artifact() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002041);
+    let request_key = resolution_execution_request_key(&["avatar", "text:com.twitter"]);
+    let verified_queries = v2_avatar_text_execution_verified_queries(execution_trace_id);
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["avatar", "text:com.twitter"],
+        verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        verified_queries.clone(),
+        &logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=avatar,text:com.twitter",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["execution_trace_id"],
+        json!(execution_trace_id.to_string())
+    );
+    assert_eq!(
+        payload["data"]["verified_queries"][0]["record_key"],
+        json!("avatar")
+    );
+    assert_eq!(
+        payload["data"]["verified_queries"][1]["record_key"],
+        json!("text:com.twitter")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_execution_selects_basenames_cross_chain_artifact() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let (logical_name_id, boundary) =
@@ -1375,6 +1423,32 @@ fn v2_execution_verified_queries(execution_trace_id: Uuid, address: &str) -> Val
             "value": {
                 "coin_type": "60",
                 "value": address
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ])
+}
+
+fn v2_avatar_text_execution_verified_queries(execution_trace_id: Uuid) -> Value {
+    json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "uri": "https://example.test/alice.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "key": "com.twitter",
+                "value": "alice"
             },
             "provenance": {
                 "execution_trace_id": execution_trace_id.to_string()
