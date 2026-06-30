@@ -195,6 +195,43 @@ pub(crate) async fn load_verified_record_lookup(
     records: &[crate::ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
+    load_verified_record_lookup_with_persistence(
+        state,
+        row,
+        record_inventory,
+        records,
+        selected_snapshot,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn load_ephemeral_verified_record_lookup(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<Option<VerifiedRecordLookup>> {
+    load_verified_record_lookup_with_persistence(
+        state,
+        row,
+        record_inventory,
+        records,
+        selected_snapshot,
+        false,
+    )
+    .await
+}
+
+async fn load_verified_record_lookup_with_persistence(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+    persist_execution: bool,
+) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
         return Ok(None);
     }
@@ -206,7 +243,7 @@ pub(crate) async fn load_verified_record_lookup(
         record_inventory,
         selected_snapshot,
         false,
-        true,
+        persist_execution,
     )
     .await
     {

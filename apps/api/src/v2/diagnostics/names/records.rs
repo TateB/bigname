@@ -21,7 +21,7 @@ use super::{
 
 use crate::v2::{
     RecordAnswer, Source, api_error_to_v2, build_indexed_name_records, build_verified_name_records,
-    default_requested_records, load_verified_record_lookup,
+    default_requested_records, load_ephemeral_verified_record_lookup,
 };
 
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
@@ -91,9 +91,14 @@ async fn build_name_records_diagnostic(
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<NameRecordsDiagnostic> {
     let indexed = build_indexed_name_records(row, record_inventory, Some(records), false);
-    let verified_lookup =
-        load_verified_record_lookup(state, row, record_inventory, records, selected_snapshot)
-            .await?;
+    let verified_lookup = load_ephemeral_verified_record_lookup(
+        state,
+        row,
+        record_inventory,
+        records,
+        selected_snapshot,
+    )
+    .await?;
     let verified =
         build_verified_name_records(row, record_inventory, Some(records), verified_lookup, false)?;
     let indexed_records = indexed.records.unwrap_or_default();

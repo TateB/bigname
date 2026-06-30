@@ -403,7 +403,8 @@ async fn v2_diagnostics_name_records_cache_keeps_non_product_cacheable_selectors
 }
 
 #[tokio::test]
-async fn v2_diagnostics_name_records_executes_verified_on_demand_for_cache_miss() -> Result<()> {
+async fn v2_diagnostics_name_records_executes_verified_on_demand_without_persisting_cache_outcome(
+) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
@@ -485,6 +486,11 @@ async fn v2_diagnostics_name_records_executes_verified_on_demand_for_cache_miss(
     .await?;
     let chain_rpc_urls =
         bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let cache_outcome_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count execution cache outcomes before diagnostics request")?;
 
     let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
         .oneshot(
@@ -498,6 +504,13 @@ async fn v2_diagnostics_name_records_executes_verified_on_demand_for_cache_miss(
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["comparison"]["addr:60"]["indexed"],
+        json!({
+            "status": "ok",
+            "value": "0x0000000000000000000000000000000000000def"
+        })
+    );
     assert_eq!(
         payload["data"]["comparison"]["addr:60"]["verified"],
         json!({
@@ -525,23 +538,14 @@ async fn v2_diagnostics_name_records_executes_verified_on_demand_for_cache_miss(
         })
     );
 
-    let cached_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v2/diagnostics/names/Alice.eth/records")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 diagnostics cached verified name records request failed")?;
-    assert_eq!(cached_response.status(), StatusCode::OK);
-    let cached_payload: Value = read_json(cached_response).await?;
+    let cache_outcome_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count execution cache outcomes after diagnostics request")?;
     assert_eq!(
-        cached_payload["data"]["comparison"]["addr:60"]["verified"],
-        json!({
-            "status": "ok",
-            "value": executed_address
-        })
+        cache_outcome_count_after, cache_outcome_count_before,
+        "diagnostics records GET must not persist execution_cache_outcomes rows"
     );
 
     database.cleanup().await?;

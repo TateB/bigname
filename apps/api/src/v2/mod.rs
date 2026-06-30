@@ -58,7 +58,8 @@ pub(crate) use name_record::{
 pub(crate) use name_records::{
     NameRecords, RecordAnswer, VerifiedRecordLookup, build_auto_name_records,
     build_indexed_name_records, build_verified_name_records, get_name_records,
-    indexed_records_requiring_verified_fallback, load_verified_record_lookup,
+    indexed_records_requiring_verified_fallback, load_ephemeral_verified_record_lookup,
+    load_verified_record_lookup,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use namespaces::get_namespace;
