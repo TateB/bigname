@@ -18,6 +18,12 @@ fn diagnostic_route_cases() -> Vec<DiagnosticRouteCase> {
         DiagnosticRouteCase {
             suffix: "binding",
             expected_data: json!({
+                "anchors": {
+                    "logical_name_id": "ens:alice.eth",
+                    "namehash": "namehash:alice.eth",
+                    "resource_id": "00000000-0000-0000-0000-000000002200",
+                    "token_lineage_id": "00000000-0000-0000-0000-000000001100"
+                },
                 "surface_binding": {
                     "surface_binding_id": "00000000-0000-0000-0000-000000003300",
                     "binding_kind": "declared_registry_path"
@@ -39,6 +45,10 @@ fn diagnostic_route_cases() -> Vec<DiagnosticRouteCase> {
                     "registrant": "0x00000000000000000000000000000000000000aa",
                     "registry_owner": "0x00000000000000000000000000000000000000bb",
                     "latest_event_kind": "NameTransferred"
+                },
+                "permission_lineage": {
+                    "status": "unsupported",
+                    "unsupported_reason": "permission_lineage_not_projected_on_name_current"
                 }
             }),
         },
@@ -66,6 +76,61 @@ async fn v2_diagnostics_name_routes_return_declared_state_slices() -> Result<()>
             "{uri}"
         );
     }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_coverage_synthesizes_missing_unsupported_reason() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let resource_id = Uuid::from_u128(0x4400);
+    let token_lineage_id = Uuid::from_u128(0x5500);
+    let surface_binding_id = Uuid::from_u128(0x6600);
+    let logical_name_id = "ens:unsupported.eth";
+    let normalized_name = "unsupported.eth";
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            normalized_name,
+            normalized_name,
+            &format!("namehash:{normalized_name}"),
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = diagnostic_name_current_row(
+        logical_name_id,
+        21_000_004,
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    );
+    row.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_applicable",
+        "source_classes_considered": [],
+        "enumeration_basis": "exact_name",
+        "unsupported_reason": null
+    });
+    database.insert_name_current_row(row).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/unsupported.eth/coverage",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        payload["data"]["unsupported_reason"],
+        json!("name_coverage_unsupported_reason_missing")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -191,6 +256,42 @@ async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
         let payload: Value = read_json(response).await?;
         assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result<()> {
+    let state = AppState {
+        phase: "test",
+        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+            .expect("query rejection does not use the database"),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    };
+
+    for suffix in ["coverage", "binding", "authority"] {
+        for query in ["source=verified", "address=bad", "page_size=201"] {
+            let uri = format!("/v2/diagnostics/names/alice.eth/{suffix}?{query}");
+            let response = app_router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("v2 diagnostic name undocumented query request failed")?;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let payload: Value = read_json(response).await?;
+            assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+            assert_eq!(
+                payload["error"]["message"],
+                json!("query parameters are invalid"),
+                "{uri}"
+            );
+        }
     }
 
     Ok(())

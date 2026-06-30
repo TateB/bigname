@@ -1,11 +1,16 @@
-use axum::Json;
+use axum::{
+    Json,
+    extract::{FromRequestParts, Query},
+    http::request::Parts,
+};
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferred_route_name};
 
 use super::super::{
-    Envelope, Meta, QueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
+    Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
     resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
@@ -16,6 +21,48 @@ mod coverage;
 pub(crate) use authority::get_name_authority_diagnostic;
 pub(crate) use binding::get_name_binding_diagnostic;
 pub(crate) use coverage::get_name_coverage_diagnostic;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawDiagnosticNameQueryParams {
+    at: Option<String>,
+    finality: Option<String>,
+    namespace: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiagnosticNameQueryParams {
+    inner: QueryParams,
+}
+
+impl<S> FromRequestParts<S> for DiagnosticNameQueryParams
+where
+    S: Send + Sync,
+{
+    type Rejection = V2Error;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(raw) = Query::<RawDiagnosticNameQueryParams>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        Self::try_from(raw)
+    }
+}
+
+impl TryFrom<RawDiagnosticNameQueryParams> for DiagnosticNameQueryParams {
+    type Error = V2Error;
+
+    fn try_from(raw: RawDiagnosticNameQueryParams) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inner: QueryParams::try_from(RawQueryParams {
+                at: raw.at,
+                finality: raw.finality,
+                namespace: raw.namespace,
+                ..RawQueryParams::default()
+            })?,
+        })
+    }
+}
 
 async fn resolve_diagnostic_name(
     state: &AppState,
@@ -47,9 +94,12 @@ async fn resolve_diagnostic_name(
     Ok((row, selected_snapshot))
 }
 
-fn bind_path_name(input_name: String, mut params: QueryParams) -> QueryParams {
-    params.name = Some(input_name);
-    params
+fn bind_diagnostic_path_name(
+    input_name: String,
+    mut params: DiagnosticNameQueryParams,
+) -> QueryParams {
+    params.inner.name = Some(input_name);
+    params.inner
 }
 
 fn diagnostic_envelope(
