@@ -202,7 +202,7 @@ pub(crate) fn build_name_authority_control_explain_declared_state(row: &NameCurr
     projections::build_name_authority_control_explain_declared_state(row)
 }
 
-fn build_record_cache_section_for_name(
+pub(crate) fn build_record_cache_section_for_name(
     name_row: &NameCurrentRow,
     row: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
@@ -211,7 +211,7 @@ fn build_record_cache_section_for_name(
     projections::build_record_cache_section_for_name(name_row, row, records, unsupported_reason)
 }
 
-fn build_record_inventory_section_for_name(
+pub(crate) fn build_record_inventory_section_for_name(
     name_row: &NameCurrentRow,
     row: Option<&RecordInventoryCurrentRow>,
     unsupported_reason: &str,

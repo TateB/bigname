@@ -188,7 +188,7 @@ pub(crate) async fn get_name_records(
     }))
 }
 
-async fn load_verified_record_lookup(
+pub(crate) async fn load_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,

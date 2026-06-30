@@ -17,10 +17,12 @@ use super::super::{
 mod authority;
 mod binding;
 mod coverage;
+mod records;
 
 pub(crate) use authority::get_name_authority_diagnostic;
 pub(crate) use binding::get_name_binding_diagnostic;
 pub(crate) use coverage::get_name_coverage_diagnostic;
+pub(crate) use records::get_name_records_diagnostic;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]

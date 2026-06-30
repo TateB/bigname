@@ -39,6 +39,7 @@ pub(crate) use diag_events::{DiagnosticEvent, build_diagnostic_event, get_diagno
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
 pub(crate) use diagnostics::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
+    get_name_records_diagnostic,
 };
 pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
 pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};
@@ -55,8 +56,9 @@ pub(crate) use name_record::{
     NameRecord, build_name_record, classify_registration_status, get_name_record,
 };
 pub(crate) use name_records::{
-    NameRecords, VerifiedRecordLookup, build_auto_name_records, build_indexed_name_records,
-    build_verified_name_records, get_name_records, indexed_records_requiring_verified_fallback,
+    NameRecords, RecordAnswer, VerifiedRecordLookup, build_auto_name_records,
+    build_indexed_name_records, build_verified_name_records, get_name_records,
+    indexed_records_requiring_verified_fallback, load_verified_record_lookup,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use namespaces::get_namespace;

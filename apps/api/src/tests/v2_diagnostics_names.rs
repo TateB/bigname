@@ -137,11 +137,423 @@ async fn v2_diagnostics_name_coverage_synthesizes_missing_unsupported_reason() -
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_records_returns_sections_comparison_and_value_sources() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let verified_value = "0x0000000000000000000000000000000000000fed";
+    seed_v2_alice_name_records_fixture(
+        &database,
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        Some((
+            &["addr:60"],
+            json!([
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": verified_value
+                    },
+                    "provenance": {
+                        "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000080).to_string()
+                    }
+                }
+            ]),
+        )),
+    )
+    .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/Alice.eth/records",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert!(payload.get("page").is_none());
+    assert_eq!(
+        payload["data"]["record_inventory"]["selectors"],
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            }
+        ])
+    );
+    assert_eq!(
+        payload["data"]["record_cache"]["entries"],
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000def"
+                }
+            }
+        ])
+    );
+    assert_eq!(
+        payload["data"]["comparison"]["addr:60"],
+        json!({
+            "indexed": {
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            },
+            "verified": {
+                "status": "ok",
+                "value": verified_value
+            }
+        })
+    );
+    assert_eq!(
+        payload["data"]["value_sources"]["addr:60"],
+        json!([
+            {
+                "source": "indexed",
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            },
+            {
+                "source": "verified",
+                "status": "ok",
+                "value": verified_value
+            }
+        ])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallback() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let worker_boundary = record_inventory_boundary_with_pointer(
+        logical_name_id,
+        resource_id,
+        Some(1201),
+        Some("RecordVersionChanged"),
+    );
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(worker_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/records",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["record_inventory"]["record_version_boundary"],
+        worker_boundary
+    );
+    assert_eq!(
+        payload["data"]["record_cache"]["record_version_boundary"],
+        worker_boundary
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_cache_keeps_non_product_cacheable_selectors() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(
+        &database,
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "pubkey",
+                    "record_family": "pubkey",
+                    "selector_key": null,
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                },
+                {
+                    "record_key": "pubkey",
+                    "record_family": "pubkey",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "record_family_not_supported_in_phase6_projection"
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        None,
+    )
+    .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/records",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["record_cache"]["entries"],
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x0000000000000000000000000000000000000def"
+                }
+            },
+            {
+                "record_key": "pubkey",
+                "record_family": "pubkey",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "record_family_not_supported_in_phase6_projection"
+            }
+        ])
+    );
+    assert_eq!(
+        payload["data"]["comparison"]
+            .as_object()
+            .expect("comparison must be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["addr:60".to_owned()]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_executes_verified_on_demand_for_cache_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row({
+            let mut row = exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            );
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            row
+        })
+        .await?;
+    database
+        .insert_record_inventory_current_row({
+            let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            inventory
+        })
+        .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000e0e";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_addr60_response(executed_address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics/names/Alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostics on-demand verified name records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["comparison"]["addr:60"]["verified"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["value_sources"]["addr:60"][1],
+        json!({
+            "source": "verified",
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 1);
+    assert_eq!(rpc_requests[0]["method"], json!("eth_call"));
+    assert_eq!(
+        rpc_requests[0]["params"][1],
+        json!({
+            "blockHash": execution_block_hash,
+            "requireCanonical": true
+        })
+    );
+
+    let cached_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics/names/Alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostics cached verified name records request failed")?;
+    assert_eq!(cached_response.status(), StatusCode::OK);
+    let cached_payload: Value = read_json(cached_response).await?;
+    assert_eq!(
+        cached_payload["data"]["comparison"]["addr:60"]["verified"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_routes_return_not_found_for_missing_name() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     database.seed_default_ens_snapshot_selector_position().await?;
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!("/v2/diagnostics/names/missing.eth/{suffix}");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::NOT_FOUND).await?;
 
@@ -163,7 +575,7 @@ async fn v2_diagnostics_name_routes_honor_snapshot_selectors() -> Result<()> {
     let snapshot_token =
         seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!(
             "/v2/diagnostics/names/alice.eth/{suffix}?at={snapshot_token}&finality=finalized"
         );
@@ -189,7 +601,7 @@ async fn v2_diagnostics_name_routes_infer_basenames_namespace() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_diagnostics_name_fixture(&database, "basenames:alice.base.eth", 84).await?;
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!("/v2/diagnostics/names/alice.base.eth/{suffix}");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
@@ -213,7 +625,7 @@ async fn v2_diagnostics_name_routes_honor_namespace_override() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.base.eth", 21_000_003).await?;
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!("/v2/diagnostics/names/alice.base.eth/{suffix}?namespace=ens");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
@@ -241,7 +653,7 @@ async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
         chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
     };
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!("/v2/diagnostics/names/bad%20name.eth/{suffix}");
         let response = app_router(state.clone())
             .oneshot(
@@ -270,8 +682,8 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
         chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
     };
 
-    for suffix in ["coverage", "binding", "authority"] {
-        for query in ["source=verified", "address=bad", "page_size=201"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
+        for query in ["source=verified", "keys=addr:60", "address=bad", "page_size=201"] {
             let uri = format!("/v2/diagnostics/names/alice.eth/{suffix}?{query}");
             let response = app_router(state.clone())
                 .oneshot(
@@ -302,7 +714,7 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
 
-    for suffix in ["coverage", "binding", "authority"] {
+    for suffix in ["coverage", "binding", "authority", "records"] {
         let invalid_namespace = format!("/v2/diagnostics/names/alice.eth/{suffix}?namespace=unknown");
         let payload =
             request_v2_diagnostics_json(&database, &invalid_namespace, StatusCode::BAD_REQUEST)
