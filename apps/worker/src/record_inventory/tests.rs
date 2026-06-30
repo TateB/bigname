@@ -1157,6 +1157,97 @@ async fn rebuild_treats_empty_contenthash_bytes_as_not_found() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_treats_empty_addr_bytes_as_not_found() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9705);
+
+    // Set a coin address, then clear it with empty bytes (`0x`) — ENS's deletion signal. The
+    // cleared record must project as `not_found`, not `success("0x")`.
+    let mut set_addr = record_changed_event(
+        "addr-set",
+        "ens:cleared-addr.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1052,
+        0,
+    );
+    set_addr.after_state["value_retained"] = json!(false);
+    set_addr.after_state["address_bytes_hex"] = json!("0x4ce0fb7f128b9f1c6f8f8d5144203801936027b8");
+    let mut clear_addr = record_changed_event(
+        "addr-clear",
+        "ens:cleared-addr.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1053,
+        0,
+    );
+    clear_addr.after_state["value_retained"] = json!(false);
+    clear_addr.after_state["address_bytes_hex"] = json!("0x");
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1051", 1051, 1_776_200_051),
+            raw_block("ethereum-mainnet", "0xrec1052", 1052, 1_776_200_052),
+            raw_block("ethereum-mainnet", "0xrec1053", 1053, 1_776_200_053),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            record_version_changed_event(
+                "cleared-addr-boundary",
+                "ens:cleared-addr.eth",
+                resource_id,
+                17,
+                1051,
+                0,
+            ),
+            set_addr,
+            clear_addr,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:cleared-addr.eth",
+            resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1051,
+            "0xrec1051",
+            1_776_200_051,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("cleared addr row must exist")?;
+
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "not_found",
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9701);
