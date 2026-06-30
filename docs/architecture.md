@@ -44,6 +44,10 @@ Per-result `ResultStatus` for mixed routes: `success`, `not_found`, `mismatch`, 
 
 Breaking semantic changes mean `v2`. The `v1` contract does not preserve ENSv1 subgraph entity names, ENSNode shapes, or GraphQL field-level parity.
 
+### Subgraph-compatible GraphQL surface
+
+Alongside the REST contract, bigname also serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only the four operations the ENS Manager dashboard's codegen consumes — `domain`, `domains`, `registrationConnection`, `domainConnection` — over the existing `name_current` and `record_inventory_current` projections, so the Manager can point at bigname unchanged. The served selection sets track the Manager's committed codegen (validated against the live zigens schema), not an internal contract bigname owns. The native `v1` REST surface above remains the primary read contract; the GraphQL surface exists solely to de-risk a Manager cutover. Wire details live in [`api-v1.md`](api-v1.md#subgraph-compatible-graphql-endpoint).
+
 ## Identity model
 
 Four identity layers, each with its own continuity rules:

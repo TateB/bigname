@@ -443,6 +443,18 @@ Rules:
 - A selector whose supplied lineage, canonicality floor, or cross-chain reconciliation can't form one snapshot returns `409 conflict`.
 - Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand, then return `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
 
+## Subgraph-compatible GraphQL endpoint
+
+Separate from the REST contract above, bigname serves a narrow subgraph-compatible read surface at `POST /graphql`. Its purpose is single and explicit: let the ENS Manager dashboard — whose codegen targets the legacy subgraph / zigens GraphQL shape — point at bigname unchanged. It is **not** general subgraph parity and adds no GraphQL field-level guarantees beyond what is documented here.
+
+- **Operations served:** `domain(id:)`, `domains(where, first, skip, orderBy, orderDirection)`, `domainConnection(first, where) { totalCount }`, `registrationConnection(first, where) { totalCount }`. These are exactly the four the Manager's committed codegen consumes; no other operations are implemented.
+- **Backing data:** the existing `name_current` and `record_inventory_current` projections — the same source of truth as the REST surface. The GraphQL layer is a shape adapter, not a new index.
+- **Contract owner:** the served selection sets track the Manager's committed codegen, validated against the live zigens schema (`https://graphql.ens.dev`). bigname does not own this contract; field shapes follow the consumer.
+- **Conventions differ from REST:** GraphQL responses use the subgraph's `camelCase` field names and entity shapes (`Domain`, `Resolver`, `Account`, `AddressRecord`), not the `snake_case` v1 wire format. Values are declared on-chain state from the projections; consumers re-validate live values against chain where needed (the "dictionary, not live state" model).
+- **CORS:** the endpoint is unauthenticated and read-only; permissive CORS applies (shared with the v1/v2 REST router).
+
+See [`architecture.md`](architecture.md#subgraph-compatible-graphql-surface) for the strategic framing.
+
 ## Versioning
 
 - New optional fields and new routes are additive within `v1`.
