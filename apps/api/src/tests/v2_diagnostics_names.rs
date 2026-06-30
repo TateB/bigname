@@ -1152,6 +1152,76 @@ async fn v2_diagnostics_name_execution_selects_basenames_cross_chain_artifact() 
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_execution_accepts_basenames_base_only_inventory_for_cross_chain_snapshot()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, boundary) =
+        seed_v2_diagnostics_basenames_execution_name(&database).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002044);
+    let request_key = resolution_execution_request_key_for_name(&logical_name_id, &["addr:60"]);
+    let verified_queries = v2_execution_verified_queries(
+        execution_trace_id,
+        "0x00000000000000000000000000000000000000dd",
+    );
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.chain_context["requested_positions"] = v2_basenames_execution_requested_positions();
+    trace.manifest_context["manifest_versions"] = basenames_execution_manifest_versions();
+    trace.request_metadata["surface"] = json!("alice.base.eth");
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        verified_queries,
+        boundary.clone(),
+        boundary,
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.manifest_versions = basenames_execution_manifest_versions();
+    outcome.cache_key.requested_chain_positions = v2_basenames_execution_requested_positions();
+
+    let mut base_only_inventory = record_inventory_current_row(
+        &logical_name_id,
+        Uuid::from_u128(0x2231),
+    );
+    base_only_inventory.record_version_boundary = outcome.cache_key.record_version_boundary.clone();
+    base_only_inventory.chain_positions = v2_basenames_base_only_inventory_chain_positions();
+    base_only_inventory.provenance = json!({
+        "manifest_versions": basenames_execution_manifest_versions()
+    });
+    base_only_inventory.coverage = json!({
+        "status": "partial",
+        "unsupported_reason": null
+    });
+    database
+        .insert_record_inventory_current_row(base_only_inventory)
+        .await?;
+
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.base.eth/execution?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["execution_trace_id"],
+        json!(execution_trace_id.to_string())
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_execution_selects_artifact_at_or_before_snapshot() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (logical_name_id, resource_id, older_snapshot_token) =
@@ -1506,6 +1576,17 @@ fn v2_basenames_base_only_execution_requested_positions() -> Value {
         "block_number": 84,
         "block_hash": "0xbase54"
     }])
+}
+
+fn v2_basenames_base_only_inventory_chain_positions() -> Value {
+    json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 84,
+            "block_hash": "0xbase54",
+            "timestamp": "2026-04-17T00:00:24Z"
+        }
+    })
 }
 
 fn basenames_execution_manifest_versions() -> Value {

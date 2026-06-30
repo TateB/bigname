@@ -9,6 +9,7 @@ use tracing::error;
 
 use crate::{
     AppState, build_resolution_execution_cache_key, build_resolution_execution_diagnostic_data,
+    load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current_for_snapshot, parse_resolution_record_key,
     resolution_execution_cache_lookup_records, resolution_verified_support_boundary,
     snapshot_selection_api_error,
@@ -78,7 +79,7 @@ pub(crate) async fn get_name_execution_diagnostic(
     let (row, selected_snapshot) =
         resolve_diagnostic_name_with_resolution_auxiliary(&state, &params, true).await?;
 
-    let record_inventory_current = match load_supported_record_inventory_current_for_snapshot(
+    let record_inventory_current = match load_record_inventory_current_for_execution_diagnostic(
         &state.pool,
         &row,
         &selected_snapshot,
@@ -274,6 +275,43 @@ fn parse_execution_keys(keys: Option<&str>) -> V2Result<Vec<crate::ResolutionRec
     }
 
     Ok(parsed)
+}
+
+async fn load_record_inventory_current_for_execution_diagnostic(
+    pool: &sqlx::PgPool,
+    row: &bigname_storage::NameCurrentRow,
+    selected_snapshot: &bigname_storage::SelectedSnapshot,
+) -> std::result::Result<
+    Option<bigname_storage::RecordInventoryCurrentRow>,
+    bigname_storage::SnapshotSelectionError,
+> {
+    let allow_selected_superset = row.namespace == bigname_storage::BASENAMES_NAMESPACE;
+    match load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await {
+        Ok(Some(record_inventory_current)) => Ok(Some(record_inventory_current)),
+        Ok(None) if allow_selected_superset => {
+            load_record_inventory_current_matching_selected_snapshot(
+                pool,
+                row,
+                selected_snapshot,
+                true,
+            )
+            .await
+        }
+        Ok(None) => Ok(None),
+        Err(load_error)
+            if allow_selected_superset
+                && load_error.kind() == bigname_storage::SnapshotSelectionErrorKind::Stale =>
+        {
+            load_record_inventory_current_matching_selected_snapshot(
+                pool,
+                row,
+                selected_snapshot,
+                true,
+            )
+            .await
+        }
+        Err(load_error) => Err(load_error),
+    }
 }
 
 fn missing_execution_artifact_error(namespace: &str, name: &str) -> V2Error {
