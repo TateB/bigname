@@ -12,7 +12,7 @@ use crate::{
     load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current_for_snapshot, parse_resolution_record_key,
     resolution_execution_cache_lookup_records, resolution_verified_support_boundary,
-    snapshot_selection_api_error,
+    snapshot_selection_api_error, validate_loaded_resolution_verified_outcome,
 };
 
 use super::super::super::{MAX_PAGE_SIZE, validate_product_record};
@@ -197,6 +197,28 @@ pub(crate) async fn get_name_execution_diagnostic(
             &row.normalized_name,
         ));
     };
+    if let Err(validation_error) =
+        validate_loaded_resolution_verified_outcome(&row, &records, &outcome)
+    {
+        if validation_error.kind() == bigname_storage::SnapshotSelectionErrorKind::Stale {
+            return Err(missing_execution_artifact_error(
+                &row.namespace,
+                &row.normalized_name,
+            ));
+        }
+
+        error!(
+            service = "api",
+            logical_name_id = %row.logical_name_id,
+            execution_trace_id = %outcome.execution_trace_id,
+            error = ?validation_error,
+            "persisted execution outcome failed coverage validation for v2 resolution execution diagnostic"
+        );
+        return Err(V2Error::internal_error(format!(
+            "failed to load resolution execution diagnostic for name {}",
+            row.normalized_name
+        )));
+    }
 
     let trace = bigname_storage::load_execution_trace(&state.pool, outcome.execution_trace_id)
         .await
