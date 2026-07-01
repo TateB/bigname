@@ -39,7 +39,7 @@ pub(crate) use diag_events::{DiagnosticEvent, build_diagnostic_event, get_diagno
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
 pub(crate) use diagnostics::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
-    get_name_records_diagnostic,
+    get_name_execution_diagnostic, get_name_records_diagnostic,
 };
 pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
 pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};

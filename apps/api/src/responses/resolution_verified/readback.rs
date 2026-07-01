@@ -133,7 +133,7 @@ async fn load_resolution_verified_outcome_for_records(
     })
 }
 
-fn validate_loaded_resolution_verified_outcome(
+pub(super) fn validate_loaded_resolution_verified_outcome(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     outcome: &ExecutionOutcome,

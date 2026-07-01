@@ -10,8 +10,8 @@ use super::{
     get_address_history, get_address_names, get_diagnostic_events,
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
-    get_name_record, get_name_records, get_name_records_diagnostic, get_namespace, get_permissions,
-    get_primary_name, get_resolver, get_status, get_subnames,
+    get_name_execution_diagnostic, get_name_record, get_name_records, get_name_records_diagnostic,
+    get_namespace, get_permissions, get_primary_name, get_resolver, get_status, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -51,7 +51,7 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route(
             "/v2/diagnostics/names/{name}/execution",
-            get(not_implemented),
+            get(get_name_execution_diagnostic),
         )
         .route(
             "/v2/diagnostics/namespaces/{namespace}/manifests",
