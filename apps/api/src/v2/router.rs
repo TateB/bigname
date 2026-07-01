@@ -1,6 +1,5 @@
 use axum::{
     Router,
-    http::StatusCode,
     routing::{get, post},
 };
 
@@ -11,7 +10,8 @@ use super::{
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_execution_diagnostic, get_name_record, get_name_records, get_name_records_diagnostic,
-    get_namespace, get_permissions, get_primary_name, get_resolver, get_status, get_subnames,
+    get_namespace, get_permissions, get_primary_name, get_resolver, get_search, get_status,
+    get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -29,7 +29,7 @@ pub(super) fn router() -> Router<AppState> {
             get(get_primary_name),
         )
         .route("/v2/addresses/{address}/history", get(get_address_history))
-        .route("/v2/search", get(not_implemented))
+        .route("/v2/search", get(get_search))
         .route("/v2/events", get(get_events))
         .route("/v2/resolvers/{chain_id}/{address}", get(get_resolver))
         .route("/v2/namespaces/{namespace}", get(get_namespace))
@@ -60,15 +60,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/diagnostics/events", get(get_diagnostic_events))
 }
 
-async fn not_implemented() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
-
 #[cfg(test)]
 mod tests {
     use axum::{
         body::{Body, to_bytes},
-        http::Request,
+        http::{Request, StatusCode},
     };
     use serde_json::{Value, json};
     use sqlx::PgPool;

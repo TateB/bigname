@@ -21,6 +21,7 @@ mod permissions;
 mod primary_name;
 mod resolvers;
 mod router;
+mod search;
 mod snapshots;
 mod status;
 mod subnames;
@@ -76,6 +77,10 @@ pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, ResolverOverview, bound_names_cursor_payload,
     bound_names_storage_cursor, build_bound_name_record, build_resolver_overview, get_resolver,
     resolver_overview_include,
+};
+pub(crate) use search::{
+    SearchCursorBinding, SearchMatch, SearchName, build_search_name, get_search,
+    search_cursor_payload, search_storage_cursor,
 };
 pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
