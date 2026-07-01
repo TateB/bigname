@@ -11,9 +11,9 @@ use sqlx::{PgPool, types::Uuid};
 use crate::{AppState, normalize_inferred_route_name};
 
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParams, V2Error, V2Result,
-    as_of_meta, decode, encode, encode_at_token, permission_scope_value, resolve_v2_snapshot,
-    v2_exact_name_snapshot_scope,
+    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
+    permission_scope_value, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
@@ -24,6 +24,24 @@ const INCLUDE_FILTER_KEY: &str = "include";
 const SUBJECT_CURSOR_KEY: &str = "subject";
 const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
 const SCOPE_CURSOR_KEY: &str = "scope";
+
+pub(crate) struct PermissionsQueryParams;
+
+impl QueryParamAllowlist for PermissionsQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "name",
+        "registration_id",
+        "address",
+        "namespace",
+        "at",
+        "finality",
+        "include",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type PermissionsQuery = StrictQueryParams<PermissionsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct PermissionRow {
@@ -64,9 +82,10 @@ struct NormalizedNameFilter {
 }
 
 pub(crate) async fn get_permissions(
-    params: QueryParams,
+    params: PermissionsQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
+    let params = params.into_inner();
     let include_lineage = permissions_include_lineage(&params.include)?;
     let resolved = resolve_permissions_filter(&state.pool, &params, include_lineage).await?;
 

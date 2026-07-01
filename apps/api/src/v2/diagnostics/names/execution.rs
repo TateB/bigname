@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{FromRequestParts, Path, State},
     http::request::Parts,
 };
 use serde::Deserialize;
@@ -22,6 +22,7 @@ use super::{
 };
 
 const MAX_EXECUTION_KEYS: usize = MAX_PAGE_SIZE as usize;
+const DIAGNOSTIC_NAME_EXECUTION_QUERY_PARAMS: &[&str] = &["namespace", "at", "finality", "keys"];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -44,10 +45,11 @@ where
     type Rejection = V2Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(raw) =
-            Query::<RawDiagnosticNameExecutionQueryParams>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        let raw = super::super::super::parse_raw_query_params_with_allowlist::<
+            RawDiagnosticNameExecutionQueryParams,
+            S,
+        >(parts, state, DIAGNOSTIC_NAME_EXECUTION_QUERY_PARAMS)
+        .await?;
         Self::try_from(raw)
     }
 }

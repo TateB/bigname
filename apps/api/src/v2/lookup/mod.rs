@@ -8,7 +8,7 @@ use tracing::error;
 
 use crate::AppState;
 
-use super::{Envelope, Meta, Page, Status, V2Error, V2Result, encode};
+use super::{Envelope, Meta, NoQueryParams, Page, Status, V2Error, V2Result, encode};
 
 mod build;
 mod cursor;
@@ -24,9 +24,9 @@ use cursor::{LookupReverseCursorBinding, lookup_reverse_cursor_payload, reverse_
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
 use head::load_served_head_meta;
 use parse::{
-    LookupProfile, LookupQueryParams, ParsedAddressLookup, ParsedNameLookup,
-    ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
-    parse_lookup_profile, parse_name_input,
+    LookupProfile, ParsedAddressLookup, ParsedNameLookup, ensure_lookup_batch_limit,
+    parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
+    parse_name_input,
 };
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -48,7 +48,7 @@ struct ReverseCursorKey {
 }
 
 pub(crate) async fn get_lookup(
-    _query: LookupQueryParams,
+    _query: NoQueryParams,
     State(state): State<AppState>,
     body: Result<Json<LookupRequest>, JsonRejection>,
 ) -> V2Result<Json<Envelope<Vec<LookupResult>>>> {

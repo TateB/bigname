@@ -1,8 +1,4 @@
-use axum::{
-    Json,
-    extract::{FromRequestParts, rejection::JsonRejection},
-    http::request::Parts,
-};
+use axum::{Json, extract::rejection::JsonRejection};
 
 use super::{
     cursor::{LookupReverseCursorBinding, lookup_reverse_storage_cursor},
@@ -49,35 +45,6 @@ pub(super) struct IdentityNameLookup {
 pub(super) enum LookupProfile {
     Feed,
     Detail,
-}
-
-#[derive(Debug)]
-pub(crate) struct LookupQueryParams;
-
-impl<S> FromRequestParts<S> for LookupQueryParams
-where
-    S: Send + Sync,
-{
-    type Rejection = V2Error;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(query) = parts.uri.query().filter(|query| !query.is_empty()) else {
-            return Ok(Self);
-        };
-
-        for pair in query.split('&') {
-            let key = pair.split('=').next().unwrap_or_default();
-            if key == "at" || key == "finality" {
-                return Err(V2Error::invalid_input(format!(
-                    "{key} is not supported on this route"
-                )));
-            }
-        }
-
-        Err(V2Error::invalid_input(
-            "query parameters are not supported on this route",
-        ))
-    }
 }
 
 pub(super) fn parse_name_input(

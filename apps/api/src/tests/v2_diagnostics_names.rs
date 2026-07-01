@@ -687,7 +687,12 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
     };
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        for query in ["source=verified", "keys=addr:60", "address=bad", "page_size=201"] {
+        for (query, expected_message) in [
+            ("source=verified", "unknown query parameter: source"),
+            ("keys=addr:60", "unknown query parameter: keys"),
+            ("address=bad", "unknown query parameter: address"),
+            ("page_size=201", "unknown query parameter: page_size"),
+        ] {
             let uri = format!("/v2/diagnostics/names/alice.eth/{suffix}?{query}");
             let response = app_router(state.clone())
                 .oneshot(
@@ -704,7 +709,7 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
             assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
             assert_eq!(
                 payload["error"]["message"],
-                json!("query parameters are invalid"),
+                json!(expected_message),
                 "{uri}"
             );
         }
@@ -801,7 +806,7 @@ async fn v2_diagnostics_name_execution_rejects_malformed_duplicate_and_unknown_q
         ),
         (
             "/v2/diagnostics/names/alice.eth/execution?keys=addr:60&source=verified",
-            "query parameters are invalid",
+            "unknown query parameter: source",
         ),
     ] {
         let response = app_router(state.clone())

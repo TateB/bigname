@@ -16,11 +16,20 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, QueryParams, RequestSource, V2Error, V2Result, api_error_to_v2, as_of_meta,
+    Envelope, Meta, QueryParamAllowlist, QueryParams, RequestSource, StrictQueryParams, V2Error,
+    V2Result, api_error_to_v2, as_of_meta,
     chains::slug_to_numeric,
     resolve_v2_snapshot, v2_exact_name_snapshot_scope,
     vocab::{RegistrationStatus, Resolver, Source, Status},
 };
+
+pub(crate) struct NameRecordQueryParams;
+
+impl QueryParamAllowlist for NameRecordQueryParams {
+    const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source"];
+}
+
+pub(crate) type NameRecordQuery = StrictQueryParams<NameRecordQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecord {
@@ -52,9 +61,10 @@ pub(crate) struct NameRecord {
 
 pub(crate) async fn get_name_record(
     Path(input_name): Path<String>,
-    params: QueryParams,
+    params: NameRecordQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<NameRecord>>> {
+    let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params

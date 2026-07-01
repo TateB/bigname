@@ -11,9 +11,10 @@ use sqlx::types::Uuid;
 use crate::{AppState, normalize_inferred_route_name};
 
 use super::{
-    CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParams, V2Error, V2Result,
-    as_of_meta, decode, encode, encode_at_token, format_timestamp, history_event_type,
-    relation_to_storage, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
+    format_timestamp, history_event_type, relation_to_storage, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope,
 };
 
 const EVENTS_SORT: &str = "chain_position_desc";
@@ -27,6 +28,26 @@ const FROM_BLOCK_FILTER_KEY: &str = "from_block";
 const TO_BLOCK_FILTER_KEY: &str = "to_block";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
 const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
+
+pub(crate) struct EventsQueryParams;
+
+impl QueryParamAllowlist for EventsQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "name",
+        "address",
+        "registration_id",
+        "type",
+        "from_block",
+        "to_block",
+        "at",
+        "finality",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type EventsQuery = StrictQueryParams<EventsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Event {
@@ -52,9 +73,10 @@ pub(crate) struct ParsedEventsFilter {
 /// `namespace` defaults to the name's inferred namespace when `name` is provided
 /// and `namespace` is omitted; otherwise defaults to `ens`.
 pub(crate) async fn get_events(
-    params: QueryParams,
+    params: EventsQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
+    let params = params.into_inner();
     let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 

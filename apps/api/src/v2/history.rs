@@ -16,8 +16,9 @@ use crate::{
 };
 
 use super::{
-    CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page, QueryParams, V2Error,
-    V2Result, as_of_meta, decode, encode, encode_at_token, resolve_v2_snapshot,
+    CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page, QueryParamAllowlist,
+    QueryParams, StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
+    resolve_v2_snapshot,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -26,6 +27,21 @@ const NAME_FILTER_KEY: &str = "name";
 const SCOPE_FILTER_KEY: &str = "scope";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
 const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
+
+pub(crate) struct HistoryQueryParams;
+
+impl QueryParamAllowlist for HistoryQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "at",
+        "finality",
+        "scope",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type HistoryQuery = StrictQueryParams<HistoryQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct HistoryEvent {
@@ -43,9 +59,10 @@ pub(crate) struct HistoryEvent {
 
 pub(crate) async fn get_history(
     Path(input_name): Path<String>,
-    params: QueryParams,
+    params: HistoryQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<HistoryEvent>>>> {
+    let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params

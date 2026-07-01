@@ -15,9 +15,10 @@ use crate::{
 };
 
 use super::{
-    CursorPayload, Envelope, Meta, Page, QueryParams, RegistrationStatus, V2Error, V2Result,
-    api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
-    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams, RegistrationStatus,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta, decode, encode,
+    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -25,6 +26,21 @@ const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const CHILD_LOGICAL_NAME_ID_CURSOR_KEY: &str = "child_logical_name_id";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const PARENT_FILTER_KEY: &str = "parent";
+
+pub(crate) struct SubnamesQueryParams;
+
+impl QueryParamAllowlist for SubnamesQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "at",
+        "finality",
+        "include",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type SubnamesQuery = StrictQueryParams<SubnamesQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Subname {
@@ -45,9 +61,10 @@ pub(crate) struct Subname {
 
 pub(crate) async fn get_subnames(
     Path(input_name): Path<String>,
-    params: QueryParams,
+    params: SubnamesQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Subname>>>> {
+    let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params

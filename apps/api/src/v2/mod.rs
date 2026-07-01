@@ -24,6 +24,7 @@ mod router;
 mod search;
 mod snapshots;
 mod status;
+mod strict_query;
 mod subnames;
 mod vocab;
 
@@ -86,6 +87,9 @@ pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
 };
 pub(crate) use status::get_status;
+pub(crate) use strict_query::{
+    NoQueryParams, QueryParamAllowlist, StrictQueryParams, parse_raw_query_params_with_allowlist,
+};
 pub(crate) use subnames::{
     Subname, build_subname, get_subnames, subname_cursor_payload, subname_storage_cursor,
 };

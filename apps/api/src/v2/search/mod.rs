@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json,
-    extract::{FromRequestParts, Query, State},
+    extract::{FromRequestParts, State},
     http::request::Parts,
 };
 use bigname_storage::{
@@ -28,6 +28,15 @@ const NONE_FILTER_VALUE: &str = "";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
+const SEARCH_QUERY_PARAMS: &[&str] = &[
+    "q",
+    "match",
+    "namespace",
+    "at",
+    "finality",
+    "cursor",
+    "page_size",
+];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct SearchName {
@@ -89,9 +98,12 @@ where
     type Rejection = V2Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(raw) = Query::<RawSearchQueryParams>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        let raw = super::parse_raw_query_params_with_allowlist::<RawSearchQueryParams, S>(
+            parts,
+            state,
+            SEARCH_QUERY_PARAMS,
+        )
+        .await?;
         Self::try_from(raw)
     }
 }

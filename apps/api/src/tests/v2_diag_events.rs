@@ -188,7 +188,7 @@ async fn v2_get_diagnostic_events_honors_namespace_snapshot_and_filters() -> Res
     let filtered = v2_diag_events_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?namespace=ens&address={DIAG_EVENTS_ADDRESS}&relation=registrant&type=registration&from_block=303&to_block=303"
+            "/v2/diagnostics/events?namespace=ens&address={DIAG_EVENTS_ADDRESS}&type=registration&from_block=303&to_block=303"
         ),
     )
     .await?;

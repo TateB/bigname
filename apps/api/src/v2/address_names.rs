@@ -20,10 +20,10 @@ use sqlx::types::{
 use crate::AppState;
 
 use super::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParams,
-    RegistrationStatus, Relation, SortOrder, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    decode, encode, encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot,
-    v2_exact_name_snapshot_scope,
+    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist,
+    QueryParams, RegistrationStatus, Relation, SortOrder, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
+    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -43,6 +43,26 @@ const SORT_KIND_NAME: &str = "name";
 const SORT_KIND_TIMESTAMP_NULL: &str = "timestamp_null";
 const SORT_KIND_TIMESTAMP_VALUE: &str = "timestamp_value";
 const NONE_FILTER_VALUE: &str = "";
+
+pub(crate) struct AddressNamesQueryParams;
+
+impl QueryParamAllowlist for AddressNamesQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "at",
+        "finality",
+        "relation",
+        "q",
+        "sort",
+        "order",
+        "dedupe",
+        "include",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type AddressNamesQuery = StrictQueryParams<AddressNamesQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct AddressName {
@@ -76,9 +96,10 @@ pub(crate) struct AddressNameGrant {
 
 pub(crate) async fn get_address_names(
     Path(address): Path<String>,
-    params: QueryParams,
+    params: AddressNamesQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
+    let params = params.into_inner();
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace_filter = params.namespace.clone();

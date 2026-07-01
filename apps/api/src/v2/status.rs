@@ -1,16 +1,12 @@
 use std::collections::BTreeMap;
 
-use axum::{
-    Json,
-    extract::{FromRequestParts, State},
-    http::request::Parts,
-};
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::AppState;
 
-use super::{Envelope, Meta, OpsStatus, V2Error, V2Result, slug_to_numeric};
+use super::{Envelope, Meta, NoQueryParams, OpsStatus, V2Error, V2Result, slug_to_numeric};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusData {
@@ -27,26 +23,6 @@ pub(crate) struct ChainStatus {
     pub(crate) lag_blocks: Option<i64>,
     pub(crate) lag_seconds: Option<i64>,
     pub(crate) status: OpsStatus,
-}
-
-#[derive(Debug)]
-pub(crate) struct NoQueryParams;
-
-impl<S> FromRequestParts<S> for NoQueryParams
-where
-    S: Send + Sync,
-{
-    type Rejection = V2Error;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        if parts.uri.query().is_some_and(|query| !query.is_empty()) {
-            return Err(V2Error::invalid_input(
-                "query parameters are not supported on this route",
-            ));
-        }
-
-        Ok(Self)
-    }
 }
 
 pub(crate) async fn get_status(
@@ -153,6 +129,7 @@ fn root_status<'a>(
 #[cfg(test)]
 mod tests {
     use axum::{
+        extract::FromRequestParts,
         http::{Request, StatusCode},
         response::IntoResponse,
     };
