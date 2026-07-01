@@ -24,6 +24,11 @@ use crate::v2::ErrorCode;
 
 use super::*;
 
+const DIVERGENT_REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000d01";
+const DIVERGENT_CONTROL_OWNER: &str = "0x0000000000000000000000000000000000000d02";
+const DIVERGENT_REGISTRATION_REGISTRANT: &str = "0x0000000000000000000000000000000000000d03";
+const DIVERGENT_CONTROL_REGISTRANT: &str = "0x0000000000000000000000000000000000000d04";
+
 #[test]
 fn search_cursor_payload_round_trips_name_cursor() {
     let cursor = NameCurrentListCursor {
@@ -181,6 +186,25 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
     assert!(data[0].get("role_summary").is_none());
     assert!(data[0].get("labelhash").is_none());
     assert!(data[0].get("subname_count").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_uses_dictionary_owner_and_registrant_precedence() -> Result<()> {
+    let database = SearchDatabase::new().await?;
+    seed_search_fixture(&database).await?;
+
+    let payload = search_payload(&database, "/v2/search?q=precedence&namespace=ens").await?;
+    let data = payload["data"].as_array().expect("data must be an array");
+
+    assert_eq!(names(data), vec!["precedence.eth"]);
+    assert_eq!(data[0]["owner"], json!(DIVERGENT_CONTROL_OWNER));
+    assert_eq!(
+        data[0]["registrant"],
+        json!(DIVERGENT_REGISTRATION_REGISTRANT)
+    );
+    assert_eq!(data[0]["registration_status"], json!("active"));
 
     database.cleanup().await
 }
@@ -626,7 +650,9 @@ fn search_specs() -> Vec<SearchSpec> {
                 namehash: $namehash,
                 id: $id,
                 owner: $owner,
+                control_owner: None,
                 registrant: $registrant,
+                control_registrant: None,
                 registered_at: $registered_at,
                 created_at: $created_at,
                 expires_at: $expires_at,
@@ -712,6 +738,19 @@ fn search_specs() -> Vec<SearchSpec> {
             "2023-07-02T00:00:00Z",
             "2027-07-02T00:00:00Z",
         ),
+        SearchSpec {
+            namespace: "ens",
+            name: "precedence.eth",
+            namehash: "node:precedence.eth",
+            id: 0xd100,
+            owner: DIVERGENT_REGISTRY_OWNER,
+            control_owner: Some(DIVERGENT_CONTROL_OWNER),
+            registrant: DIVERGENT_REGISTRATION_REGISTRANT,
+            control_registrant: Some(DIVERGENT_CONTROL_REGISTRANT),
+            registered_at: "2024-07-03T00:00:00Z",
+            created_at: "2023-07-03T00:00:00Z",
+            expires_at: "2027-07-03T00:00:00Z",
+        },
         spec!(
             "basenames",
             "alpha.base.eth",
@@ -755,7 +794,9 @@ struct SearchSpec {
     namehash: &'static str,
     id: u128,
     owner: &'static str,
+    control_owner: Option<&'static str>,
     registrant: &'static str,
+    control_registrant: Option<&'static str>,
     registered_at: &'static str,
     created_at: &'static str,
     expires_at: &'static str,
@@ -884,7 +925,8 @@ fn name_current_row(spec: &SearchSpec) -> NameCurrentRow {
             },
             "control": {
                 "registry_owner": spec.owner,
-                "registrant": spec.registrant,
+                "owner": spec.control_owner,
+                "registrant": spec.control_registrant.unwrap_or(spec.registrant),
                 "expiry": spec.expires_at
             }
         }),

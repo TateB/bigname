@@ -190,8 +190,8 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
         display_name: row.row.canonical_display_name.clone(),
         namespace: row.row.namespace.clone(),
         namehash: row.row.namehash.clone(),
-        owner: row.owner.clone().or(registration.owner),
-        registrant: row.registrant.clone().or(registration.registrant),
+        owner: registration.owner,
+        registrant: registration.registrant,
         registration_status: registration.registration_status,
         registered_at: row
             .registration_date

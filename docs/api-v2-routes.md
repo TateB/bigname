@@ -347,6 +347,11 @@ Field ownership:
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary.
 - Pagination behavior: standard collection pagination.
+- Snapshot behavior: `at` and `finality` are accepted and used only to resolve
+  `meta.as_of` (the snapshot scope spans all public namespaces when `namespace`
+  is omitted, and the single namespace when provided). The search collection
+  itself reads the latest `name_current` projection; true as-of search
+  enumeration is deferred to a storage follow-up.
 - Status semantics: no matches returns `200` with empty `data`.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
