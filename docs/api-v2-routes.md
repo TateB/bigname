@@ -352,7 +352,8 @@ Field ownership:
   is omitted, and the single namespace when provided). The search collection
   itself reads the latest `name_current` projection; true as-of search
   enumeration is deferred to a storage follow-up.
-- Status semantics: no matches returns `200` with empty `data`.
+- Status semantics: no matches returns `200` with empty `data`. `q` is
+  required; a missing or empty `q` returns `400 invalid_input`.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 
