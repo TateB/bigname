@@ -1,4 +1,8 @@
 const V2_RESOLVER_ADDRESS: &str = "0x0000000000000000000000000000000000000aaa";
+const DIVERGENT_REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000d01";
+const DIVERGENT_CONTROL_OWNER: &str = "0x0000000000000000000000000000000000000d02";
+const DIVERGENT_REGISTRATION_REGISTRANT: &str = "0x0000000000000000000000000000000000000d03";
+const DIVERGENT_CONTROL_REGISTRANT: &str = "0x0000000000000000000000000000000000000d04";
 
 #[test]
 fn v2_bound_names_cursor_payload_round_trips_storage_cursor() {
@@ -180,6 +184,49 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
     assert_eq!(payload["data"]["bound_names"]["data"], json!([]));
     assert_eq!(payload["data"]["bound_names"]["page"]["has_more"], json!(false));
     assert!(payload.get("page").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_uses_dictionary_owner_and_registrant_precedence_for_bound_names(
+) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture_with_chains(
+        &database,
+        &[
+            "base-mainnet",
+            "base-mainnet",
+            "base-mainnet",
+            "base-mainnet",
+            "base-mainnet",
+            "ethereum-mainnet",
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=50"),
+    )
+    .await?;
+    let rows = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+    let row = rows
+        .iter()
+        .find(|row| row["name"] == json!("precedence.eth"))
+        .expect("precedence row must be present");
+
+    assert_eq!(row["owner"], json!(DIVERGENT_CONTROL_OWNER));
+    assert_eq!(row["registrant"], json!(DIVERGENT_REGISTRATION_REGISTRANT));
+    assert_eq!(row["registration_status"], json!("active"));
 
     database.cleanup().await?;
     Ok(())
@@ -437,10 +484,34 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
     database: &TestDatabase,
     resolver_chains: &[&str],
 ) -> Result<()> {
-    let specs = v2_address_name_specs();
+    let mut specs = v2_address_name_specs();
+    specs.push(V2AddressNameSpec {
+        logical_name_id: "ens:precedence.eth",
+        name: "precedence.eth",
+        namehash: "node:precedence.eth",
+        resource_id: Uuid::from_u128(0xe100),
+        token_lineage_id: Uuid::from_u128(0xe101),
+        surface_binding_id: Uuid::from_u128(0xe102),
+        block_hash: "0xname70",
+        block_number: 106,
+        owner: DIVERGENT_REGISTRY_OWNER,
+        registrant: DIVERGENT_REGISTRATION_REGISTRANT,
+        registered_at: "2024-07-03T00:00:00Z",
+        created_at: "2023-07-03T00:00:00Z",
+        expires_at: "2027-07-03T00:00:00Z",
+        relations: &[],
+    });
     seed_v2_address_name_storage(database, &specs).await?;
 
     for (spec, resolver_chain) in specs.iter().zip(resolver_chains.iter().copied()) {
+        let control_owner = (spec.logical_name_id == "ens:precedence.eth")
+            .then_some(DIVERGENT_CONTROL_OWNER);
+        let control_registrant = if spec.logical_name_id == "ens:precedence.eth" {
+            DIVERGENT_CONTROL_REGISTRANT
+        } else {
+            spec.registrant
+        };
+
         database
             .insert_name_current_row(address_name_name_current_row(
                 spec.logical_name_id,
@@ -462,7 +533,8 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
                     },
                     "control": {
                         "registry_owner": spec.owner,
-                        "registrant": spec.registrant,
+                        "owner": control_owner,
+                        "registrant": control_registrant,
                         "expiry": spec.expires_at
                     },
                     "resolver": {

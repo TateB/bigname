@@ -241,8 +241,8 @@ pub(crate) fn build_bound_name_record(row: &NameCurrentListRow, chain_id: u64) -
     let registration = name_record::name_registration_fields(Some(&row.row), &row.row.namespace);
 
     record.token_id = row.token_id.clone().or(record.token_id);
-    record.owner = row.owner.clone().or(registration.owner);
-    record.registrant = row.registrant.clone().or(registration.registrant);
+    record.owner = registration.owner;
+    record.registrant = registration.registrant;
     record.registered_at = row
         .registration_date
         .map(format_timestamp)
