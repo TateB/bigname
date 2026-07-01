@@ -20,6 +20,8 @@ use sqlx::types::{
 };
 use tower::ServiceExt;
 
+use crate::v2::ErrorCode;
+
 use super::*;
 
 #[test]
@@ -31,7 +33,7 @@ fn search_cursor_payload_round_trips_name_cursor() {
         namehash: "node:alpha.eth".to_owned(),
     };
     let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
-    let payload = search_cursor_payload(&cursor, &binding);
+    let payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
 
     assert_eq!(
         search_storage_cursor(&payload, &binding).expect("cursor must decode"),
@@ -53,31 +55,47 @@ fn search_cursor_rejects_cross_filter_match_namespace_or_snapshot() {
     };
     let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
 
-    let mut payload = search_cursor_payload(&cursor, &binding);
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload
         .filters
         .insert(Q_FILTER_KEY.to_owned(), "be".to_owned());
     assert!(search_storage_cursor(&payload, &binding).is_err());
 
-    let mut payload = search_cursor_payload(&cursor, &binding);
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload
         .filters
         .insert(MATCH_FILTER_KEY.to_owned(), "contains".to_owned());
     assert!(search_storage_cursor(&payload, &binding).is_err());
 
-    let mut payload = search_cursor_payload(&cursor, &binding);
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload
         .filters
         .insert(NAMESPACE_FILTER_KEY.to_owned(), "basenames".to_owned());
     assert!(search_storage_cursor(&payload, &binding).is_err());
 
-    let mut payload = search_cursor_payload(&cursor, &binding);
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload.snapshot = Some("snapshot-2".to_owned());
     assert!(search_storage_cursor(&payload, &binding).is_err());
 
-    let mut payload = search_cursor_payload(&cursor, &binding);
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload.sort = "name_desc".to_owned();
     assert!(search_storage_cursor(&payload, &binding).is_err());
+}
+
+#[test]
+fn search_cursor_payload_rejects_non_name_storage_cursor() {
+    let cursor = NameCurrentListCursor {
+        sort_value: NameCurrentListCursorValue::Timestamp(None),
+        namespace: "ens".to_owned(),
+        normalized_name: "alpha.eth".to_owned(),
+        namehash: "node:alpha.eth".to_owned(),
+    };
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
+
+    let error =
+        search_cursor_payload(&cursor, &binding).expect_err("non-name cursor must not encode");
+
+    assert_eq!(error.code(), ErrorCode::InternalError);
 }
 
 #[test]
@@ -286,6 +304,7 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
     .await?;
     assert_eq!(second["page"]["cursor"], json!(next_cursor));
     assert_eq!(names(second["data"].as_array().unwrap()), vec!["alpha.eth"]);
+    assert_eq!(second["page"]["has_more"], json!(true));
 
     let third_cursor = second["page"]["next_cursor"]
         .as_str()
@@ -295,7 +314,26 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
         &format!("/v2/search?q=a&page_size=1&cursor={third_cursor}"),
     )
     .await?;
-    assert_eq!(names(third["data"].as_array().unwrap()), vec!["alpine.eth"]);
+    assert_eq!(
+        names(third["data"].as_array().unwrap()),
+        vec!["alpine.base.eth"]
+    );
+    assert_eq!(third["page"]["has_more"], json!(true));
+
+    let final_cursor = third["page"]["next_cursor"]
+        .as_str()
+        .expect("third page must include next cursor");
+    let final_page = search_payload(
+        &database,
+        &format!("/v2/search?q=a&page_size=1&cursor={final_cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        names(final_page["data"].as_array().unwrap()),
+        vec!["alpine.eth"]
+    );
+    assert_eq!(final_page["page"]["has_more"], json!(false));
+    assert_eq!(final_page["page"]["next_cursor"], Value::Null);
 
     database.cleanup().await
 }
@@ -684,6 +722,17 @@ fn search_specs() -> Vec<SearchSpec> {
             "2024-08-02T00:00:00Z",
             "2023-08-02T00:00:00Z",
             "2027-08-02T00:00:00Z",
+        ),
+        spec!(
+            "basenames",
+            "alpine.base.eth",
+            "node:alpine.base.eth",
+            0xb200,
+            "0x0000000000000000000000000000000000000b21",
+            "0x0000000000000000000000000000000000000b22",
+            "2024-08-03T00:00:00Z",
+            "2023-08-03T00:00:00Z",
+            "2027-08-03T00:00:00Z",
         ),
         spec!(
             "internal",

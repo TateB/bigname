@@ -119,7 +119,7 @@ fn resource(resource_id: Uuid, token_lineage_id: Uuid) -> Resource {
 fn name_surface(logical_name_id: &str, display_name: &str, namehash: &str) -> NameSurface {
     NameSurface {
         logical_name_id: logical_name_id.to_owned(),
-        namespace: "ens".to_owned(),
+        namespace: namespace_from_logical_name_id(logical_name_id).to_owned(),
         input_name: display_name.to_owned(),
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
@@ -166,7 +166,7 @@ fn name_current_row(
 ) -> NameCurrentRow {
     NameCurrentRow {
         logical_name_id: logical_name_id.to_owned(),
-        namespace: "ens".to_owned(),
+        namespace: namespace_from_logical_name_id(logical_name_id).to_owned(),
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
         namehash: namehash.to_owned(),
@@ -206,6 +206,13 @@ fn name_current_row(
         manifest_version: 3,
         last_recomputed_at: timestamp(1_717_171_717),
     }
+}
+
+fn namespace_from_logical_name_id(logical_name_id: &str) -> &str {
+    logical_name_id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .unwrap_or("ens")
 }
 
 fn address_name_current_row(
@@ -495,6 +502,101 @@ async fn offset_windows_are_stable_and_disjoint() -> Result<()> {
     )
     .await?;
     assert_eq!(names(&full), vec!["alice.eth", "bob.eth", "carol.eth"]);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn namespaces_filter_pages_across_namespace_boundary_with_prefix() -> Result<()> {
+    let database = test_database().await?;
+    seed_name(
+        &database,
+        "ens:aa.eth",
+        "aa.eth",
+        "0x01",
+        registered_summary("registrar", "0x01"),
+        refs(1),
+    )
+    .await?;
+    seed_name(
+        &database,
+        "basenames:ab.base.eth",
+        "ab.base.eth",
+        "0x02",
+        registered_summary("registrar", "0x02"),
+        refs(2),
+    )
+    .await?;
+    seed_name(
+        &database,
+        "ens:ac.eth",
+        "ac.eth",
+        "0x03",
+        registered_summary("registrar", "0x03"),
+        refs(3),
+    )
+    .await?;
+    seed_name(
+        &database,
+        "internal:ad.internal",
+        "ad.internal",
+        "0x04",
+        registered_summary("registrar", "0x04"),
+        refs(4),
+    )
+    .await?;
+
+    let filter = NameCurrentListFilter {
+        namespace: Some("internal".to_owned()),
+        namespaces: Some(vec!["ens".to_owned(), "basenames".to_owned()]),
+        prefix: Some("a".to_owned()),
+        ..NameCurrentListFilter::default()
+    };
+
+    let first = load_name_current_list_page(
+        database.pool(),
+        &filter,
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        1,
+        false,
+    )
+    .await?;
+    assert_eq!(names(&first.rows), vec!["aa.eth"]);
+    assert_eq!(first.rows[0].row.namespace.as_str(), "ens");
+    let first_cursor = first.next_cursor.clone().expect("first page must continue");
+
+    let second = load_name_current_list_page(
+        database.pool(),
+        &filter,
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        Some(&first_cursor),
+        1,
+        false,
+    )
+    .await?;
+    assert_eq!(names(&second.rows), vec!["ab.base.eth"]);
+    assert_eq!(second.rows[0].row.namespace.as_str(), "basenames");
+    let second_cursor = second
+        .next_cursor
+        .clone()
+        .expect("second page must continue");
+
+    let third = load_name_current_list_page(
+        database.pool(),
+        &filter,
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        Some(&second_cursor),
+        1,
+        false,
+    )
+    .await?;
+    assert_eq!(names(&third.rows), vec!["ac.eth"]);
+    assert_eq!(third.rows[0].row.namespace.as_str(), "ens");
+    assert!(third.next_cursor.is_none());
 
     database.cleanup().await
 }

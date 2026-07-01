@@ -68,6 +68,9 @@ pub struct NameCurrentAddressFilter {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NameCurrentListFilter {
     pub namespace: Option<String>,
+    /// Namespace set for public search reads. When non-empty, binds `nc.namespace = ANY($list)`
+    /// and supersedes `namespace`, keeping a storage-ordered page in one DB query.
+    pub namespaces: Option<Vec<String>>,
     pub name: Option<String>,
     pub prefix: Option<String>,
     pub contains: Option<String>,
@@ -392,7 +395,11 @@ fn push_filtered_name_current_cte<'a>(
 ) {
     builder.push("WITH ");
     if let Some(address_filter) = filter.address.as_ref() {
-        push_address_membership_cte(builder, address_filter, filter.namespace.as_deref());
+        let address_namespace = match filter.namespaces.as_ref() {
+            Some(namespaces) if !namespaces.is_empty() => None,
+            _ => filter.namespace.as_deref(),
+        };
+        push_address_membership_cte(builder, address_filter, address_namespace);
         builder.push(", ");
     }
     builder.push(
@@ -538,7 +545,15 @@ fn push_name_current_filter_predicates<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
 ) {
-    if let Some(namespace) = filter.namespace.as_deref() {
+    if let Some(namespaces) = filter
+        .namespaces
+        .as_ref()
+        .filter(|namespaces| !namespaces.is_empty())
+    {
+        builder.push(" AND nc.namespace = ANY(");
+        builder.push_bind(namespaces.as_slice());
+        builder.push(")");
+    } else if let Some(namespace) = filter.namespace.as_deref() {
         builder.push(" AND nc.namespace = ");
         builder.push_bind(namespace);
     }

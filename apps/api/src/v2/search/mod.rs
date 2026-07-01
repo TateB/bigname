@@ -8,11 +8,10 @@ use axum::{
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
     NameCurrentListRow, NameCurrentListSort, SnapshotSelectionScope,
-    name_current_list_cursor_from_row,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
+use crate::{AppState, PUBLIC_NAMESPACES};
 
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
@@ -29,7 +28,6 @@ const NONE_FILTER_VALUE: &str = "";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
-const PUBLIC_SEARCH_NAMESPACES: &[&str] = &["ens", "basenames"];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct SearchName {
@@ -153,14 +151,19 @@ pub(crate) async fn get_search(
         .transpose()?;
 
     let filter = search_filter(&params);
-    let (rows, storage_next_cursor) =
-        load_search_page(&state, &filter, storage_cursor.as_ref(), params.page_size).await?;
+    let storage_page =
+        load_search_storage_page(&state, &filter, storage_cursor.as_ref(), params.page_size)
+            .await?;
 
-    let next_cursor = storage_next_cursor
+    let next_cursor = storage_page
+        .next_cursor
         .as_ref()
-        .map(|cursor| encode(&search_cursor_payload(cursor, &cursor_binding)));
+        .map(|cursor| {
+            search_cursor_payload(cursor, &cursor_binding).map(|payload| encode(&payload))
+        })
+        .transpose()?;
     let has_more = next_cursor.is_some();
-    let data = rows.iter().map(build_search_name).collect();
+    let data = storage_page.rows.iter().map(build_search_name).collect();
     let meta = Meta {
         as_of: Some(as_of_meta(&selected_snapshot)?),
         ..Meta::default()
@@ -208,12 +211,14 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
 pub(crate) fn search_cursor_payload(
     cursor: &NameCurrentListCursor,
     binding: &SearchCursorBinding<'_>,
-) -> CursorPayload {
+) -> V2Result<CursorPayload> {
     let NameCurrentListCursorValue::Name(display_name) = &cursor.sort_value else {
-        return CursorPayload::new(SEARCH_SORT, cursor_filters(binding), BTreeMap::new(), None);
+        return Err(V2Error::internal_error(
+            "search pagination cursor must use name sort",
+        ));
     };
 
-    CursorPayload::new(
+    Ok(CursorPayload::new(
         SEARCH_SORT,
         cursor_filters(binding),
         BTreeMap::from([
@@ -226,7 +231,7 @@ pub(crate) fn search_cursor_payload(
             (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
         ]),
         Some(binding.snapshot_token.to_owned()),
-    )
+    ))
 }
 
 pub(crate) fn search_storage_cursor(
@@ -268,6 +273,12 @@ pub(crate) struct SearchCursorBinding<'a> {
 fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
     let mut filter = NameCurrentListFilter {
         namespace: params.namespace.clone(),
+        namespaces: params.namespace.is_none().then(|| {
+            PUBLIC_NAMESPACES
+                .iter()
+                .map(|namespace| (*namespace).to_owned())
+                .collect()
+        }),
         ..NameCurrentListFilter::default()
     };
 
@@ -285,7 +296,7 @@ async fn search_snapshot_scope(
 ) -> V2Result<SnapshotSelectionScope> {
     let Some(namespace) = namespace else {
         let mut requirements = Vec::new();
-        for namespace in PUBLIC_SEARCH_NAMESPACES {
+        for namespace in PUBLIC_NAMESPACES {
             let scope = v2_exact_name_snapshot_scope(state, namespace).await?;
             requirements.extend(scope.required_positions().iter().cloned());
         }
@@ -295,42 +306,6 @@ async fn search_snapshot_scope(
     };
 
     v2_exact_name_snapshot_scope(state, namespace).await
-}
-
-async fn load_search_page(
-    state: &AppState,
-    filter: &NameCurrentListFilter,
-    cursor: Option<&NameCurrentListCursor>,
-    page_size: u64,
-) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
-    if filter.namespace.is_some() {
-        let page = load_search_storage_page(state, filter, cursor, page_size).await?;
-        return Ok((page.rows, page.next_cursor));
-    }
-
-    let mut rows = Vec::new();
-    for namespace in PUBLIC_SEARCH_NAMESPACES {
-        let namespace_filter = NameCurrentListFilter {
-            namespace: Some((*namespace).to_owned()),
-            ..filter.clone()
-        };
-        let page =
-            load_search_storage_page(state, &namespace_filter, cursor, page_size + 1).await?;
-        rows.extend(page.rows);
-    }
-    rows.sort_by(search_row_order);
-
-    let page_size =
-        usize::try_from(page_size).map_err(|_| V2Error::invalid_input("page_size is invalid"))?;
-    let next_cursor = if rows.len() > page_size {
-        rows.truncate(page_size);
-        rows.last()
-            .map(|row| name_current_list_cursor_from_row(row, NameCurrentListSort::Name))
-    } else {
-        None
-    };
-
-    Ok((rows, next_cursor))
 }
 
 async fn load_search_storage_page(
@@ -350,15 +325,6 @@ async fn load_search_storage_page(
     )
     .await
     .map_err(|_| V2Error::internal_error("failed to load search results"))
-}
-
-fn search_row_order(left: &NameCurrentListRow, right: &NameCurrentListRow) -> std::cmp::Ordering {
-    left.row
-        .canonical_display_name
-        .cmp(&right.row.canonical_display_name)
-        .then_with(|| left.row.namespace.cmp(&right.row.namespace))
-        .then_with(|| left.row.normalized_name.cmp(&right.row.normalized_name))
-        .then_with(|| left.row.namehash.cmp(&right.row.namehash))
 }
 
 fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String> {
@@ -392,7 +358,7 @@ fn parse_match(value: Option<&str>) -> V2Result<SearchMatch> {
 }
 
 fn validate_namespace(namespace: &str) -> V2Result<()> {
-    if matches!(namespace, "ens" | "basenames") {
+    if PUBLIC_NAMESPACES.contains(&namespace) {
         Ok(())
     } else {
         Err(V2Error::invalid_input("namespace is invalid"))

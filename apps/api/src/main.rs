@@ -75,7 +75,7 @@ use crate::errors::ErrorResponse;
 #[cfg(test)]
 use axum::response::Response;
 
-const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
+pub(crate) const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 
 #[tokio::main]

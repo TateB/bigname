@@ -31,6 +31,7 @@ pub async fn count_address_names_current_for_app_filter(
         pool,
         &NameCurrentListFilter {
             namespace: filter.namespace.clone(),
+            namespaces: None,
             name: None,
             prefix: filter.prefix.clone(),
             contains: filter.contains.clone(),

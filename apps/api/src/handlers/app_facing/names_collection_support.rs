@@ -95,6 +95,7 @@ fn parse_names_request(query: NamesQuery) -> ApiResult<ParsedNamesRequest> {
     Ok(ParsedNamesRequest {
         filter: bigname_storage::NameCurrentListFilter {
             namespace,
+            namespaces: None,
             name,
             prefix,
             contains,
