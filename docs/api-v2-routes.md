@@ -244,10 +244,17 @@ Field ownership:
   `{address, grant_scope, powers, registration_id, name}`. `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. `grant` and
-  `revocation` identify the event or permission row that created or removed
-  the powers; `inheritance_path` lists inherited grant scopes in order; and
+  `revocation` identify the event or permission that created or removed the
+  powers; `inheritance_path` lists inherited grant scopes in order; and
   `transfer_behavior` describes whether the powers follow a registration
-  transfer.
+  transfer. Lineage source objects use product `kind` values such as `event`,
+  `permission`, `registration_authority`, and `registration_rebound`; use
+  `registration_id` for registration handles; and omit diagnostics-only
+  manifest-version fields. `grant_scope` is `{kind, detail}`. Detail is `{}`
+  for `root`, `registry`, and `resource`;
+  `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
+  `{chain_id, manager}` for `record_manager`; `{predecessor_registration_id}`
+  for `migration_derived`; and `{transport}` for `transport_derived`.
 - Pagination behavior: standard collection pagination.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`. Unsupported filter combinations return `422 unsupported`.
@@ -279,7 +286,8 @@ Field ownership:
   are not included; use `GET /v2/names/{name}/records` for resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
-  permission subject address.
+  permission subject address. `grant_scope` uses the same shape documented for
+  `GET /v2/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, relation filter, `q`, dedupe mode, sort,
   order, and the snapshot token used for `meta.as_of`.
@@ -486,7 +494,10 @@ Diagnostic snapshot rules:
   unsupported_reason?, failure_reason?}`. `value_sources` summarizes the
   indexed or verified origin per key. `comparison` is keyed by `record_key` and
   carries side-by-side `{indexed, verified}` record answers for the former
-  `mode=both` workflow.
+  `mode=both` workflow. Identity objects in these diagnostics use dictionary
+  spellings (`namespace`, `name`, `display_name`, `registration_id`), while
+  pipeline-only identifiers such as `normalized_event_id` keep their pipeline
+  names per the tier-3 rule.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): record inventory/cache diagnostics formerly embedded in
@@ -506,7 +517,9 @@ Diagnostic snapshot rules:
   requested keys, and selected snapshot. The route rejects duplicate or
   malformed keys with `400 invalid_input`.
 - Response shape: `data` includes trace id, steps, digests, and CCIP
-  participation.
+  participation. Identity objects in the payload use dictionary spellings
+  (`namespace`, `name`, `display_name`, `registration_id`), while pipeline-only
+  identifiers keep their pipeline names per the tier-3 rule.
 - Pagination behavior: none.
 - Status semantics: missing persisted execution artifacts return
   `404 not_found`.

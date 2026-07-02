@@ -15,8 +15,8 @@ use crate::{
 };
 
 use super::{
-    DiagnosticNameQueryParams, Envelope, Meta, V2Result, as_of_meta, bind_diagnostic_path_name,
-    resolve_diagnostic_name,
+    DiagnosticNameQueryParams, Envelope, Meta, V2Result, apply_diagnostics_dictionary_names,
+    as_of_meta, bind_diagnostic_path_name, resolve_diagnostic_name,
 };
 
 use crate::v2::{
@@ -106,18 +106,23 @@ async fn build_name_records_diagnostic(
     let comparison = build_record_comparison(records, &indexed_records, &verified_records);
     let value_sources = build_value_sources(&comparison);
 
+    let mut record_inventory_section = build_record_inventory_section_for_name(
+        row,
+        record_inventory,
+        RECORD_INVENTORY_UNSUPPORTED_REASON,
+    );
+    let mut record_cache_section = build_record_cache_section_for_name(
+        row,
+        record_inventory,
+        &[],
+        RECORD_CACHE_UNSUPPORTED_REASON,
+    );
+    apply_diagnostics_dictionary_names(&mut record_inventory_section);
+    apply_diagnostics_dictionary_names(&mut record_cache_section);
+
     Ok(NameRecordsDiagnostic {
-        record_inventory: build_record_inventory_section_for_name(
-            row,
-            record_inventory,
-            RECORD_INVENTORY_UNSUPPORTED_REASON,
-        ),
-        record_cache: build_record_cache_section_for_name(
-            row,
-            record_inventory,
-            &[],
-            RECORD_CACHE_UNSUPPORTED_REASON,
-        ),
+        record_inventory: record_inventory_section,
+        record_cache: record_cache_section,
         value_sources,
         comparison,
     })

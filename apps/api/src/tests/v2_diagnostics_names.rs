@@ -265,6 +265,14 @@ async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallbac
         Some(1201),
         Some("RecordVersionChanged"),
     );
+    let expected_boundary = json!({
+        "namespace": "ens",
+        "name": "alice.eth",
+        "registration_id": resource_id.to_string(),
+        "normalized_event_id": 1201,
+        "event_kind": "RecordVersionChanged",
+        "chain_position": worker_boundary["chain_position"].clone(),
+    });
 
     database
         .seed_name_current_binding(
@@ -302,11 +310,11 @@ async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallbac
 
     assert_eq!(
         payload["data"]["record_inventory"]["record_version_boundary"],
-        worker_boundary
+        expected_boundary
     );
     assert_eq!(
         payload["data"]["record_cache"]["record_version_boundary"],
-        worker_boundary
+        expected_boundary
     );
 
     database.cleanup().await?;

@@ -17,7 +17,8 @@ use crate::{
 
 use super::super::super::{MAX_PAGE_SIZE, validate_product_record};
 use super::{
-    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, diagnostic_envelope,
+    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2,
+    apply_diagnostics_dictionary_names, diagnostic_envelope,
     resolve_diagnostic_name_with_resolution_auxiliary,
 };
 
@@ -251,7 +252,7 @@ pub(crate) async fn get_name_execution_diagnostic(
         )));
     };
 
-    let data = build_resolution_execution_diagnostic_data(&row, &records, &trace, &outcome)
+    let mut data = build_resolution_execution_diagnostic_data(&row, &records, &trace, &outcome)
         .map_err(|build_error| {
             error!(
                 service = "api",
@@ -261,6 +262,7 @@ pub(crate) async fn get_name_execution_diagnostic(
             );
             V2Error::internal_error("failed to build resolution execution diagnostic")
         })?;
+    apply_diagnostics_dictionary_names(&mut data);
 
     diagnostic_envelope(data, &selected_snapshot)
 }

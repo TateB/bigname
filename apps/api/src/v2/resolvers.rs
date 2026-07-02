@@ -455,6 +455,7 @@ fn projected_section_items(summary: &Value, field_key: &str) -> Option<Value> {
             "nodes" | "aliases" => {
                 Value::Array(items.iter().map(compact_resolver_binding_item).collect())
             }
+            "roles" => Value::Array(items.iter().map(compact_resolver_role_item).collect()),
             _ => Value::Array(items.clone()),
         })
 }
@@ -466,17 +467,37 @@ fn compact_resolver_binding_item(item: &Value) -> Value {
     {
         insert_optional_string(&mut compact, "namespace", Some(namespace.to_owned()));
     }
+    insert_optional_string(&mut compact, "name", item_string(item, "normalized_name"));
     insert_optional_string(
         &mut compact,
-        "name",
+        "display_name",
         item_string(item, "canonical_display_name"),
     );
-    insert_optional_string(
-        &mut compact,
-        "normalized_name",
-        item_string(item, "normalized_name"),
-    );
     insert_optional_string(&mut compact, "namehash", item_string(item, "namehash"));
+    Value::Object(compact)
+}
+
+fn compact_resolver_role_item(item: &Value) -> Value {
+    let Some(object) = item.as_object() else {
+        return item.clone();
+    };
+
+    let mut compact = object.clone();
+    if let Some(value) = compact.remove("subject") {
+        compact.insert("address".to_owned(), value);
+    }
+    if let Some(value) = compact.remove("resource_count") {
+        compact.insert("registration_count".to_owned(), value);
+    }
+    if let Some(value) = compact.remove("permission_row_count") {
+        compact.insert("permission_count".to_owned(), value);
+    }
+    if let Some(value) = compact.remove("effective_powers") {
+        compact.insert("powers".to_owned(), value);
+    }
+    if let Some(value) = compact.remove("resource_ids") {
+        compact.insert("registration_ids".to_owned(), value);
+    }
     Value::Object(compact)
 }
 

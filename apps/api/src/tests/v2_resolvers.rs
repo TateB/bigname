@@ -78,8 +78,34 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
     );
     let value = serde_json::to_value(overview).expect("overview must serialize");
     assert!(value["nodes"].is_array());
-    assert!(value["aliases"].is_array());
-    assert!(value["roles"].is_array());
+    assert_eq!(
+        value["aliases"],
+        json!([
+            {
+                "namespace": "ens",
+                "name": "beta.eth",
+                "display_name": "Beta.eth",
+                "namehash": "namehash:beta.eth"
+            }
+        ])
+    );
+    assert_eq!(
+        value["roles"],
+        json!([
+            {
+                "address": "0x0000000000000000000000000000000000000abc",
+                "registration_count": 1,
+                "permission_count": 1,
+                "powers": ["set_records", "set_resolver"],
+                "registration_ids": ["00000000-0000-0000-0000-00000000b100"]
+            }
+        ])
+    );
+    assert!(value["roles"][0].get("subject").is_none());
+    assert!(value["roles"][0].get("resource_count").is_none());
+    assert!(value["roles"][0].get("permission_row_count").is_none());
+    assert!(value["roles"][0].get("effective_powers").is_none());
+    assert!(value["roles"][0].get("resource_ids").is_none());
     assert_eq!(value["events"], Value::Null);
 
     let error = crate::v2::resolver_overview_include(&["records".to_owned()])
@@ -120,7 +146,12 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     assert!(first_page["data"].get("roles").is_none());
     assert!(first_page["data"].get("events").is_none());
     assert_eq!(first_page["data"]["nodes"][0]["namespace"], json!("ens"));
-    assert_eq!(first_page["data"]["nodes"][0]["name"], json!("Alice.eth"));
+    assert_eq!(first_page["data"]["nodes"][0]["name"], json!("alice.eth"));
+    assert_eq!(
+        first_page["data"]["nodes"][0]["display_name"],
+        json!("Alice.eth")
+    );
+    assert!(first_page["data"]["nodes"][0].get("normalized_name").is_none());
 
     let bound_names = &first_page["data"]["bound_names"];
     assert_eq!(bound_names["page"]["cursor"], Value::Null);

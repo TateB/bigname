@@ -64,42 +64,50 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     let rows = payload["data"]
         .as_array()
         .expect("permissions data must be an array");
-    assert_eq!(rows.len(), 2);
-    let current = permission_row_by_registration(rows, current_resource_id);
+    assert_eq!(rows.len(), 5);
+    let resolver = permission_row_by_scope_kind(rows, "resolver");
+    let record_manager = permission_row_by_scope_kind(rows, "record_manager");
+    let migration_derived = permission_row_by_scope_kind(rows, "migration_derived");
+    let transport_derived = permission_row_by_scope_kind(rows, "transport_derived");
     let stale = permission_row_by_registration(rows, stale_resource_id);
 
-    assert_eq!(current["address"], json!(V2_PERMISSIONS_SUBJECT));
-    assert_eq!(current["registration_id"], json!(current_resource_id.to_string()));
-    assert_eq!(current["name"], json!("perms.eth"));
+    assert_eq!(resolver["address"], json!(V2_PERMISSIONS_SUBJECT));
     assert_eq!(
-        current["grant_scope"],
+        resolver["registration_id"],
+        json!(current_resource_id.to_string())
+    );
+    assert_eq!(resolver["name"], json!("perms.eth"));
+    assert_eq!(
+        resolver["grant_scope"],
         json!({
             "kind": "resolver",
             "detail": {
-                "chain_id": "ethereum-mainnet",
-                "resolver_address": "0x0000000000000000000000000000000000000abc"
+                "resolver": {
+                    "chain_id": 1,
+                    "address": "0x0000000000000000000000000000000000000abc"
+                }
             }
         })
     );
     assert_eq!(
-        current["powers"],
+        resolver["powers"],
         json!(["set_resolver", "create_subnames"])
     );
     assert_eq!(
-        current["lineage"],
+        resolver["lineage"],
         json!({
             "grant": {
-                "kind": "normalized_event",
-                "manifest_version": 8
+                "kind": "event",
+                "event_id": 108
             },
             "revocation": {
-                "kind": "permission_row",
+                "kind": "permission",
                 "registration_id": current_resource_id.to_string()
             },
             "inheritance_path": [
                 {
-                    "kind": "resource_authority",
-                    "resource_id": current_resource_id
+                    "kind": "registration_authority",
+                    "registration_id": current_resource_id.to_string()
                 }
             ],
             "transfer_behavior": {
@@ -108,14 +116,50 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
         })
     );
 
+    assert_eq!(
+        record_manager["grant_scope"],
+        json!({
+            "kind": "record_manager",
+            "detail": {
+                "chain_id": 1,
+                "manager": "0x0000000000000000000000000000000000000cc3"
+            }
+        })
+    );
+    assert_eq!(
+        migration_derived["grant_scope"],
+        json!({
+            "kind": "migration_derived",
+            "detail": {
+                "predecessor_registration_id": v2_permissions_predecessor_resource_id().to_string()
+            }
+        })
+    );
+    assert_eq!(
+        transport_derived["grant_scope"],
+        json!({
+            "kind": "transport_derived",
+            "detail": {
+                "transport": "l1_to_l2"
+            }
+        })
+    );
+
     assert_eq!(stale["registration_id"], json!(stale_resource_id.to_string()));
     assert!(stale.get("name").is_none());
+    assert_eq!(
+        stale["grant_scope"],
+        json!({
+            "kind": "resource",
+            "detail": {}
+        })
+    );
     assert_eq!(
         stale["lineage"],
         json!({
             "grant": {
-                "kind": "normalized_event",
-                "manifest_version": 7
+                "kind": "event",
+                "event_id": 109
             }
         })
     );
@@ -135,7 +179,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     let name_rows = by_name["data"]
         .as_array()
         .expect("name-filtered permissions data");
-    assert_eq!(name_rows.len(), 2);
+    assert_eq!(name_rows.len(), 5);
     assert!(
         name_rows
             .iter()
@@ -150,7 +194,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     let registration_rows = by_registration["data"]
         .as_array()
         .expect("registration-filtered permissions data");
-    assert_eq!(registration_rows.len(), 2);
+    assert_eq!(registration_rows.len(), 5);
     assert!(
         registration_rows
             .iter()
@@ -191,7 +235,7 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
     )
     .await?;
     assert_eq!(second_page["page"]["cursor"], json!(next_cursor));
-    assert_eq!(second_page["page"]["has_more"], json!(false));
+    assert_eq!(second_page["page"]["has_more"], json!(true));
     assert_ne!(first_page["data"], second_page["data"]);
 
     let cross_address = v2_permissions_response_for_database(
@@ -329,9 +373,15 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         8,
         108,
     );
+    current_row.grant_source = json!({
+        "kind": "normalized_event",
+        "normalized_event_id": 108,
+        "manifest_version": 8
+    });
     current_row.revocation_source = Some(json!({
         "kind": "permission_row",
-        "registration_id": current_resource_id
+        "resource_id": current_resource_id,
+        "manifest_version": 8
     }));
     current_row.inheritance_path = json!([
         {
@@ -350,13 +400,50 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         7,
         109,
     );
+    stale_row.grant_source = json!({
+        "kind": "normalized_event",
+        "normalized_event_id": 109,
+        "manifest_version": 7
+    });
     stale_row.inheritance_path = json!([]);
     stale_row.transfer_behavior = Value::Null;
+
+    let record_manager_row = permission_current_row(
+        current_resource_id,
+        V2_PERMISSIONS_SUBJECT,
+        PermissionScope::RecordManager {
+            chain_id: "ethereum-mainnet".to_owned(),
+            manager_address: "0x0000000000000000000000000000000000000cC3".to_owned(),
+        },
+        10,
+        111,
+    );
+    let migration_derived_row = permission_current_row(
+        current_resource_id,
+        V2_PERMISSIONS_SUBJECT,
+        PermissionScope::MigrationDerived {
+            predecessor_resource_id: v2_permissions_predecessor_resource_id(),
+        },
+        11,
+        112,
+    );
+    let transport_derived_row = permission_current_row(
+        current_resource_id,
+        V2_PERMISSIONS_SUBJECT,
+        PermissionScope::TransportDerived {
+            transport: "l1_to_l2".to_owned(),
+        },
+        12,
+        113,
+    );
 
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
             current_row,
+            record_manager_row,
+            migration_derived_row,
+            transport_derived_row,
             stale_row,
             permission_current_row(
                 current_resource_id,
@@ -379,10 +466,20 @@ fn permission_row_by_registration(rows: &[Value], resource_id: Uuid) -> &Value {
         .expect("permission row must exist")
 }
 
+fn permission_row_by_scope_kind<'a>(rows: &'a [Value], kind: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["grant_scope"]["kind"] == json!(kind))
+        .unwrap_or_else(|| panic!("permission row with scope kind {kind} must exist"))
+}
+
 fn v2_permissions_current_resource_id() -> Uuid {
     Uuid::from_u128(0xe100)
 }
 
 fn v2_permissions_stale_resource_id() -> Uuid {
     Uuid::from_u128(0xe200)
+}
+
+fn v2_permissions_predecessor_resource_id() -> Uuid {
+    Uuid::from_u128(0xe300)
 }

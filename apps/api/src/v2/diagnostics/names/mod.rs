@@ -1,7 +1,7 @@
 use axum::{Json, extract::FromRequestParts, http::request::Parts};
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use crate::{
     AppState, ExactNameSnapshotSelector, exact_name_snapshot_scope,
@@ -138,6 +138,45 @@ fn diagnostic_envelope(
     }))
 }
 
+fn apply_diagnostics_dictionary_names(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(object) => {
+            apply_diagnostics_dictionary_object_names(object);
+            for child in object.values_mut() {
+                apply_diagnostics_dictionary_names(child);
+            }
+        }
+        JsonValue::Array(items) => {
+            for child in items {
+                apply_diagnostics_dictionary_names(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_diagnostics_dictionary_object_names(object: &mut Map<String, JsonValue>) {
+    if let Some(value) = object.remove("normalized_name") {
+        object.entry("name".to_owned()).or_insert(value);
+    }
+    if let Some(value) = object.remove("canonical_display_name") {
+        object.entry("display_name".to_owned()).or_insert(value);
+    }
+    if let Some(value) = object.remove("logical_name_id")
+        && let Some((namespace, name)) = value.as_str().and_then(|value| value.split_once(':'))
+    {
+        object
+            .entry("namespace".to_owned())
+            .or_insert_with(|| JsonValue::String(namespace.to_owned()));
+        object
+            .entry("name".to_owned())
+            .or_insert_with(|| JsonValue::String(name.to_owned()));
+    }
+    if let Some(value) = object.remove("resource_id") {
+        object.entry("registration_id".to_owned()).or_insert(value);
+    }
+}
+
 #[cfg(test)]
 fn test_name_row() -> NameCurrentRow {
     use serde_json::json;
@@ -176,5 +215,53 @@ fn test_name_row() -> NameCurrentRow {
         manifest_version: 1,
         last_recomputed_at: bigname_storage::parse_rfc3339_utc_timestamp("2026-04-17T00:00:03Z")
             .expect("test timestamp must parse"),
+    }
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn diagnostics_dictionary_mapper_keeps_pipeline_event_ids_and_renames_concepts() {
+        let mut value = json!({
+            "record_version_boundary": {
+                "logical_name_id": "ens:alice.eth",
+                "resource_id": "00000000-0000-0000-0000-000000002200",
+                "normalized_event_id": 1200
+            },
+            "resolver_discovery_path": [
+                {
+                    "logical_name_id": "ens:alice.eth",
+                    "normalized_name": "alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "resource_id": "00000000-0000-0000-0000-000000002200"
+                }
+            ]
+        });
+
+        apply_diagnostics_dictionary_names(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "record_version_boundary": {
+                    "namespace": "ens",
+                    "name": "alice.eth",
+                    "registration_id": "00000000-0000-0000-0000-000000002200",
+                    "normalized_event_id": 1200
+                },
+                "resolver_discovery_path": [
+                    {
+                        "namespace": "ens",
+                        "name": "alice.eth",
+                        "display_name": "Alice.eth",
+                        "registration_id": "00000000-0000-0000-0000-000000002200"
+                    }
+                ]
+            })
+        );
     }
 }
