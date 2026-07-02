@@ -85,7 +85,7 @@ pub(crate) async fn get_name_records(
     let requested_records = parse_record_keys(params.keys.as_deref())?;
     let include_inventory = records_include_inventory(&params.include)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let row = load_name_current_for_selected_snapshot(

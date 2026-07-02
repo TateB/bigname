@@ -73,7 +73,7 @@ pub(crate) async fn get_subnames(
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let include_counts = subnames_include_counts(&params.include)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let parent = load_name_current_for_selected_snapshot(

@@ -213,6 +213,131 @@ async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_checkpoints() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_mixed_checkpoint_names(&database).await?;
+
+    let at = v2_sepolia_snapshot_token();
+    let payload = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={at}"),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["meta"]["as_of"]["11155111"],
+        json!({
+            "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
+            "block_hash": V2_SEPOLIA_SNAPSHOT_HASH,
+            "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
+        })
+    );
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(payload["data"]["network"], json!("ethereum-sepolia"));
+    assert_eq!(payload["data"]["chain_id"], json!(11155111));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_mixed_checkpoint_names(&database).await?;
+
+    let mainnet = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+    )
+    .await?;
+    let mainnet_at =
+        v2_at_token_from_meta_as_of(&mainnet, "1", "ethereum", "ethereum-mainnet")?;
+    let mainnet_replay = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}?at={mainnet_at}"),
+    )
+    .await?;
+    assert_eq!(mainnet_replay["meta"]["as_of"], mainnet["meta"]["as_of"]);
+    assert_eq!(mainnet_replay["data"], mainnet["data"]);
+
+    let sepolia_at = v2_sepolia_snapshot_token();
+    let sepolia = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_at}"),
+    )
+    .await?;
+    let sepolia_replay_at = v2_at_token_from_meta_as_of(
+        &sepolia,
+        "11155111",
+        "ethereum-sepolia",
+        "ethereum-sepolia",
+    )?;
+    let sepolia_replay = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_replay_at}"),
+    )
+    .await?;
+    assert_eq!(sepolia_replay["meta"]["as_of"], sepolia["meta"]["as_of"]);
+    assert_eq!(sepolia_replay["data"], sepolia["data"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_checkpoints() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_mixed_checkpoint_names(&database).await?;
+
+    let payload = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": V2_MAINNET_SNAPSHOT_BLOCK,
+            "block_hash": V2_MAINNET_SNAPSHOT_HASH,
+            "timestamp": V2_MAINNET_SNAPSHOT_TIMESTAMP
+        })
+    );
+    assert!(payload["meta"]["as_of"].get("11155111").is_none());
+    assert_eq!(payload["data"]["network"], json!("ethereum"));
+    assert_eq!(payload["data"]["chain_id"], json!(1));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_checkpoint_exists() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_only_checkpoint_name(&database).await?;
+
+    let payload = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?at=2026-04-17T00:10:30Z"),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["meta"]["as_of"]["11155111"],
+        json!({
+            "block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK,
+            "block_hash": V2_SEPOLIA_ONLY_SNAPSHOT_HASH,
+            "timestamp": V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP
+        })
+    );
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(payload["data"]["network"], json!("ethereum-sepolia"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
     let payload = v2_name_records_payload("/v2/names/Alice.eth/records").await?;
 
@@ -1378,8 +1503,237 @@ async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
     Ok(())
 }
 
+const V2_MAINNET_SNAPSHOT_NAME: &str = "mainnet-pin.eth";
+const V2_MAINNET_SNAPSHOT_HASH: &str = "0xv2-mainnet-pin";
+const V2_MAINNET_SNAPSHOT_BLOCK: i64 = 21_000_011;
+const V2_MAINNET_SNAPSHOT_TIMESTAMP: &str = "2026-04-17T00:00:11Z";
+const V2_SEPOLIA_SNAPSHOT_NAME: &str = "sepolia-pin.eth";
+const V2_SEPOLIA_SNAPSHOT_HASH: &str = "0xv2-sepolia-pin";
+const V2_SEPOLIA_SNAPSHOT_BLOCK: i64 = 111_551_110;
+const V2_SEPOLIA_SNAPSHOT_TIMESTAMP: &str = "2026-04-17T00:10:10Z";
+const V2_SEPOLIA_ONLY_SNAPSHOT_NAME: &str = "sepolia-only.eth";
+const V2_SEPOLIA_ONLY_SNAPSHOT_HASH: &str = "0xv2-sepolia-only";
+const V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK: i64 = 111_551_120;
+const V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP: &str = "2026-04-17T00:10:20Z";
+
+async fn seed_v2_mixed_checkpoint_names(database: &TestDatabase) -> Result<()> {
+    seed_v2_snapshot_profile_name(
+        database,
+        V2_SEPOLIA_SNAPSHOT_NAME,
+        "SepoliaPin.eth",
+        "namehash:sepolia-pin.eth",
+        Uuid::from_u128(0x7e20),
+        Uuid::from_u128(0x7e21),
+        Uuid::from_u128(0x7e22),
+        "ethereum-sepolia",
+        "ethereum-sepolia",
+        V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH,
+        V2_SEPOLIA_SNAPSHOT_TIMESTAMP,
+    )
+    .await?;
+    seed_v2_snapshot_profile_name(
+        database,
+        V2_MAINNET_SNAPSHOT_NAME,
+        "MainnetPin.eth",
+        "namehash:mainnet-pin.eth",
+        Uuid::from_u128(0x7e10),
+        Uuid::from_u128(0x7e11),
+        Uuid::from_u128(0x7e12),
+        "ethereum",
+        "ethereum-mainnet",
+        V2_MAINNET_SNAPSHOT_BLOCK,
+        V2_MAINNET_SNAPSHOT_HASH,
+        V2_MAINNET_SNAPSHOT_TIMESTAMP,
+    )
+    .await
+}
+
+async fn seed_v2_sepolia_only_checkpoint_name(database: &TestDatabase) -> Result<()> {
+    seed_v2_snapshot_profile_name(
+        database,
+        V2_SEPOLIA_ONLY_SNAPSHOT_NAME,
+        "SepoliaOnly.eth",
+        "namehash:sepolia-only.eth",
+        Uuid::from_u128(0x7e30),
+        Uuid::from_u128(0x7e31),
+        Uuid::from_u128(0x7e32),
+        "ethereum-sepolia",
+        "ethereum-sepolia",
+        V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_ONLY_SNAPSHOT_HASH,
+        V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP,
+    )
+    .await?;
+    sqlx::query("DELETE FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'")
+        .execute(&database.pool)
+        .await
+        .context("failed to remove mainnet checkpoint for sepolia-only v2 snapshot test")?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_v2_snapshot_profile_name(
+    database: &TestDatabase,
+    normalized_name: &str,
+    display_name: &str,
+    namehash: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+    slot: &str,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<()> {
+    let logical_name_id = format!("ens:{normalized_name}");
+    seed_v2_subnames_bound_child(
+        database,
+        &logical_name_id,
+        display_name,
+        namehash,
+        block_number.rem_euclid(100),
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "ens_v2_registry"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000001"
+            },
+            "resolver": {
+                "chain_id": chain_id,
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged"
+            }
+        }),
+    )
+    .await?;
+
+    let mut row = bigname_storage::load_name_current(&database.pool, &logical_name_id)
+        .await
+        .with_context(|| format!("failed to load v2 snapshot fixture row {logical_name_id}"))?
+        .with_context(|| format!("v2 snapshot fixture row {logical_name_id} was not inserted"))?;
+    row.chain_positions = v2_snapshot_chain_positions(slot, chain_id, block_number, block_hash, timestamp);
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            chain_id: "finalized"
+        }
+    });
+    row.declared_summary["resolver"]["chain_id"] = json!(chain_id);
+    row.provenance["manifest_versions"] = json!([
+        {
+            "manifest_version": 3,
+            "source_family": "ens_v2_registry_l1",
+            "chain": chain_id,
+            "deployment_epoch": "ens_v2"
+        }
+    ]);
+    database.insert_name_current_row(row).await
+}
+
+fn v2_snapshot_chain_positions(
+    slot: &str,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Value {
+    json!({
+        slot: {
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": timestamp
+        }
+    })
+}
+
+fn v2_sepolia_snapshot_token() -> String {
+    v2_at_token(
+        "ethereum-sepolia",
+        "ethereum-sepolia",
+        V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH,
+        V2_SEPOLIA_SNAPSHOT_TIMESTAMP,
+    )
+    .expect("sepolia snapshot token fixture must encode")
+}
+
+fn v2_at_token_from_meta_as_of(
+    payload: &Value,
+    numeric_chain_id: &str,
+    slot: &str,
+    chain_id: &str,
+) -> Result<String> {
+    let as_of = payload
+        .pointer(&format!("/meta/as_of/{numeric_chain_id}"))
+        .with_context(|| format!("response must include meta.as_of[{numeric_chain_id}]"))?;
+    let block_number = as_of
+        .get("block_number")
+        .and_then(Value::as_i64)
+        .context("meta.as_of block_number must be an i64")?;
+    let block_hash = as_of
+        .get("block_hash")
+        .and_then(Value::as_str)
+        .context("meta.as_of block_hash must be a string")?;
+    let timestamp = as_of
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .context("meta.as_of timestamp must be a string")?;
+
+    v2_at_token(slot, chain_id, block_number, block_hash, timestamp)
+}
+
+fn v2_at_token(
+    slot: &str,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<String> {
+    let position = bigname_storage::ChainPosition {
+        slot: slot.to_owned(),
+        chain_id: chain_id.to_owned(),
+        block_number,
+        block_hash: block_hash.to_owned(),
+        timestamp: bigname_storage::parse_rfc3339_utc_timestamp(timestamp)
+            .map_err(|error| anyhow::anyhow!("{error}"))?,
+    };
+    let selected = bigname_storage::SelectedSnapshot {
+        chain_positions: bigname_storage::ChainPositions::new(std::collections::BTreeMap::from([
+            (slot.to_owned(), position),
+        ])),
+        consistency: bigname_storage::SnapshotConsistency::Head,
+    };
+    Ok(crate::v2::encode_at_token(&selected))
+}
+
 async fn v2_name_record_payload(uri: &str) -> Result<Value> {
     v2_name_record_payload_with_row(uri, |_| {}).await
+}
+
+async fn v2_name_record_payload_for_database(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Value> {
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 name record request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
 }
 
 async fn v2_name_record_payload_with_row(

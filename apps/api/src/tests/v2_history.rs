@@ -266,6 +266,37 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_get_history_uses_sepolia_positioned_at_token_on_mixed_checkpoints() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_checkpoint_history(&database).await?;
+
+    let at = v2_sepolia_snapshot_token();
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history?at={at}"),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["meta"]["as_of"]["11155111"],
+        json!({
+            "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
+            "block_hash": V2_SEPOLIA_SNAPSHOT_HASH,
+            "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
+        })
+    );
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(
+        history_types(payload["data"].as_array().expect("history data")),
+        vec!["registration"]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn v2_history_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
@@ -394,6 +425,50 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await
     .context("failed to upsert v2 history fixture events")?;
+
+    Ok(())
+}
+
+async fn seed_v2_mixed_checkpoint_history(database: &TestDatabase) -> Result<()> {
+    let logical_name_id = format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}");
+    let resource_id = Uuid::from_u128(0x7e20);
+    let block_number = V2_SEPOLIA_SNAPSHOT_BLOCK + 1;
+    let block_hash = "0xv2-sepolia-history-event";
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-sepolia",
+            block_hash,
+            Some(V2_SEPOLIA_SNAPSHOT_HASH),
+            block_number,
+            1_776_384_711,
+        )],
+    )
+    .await?;
+
+    let mut event = history_event(
+        "v2-sepolia-snapshot-history-registration",
+        None,
+        Some(resource_id),
+        Some("ethereum-sepolia"),
+        Some(block_number),
+        Some(block_hash),
+        Some("0xv2sepoliahistorytx"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.namespace = "ens".to_owned();
+    event.logical_name_id = Some(logical_name_id);
+    event.event_kind = "RegistrationGranted".to_owned();
+    event.source_family = "ens_v2_registry_l1".to_owned();
+    event.derivation_kind = "ens_v2_exact_name_profile".to_owned();
+    event.after_state = json!({
+        "authority_kind": "ens_v2_registry",
+        "authority_key": "registry:ethereum-sepolia:sepolia-pin",
+        "registrant": "0x00000000000000000000000000000000000000aa",
+    });
+    bigname_storage::upsert_normalized_events(&database.pool, &[event]).await?;
 
     Ok(())
 }

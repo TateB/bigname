@@ -5,7 +5,8 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    HistoryCursor, HistoryEvent as StorageHistoryEvent, HistorySummaryMode, SnapshotSelectionScope,
+    HistoryCursor, HistoryEvent as StorageHistoryEvent, HistorySummaryMode, SnapshotAt,
+    SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
@@ -16,9 +17,9 @@ use crate::{
 };
 
 use super::{
-    CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page, QueryParamAllowlist,
-    QueryParams, StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    resolve_v2_snapshot,
+    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
+    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, as_of_meta, decode,
+    decode_at_token, encode, encode_at_token, resolve_v2_snapshot,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -70,7 +71,7 @@ pub(crate) async fn get_history(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let parent = load_name_current_for_selected_snapshot(
@@ -298,15 +299,43 @@ pub(crate) fn history_storage_scope(scope: HistoryScope) -> bigname_storage::His
 pub(crate) async fn v2_exact_name_snapshot_scope(
     state: &AppState,
     namespace: &str,
+    at: Option<&AtSelector>,
 ) -> V2Result<SnapshotSelectionScope> {
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary(state, namespace, at, false).await
+}
+
+pub(crate) async fn v2_exact_name_snapshot_scope_with_resolution_auxiliary(
+    state: &AppState,
+    namespace: &str,
+    at: Option<&AtSelector>,
+    include_resolution_auxiliary: bool,
+) -> V2Result<SnapshotSelectionScope> {
+    let at_positions = at.map(v2_snapshot_scope_at_selector).transpose()?.flatten();
+    let selector = at_positions
+        .as_deref()
+        .map(ExactNameSnapshotSelector::from_at)
+        .unwrap_or_default();
+
     crate::exact_name_snapshot_scope(
         &state.pool,
         namespace,
-        ExactNameSnapshotSelector::default(),
-        false,
+        selector,
+        include_resolution_auxiliary,
     )
     .await
     .map_err(api_error_to_v2)
+}
+
+fn v2_snapshot_scope_at_selector(at: &AtSelector) -> V2Result<Option<String>> {
+    match at {
+        AtSelector::Timestamp(_) => Ok(None),
+        AtSelector::SnapshotToken(token) => {
+            let SnapshotAt::ResolvedPositions(chain_positions) = decode_at_token(token)? else {
+                return Ok(None);
+            };
+            Ok(Some(chain_positions.to_value().to_string()))
+        }
+    }
 }
 
 pub(crate) fn api_error_to_v2(error: ApiError) -> V2Error {

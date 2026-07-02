@@ -143,7 +143,8 @@ pub(crate) async fn get_search(
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     // Search is anchorless: `namespace` filters rows, while `at`/`finality`
     // select response metadata and cursor binding for the latest-row read.
-    let scope = search_snapshot_scope(&state, params.namespace.as_deref()).await?;
+    let scope =
+        search_snapshot_scope(&state, params.namespace.as_deref(), params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
@@ -305,11 +306,12 @@ fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
 async fn search_snapshot_scope(
     state: &AppState,
     namespace: Option<&str>,
+    at: Option<&AtSelector>,
 ) -> V2Result<SnapshotSelectionScope> {
     let Some(namespace) = namespace else {
         let mut requirements = Vec::new();
         for namespace in PUBLIC_NAMESPACES {
-            let scope = v2_exact_name_snapshot_scope(state, namespace).await?;
+            let scope = v2_exact_name_snapshot_scope(state, namespace, at).await?;
             requirements.extend(scope.required_positions().iter().cloned());
         }
 
@@ -317,7 +319,7 @@ async fn search_snapshot_scope(
             .map_err(|error| V2Error::internal_error(error.message()));
     };
 
-    v2_exact_name_snapshot_scope(state, namespace).await
+    v2_exact_name_snapshot_scope(state, namespace, at).await
 }
 
 async fn load_search_storage_page(

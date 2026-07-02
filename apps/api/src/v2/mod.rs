@@ -51,7 +51,7 @@ pub(crate) use events::{
 pub(crate) use history::{
     HistoryEvent, api_error_to_v2, build_history_event, format_timestamp, get_history,
     history_cursor_payload, history_event_type, history_storage_cursor, history_storage_scope,
-    v2_exact_name_snapshot_scope,
+    v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 pub(crate) use lookup::get_lookup;
 pub(crate) use name_record::{

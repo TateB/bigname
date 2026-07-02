@@ -112,7 +112,8 @@ pub(crate) async fn get_address_names(
     let storage_order = order_to_storage(params.order);
     let normalized_q = params.q.as_deref().map(str::to_lowercase);
 
-    let scope = v2_exact_name_snapshot_scope(&state, snapshot_namespace).await?;
+    let scope =
+        v2_exact_name_snapshot_scope(&state, snapshot_namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let snapshot_token = encode_at_token(&selected_snapshot);

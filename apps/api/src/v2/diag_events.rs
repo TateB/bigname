@@ -67,7 +67,7 @@ pub(crate) async fn get_diagnostic_events(
     let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let snapshot_token = encode_at_token(&selected_snapshot);

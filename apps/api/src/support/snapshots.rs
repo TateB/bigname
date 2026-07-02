@@ -66,6 +66,15 @@ pub(super) struct ExactNameSnapshotSelector<'a> {
     consistency: Option<&'a str>,
 }
 
+impl<'a> ExactNameSnapshotSelector<'a> {
+    pub(super) fn from_at(at: &'a str) -> Self {
+        Self {
+            at: Some(at),
+            ..Self::default()
+        }
+    }
+}
+
 impl<'a> From<&'a ExactNameSnapshotQuery> for ExactNameSnapshotSelector<'a> {
     fn from(query: &'a ExactNameSnapshotQuery) -> Self {
         Self {

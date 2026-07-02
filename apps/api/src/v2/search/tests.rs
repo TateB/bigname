@@ -520,17 +520,14 @@ impl SearchDatabase {
 
     async fn snapshot_token(&self, namespace: &str, at: &str) -> Result<String> {
         let state = self.app_state();
-        let scope = v2_exact_name_snapshot_scope(&state, namespace)
+        let at_selector = AtSelector::Timestamp(at.to_owned());
+        let scope = v2_exact_name_snapshot_scope(&state, namespace, Some(&at_selector))
             .await
             .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
-        let selected = resolve_v2_snapshot(
-            self.pool(),
-            &scope,
-            Some(&AtSelector::Timestamp(at.to_owned())),
-            Finality::Latest,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
+        let selected =
+            resolve_v2_snapshot(self.pool(), &scope, Some(&at_selector), Finality::Latest)
+                .await
+                .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
 
         Ok(encode_at_token(&selected))
     }

@@ -3,14 +3,11 @@ use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue};
 
-use crate::{
-    AppState, ExactNameSnapshotSelector, exact_name_snapshot_scope,
-    load_name_current_for_selected_snapshot, normalize_inferred_route_name,
-};
+use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferred_route_name};
 
 use super::super::{
     Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    resolve_v2_snapshot,
+    resolve_v2_snapshot, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod authority;
@@ -94,14 +91,13 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let scope = exact_name_snapshot_scope(
-        &state.pool,
+    let scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
+        state,
         &namespace,
-        ExactNameSnapshotSelector::default(),
+        params.at.as_ref(),
         include_resolution_auxiliary,
     )
-    .await
-    .map_err(api_error_to_v2)?;
+    .await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let row = load_name_current_for_selected_snapshot(
