@@ -4,7 +4,9 @@ use bigname_storage::{
 };
 use sqlx::PgPool;
 
-use crate::v2::{Meta, V2Error, V2Result, snapshot_meta};
+use crate::v2::{
+    Meta, SnapshotReadResource, V2Error, V2Result, sanitized_snapshot_internal_error, snapshot_meta,
+};
 
 pub(crate) async fn load_served_head_meta(
     pool: &PgPool,
@@ -28,10 +30,10 @@ pub(crate) async fn load_served_head_meta(
             ));
         }
         Err(error) => {
-            return Err(V2Error::internal_error(format!(
-                "failed to load lookup served head: {}",
-                error.message()
-            )));
+            return Err(sanitized_snapshot_internal_error(
+                &error,
+                SnapshotReadResource::Resource,
+            ));
         }
     };
     snapshot_meta(&selected)

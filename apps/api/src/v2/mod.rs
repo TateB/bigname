@@ -87,7 +87,7 @@ pub(crate) use search::{
 pub(crate) use snapshots::{
     SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
     consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
-    resolve_v2_snapshot_for, snapshot_meta,
+    resolve_v2_snapshot_for, sanitized_snapshot_internal_error, snapshot_meta,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{

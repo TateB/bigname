@@ -179,6 +179,55 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let state = database.app_state();
+    state.pool.close().await;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "namespace": "ens",
+                        "inputs": [{"id": "name", "name": "alice.eth"}]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 lookup closed-pool request failed")?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("failed to serve v2 request")
+    );
+    let error_body = payload["error"].to_string();
+    for term in [
+        "checkpoint",
+        "chain_checkpoints",
+        "chain_lineage",
+        "stored",
+        "lineage",
+    ] {
+        assert!(
+            !error_body.contains(term),
+            "lookup internal error leaked storage detail {term}: {error_body}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_namespace_scoped_token_replays_with_union_checkpoint_present() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
