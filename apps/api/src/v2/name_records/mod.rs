@@ -30,6 +30,7 @@ pub(crate) use build::{
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
+const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
 
 pub(crate) struct NameRecordsQueryParams;
 
@@ -260,7 +261,7 @@ async fn load_verified_record_lookup_with_persistence(
         Ok(Some(outcome)) => Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome)))),
         Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
-            VerifiedRecordLookup::Stale(error.message().to_owned()),
+            VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
         )),
         Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
     }

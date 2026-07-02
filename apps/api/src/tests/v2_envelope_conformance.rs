@@ -500,6 +500,18 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
         collect_pipeline_vocabulary_in_product_response(route, &payload, &mut violations);
     }
 
+    let records_route = V2_CONFORMANCE_ROUTES
+        .iter()
+        .find(|route| route.success == V2SuccessFixture::NameRecords)
+        .expect("name-records conformance route must be registered");
+    let verified_stale_records = v2_conformance_name_records_verified_stale_payload().await?;
+    assert_v2_name_records_verified_stale_fixture(&verified_stale_records);
+    collect_pipeline_vocabulary_in_product_response(
+        records_route,
+        &verified_stale_records,
+        &mut violations,
+    );
+
     let database = TestDatabase::new_migrated().await?;
     for route in V2_CONFORMANCE_ROUTES
         .iter()
@@ -773,6 +785,15 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
     }
 }
 
+async fn v2_conformance_name_records_verified_stale_payload() -> Result<Value> {
+    v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        |_, _, _| {},
+        None,
+    )
+    .await
+}
+
 async fn v2_conformance_get_json(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = app_router(database.app_state())
         .oneshot(
@@ -956,6 +977,22 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
         }
         _ => {}
     }
+}
+
+fn assert_v2_name_records_verified_stale_fixture(payload: &Value) {
+    assert_non_empty_json(
+        &payload["data"]["records"],
+        "GET /v2/names/{name}/records verified stale",
+        "$.data.records",
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "stale",
+            "failure_reason": "verified_answer_stale_for_snapshot"
+        }),
+        "verified-stale records fixture must exercise the product stale reason"
+    );
 }
 
 fn assert_non_empty_json(value: &Value, context: &str, path: &str) {
