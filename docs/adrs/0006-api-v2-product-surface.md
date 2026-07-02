@@ -245,9 +245,10 @@ Rules:
   makes it cheap (the reverse-lookup count path) or where the caller opts in
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
-- `meta` is always present: `as_of` and `as_of_token` on every route that reads
-  chain-derived state (control-plane routes — `/v2/status`,
-  `/v2/namespaces/{namespace}` — omit both); `completeness`,
+- `meta` is always present: `as_of` and `as_of_token` on routes that read
+  snapshot-pinned chain-derived state (control-plane routes — `/v2/status`,
+  `/v2/namespaces/{namespace}` — and primary-name responses served by the
+  route-local on-demand fallback omit both); `completeness`,
   `unsupported_fields`, and `unsupported_reason` only when the read is not clean;
   `source` when the route supports
   `?source=`. There is no `meta` query parameter — no `meta=full` (deeper
@@ -326,7 +327,7 @@ behavior per row.
 | --- | --- | --- |
 | `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or the URL-safe opaque snapshot token from a previous response's `meta.as_of_token` (pins exact per-chain positions) |
 | `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
-| `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
+| `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | every paginated route | route-documented field set + `asc`/`desc`; one style |
@@ -376,7 +377,12 @@ Rules:
 - `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
   does not accept `at` or `finality`; its `meta.as_of`/`meta.as_of_token`
   record the served positions for staleness attribution and shadow-diff
-  correlation.
+  correlation when the answer comes from persisted snapshot state. When the
+  ENS/60 route-local on-demand fallback supplies the answer, the response omits
+  `meta.as_of` and `meta.as_of_token`. Basenames responses that serve a
+  persisted verified answer include both the Base authority position and the
+  Ethereum resolution-auxiliary position; indexed-only responses and missing
+  persisted verified outcomes remain Base-scoped.
 
 ### Error model and statuses
 

@@ -43,6 +43,7 @@ enum V2TopLevelEnvelope {
 #[derive(Clone, Copy)]
 enum V2AsOfExpectation {
     Present,
+    Conditional,
     Absent,
 }
 
@@ -237,7 +238,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
         success: V2SuccessFixture::PrimaryName,
         envelope: V2TopLevelEnvelope::DataMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Conditional,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -759,7 +760,10 @@ async fn assert_v2_as_of_token_fixpoint(
 }
 
 fn route_accepts_at(route: &V2ConformanceRoute) -> bool {
-    matches!(route.as_of, V2AsOfExpectation::Present)
+    matches!(
+        route.as_of,
+        V2AsOfExpectation::Present | V2AsOfExpectation::Conditional
+    )
         && !matches!(
             route.success,
             V2SuccessFixture::Lookup | V2SuccessFixture::PrimaryName
@@ -1584,6 +1588,14 @@ fn assert_v2_success_envelope(route: &V2ConformanceRoute, payload: &Value) {
         V2AsOfExpectation::Present => {
             assert_as_of_shape(route, &payload["meta"]["as_of"]);
             assert_as_of_token_shape(route, &payload["meta"]["as_of_token"]);
+        }
+        V2AsOfExpectation::Conditional => {
+            if payload["meta"].get("as_of").is_some()
+                || payload["meta"].get("as_of_token").is_some()
+            {
+                assert_as_of_shape(route, &payload["meta"]["as_of"]);
+                assert_as_of_token_shape(route, &payload["meta"]["as_of_token"]);
+            }
         }
         V2AsOfExpectation::Absent => {
             assert!(

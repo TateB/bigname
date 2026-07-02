@@ -159,8 +159,9 @@ Rules:
   must not run unconditional full counts on the request path to fill it.
 - `meta` is always present. Routes that read chain-derived state include
   `meta.as_of` and `meta.as_of_token` when they can attribute at least one
-  served chain position; control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`) omit both. `meta.as_of` is human-readable
+  served snapshot-pinned chain position; control-plane routes (`/v2/status`,
+  `/v2/namespaces/{namespace}`) and primary-name responses served by the
+  route-local on-demand fallback omit both. `meta.as_of` is human-readable
   staleness attribution. `meta.as_of_token` is opaque and is the value to pass
   to `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
@@ -295,7 +296,12 @@ emitting a token that cannot replay on a compatible snapshot-read route.
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
-attribution and shadow-diff correlation.
+attribution and shadow-diff correlation. When the ENS/60 route-local on-demand
+fallback supplies the answer instead of persisted snapshot state, the response
+omits `meta.as_of` and `meta.as_of_token`. Basenames responses that serve a
+persisted verified answer include both the Base authority position and the
+Ethereum resolution-auxiliary position; indexed-only responses and missing
+persisted verified outcomes remain Base-scoped.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 

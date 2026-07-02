@@ -347,7 +347,13 @@ Field ownership:
   summary and must not contradict that entry. Claimed-vs-verified remains one
   call without `declared_state`/`verified_state`. When a served head is
   available, `meta.as_of` and `meta.as_of_token` record the served positions
-  for staleness attribution and shadow-diff correlation.
+  for staleness attribution and shadow-diff correlation. When the ENS/60
+  route-local on-demand fallback supplies the answer instead of persisted
+  snapshot state, the response omits `meta.as_of` and `meta.as_of_token`.
+  Basenames responses that serve a persisted verified answer include both the
+  Base authority position and the Ethereum resolution-auxiliary position;
+  indexed-only responses and missing persisted verified outcomes remain
+  Base-scoped.
 - Pagination behavior: none.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
