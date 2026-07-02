@@ -293,7 +293,7 @@ async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()>
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000065);
     let verified_primary_name = json!({
         "status": "unsupported",
-        "unsupported_reason": "primary_names_current_projection_missing"
+        "unsupported_reason": "primary_name_sidecar_missing"
     });
 
     database

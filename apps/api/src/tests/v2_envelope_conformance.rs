@@ -125,79 +125,6 @@ const PRODUCT_ONLY_BANNED_FIELD_NAMES: &[&str] = &[
 // carry pipeline vocabulary. It remains banned on product routes.
 const DIAGNOSTICS_ONLY_PIPELINE_IDENTIFIER_FIELD_NAMES: &[&str] = &["normalized_event_id"];
 
-// ADR 0006 section "Rules" bans pipeline vocabulary from product-route field names,
-// enum/status values, and errors. Storage table names are enumerated from
-// crates/storage plus migrations/20260430060000_baseline.sql and later
-// storage migrations.
-const PRODUCT_PIPELINE_TERMS: &[&str] = &[
-    "projection",
-    "sidecar",
-    "manifest_version",
-    "manifest",
-    "normalized_event",
-    "normalized event",
-    "permission_row",
-    "raw_log",
-    "raw_fact",
-    "raw fact",
-    "coverage",
-    "resource_authority",
-    "resource_rebound",
-    "derivation_kind",
-    "exhaustiveness",
-    "enumeration_basis",
-    "source_classes_considered",
-    "address_names_current",
-    "address_names_current_identity_counts",
-    "address_names_current_identity_feed",
-    "backfill_jobs",
-    "backfill_ranges",
-    "chain_checkpoints",
-    "chain_header_audit",
-    "chain_lineage",
-    "children_current",
-    "contract_instance_addresses",
-    "contract_instances",
-    "current_projection_replay_status",
-    "discovery_edges",
-    "event_silent_resolver_call_observations",
-    "execution_cache_outcomes",
-    "execution_steps",
-    "execution_traces",
-    "label_preimage_backfill_runs",
-    "label_preimages",
-    "manifest_alert_observations",
-    "manifest_capability_flags",
-    "manifest_contract_instances",
-    "manifest_discovery_rules",
-    "manifest_versions",
-    "name_current",
-    "name_surface_normalization_repair_findings",
-    "name_surfaces",
-    "normalized_events",
-    "normalized_replay_adapter_checkpoint_items",
-    "normalized_replay_adapter_checkpoints",
-    "normalized_replay_cursors",
-    "permission_current",
-    "permissions_current",
-    "primary_names_current",
-    "projection_apply_cursors",
-    "projection_invalidations",
-    "projection_invalidation_dead_letters",
-    "projection_normalized_event_changes",
-    "raw_call_snapshots",
-    "raw_code_hashes",
-    "raw_logs",
-    "raw_payload_cache_metadata",
-    "raw_receipts",
-    "raw_transactions",
-    "record_inventory_current",
-    "resolver_current",
-    "resources",
-    "surface_bindings",
-    "token_lineages",
-];
-
 const DIAGNOSTICS_BINDING_DICTIONARY_ALLOWLIST: &[&str] = &[
     // ADR 0006 route catalog says diagnostics binding explains binding ids,
     // binding kind, and anchors.
@@ -1892,27 +1819,7 @@ fn is_enumish_product_value_key(key: &str) -> bool {
 }
 
 fn matched_pipeline_terms(candidate: &str) -> Vec<&'static str> {
-    let normalized_candidate = normalize_pipeline_candidate(candidate);
-
-    PRODUCT_PIPELINE_TERMS
-        .iter()
-        .copied()
-        .filter(|term| {
-            let normalized_term = normalize_pipeline_candidate(term);
-            normalized_candidate.contains(&normalized_term)
-        })
-        .collect()
-}
-
-fn normalize_pipeline_candidate(candidate: &str) -> String {
-    candidate
-        .chars()
-        .map(|ch| match ch {
-            'A'..='Z' => ch.to_ascii_lowercase(),
-            '-' | ' ' => '_',
-            _ => ch,
-        })
-        .collect()
+    crate::v2::matched_pipeline_vocabulary_terms(candidate, crate::v2::PRODUCT_PIPELINE_TERMS)
 }
 
 fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
@@ -1987,6 +1894,18 @@ fn term_match_has_underscore_boundaries(key: &str, term: &str, start: usize) -> 
 }
 
 #[test]
+fn v2_pipeline_matching_uses_shared_underscore_boundaries_and_plural_suffixes() {
+    assert_eq!(matched_pipeline_terms("insufficient_coverage"), vec!["coverage"]);
+    assert_eq!(matched_pipeline_terms("coverage_gap"), vec!["coverage"]);
+    assert_eq!(matched_pipeline_terms("coverages"), vec!["coverage"]);
+    assert!(matched_pipeline_terms("discoverage").is_empty());
+
+    let raw_fact_matches = matched_pipeline_terms("raw facts unavailable");
+    assert!(raw_fact_matches.contains(&"raw_fact"));
+    assert!(raw_fact_matches.contains(&"raw fact"));
+}
+
+#[test]
 fn v2_dictionary_field_matching_uses_underscore_boundaries_and_plural_suffixes() {
     assert_eq!(
         matched_banned_dictionary_field_names("resource_ids"),
@@ -2055,7 +1974,7 @@ fn v2_product_value_matching_targets_chain_ids_and_storage_powers() {
 
     collect_pipeline_vocabulary_in_product_response(&route, &payload, &mut violations);
 
-    assert_eq!(violations.len(), 2);
+    assert_eq!(violations.len(), 3);
     assert!(
         violations
             .iter()
@@ -2065,6 +1984,11 @@ fn v2_product_value_matching_targets_chain_ids_and_storage_powers() {
         violations
             .iter()
             .any(|violation| violation.contains("resource_control"))
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("pipeline vocabulary \"resources\""))
     );
 }
 

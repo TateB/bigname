@@ -7,7 +7,7 @@ use tracing::error;
 use crate::{ResolutionRecordKey, build_resolution_verified_state};
 
 use super::super::{
-    Source, Status, V2Error, V2Result,
+    PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_pipeline_vocabulary,
     name_record::{
         record_addresses, record_content_hash, record_text_records, record_value_string, resolver,
         string_field, value_to_string,
@@ -479,28 +479,18 @@ fn product_record_reason(reason: &str) -> V2Result<String> {
         "record_family_not_supported_in_phase6_projection" => {
             Ok("record_family_not_supported".to_owned())
         }
-        _ if record_reason_contains_pipeline_vocabulary(reason) => Err(V2Error::internal_error(
-            "failed to map product record reason vocabulary",
-        )),
+        _ if record_reason_contains_pipeline_vocabulary(reason) => {
+            error!(%reason, "rejected record reason containing pipeline vocabulary");
+            Err(V2Error::internal_error(
+                "failed to map product record reason vocabulary",
+            ))
+        }
         _ => Ok(reason.to_owned()),
     }
 }
 
 fn record_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
-    const PIPELINE_REASON_TERMS: &[&str] = &[
-        "normalized_event",
-        "normalized_events",
-        "phase6_projection",
-        "projection",
-        "record_inventory_current",
-        "raw_fact",
-        "raw_log",
-        "manifest",
-    ];
-
-    PIPELINE_REASON_TERMS
-        .iter()
-        .any(|term| reason.contains(term))
+    contains_pipeline_vocabulary(reason, PRODUCT_PIPELINE_TERMS)
 }
 
 #[cfg(test)]
@@ -528,9 +518,11 @@ mod tests {
 
     #[test]
     fn product_record_reason_rejects_unmapped_pipeline_vocabulary() {
-        let error = product_record_reason("raw_log_missing_record_cache")
-            .expect_err("pipeline vocabulary must fail loudly");
+        for reason in ["raw_log_missing_record_cache", "record_sidecar_missing"] {
+            let error =
+                product_record_reason(reason).expect_err("pipeline vocabulary must fail loudly");
 
-        assert_eq!(error.code(), ErrorCode::InternalError);
+            assert_eq!(error.code(), ErrorCode::InternalError);
+        }
     }
 }

@@ -98,7 +98,8 @@ pub(crate) use subnames::{
 };
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
-    OpsStatus, RegistrationStatus, Relation, Resolver, Source, Status,
+    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, Resolver, Source, Status,
+    contains_boundary_vocabulary, contains_pipeline_vocabulary, matched_pipeline_vocabulary_terms,
 };
 
 use axum::Router;

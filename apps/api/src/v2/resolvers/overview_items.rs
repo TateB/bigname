@@ -1,6 +1,9 @@
 use serde_json::{Map, Value, json};
 
-use crate::v2::{V2Error, V2Result, history_event_type, permission_powers_value, slug_to_numeric};
+use crate::v2::{
+    V2Error, V2Result, contains_boundary_vocabulary, history_event_type, permission_powers_value,
+    slug_to_numeric,
+};
 
 pub(super) fn projected_section_items(summary: &Value, field_key: &str) -> V2Result<Option<Value>> {
     if !summary_is_supported(summary) {
@@ -267,7 +270,7 @@ fn resolver_alias_unknown_key_has_banned_vocabulary(key: &str) -> bool {
         "provenance",
     ];
 
-    BANNED_TERMS.iter().any(|term| key.contains(term))
+    contains_boundary_vocabulary(key, BANNED_TERMS)
 }
 
 fn resolver_alias_mapping_error() -> V2Error {
