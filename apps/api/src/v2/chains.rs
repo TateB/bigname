@@ -66,6 +66,16 @@ pub(crate) fn deployment_profile_for_slug(slug: &str) -> Option<DeploymentProfil
         .map(|mapping| mapping.profile)
 }
 
+pub(crate) fn snapshot_slot_for_slug(slug: &str) -> Option<&'static str> {
+    match slug {
+        STORAGE_ETHEREUM_MAINNET_CHAIN_ID => Some("ethereum"),
+        STORAGE_BASE_MAINNET_CHAIN_ID => Some("base"),
+        ETHEREUM_SEPOLIA_CHAIN_ID => Some(ETHEREUM_SEPOLIA_CHAIN_ID),
+        BASE_SEPOLIA_CHAIN_ID => Some(BASE_SEPOLIA_CHAIN_ID),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +130,26 @@ mod tests {
             Some(DeploymentProfile::Sepolia)
         );
         assert_eq!(deployment_profile_for_slug("unknown-mainnet"), None);
+    }
+
+    #[test]
+    fn snapshot_slots_use_profile_vocabulary() {
+        assert_eq!(
+            snapshot_slot_for_slug(STORAGE_ETHEREUM_MAINNET_CHAIN_ID),
+            Some("ethereum")
+        );
+        assert_eq!(
+            snapshot_slot_for_slug(STORAGE_BASE_MAINNET_CHAIN_ID),
+            Some("base")
+        );
+        assert_eq!(
+            snapshot_slot_for_slug(ETHEREUM_SEPOLIA_CHAIN_ID),
+            Some("ethereum-sepolia")
+        );
+        assert_eq!(
+            snapshot_slot_for_slug(BASE_SEPOLIA_CHAIN_ID),
+            Some("base-sepolia")
+        );
+        assert_eq!(snapshot_slot_for_slug("unknown-mainnet"), None);
     }
 }

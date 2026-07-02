@@ -8,8 +8,8 @@ use crate::AppState;
 use super::events::{parse_events_filter, resolve_events_namespace};
 use super::{
     Envelope, Meta, Page, QueryParamAllowlist, QueryParams, SnapshotReadResource,
-    StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    events_cursor_payload, events_storage_cursor, format_timestamp, resolve_v2_snapshot_for,
+    StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token, events_cursor_payload,
+    events_storage_cursor, format_timestamp, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope,
 };
 
@@ -120,10 +120,7 @@ pub(crate) async fn get_diagnostic_events(
         .iter()
         .map(build_diagnostic_event)
         .collect();
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,

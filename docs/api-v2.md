@@ -69,7 +69,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
 | `source` | answer origin `indexed` or `verified` (the records route adds request value `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
-| `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `as_of` | readable per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
 | `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
@@ -138,6 +139,7 @@ One success shape applies to every route:
         "timestamp": "2026-06-10T00:00:00Z"
       }
     },
+    "as_of_token": "opaque-token",
     "completeness": "partial",
     "unsupported_fields": ["role_summary"],
     "unsupported_reason": "not_supported_for_namespace",
@@ -156,8 +158,10 @@ Rules:
   it cheap or where a route explicitly documents `include=total_count`. Routes
   must not run unconditional full counts on the request path to fill it.
 - `meta` is always present. Routes that read chain-derived state include
-  `meta.as_of`; control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`) omit it. `meta.completeness`,
+  `meta.as_of` and `meta.as_of_token`; control-plane routes (`/v2/status`,
+  `/v2/namespaces/{namespace}`) omit both. `meta.as_of` is human-readable
+  staleness attribution. `meta.as_of_token` is opaque and is the value to pass
+  to `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
   read is not clean. `meta.source` appears when the route supports `source`.
 - `meta.unsupported_fields` names response-level sections or expansions the
@@ -228,7 +232,7 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
+| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or the URL-safe opaque snapshot token from `meta.as_of_token` |
 | `finality` | snapshot-read routes and diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | `latest` (default), `safe`, `finalized` |
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
@@ -268,18 +272,24 @@ Rules:
 
 `finality` values are `latest`, `safe`, and `finalized`. Snapshot selection is
 uniform across snapshot-read routes. Each chain-derived response carries
-`meta.as_of`, keyed by stringified `chain_id`, and that response metadata can
-round-trip as an `at` snapshot token to pin exact per-chain positions.
+`meta.as_of`, keyed by stringified `chain_id`, and `meta.as_of_token`, an
+opaque token that can round-trip as `at` to pin exact per-chain positions.
+Tokens are accepted when their chain positions are in the target route's
+snapshot scope. A multi-chain token from a namespace-omitted search replays on
+the same union search and is rejected by single-namespace routes whose scope
+does not include every token slot.
 For event and history rows, `finality` selects rows at blocks at or below the
 selected chain checkpoint; `safe` and `finalized` exclude rows above their
 respective checkpoints.
 
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
-`finality`; its `meta.as_of` records the served positions for staleness
-attribution and shadow-diff correlation.
+`finality`; its `meta.as_of` and `meta.as_of_token` record the served positions
+for staleness attribution and shadow-diff correlation.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
-does not accept `at` or `finality`.
+does not accept `at` or `finality`; its `meta.as_of` and `meta.as_of_token`
+record the served positions for staleness attribution and shadow-diff
+correlation.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 

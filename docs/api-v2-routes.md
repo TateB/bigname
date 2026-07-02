@@ -201,9 +201,9 @@ Field ownership:
 - Pagination behavior: standard collection pagination by
   `display_name` ascending.
 - Snapshot behavior: `at` and `finality` are accepted and used to resolve the
-  parent name and `meta.as_of`. The subname list itself reads the latest
-  `children_current` projection; true as-of child enumeration is deferred to a
-  storage follow-up.
+  parent name and `meta.as_of`/`meta.as_of_token`. The subname list itself
+  reads the latest `children_current` projection; true as-of child enumeration
+  is deferred to a storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
@@ -234,9 +234,9 @@ Field ownership:
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
 - Snapshot behavior: `at` and `finality` are accepted and used to resolve the
-  parent name and `meta.as_of`. The history list itself reads latest
-  normalized-event history; true as-of history enumeration is deferred to a
-  storage follow-up.
+  parent name and `meta.as_of`/`meta.as_of_token`. The history list itself
+  reads latest normalized-event history; true as-of history enumeration is
+  deferred to a storage follow-up.
 - Status semantics: no matching history returns `200` with empty `data`.
   Missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
@@ -273,9 +273,9 @@ Field ownership:
   for `migration_derived`; and `{transport}` for `transport_derived`.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: `at` and `finality` are accepted and used to resolve
-  `meta.as_of` and the `name` filter's registration anchor. Permission rows
-  read the latest permissions projection; true as-of permission enumeration is
-  deferred to a storage follow-up.
+  `meta.as_of`/`meta.as_of_token` and the `name` filter's registration anchor.
+  Permission rows read the latest permissions projection; true as-of permission
+  enumeration is deferred to a storage follow-up.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   selected snapshot. Unsupported filter combinations return `422 unsupported`.
@@ -313,12 +313,12 @@ Field ownership:
   `GET /v2/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, relation filter, `q`, dedupe mode, sort,
-  order, and the snapshot token used for `meta.as_of`.
+  order, and the snapshot token emitted as `meta.as_of_token`.
 - Snapshot behavior: `at` and `finality` are accepted and used only to resolve
-  `meta.as_of` (default namespace `ens` when `namespace` is omitted). The
-  address-name collection itself reads the latest `address_names_current`
-  projection; true as-of address-name enumeration is deferred to a storage
-  follow-up.
+  `meta.as_of`/`meta.as_of_token` (default namespace `ens` when `namespace` is
+  omitted). The address-name collection itself reads the latest
+  `address_names_current` projection; true as-of address-name enumeration is
+  deferred to a storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
@@ -345,7 +345,9 @@ Field ownership:
   a persisted or on-demand verified outcome exists. The `verified` answer
   entry is the source-specific payload; `verification` is the typed comparison
   summary and must not contradict that entry. Claimed-vs-verified remains one
-  call without `declared_state`/`verified_state`.
+  call without `declared_state`/`verified_state`. `meta.as_of` and
+  `meta.as_of_token` record the served positions for staleness attribution and
+  shadow-diff correlation.
 - Pagination behavior: none.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
@@ -379,10 +381,10 @@ Field ownership:
   dictionary vocabulary.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: `at` and `finality` are accepted and used only to resolve
-  `meta.as_of` (the snapshot scope spans all public namespaces when `namespace`
-  is omitted, and the single namespace when provided). The search collection
-  itself reads the latest `name_current` projection; true as-of search
-  enumeration is deferred to a storage follow-up.
+  `meta.as_of`/`meta.as_of_token` (the snapshot scope spans all public
+  namespaces when `namespace` is omitted, and the single namespace when
+  provided). The search collection itself reads the latest `name_current`
+  projection; true as-of search enumeration is deferred to a storage follow-up.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`.
   Namespace-omitted search returns `409 conflict` when the selector cannot form
@@ -446,7 +448,7 @@ Field ownership:
   value is `{completeness, unsupported_reason?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of`.
+  omits `meta.as_of` and `meta.as_of_token`.
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.
 - Replaces (v1): `GET /v1/namespaces/{namespace}`. Operational namespace
@@ -464,16 +466,16 @@ Diagnostic snapshot rules:
   `/v2/diagnostics/names/{name}/authority`,
   `/v2/diagnostics/names/{name}/records`,
   `/v2/diagnostics/names/{name}/execution`, and `/v2/diagnostics/events`
-  accept `at` and `finality` and carry `meta.as_of` because they explain the
-  same selected snapshot as product reads.
+  accept `at` and `finality` and carry `meta.as_of`/`meta.as_of_token` because
+  they explain the same selected snapshot as product reads.
 - Diagnostics execution selection uses the exact name, `keys`, and selected
   snapshot. Omitting `at` selects the latest persisted execution artifact.
   RFC 3339 `at` selects the newest persisted artifact whose requested chain
   positions are at or before the selected positions. If multiple artifacts
   match, the deterministic tie-break is newest `finished_at`, then greatest
   `execution_trace_id`.
-- `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of`; it is
-  control-plane metadata.
+- `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
+  `meta.as_of_token`; it is control-plane metadata.
 
 ### `GET /v2/diagnostics/names/{name}/coverage`
 

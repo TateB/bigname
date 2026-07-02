@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 
+use bigname_storage::{ChainPosition, ChainPositions, SelectedSnapshot, SnapshotConsistency};
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::v2::{AsOf, V2Error, V2Result, format_timestamp, slug_to_numeric};
+use crate::v2::{
+    AsOf, Meta, V2Error, V2Result, encode_at_token, format_timestamp, slug_to_numeric,
+    snapshot_slot_for_slug,
+};
 
-pub(super) async fn load_served_head_meta(pool: &PgPool) -> V2Result<BTreeMap<String, AsOf>> {
+pub(crate) async fn load_served_head_meta(pool: &PgPool) -> V2Result<Meta> {
     let status = bigname_storage::load_indexing_status(pool)
         .await
         .map_err(|load_error| {
@@ -37,6 +41,7 @@ pub(super) async fn load_served_head_meta(pool: &PgPool) -> V2Result<BTreeMap<St
         .map(|checkpoint| (checkpoint.chain_id, checkpoint.canonical_block_hash))
         .collect::<BTreeMap<_, _>>();
     let mut as_of = BTreeMap::new();
+    let mut positions = BTreeMap::new();
 
     for row in status.chains {
         let Some(block_number) = row.canonical_block else {
@@ -48,9 +53,15 @@ pub(super) async fn load_served_head_meta(pool: &PgPool) -> V2Result<BTreeMap<St
         let Some(block_hash) = hashes.get(&row.chain_id).cloned().flatten() else {
             continue;
         };
-        let chain_id = slug_to_numeric(&row.chain_id).ok_or_else(|| {
+        let numeric_chain_id = slug_to_numeric(&row.chain_id).ok_or_else(|| {
             V2Error::internal_error(format!(
                 "indexing status row uses unmapped chain_id {}",
+                row.chain_id
+            ))
+        })?;
+        let slot = snapshot_slot_for_slug(&row.chain_id).ok_or_else(|| {
+            V2Error::internal_error(format!(
+                "indexing status row uses unmapped snapshot slot {}",
                 row.chain_id
             ))
         })?;
@@ -62,14 +73,40 @@ pub(super) async fn load_served_head_meta(pool: &PgPool) -> V2Result<BTreeMap<St
         })?;
 
         as_of.insert(
-            chain_id.to_string(),
+            numeric_chain_id.to_string(),
             AsOf {
                 block_number,
-                block_hash,
+                block_hash: block_hash.clone(),
                 timestamp: format_timestamp(timestamp),
             },
         );
+        if positions
+            .insert(
+                slot.to_owned(),
+                ChainPosition {
+                    slot: slot.to_owned(),
+                    chain_id: row.chain_id,
+                    block_number: block_number as i64,
+                    block_hash,
+                    timestamp,
+                },
+            )
+            .is_some()
+        {
+            return Err(V2Error::internal_error(format!(
+                "indexing status rows repeat snapshot slot {slot}"
+            )));
+        }
     }
 
-    Ok(as_of)
+    let selected = SelectedSnapshot {
+        chain_positions: ChainPositions::new(positions),
+        consistency: SnapshotConsistency::Head,
+    };
+
+    Ok(Meta {
+        as_of: Some(as_of),
+        as_of_token: Some(encode_at_token(&selected)),
+        ..Meta::default()
+    })
 }

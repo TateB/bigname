@@ -35,7 +35,7 @@ pub(crate) use address_names::{
     address_names_storage_cursor, build_address_name, build_address_name_role_summary,
     dedupe_to_storage, get_address_names, order_to_storage, relation_to_storage, sort_to_storage,
 };
-pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
+pub(crate) use chains::{numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
 pub(crate) use diag_events::{DiagnosticEvent, build_diagnostic_event, get_diagnostic_events};
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
@@ -53,7 +53,7 @@ pub(crate) use history::{
     history_event_type, history_storage_cursor, history_storage_scope,
     v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
-pub(crate) use lookup::get_lookup;
+pub(crate) use lookup::{get_lookup, load_served_head_meta};
 pub(crate) use name_record::{
     NameRecord, build_name_record, classify_registration_status, get_name_record,
 };
@@ -87,7 +87,7 @@ pub(crate) use search::{
 pub(crate) use snapshots::{
     SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
     consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
-    resolve_v2_snapshot_for,
+    resolve_v2_snapshot_for, snapshot_meta,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{

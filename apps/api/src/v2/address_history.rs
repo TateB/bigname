@@ -9,10 +9,10 @@ use bigname_storage::{HistoryCursor, HistorySummaryMode};
 use crate::AppState;
 
 use super::{
-    CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, QueryParams,
-    Relation, SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
-    as_of_meta, build_event, decode, encode, encode_at_token, history_storage_scope,
-    relation_to_storage, resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, QueryParams, Relation,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event,
+    decode, encode, encode_at_token, history_storage_scope, relation_to_storage,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -106,10 +106,7 @@ pub(crate) async fn get_address_history(
         .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().filter_map(build_event).collect();
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,

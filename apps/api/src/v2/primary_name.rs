@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, PRODUCT_PIPELINE_TERMS, RawQueryParams, Source, Status, V2Error, V2Result,
-    api_error_to_v2, contains_pipeline_vocabulary,
+    Envelope, PRODUCT_PIPELINE_TERMS, RawQueryParams, Source, Status, V2Error, V2Result,
+    api_error_to_v2, contains_pipeline_vocabulary, load_served_head_meta,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -179,6 +179,9 @@ pub(crate) async fn get_primary_name(
         .map_err(api_error_to_v2)?;
     }
 
+    let mut meta = load_served_head_meta(&state.pool).await?;
+    meta.source = params.source.meta_source();
+
     Ok(Json(Envelope {
         data: build_primary_name(
             address,
@@ -188,10 +191,7 @@ pub(crate) async fn get_primary_name(
             &lookup_state,
         )?,
         page: None,
-        meta: Meta {
-            source: params.source.meta_source(),
-            ..Meta::default()
-        },
+        meta,
     }))
 }
 

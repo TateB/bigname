@@ -116,7 +116,8 @@ One name per concept, applied on every `v2` route:
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
 | `source` | `indexed`, `verified` (the records route adds `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
-| `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `as_of` | readable per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `grant_scope` | the protocol scope of a permission row (root/registry/resolver-scoped grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
@@ -225,6 +226,7 @@ One success shape for every route:
         "timestamp": "2026-06-10T00:00:00Z"
       }
     },
+    "as_of_token": "opaque-snapshot-token",
     "completeness": "partial",
     "unsupported_fields": ["role_summary"],
     "unsupported_reason": "not_supported_for_namespace",
@@ -243,10 +245,11 @@ Rules:
   makes it cheap (the reverse-lookup count path) or where the caller opts in
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
-- `meta` is always present: `as_of` on every route that reads chain-derived
-  state (control-plane routes — `/v2/status`, `/v2/namespaces/{namespace}` —
-  omit it); `completeness`, `unsupported_fields`, and `unsupported_reason`
-  only when the read is not clean; `source` when the route supports
+- `meta` is always present: `as_of` and `as_of_token` on every route that reads
+  chain-derived state (control-plane routes — `/v2/status`,
+  `/v2/namespaces/{namespace}` — omit both); `completeness`,
+  `unsupported_fields`, and `unsupported_reason` only when the read is not clean;
+  `source` when the route supports
   `?source=`. There is no `meta` query parameter — no `meta=full` (deeper
   detail is a diagnostics route, not a query knob) and no stripped variant,
   so the envelope never changes shape per request. `meta` is one small
@@ -321,7 +324,7 @@ behavior per row.
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or a URL-safe opaque snapshot token round-tripped from a previous response's `meta.as_of` (pins exact per-chain positions) |
+| `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or the URL-safe opaque snapshot token from a previous response's `meta.as_of_token` (pins exact per-chain positions) |
 | `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
 | `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
@@ -333,20 +336,22 @@ Rules:
 
 - Snapshot selection (`at` + `finality`) is uniform across projection-read
   routes. Exact multi-chain block pinning stays on product routes: every
-  response's `meta.as_of` round-trips as an `at` snapshot token, so snapshot
-  reads can be replayed at exactly the positions they were served from (the
-  determinism tool for the parity diff harness and shadow comparison). What
-  dies is `v1`'s separate `chain_positions` query parameter — one selector
-  parameter, not two.
+  chain-derived response carries `meta.as_of_token`, so snapshot reads can be
+  replayed at exactly the positions they were served from (the determinism tool
+  for the parity diff harness and shadow comparison). `meta.as_of` remains the
+  readable per-chain attribution object; callers do not reconstruct tokens from
+  it. What dies is `v1`'s separate `chain_positions` query parameter — one
+  selector parameter, not two.
 - The first paginated collection routes, `GET /v2/names/{name}/subnames` and
   `GET /v2/names/{name}/history`, accept `at` and `finality` and use them to
-  resolve the parent name plus `meta.as_of`, but the collection rows currently
-  read the latest projection/history. True as-of child and history enumeration
-  is deferred to storage follow-up work.
+  resolve the parent name plus `meta.as_of`/`meta.as_of_token`, but the
+  collection rows currently read the latest projection/history. True as-of
+  child and history enumeration is deferred to storage follow-up work.
 - `GET /v2/addresses/{address}/names` also accepts `at` and `finality` only
-  for `meta.as_of` resolution. The address anchor has no parent resource to
-  resolve or 404, and collection rows read the latest address-name projection;
-  true as-of address-name enumeration is deferred to storage follow-up work.
+  for `meta.as_of`/`meta.as_of_token` resolution. The address anchor has no
+  parent resource to resolve or 404, and collection rows read the latest
+  address-name projection; true as-of address-name enumeration is deferred to
+  storage follow-up work.
 - Cursors are opaque and versioned but not bound to the route path string, so
   route evolution does not invalidate outstanding cursors. Cursors remain
   stable under replay for the same snapshot.
@@ -362,12 +367,16 @@ Rules:
   `normalization` metadata (`changed`, `input_name`, `reason`) — both
   preserved from `v1`'s result-level contract. The lookup
   primitive is a current-state read: it does not accept `at`/`finality`, and
-  `meta.as_of` records the served positions for staleness attribution and
-  shadow-diff correlation. Batch limit 1000
+  `meta.as_of`/`meta.as_of_token` record the served positions for staleness
+  attribution and shadow-diff correlation. Batch limit 1000
   (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`, which renames
   `BIGNAME_API_IDENTITY_BATCH_LIMIT`). `profile=shadow` is
   removed from the public contract; it survives as an undocumented
   compatibility alias of `detail` until partner-1 shadow comparison completes.
+- `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
+  does not accept `at` or `finality`; its `meta.as_of`/`meta.as_of_token`
+  record the served positions for staleness attribution and shadow-diff
+  correlation.
 
 ### Error model and statuses
 
@@ -450,7 +459,7 @@ per-item `status` (Q31); `view=full` — deleted (Q33); `mode` public — rename
 `source`, only on routes where verified execution is first-class (Q34);
 canonicality explicit in public behavior — yes, via `stale`/`conflict` (Q39);
 coherent multi-chain snapshots — yes, with exact pinning preserved on product
-routes via the `at` snapshot token
+routes via `meta.as_of_token` and the `at` snapshot token
 (Q40); normalized events as public semantics — no: history and events are
 route-owned compact DTOs, and raw normalized-event rows and kinds stay
 diagnostics-only (Q37). It also supersedes Q32's earlier `Yes`: `meta=full`

@@ -13,7 +13,7 @@ use crate::ApiError;
 
 use super::{
     chains::slug_to_numeric,
-    envelope::AsOf,
+    envelope::{AsOf, Meta},
     error::{V2Error, V2Result},
     params::AtSelector,
     vocab::Finality,
@@ -71,6 +71,14 @@ pub(crate) fn as_of_meta(selected: &SelectedSnapshot) -> V2Result<BTreeMap<Strin
     }
 
     Ok(as_of)
+}
+
+pub(crate) fn snapshot_meta(selected: &SelectedSnapshot) -> V2Result<Meta> {
+    Ok(Meta {
+        as_of: Some(as_of_meta(selected)?),
+        as_of_token: Some(encode_at_token(selected)),
+        ..Meta::default()
+    })
 }
 
 pub(crate) async fn resolve_v2_snapshot(

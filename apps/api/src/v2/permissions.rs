@@ -9,9 +9,9 @@ use sqlx::types::Uuid;
 use crate::{AppState, normalize_inferred_route_name};
 
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode,
-    encode_at_token, permission_powers_value, permission_scope_value, resolve_v2_snapshot_for,
+    AddressNameGrant, CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token,
+    permission_powers_value, permission_scope_value, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope,
 };
 
@@ -165,10 +165,7 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| build_permission_row(row, current_names.get(&row.resource_id), include_lineage))
         .collect::<V2Result<Vec<_>>>()?;
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,
@@ -187,10 +184,7 @@ fn empty_permissions_response(
     params: &QueryParams,
     selected_snapshot: &bigname_storage::SelectedSnapshot,
 ) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
-    let meta = Meta {
-        as_of: Some(as_of_meta(selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(selected_snapshot)?;
 
     Ok(Json(Envelope {
         data: Vec::new(),

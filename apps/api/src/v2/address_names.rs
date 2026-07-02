@@ -20,11 +20,11 @@ use sqlx::types::{
 use crate::AppState;
 
 use super::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist,
+    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist,
     QueryParams, RegistrationStatus, Relation, SnapshotReadResource, SortOrder, StrictQueryParams,
-    V2Error, V2Result, api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
+    V2Error, V2Result, api_error_to_v2, decode, encode, encode_at_token,
     name_record::name_registration_fields, permission_powers_value, permission_scope_value,
-    resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -245,10 +245,7 @@ pub(crate) async fn get_address_names(
             ))
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,

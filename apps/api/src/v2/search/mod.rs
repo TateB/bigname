@@ -18,7 +18,7 @@ use super::chains::deployment_profile_for_slug;
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
     RegistrationStatus, SnapshotReadResource, V2Error, V2Result, as_of_meta, decode, encode,
-    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for,
+    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope,
 };
 
@@ -190,10 +190,7 @@ pub(crate) async fn get_search(
         .transpose()?;
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().map(build_search_name).collect();
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,
