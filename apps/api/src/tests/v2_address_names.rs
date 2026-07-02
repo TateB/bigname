@@ -329,10 +329,10 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
                     },
                     {
                         "grant_scope": {
-                            "kind": "resource",
+                            "kind": "registration",
                             "detail": {}
                         },
-                        "powers": ["set_resolver", "set_records"]
+                        "powers": ["registration_control", "resolver_control"]
                     }
                 ]
             },
@@ -341,13 +341,43 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
                 "grants": [
                     {
                         "grant_scope": {
-                            "kind": "resolver",
+                            "kind": "migration_derived",
                             "detail": {
-                                "chain_id": "ethereum-mainnet",
-                                "resolver_address": "0x0000000000000000000000000000000000000aaa"
+                                "predecessor_registration_id": v2_address_names_predecessor_resource_id().to_string()
                             }
                         },
                         "powers": ["set_resolver", "set_records"]
+                    },
+                    {
+                        "grant_scope": {
+                            "kind": "record_manager",
+                            "detail": {
+                                "chain_id": 1,
+                                "manager": "0x0000000000000000000000000000000000000bb1"
+                            }
+                        },
+                        "powers": ["set_resolver", "create_subnames"]
+                    },
+                    {
+                        "grant_scope": {
+                            "kind": "resolver",
+                            "detail": {
+                                "resolver": {
+                                    "chain_id": 1,
+                                    "address": "0x0000000000000000000000000000000000000aaa"
+                                }
+                            }
+                        },
+                        "powers": ["set_resolver", "set_records"]
+                    },
+                    {
+                        "grant_scope": {
+                            "kind": "transport_derived",
+                            "detail": {
+                                "transport": "l1_to_l2"
+                            }
+                        },
+                        "powers": ["set_resolver", "create_subnames"]
                     }
                 ]
             }
@@ -623,16 +653,25 @@ async fn seed_v2_address_name_relations(
 
 async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()> {
     let alpha_resource_id = Uuid::from_u128(0xa100);
+    let mut resource_row = permission_current_row(
+        alpha_resource_id,
+        V2_PERMISSION_SUBJECT,
+        PermissionScope::Resource,
+        7,
+        107,
+    );
+    resource_row.effective_powers = json!(["resource_control", "resolver_control"]);
+    resource_row.grant_source = json!({
+        "kind": "ens_v1_authority",
+        "authority_kind": "registry_owner",
+        "authority_key": "registry:ethereum-mainnet:alpha",
+        "source_event_kind": "Transfer"
+    });
+
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_SUBJECT,
-                PermissionScope::Resource,
-                7,
-                107,
-            ),
+            resource_row,
             permission_current_row(
                 alpha_resource_id,
                 V2_PERMISSION_SUBJECT,
@@ -650,10 +689,42 @@ async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()>
                 9,
                 109,
             ),
+            permission_current_row(
+                alpha_resource_id,
+                V2_PERMISSION_OTHER_SUBJECT,
+                PermissionScope::RecordManager {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    manager_address: "0x0000000000000000000000000000000000000BB1".to_owned(),
+                },
+                10,
+                110,
+            ),
+            permission_current_row(
+                alpha_resource_id,
+                V2_PERMISSION_OTHER_SUBJECT,
+                PermissionScope::MigrationDerived {
+                    predecessor_resource_id: v2_address_names_predecessor_resource_id(),
+                },
+                11,
+                111,
+            ),
+            permission_current_row(
+                alpha_resource_id,
+                V2_PERMISSION_OTHER_SUBJECT,
+                PermissionScope::TransportDerived {
+                    transport: "l1_to_l2".to_owned(),
+                },
+                12,
+                112,
+            ),
         ],
     )
     .await?;
     Ok(())
+}
+
+fn v2_address_names_predecessor_resource_id() -> Uuid {
+    Uuid::from_u128(0xa300)
 }
 
 fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {

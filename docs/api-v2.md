@@ -75,13 +75,13 @@ step-3-gate vocabulary needed by the route schemas:
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc` | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
-| `grant_scope` | the protocol scope of a permission row (root/registry/resolver-scoped grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
+| `grant_scope` | the protocol scope of a permission row (`root`, `registry`, `registration`, resolver-scoped, and derived grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
 | `failure_reason` | reason code or short reason string for `failed`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
-| `powers` | effective permission powers | `effective_powers` |
+| `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control` | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -96,6 +96,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
 | `type` | product event category label | `event_kind`, compact event `type` aliases |
+| `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
 | `block_hash` | EVM block hash | block-hash fields inside chain-position objects |
 | `timestamp` | RFC 3339 event or block timestamp | event timestamps and chain-position timestamps |

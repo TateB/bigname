@@ -66,19 +66,30 @@ async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Res
     );
     assert_eq!(surface_bound["derivation_kind"], json!("diag_test_derivation"));
     assert_eq!(surface_bound["canonicality_state"], json!("canonical"));
-    assert_eq!(surface_bound["before_state"]["state"], json!("before"));
-    assert_eq!(surface_bound["after_state"]["state"], json!("after"));
     assert_eq!(
-        surface_bound["provenance"],
-        json!({"event_identity": "diag:surface-bound", "route": "diagnostics"})
+        surface_bound["before_state"]["subject"],
+        json!("0x0000000000000000000000000000000000000dea")
     );
+    assert_eq!(
+        surface_bound["after_state"]["grant_source"]["kind"],
+        json!("raw_log")
+    );
+    assert_eq!(
+        surface_bound["after_state"]["inheritance_path"][0]["kind"],
+        json!("resolver_root_fallback")
+    );
+    assert_eq!(
+        surface_bound["after_state"]["selector"]["normalized_name"],
+        json!("diag.eth")
+    );
+    assert_eq!(surface_bound["provenance"], json!({}));
     assert_eq!(
         surface_bound["coverage"],
         json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "source_classes_considered": ["normalized_events"],
-            "enumeration_basis": "diag_events",
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "exact_name",
             "unsupported_reason": null
         })
     );
@@ -395,19 +406,66 @@ fn v2_diag_event(
         manifest_version: 17,
         source_manifest_id: None,
         derivation_kind: "diag_test_derivation".to_owned(),
-        before_state: json!({"state": "before"}),
-        after_state: json!({
-            "state": "after",
-            "provenance": {
-                "event_identity": event_identity,
-                "route": "diagnostics"
+        before_state: json!({
+            "subject": DIAG_EVENTS_ADDRESS,
+            "scope": {
+                "kind": "resolver",
+                "chain_id": chain_id,
+                "resolver_address": "0x0000000000000000000000000000000000000ABC"
             },
-            "coverage": {
-                "status": "full",
-                "exhaustiveness": "authoritative",
-                "source_classes_considered": ["normalized_events"],
-                "enumeration_basis": "diag_events",
-                "unsupported_reason": null
+            "effective_powers": [],
+            "grant_source": null,
+            "revocation_source": null,
+            "inheritance_path": [],
+            "transfer_behavior": {},
+            "source_event": "EACRolesChanged",
+            "upstream_resource": "namehash:diag.eth",
+            "role_bitmap": "0x00",
+            "old_role_bitmap": "0x00",
+            "root_resource": false,
+            "selector": {
+                "kind": "name",
+                "key": DIAG_EVENTS_NAME,
+                "hash": "node:diag.eth",
+                "normalized_name": DIAG_EVENTS_NAME,
+                "dns_encoded_name": "0x04646961670365746800"
+            }
+        }),
+        after_state: json!({
+            "subject": DIAG_EVENTS_ADDRESS,
+            "scope": {
+                "kind": "resolver",
+                "chain_id": chain_id,
+                "resolver_address": "0x0000000000000000000000000000000000000ABC"
+            },
+            "effective_powers": ["set_resolver"],
+            "grant_source": {
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "upstream_resource": "namehash:diag.eth",
+                "root_resource": false,
+                "changed_powers": ["set_resolver"],
+                "resolver_contract_instance_id": "00000000-0000-0000-0000-00000000d1a9"
+            },
+            "revocation_source": null,
+            "inheritance_path": [{
+                "kind": "resolver_root_fallback",
+                "chain_id": chain_id,
+                "resolver_address": "0x0000000000000000000000000000000000000ABC",
+                "upstream_resource": "root"
+            }],
+            "transfer_behavior": {},
+            "source_event": "EACRolesChanged",
+            "upstream_resource": "namehash:diag.eth",
+            "role_bitmap": "0x01",
+            "old_role_bitmap": "0x00",
+            "root_resource": false,
+            "selector": {
+                "kind": "name",
+                "key": DIAG_EVENTS_NAME,
+                "hash": "node:diag.eth",
+                "normalized_name": DIAG_EVENTS_NAME,
+                "dns_encoded_name": "0x04646961670365746800"
             }
         }),
         ..history_event(

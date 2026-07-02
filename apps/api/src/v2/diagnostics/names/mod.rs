@@ -1,7 +1,7 @@
 use axum::{Json, extract::FromRequestParts, http::request::Parts};
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use crate::{
     AppState, ExactNameSnapshotSelector, exact_name_snapshot_scope,
@@ -138,6 +138,75 @@ fn diagnostic_envelope(
     }))
 }
 
+fn apply_diagnostics_dictionary_names(value: &mut JsonValue) -> V2Result<()> {
+    match value {
+        JsonValue::Object(object) => {
+            apply_diagnostics_dictionary_object_names(object)?;
+            for child in object.values_mut() {
+                apply_diagnostics_dictionary_names(child)?;
+            }
+        }
+        JsonValue::Array(items) => {
+            for child in items {
+                apply_diagnostics_dictionary_names(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_diagnostics_dictionary_object_names(object: &mut Map<String, JsonValue>) -> V2Result<()> {
+    rename_diagnostic_key(object, "normalized_name", "name")?;
+    rename_diagnostic_key(object, "canonical_display_name", "display_name")?;
+    rename_diagnostic_key(object, "resource_id", "registration_id")?;
+    split_logical_name_id(object)?;
+    Ok(())
+}
+
+fn rename_diagnostic_key(
+    object: &mut Map<String, JsonValue>,
+    source: &str,
+    target: &str,
+) -> V2Result<()> {
+    if !object.contains_key(source) {
+        return Ok(());
+    }
+    if object.contains_key(target) {
+        return Err(diagnostics_dictionary_error());
+    }
+    let value = object
+        .remove(source)
+        .expect("source key existence checked above");
+    object.insert(target.to_owned(), value);
+    Ok(())
+}
+
+fn split_logical_name_id(object: &mut Map<String, JsonValue>) -> V2Result<()> {
+    let Some(value) = object.get("logical_name_id") else {
+        return Ok(());
+    };
+    if object.contains_key("namespace") || object.contains_key("name") {
+        return Err(diagnostics_dictionary_error());
+    }
+    let Some((namespace, name)) = value.as_str().and_then(|value| value.split_once(':')) else {
+        return Err(diagnostics_dictionary_error());
+    };
+    if namespace.is_empty() || name.is_empty() {
+        return Err(diagnostics_dictionary_error());
+    }
+    let namespace = namespace.to_owned();
+    let name = name.to_owned();
+    object.remove("logical_name_id");
+    object.insert("namespace".to_owned(), JsonValue::String(namespace));
+    object.insert("name".to_owned(), JsonValue::String(name));
+    Ok(())
+}
+
+fn diagnostics_dictionary_error() -> V2Error {
+    V2Error::internal_error("failed to map diagnostics dictionary names")
+}
+
 #[cfg(test)]
 fn test_name_row() -> NameCurrentRow {
     use serde_json::json;
@@ -176,5 +245,90 @@ fn test_name_row() -> NameCurrentRow {
         manifest_version: 1,
         last_recomputed_at: bigname_storage::parse_rfc3339_utc_timestamp("2026-04-17T00:00:03Z")
             .expect("test timestamp must parse"),
+    }
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn diagnostics_dictionary_mapper_keeps_pipeline_event_ids_and_renames_concepts() {
+        let mut value = json!({
+            "record_version_boundary": {
+                "logical_name_id": "ens:alice.eth",
+                "resource_id": "00000000-0000-0000-0000-000000002200",
+                "normalized_event_id": 1200
+            },
+            "resolver_discovery_path": [
+                {
+                    "logical_name_id": "ens:alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "resource_id": "00000000-0000-0000-0000-000000002200"
+                }
+            ]
+        });
+
+        apply_diagnostics_dictionary_names(&mut value).expect("diagnostics names must map");
+
+        assert_eq!(
+            value,
+            json!({
+                "record_version_boundary": {
+                    "namespace": "ens",
+                    "name": "alice.eth",
+                    "registration_id": "00000000-0000-0000-0000-000000002200",
+                    "normalized_event_id": 1200
+                },
+                "resolver_discovery_path": [
+                    {
+                        "namespace": "ens",
+                        "name": "alice.eth",
+                        "display_name": "Alice.eth",
+                        "registration_id": "00000000-0000-0000-0000-000000002200"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn diagnostics_dictionary_mapper_rejects_target_collisions() {
+        let mut value = json!({
+            "normalized_name": "alice.eth",
+            "name": "existing.eth"
+        });
+
+        let error = apply_diagnostics_dictionary_names(&mut value)
+            .expect_err("colliding dictionary rename must fail");
+
+        assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn diagnostics_dictionary_mapper_rejects_logical_name_target_collisions() {
+        let mut value = json!({
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens"
+        });
+
+        let error = apply_diagnostics_dictionary_names(&mut value)
+            .expect_err("logical_name_id split collision must fail");
+
+        assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn diagnostics_dictionary_mapper_rejects_malformed_logical_name_ids() {
+        let mut value = json!({
+            "logical_name_id": "alice.eth"
+        });
+
+        let error = apply_diagnostics_dictionary_names(&mut value)
+            .expect_err("malformed logical_name_id must fail");
+
+        assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
     }
 }

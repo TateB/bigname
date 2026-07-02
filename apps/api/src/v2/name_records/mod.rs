@@ -30,6 +30,7 @@ pub(crate) use build::{
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
+const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
 
 pub(crate) struct NameRecordsQueryParams;
 
@@ -126,7 +127,7 @@ pub(crate) async fn get_name_records(
                 record_inventory.as_ref(),
                 requested_records,
                 include_inventory,
-            ),
+            )?,
         ),
         RequestSource::Verified => {
             let verified_lookup = load_verified_record_lookup(
@@ -158,14 +159,14 @@ pub(crate) async fn get_name_records(
                         record_inventory.as_ref(),
                         requested_records,
                         include_inventory,
-                    ),
+                    )?,
                 )
             } else {
                 let fallback_records = indexed_records_requiring_verified_fallback(
                     &row,
                     record_inventory.as_ref(),
                     records,
-                );
+                )?;
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
@@ -260,7 +261,7 @@ async fn load_verified_record_lookup_with_persistence(
         Ok(Some(outcome)) => Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome)))),
         Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
-            VerifiedRecordLookup::Stale(error.message().to_owned()),
+            VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
         )),
         Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
     }

@@ -2618,19 +2618,23 @@ fn permission_current_row(
             }
         ]),
         grant_source: json!({
-            "kind": "normalized_event",
-            "manifest_version": manifest_version,
+            "kind": "raw_log",
+            "source_event": "EACRolesChanged",
+            "upstream_resource": resource_id.to_string(),
+            "root_resource": false,
+            "changed_powers": [
+                "set_resolver",
+                if manifest_version % 2 == 0 {
+                    "create_subnames"
+                } else {
+                    "set_records"
+                }
+            ],
+            "registry_contract_instance_id": "00000000-0000-0000-0000-00000000c001",
         }),
         revocation_source: None,
-        inheritance_path: json!([
-            {
-                "kind": "resource_authority",
-                "resource_id": resource_id,
-            }
-        ]),
-        transfer_behavior: json!({
-            "kind": "resource_rebound",
-        }),
+        inheritance_path: json!([]),
+        transfer_behavior: json!({}),
         provenance: json!({
             "normalized_event_ids": [block_number, block_number + 1],
             "raw_fact_refs": [{
@@ -2822,8 +2826,12 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
                     "subject": "0x0000000000000000000000000000000000000abc",
                     "effective_powers": ["set_resolver", "set_records"],
                     "grant_source": {
-                        "kind": "normalized_event",
-                        "event_identity": "resolver-permission-1",
+                        "kind": "raw_log",
+                        "source_event": "EACRolesChanged",
+                        "upstream_resource": "root",
+                        "root_resource": true,
+                        "changed_powers": ["set_resolver", "set_records"],
+                        "resolver_contract_instance_id": "00000000-0000-0000-0000-00000000c202",
                     },
                     "revocation_source": null,
                 }],
@@ -2841,10 +2849,10 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
             },
             "event_summary": {
                 "status": "supported",
-                "count": 2,
+                "count": 3,
                 "by_kind": {
                     "PermissionChanged": 1,
-                    "ResolverChanged": 1,
+                    "ResolverChanged": 2,
                 },
             },
         }),
@@ -2888,6 +2896,36 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
         manifest_version: 7,
         last_recomputed_at: timestamp(1_748_800_202),
     }
+}
+
+fn resolver_current_row_with_writer_alias(
+    chain_id: &str,
+    resolver_address: &str,
+) -> ResolverCurrentRow {
+    let mut row = resolver_current_row(chain_id, resolver_address);
+    row.declared_summary["aliases"]["count"] = json!(2);
+    row.declared_summary["aliases"]["items"]
+        .as_array_mut()
+        .expect("resolver aliases fixture must be an array")
+        .push(json!({
+            "logical_name_id": "ens:alias.eth",
+            "resource_id": "00000000-0000-0000-0000-00000000b104",
+            "binding_kind": "resolver_alias_path",
+            "alias_state": "active",
+            "active": true,
+            "chain_id": chain_id,
+            "resolver_address": resolver_address,
+            "from_dns_encoded_name": "0x05616c6961730365746800",
+            "to_dns_encoded_name": "0x04626574610365746800",
+            "from_name": "alias.eth",
+            "to_name": "beta.eth",
+            "to_logical_name_id": "ens:beta.eth",
+            "to_resource_id": "00000000-0000-0000-0000-00000000b102",
+            "latest_event_kind": "AliasChanged",
+        }));
+    row.declared_summary["event_summary"]["count"] = json!(4);
+    row.declared_summary["event_summary"]["by_kind"]["AliasChanged"] = json!(1);
+    row
 }
 
 fn exact_name_row(

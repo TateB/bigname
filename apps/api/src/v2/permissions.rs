@@ -13,8 +13,13 @@ use crate::{AppState, normalize_inferred_route_name};
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    permission_scope_value, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    permission_powers_value, permission_scope_value, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope,
 };
+
+#[path = "permissions/lineage.rs"]
+mod lineage;
+use lineage::permission_lineage;
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -137,7 +142,7 @@ pub(crate) async fn get_permissions(
         .rows
         .iter()
         .map(|row| build_permission_row(row, current_names.get(&row.resource_id), include_lineage))
-        .collect();
+        .collect::<V2Result<Vec<_>>>()?;
     let meta = Meta {
         as_of: Some(as_of_meta(&selected_snapshot)?),
         ..Meta::default()
@@ -282,37 +287,19 @@ pub(crate) fn build_permission_row(
     row: &PermissionsCurrentRow,
     name: Option<&String>,
     include_lineage: bool,
-) -> PermissionRow {
-    PermissionRow {
+) -> V2Result<PermissionRow> {
+    Ok(PermissionRow {
         address: row.subject.clone(),
         grant: AddressNameGrant {
-            grant_scope: permission_scope_value(&row.scope),
-            powers: row.effective_powers.clone(),
+            grant_scope: permission_scope_value(&row.scope)?,
+            powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
         name: name.cloned(),
-        lineage: include_lineage.then(|| permission_lineage(row)),
-    }
-}
-
-fn permission_lineage(row: &PermissionsCurrentRow) -> PermissionLineage {
-    PermissionLineage {
-        grant: row.grant_source.clone(),
-        revocation: row.revocation_source.clone(),
-        inheritance_path: non_empty_array(&row.inheritance_path),
-        transfer_behavior: non_null_value(&row.transfer_behavior),
-    }
-}
-
-fn non_empty_array(value: &Value) -> Option<Value> {
-    value
-        .as_array()
-        .filter(|values| !values.is_empty())
-        .map(|_| value.clone())
-}
-
-fn non_null_value(value: &Value) -> Option<Value> {
-    (!value.is_null()).then(|| value.clone())
+        lineage: include_lineage
+            .then(|| permission_lineage(row))
+            .transpose()?,
+    })
 }
 
 fn permissions_cursor_payload(
@@ -427,8 +414,22 @@ mod tests {
                 resolver_address: "0x0000000000000000000000000000000000000ABC".to_owned(),
             },
             effective_powers: json!(["set_resolver"]),
-            grant_source: json!({"kind": "normalized_event", "id": 10}),
-            revocation_source: Some(json!({"kind": "permission_row", "id": "old"})),
+            grant_source: json!({
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "upstream_resource": "root",
+                "root_resource": true,
+                "changed_powers": ["set_resolver"],
+                "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000010"
+            }),
+            revocation_source: Some(json!({
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "upstream_resource": "root",
+                "root_resource": true,
+                "changed_powers": ["set_resolver"],
+                "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000011"
+            })),
             inheritance_path,
             transfer_behavior,
             provenance: json!({}),
@@ -481,11 +482,17 @@ mod tests {
     #[test]
     fn build_permission_row_maps_scope_powers_name_and_lineage() {
         let row = sample_permissions_row(
-            json!([{"kind": "resource_authority"}]),
-            json!({"kind": "resource_rebound"}),
+            json!([{
+                "kind": "resolver_root_fallback",
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": "0x0000000000000000000000000000000000000ABC",
+                "upstream_resource": "root"
+            }]),
+            Value::Null,
         );
         let name = "alice.eth".to_owned();
-        let mapped = build_permission_row(&row, Some(&name), true);
+        let mapped =
+            build_permission_row(&row, Some(&name), true).expect("known storage chain id must map");
 
         assert_eq!(mapped.address, ADDRESS);
         assert_eq!(mapped.registration_id, REGISTRATION_ID);
@@ -496,18 +503,28 @@ mod tests {
             json!({
                 "kind": "resolver",
                 "detail": {
-                    "chain_id": "ethereum-mainnet",
-                    "resolver_address": "0x0000000000000000000000000000000000000abc"
+                    "resolver": {
+                        "chain_id": 1,
+                        "address": "0x0000000000000000000000000000000000000abc"
+                    }
                 }
             })
         );
         assert_eq!(
             mapped.lineage,
             Some(PermissionLineage {
-                grant: json!({"kind": "normalized_event", "id": 10}),
-                revocation: Some(json!({"kind": "permission_row", "id": "old"})),
-                inheritance_path: Some(json!([{"kind": "resource_authority"}])),
-                transfer_behavior: Some(json!({"kind": "resource_rebound"})),
+                grant: json!({"kind": "event"}),
+                revocation: Some(json!({
+                    "kind": "event"
+                })),
+                inheritance_path: Some(json!([{
+                    "kind": "resolver_root_fallback",
+                    "resolver": {
+                        "chain_id": 1,
+                        "address": "0x0000000000000000000000000000000000000abc"
+                    }
+                }])),
+                transfer_behavior: None,
             })
         );
     }
@@ -516,11 +533,12 @@ mod tests {
     fn lineage_omits_absent_optional_members() {
         let mut row = sample_permissions_row(json!([]), Value::Null);
         row.revocation_source = None;
-        let mapped = build_permission_row(&row, None, true);
+        let mapped =
+            build_permission_row(&row, None, true).expect("known storage chain id must map");
         let lineage = mapped.lineage.expect("lineage must be present");
 
         assert_eq!(mapped.name, None);
-        assert_eq!(lineage.grant, json!({"kind": "normalized_event", "id": 10}));
+        assert_eq!(lineage.grant, json!({"kind": "event"}));
         assert_eq!(lineage.revocation, None);
         assert_eq!(lineage.inheritance_path, None);
         assert_eq!(lineage.transfer_behavior, None);

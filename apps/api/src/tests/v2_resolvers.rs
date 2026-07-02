@@ -61,7 +61,8 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
         1,
         include,
         empty_bound_names(),
-    );
+    )
+    .expect("resolver overview must build");
     let value = serde_json::to_value(overview).expect("overview must serialize");
 
     assert!(value["nodes"].is_array());
@@ -70,21 +71,174 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
     assert!(value.get("events").is_none());
 
     let include = crate::v2::resolver_overview_include(&[]).expect("empty include defaults to all");
+    let mut resolver_row =
+        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver_row.declared_summary["role_holders"]["items"][0]["effective_powers"] =
+        json!(["resource_control", "set_resolver"]);
     let overview = crate::v2::build_resolver_overview(
-        resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS),
+        resolver_row,
         1,
         include,
         empty_bound_names(),
-    );
+    )
+    .expect("resolver overview must build");
     let value = serde_json::to_value(overview).expect("overview must serialize");
     assert!(value["nodes"].is_array());
-    assert!(value["aliases"].is_array());
-    assert!(value["roles"].is_array());
-    assert_eq!(value["events"], Value::Null);
+    assert_eq!(
+        value["aliases"],
+        json!([
+            {
+                "namespace": "ens",
+                "name": "beta.eth",
+                "display_name": "Beta.eth",
+                "namehash": "namehash:beta.eth"
+            },
+            {
+                "namespace": "ens",
+                "from_name": "alias.eth",
+                "to_name": "beta.eth",
+                "state": "active",
+                "resolver": {
+                    "chain_id": 1,
+                    "address": "0x0000000000000000000000000000000000000aaa"
+                },
+                "to_registration_id": "00000000-0000-0000-0000-00000000b102"
+            }
+        ])
+    );
+    assert_eq!(
+        value["roles"],
+        json!([
+            {
+                "address": "0x0000000000000000000000000000000000000abc",
+                "registration_count": 1,
+                "permission_count": 1,
+                "powers": ["registration_control", "set_resolver"],
+                "registration_ids": ["00000000-0000-0000-0000-00000000b100"]
+            }
+        ])
+    );
+    assert!(value["roles"][0].get("subject").is_none());
+    assert!(value["roles"][0].get("resource_count").is_none());
+    assert!(value["roles"][0].get("permission_row_count").is_none());
+    assert!(value["roles"][0].get("effective_powers").is_none());
+    assert!(value["roles"][0].get("resource_ids").is_none());
+    assert_eq!(
+        value["events"],
+        json!({
+            "count": 4,
+            "by_type": {
+                "permission": 1,
+                "resolver": 2,
+            }
+        })
+    );
+    assert!(value["events"].get("by_kind").is_none());
 
     let error = crate::v2::resolver_overview_include(&["records".to_owned()])
         .expect_err("unknown include must fail");
     assert_eq!(error.code(), crate::v2::ErrorCode::InvalidInput);
+
+    let include = crate::v2::resolver_overview_include(&["aliases".to_owned()])
+        .expect("valid include must parse");
+    let mut resolver_row =
+        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver_row.declared_summary["aliases"]["items"][1]["unmapped_resource_id"] =
+        json!("00000000-0000-0000-0000-00000000ffff");
+    let error =
+        crate::v2::build_resolver_overview(resolver_row, 1, include, empty_bound_names())
+            .expect_err("unmapped banned alias keys must fail loudly");
+    assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
+}
+
+#[test]
+fn v2_resolver_events_summary_maps_writer_by_kind_to_product_types() {
+    let include =
+        crate::v2::resolver_overview_include(&["events".to_owned()]).expect("events include parses");
+    let mut resolver_row = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver_row.declared_summary["event_summary"] = json!({
+        "status": "supported",
+        "count": 10,
+        "by_kind": {
+            "RecordChanged": 2,
+            "RecordVersionChanged": 3,
+            "SurfaceBound": 4,
+            "PermissionChanged": 1,
+        },
+    });
+
+    let overview = crate::v2::build_resolver_overview(resolver_row, 1, include, empty_bound_names())
+        .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+
+    assert_eq!(
+        value["events"],
+        json!({
+            "count": 10,
+            "by_type": {
+                "permission": 1,
+                "record": 5,
+            }
+        })
+    );
+    assert!(value["events"].get("by_kind").is_none());
+    assert!(value["events"]["by_type"].get("SurfaceBound").is_none());
+}
+
+#[test]
+fn v2_resolver_alias_summary_preserves_null_targets_for_removed_and_unknown() {
+    let include =
+        crate::v2::resolver_overview_include(&["aliases".to_owned()]).expect("aliases include parses");
+    let mut resolver_row =
+        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    let aliases = resolver_row.declared_summary["aliases"]["items"]
+        .as_array_mut()
+        .expect("aliases fixture items must be an array");
+    aliases[1]["alias_state"] = json!("removed");
+    aliases[1]["to_name"] = Value::Null;
+    aliases[1]["to_logical_name_id"] = Value::Null;
+    aliases[1]["to_resource_id"] = Value::Null;
+    let mut unknown = aliases[1].clone();
+    unknown["logical_name_id"] = json!("ens:unknown-alias.eth");
+    unknown["resource_id"] = json!("00000000-0000-0000-0000-00000000b105");
+    unknown["alias_state"] = json!("unknown");
+    unknown["from_name"] = json!("unknown-alias.eth");
+    unknown["from_dns_encoded_name"] = json!("0x0d756e6b6e6f776e2d616c6961730365746800");
+    aliases.push(unknown);
+    resolver_row.declared_summary["aliases"]["count"] = json!(3);
+
+    let overview = crate::v2::build_resolver_overview(resolver_row, 1, include, empty_bound_names())
+        .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+
+    assert_eq!(
+        value["aliases"][1],
+        json!({
+            "namespace": "ens",
+            "from_name": "alias.eth",
+            "to_name": null,
+            "state": "removed",
+            "resolver": {
+                "chain_id": 1,
+                "address": "0x0000000000000000000000000000000000000aaa"
+            }
+        })
+    );
+    assert_eq!(
+        value["aliases"][2],
+        json!({
+            "namespace": "ens",
+            "from_name": "unknown-alias.eth",
+            "to_name": null,
+            "state": "unknown",
+            "resolver": {
+                "chain_id": 1,
+                "address": "0x0000000000000000000000000000000000000aaa"
+            }
+        })
+    );
+    assert!(value["aliases"][1].get("to_registration_id").is_none());
+    assert!(value["aliases"][2].get("to_registration_id").is_none());
 }
 
 #[tokio::test]
@@ -93,7 +247,10 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     seed_v2_resolver_bound_names_fixture(&database).await?;
     bigname_storage::upsert_resolver_current_rows(
         &database.pool,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+        &[resolver_current_row_with_writer_alias(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
     )
     .await?;
 
@@ -111,16 +268,21 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         first_page["data"]["counts"],
         json!({
             "nodes": 2,
-            "aliases": 1,
+            "aliases": 2,
             "role_holders": 1,
-            "events": 2,
+            "events": 4,
         })
     );
     assert!(first_page["data"].get("aliases").is_none());
     assert!(first_page["data"].get("roles").is_none());
     assert!(first_page["data"].get("events").is_none());
     assert_eq!(first_page["data"]["nodes"][0]["namespace"], json!("ens"));
-    assert_eq!(first_page["data"]["nodes"][0]["name"], json!("Alice.eth"));
+    assert_eq!(first_page["data"]["nodes"][0]["name"], json!("alice.eth"));
+    assert_eq!(
+        first_page["data"]["nodes"][0]["display_name"],
+        json!("Alice.eth")
+    );
+    assert!(first_page["data"]["nodes"][0].get("normalized_name").is_none());
 
     let bound_names = &first_page["data"]["bound_names"];
     assert_eq!(bound_names["page"]["cursor"], Value::Null);

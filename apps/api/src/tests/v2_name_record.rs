@@ -714,10 +714,49 @@ async fn v2_get_name_records_source_verified_cache_miss_reports_stale_when_execu
         payload["data"]["records"]["addr:60"],
         json!({
             "status": "stale",
-            "failure_reason": "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
+            "failure_reason": "verified_answer_stale_for_snapshot"
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_maps_stale_lookup_storage_reason_to_product_reason(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+    let (rpc_url, rpc_handle) = spawn_v2_name_records_error_mock_rpc(vec![(
+        -32000,
+        "state not available: record_inventory_current projection does not match the selected snapshot",
+    )])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 stale verified name records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "stale",
+            "failure_reason": "verified_answer_stale_for_snapshot"
+        })
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -845,7 +884,7 @@ async fn v2_get_name_records_source_verified_reports_stale_for_non_ens_on_demand
         payload["data"]["records"]["addr:60"],
         json!({
             "status": "stale",
-            "failure_reason": "persisted verified resolution output is not available for the selected snapshot"
+            "failure_reason": "verified_answer_stale_for_snapshot"
         })
     );
 
@@ -956,7 +995,7 @@ async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -
             },
             "text:email": {
                 "status": "stale",
-                "failure_reason": "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
+                "failure_reason": "verified_answer_stale_for_snapshot"
             }
         })
     );
@@ -1569,6 +1608,56 @@ async fn v2_name_records_payload_without_inventory(uri: &str) -> Result<Value> {
 
     database.cleanup().await?;
     Ok(payload)
+}
+
+async fn spawn_v2_name_records_error_mock_rpc(
+    responses: Vec<(i64, &'static str)>,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock v2 name-records RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (code, message) in responses {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept mock v2 name-records RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            write_v2_name_records_mock_rpc_error(&mut socket, code, message).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn write_v2_name_records_mock_rpc_error(
+    socket: &mut tokio::net::TcpStream,
+    code: i64,
+    message: &str,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write mock v2 name-records RPC response")
 }
 
 async fn seed_v2_alice_name_records_fixture(

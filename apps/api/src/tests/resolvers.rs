@@ -33,7 +33,7 @@ async fn get_resolvers_compact_overview_returns_projection_backed_summary() -> R
                     "nodes": 2,
                     "aliases": 1,
                     "role_holders": 1,
-                    "events": 2,
+                    "events": 3,
                 },
                 "nodes": [
                     {
@@ -213,7 +213,7 @@ async fn get_resolvers_compact_overview_honors_include_and_meta_none() -> Result
             "nodes": 2,
             "aliases": 1,
             "role_holders": 1,
-            "events": 2,
+            "events": 3,
         })
     );
     assert!(payload["data"].get("unsupported_sections").is_none());

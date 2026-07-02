@@ -25,18 +25,20 @@ pub(crate) fn build_indexed_name_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: Option<&[ResolutionRecordKey]>,
     include_inventory: bool,
-) -> NameRecords {
-    let record_answers = requested_records.map(|records| {
-        records
-            .iter()
-            .map(|record| {
-                (
-                    record.record_key.clone(),
-                    indexed_record_answer(record_inventory, record),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    });
+) -> V2Result<NameRecords> {
+    let record_answers = requested_records
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| {
+                    Ok((
+                        record.record_key.clone(),
+                        indexed_record_answer(record_inventory, record)?,
+                    ))
+                })
+                .collect::<V2Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?;
     let values = match requested_records {
         Some(records) => RecordValues::from_answers(
             records,
@@ -51,7 +53,7 @@ pub(crate) fn build_indexed_name_records(
         },
     };
 
-    NameRecords {
+    Ok(NameRecords {
         resolver: resolver(&row.declared_summary),
         addresses: values.addresses,
         text_records: values.text_records,
@@ -59,19 +61,21 @@ pub(crate) fn build_indexed_name_records(
         records: record_answers,
         inventory: include_inventory
             .then(|| inventory_summary(record_inventory, requested_records)),
-    }
+    })
 }
 
 pub(crate) fn indexed_records_requiring_verified_fallback(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: &[ResolutionRecordKey],
-) -> Vec<ResolutionRecordKey> {
-    requested_records
-        .iter()
-        .filter(|record| indexed_satisfying_record_answer(row, record_inventory, record).is_none())
-        .cloned()
-        .collect()
+) -> V2Result<Vec<ResolutionRecordKey>> {
+    let mut fallback_records = Vec::new();
+    for record in requested_records {
+        if indexed_satisfying_record_answer(row, record_inventory, record)?.is_none() {
+            fallback_records.push(record.clone());
+        }
+    }
+    Ok(fallback_records)
 }
 
 pub(crate) fn build_auto_name_records(
@@ -85,7 +89,7 @@ pub(crate) fn build_auto_name_records(
     let mut answers = BTreeMap::new();
 
     for record in requested_records {
-        if let Some(answer) = indexed_satisfying_record_answer(row, record_inventory, record) {
+        if let Some(answer) = indexed_satisfying_record_answer(row, record_inventory, record)? {
             answers.insert(record.record_key.clone(), answer);
         } else {
             fallback_records.push(record.clone());
@@ -97,10 +101,10 @@ pub(crate) fn build_auto_name_records(
     } else {
         let verified_answers = verified_record_answers(row, &fallback_records, verified_lookup)?;
         for record in &fallback_records {
-            let answer = verified_answers
-                .get(&record.record_key)
-                .cloned()
-                .unwrap_or_else(|| unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON));
+            let answer = match verified_answers.get(&record.record_key).cloned() {
+                Some(answer) => answer,
+                None => unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)?,
+            };
             answers.insert(record.record_key.clone(), answer);
         }
         Source::Verified
@@ -197,15 +201,15 @@ impl RecordValues {
 fn indexed_record_answer(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     record: &ResolutionRecordKey,
-) -> RecordAnswer {
+) -> V2Result<RecordAnswer> {
     let Some(record_inventory) = record_inventory else {
         return unsupported_answer(INDEXED_INVENTORY_UNAVAILABLE_REASON);
     };
 
     if let Some(entry) = indexed_entry_for_record(record_inventory, record) {
-        let answer = answer_from_inventory_entry(entry);
+        let answer = answer_from_inventory_entry(entry)?;
         if record.record_key != "avatar" || answer.status == Status::Ok {
-            return answer;
+            return Ok(answer);
         }
     }
 
@@ -216,20 +220,22 @@ fn indexed_record_answer(
             selector_key: Some("avatar".to_owned()),
         };
         if let Some(entry) = indexed_entry_for_record(record_inventory, &text_avatar) {
-            let answer = answer_from_inventory_entry(entry);
+            let answer = answer_from_inventory_entry(entry)?;
             if answer.status == Status::Ok {
-                return answer;
+                return Ok(answer);
             }
         }
     }
 
     if let Some(gap) = inventory_item_for_record(&record_inventory.explicit_gaps, record) {
-        return RecordAnswer {
+        return Ok(RecordAnswer {
             status: Status::NotFound,
             value: None,
             unsupported_reason: None,
-            failure_reason: string_field(gap.get("gap_reason")),
-        };
+            failure_reason: string_field(gap.get("gap_reason"))
+                .map(|reason| product_record_reason(&reason))
+                .transpose()?,
+        });
     }
 
     if let Some(reason) = unsupported_family_reason(record_inventory, &record.record_family) {
@@ -243,16 +249,16 @@ fn indexed_satisfying_record_answer(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     record: &ResolutionRecordKey,
-) -> Option<RecordAnswer> {
+) -> V2Result<Option<RecordAnswer>> {
     if terminal_no_declared_resolver(row) {
-        return Some(not_found_answer(None));
+        return Ok(Some(not_found_answer(None)?));
     }
     if !indexed_inventory_is_authoritative(record_inventory) {
-        return None;
+        return Ok(None);
     }
 
-    let answer = indexed_record_answer(record_inventory, record);
-    matches!(answer.status, Status::Ok | Status::NotFound).then_some(answer)
+    let answer = indexed_record_answer(record_inventory, record)?;
+    Ok(matches!(answer.status, Status::Ok | Status::NotFound).then_some(answer))
 }
 
 fn indexed_entry_for_record<'a>(
@@ -262,15 +268,15 @@ fn indexed_entry_for_record<'a>(
     inventory_item_for_record(&record_inventory.entries, record)
 }
 
-fn answer_from_inventory_entry(entry: &Value) -> RecordAnswer {
+fn answer_from_inventory_entry(entry: &Value) -> V2Result<RecordAnswer> {
     let status = string_field(entry.get("status")).unwrap_or_else(|| "unsupported".to_owned());
     match status.as_str() {
-        "success" => RecordAnswer {
+        "success" => Ok(RecordAnswer {
             status: Status::Ok,
             value: record_value_string(entry).map(Value::String),
             unsupported_reason: None,
             failure_reason: None,
-        },
+        }),
         "not_found" => not_found_answer(string_field(entry.get("failure_reason"))),
         "unsupported" => unsupported_answer(
             &string_field(entry.get("unsupported_reason"))
@@ -293,67 +299,67 @@ fn verified_record_answers(
         Some(VerifiedRecordLookup::Found(outcome)) => {
             let state = build_resolution_verified_state(row, records, Some(outcome.as_ref()))
                 .map_err(|error| V2Error::internal_error(error.to_string()))?;
-            Ok(verified_queries_from_state(&state, records))
+            verified_queries_from_state(&state, records)
         }
         Some(VerifiedRecordLookup::Stale(reason)) => {
             let supported = supported_verified_record_keys(row, records);
-            Ok(records
+            records
                 .iter()
                 .map(|record| {
                     let answer = if supported.contains(&record.record_key) {
                         stale_answer(reason.clone())
                     } else {
                         unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)
-                    };
-                    (record.record_key.clone(), answer)
+                    }?;
+                    Ok((record.record_key.clone(), answer))
                 })
-                .collect())
+                .collect()
         }
-        Some(VerifiedRecordLookup::NotSupported) | None => Ok(records
+        Some(VerifiedRecordLookup::NotSupported) | None => records
             .iter()
             .map(|record| {
-                (
+                Ok((
                     record.record_key.clone(),
-                    unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON),
-                )
+                    unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)?,
+                ))
             })
-            .collect()),
+            .collect(),
     }
 }
 
 fn verified_queries_from_state(
     state: &Value,
     records: &[ResolutionRecordKey],
-) -> BTreeMap<String, RecordAnswer> {
-    let queries = state
+) -> V2Result<BTreeMap<String, RecordAnswer>> {
+    let mut queries = BTreeMap::new();
+    for query in state
         .get("verified_queries")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|query| {
-            let record_key = string_field(query.get("record_key"))?;
-            Some((record_key, verified_answer_from_query(query)))
-        })
-        .collect::<BTreeMap<_, _>>();
+    {
+        let Some(record_key) = string_field(query.get("record_key")) else {
+            continue;
+        };
+        queries.insert(record_key, verified_answer_from_query(query)?);
+    }
 
     records
         .iter()
         .map(|record| {
-            (
-                record.record_key.clone(),
-                queries
-                    .get(&record.record_key)
-                    .cloned()
-                    .unwrap_or_else(|| unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)),
-            )
+            let answer = match queries.get(&record.record_key).cloned() {
+                Some(answer) => answer,
+                None => unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)?,
+            };
+            Ok((record.record_key.clone(), answer))
         })
         .collect()
 }
 
-fn verified_answer_from_query(query: &Value) -> RecordAnswer {
+fn verified_answer_from_query(query: &Value) -> V2Result<RecordAnswer> {
     let status = string_field(query.get("status")).unwrap_or_else(|| "unsupported".to_owned());
     match status.as_str() {
-        "success" => RecordAnswer {
+        "success" => Ok(RecordAnswer {
             status: Status::Ok,
             value: query
                 .get("value")
@@ -361,7 +367,7 @@ fn verified_answer_from_query(query: &Value) -> RecordAnswer {
                 .map(Value::String),
             unsupported_reason: None,
             failure_reason: None,
-        },
+        }),
         "not_found" => not_found_answer(string_field(query.get("failure_reason"))),
         "unsupported" => unsupported_answer(
             &string_field(query.get("unsupported_reason"))
@@ -418,38 +424,104 @@ fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
         && string_field(resolver.get("address")).is_none()
 }
 
-fn not_found_answer(failure_reason: Option<String>) -> RecordAnswer {
-    RecordAnswer {
+fn not_found_answer(failure_reason: Option<String>) -> V2Result<RecordAnswer> {
+    Ok(RecordAnswer {
         status: Status::NotFound,
         value: None,
         unsupported_reason: None,
-        failure_reason,
-    }
+        failure_reason: failure_reason
+            .map(|reason| product_record_reason(&reason))
+            .transpose()?,
+    })
 }
 
-fn unsupported_answer(reason: &str) -> RecordAnswer {
-    RecordAnswer {
+fn unsupported_answer(reason: &str) -> V2Result<RecordAnswer> {
+    Ok(RecordAnswer {
         status: Status::Unsupported,
         value: None,
-        unsupported_reason: Some(reason.to_owned()),
+        unsupported_reason: Some(product_record_reason(reason)?),
         failure_reason: None,
-    }
+    })
 }
 
-fn stale_answer(reason: impl Into<String>) -> RecordAnswer {
-    RecordAnswer {
+fn stale_answer(reason: impl Into<String>) -> V2Result<RecordAnswer> {
+    let reason = reason.into();
+    Ok(RecordAnswer {
         status: Status::Stale,
         value: None,
         unsupported_reason: None,
-        failure_reason: Some(reason.into()),
-    }
+        failure_reason: Some(product_record_reason(&reason)?),
+    })
 }
 
-fn failed_answer(reason: impl Into<String>) -> RecordAnswer {
-    RecordAnswer {
+fn failed_answer(reason: impl Into<String>) -> V2Result<RecordAnswer> {
+    let reason = reason.into();
+    Ok(RecordAnswer {
         status: Status::Failed,
         value: None,
         unsupported_reason: None,
-        failure_reason: Some(reason.into()),
+        failure_reason: Some(product_record_reason(&reason)?),
+    })
+}
+
+fn product_record_reason(reason: &str) -> V2Result<String> {
+    match reason {
+        "value_not_retained_in_normalized_events" => Ok("value_not_retained".to_owned()),
+        "record_family_not_supported_in_phase6_projection" => {
+            Ok("record_family_not_supported".to_owned())
+        }
+        _ if record_reason_contains_pipeline_vocabulary(reason) => Err(V2Error::internal_error(
+            "failed to map product record reason vocabulary",
+        )),
+        _ => Ok(reason.to_owned()),
+    }
+}
+
+fn record_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
+    const PIPELINE_REASON_TERMS: &[&str] = &[
+        "normalized_event",
+        "normalized_events",
+        "phase6_projection",
+        "projection",
+        "record_inventory_current",
+        "raw_fact",
+        "raw_log",
+        "manifest",
+    ];
+
+    PIPELINE_REASON_TERMS
+        .iter()
+        .any(|term| reason.contains(term))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v2::ErrorCode;
+
+    #[test]
+    fn product_record_reason_maps_storage_projection_reasons() {
+        assert_eq!(
+            product_record_reason("value_not_retained_in_normalized_events")
+                .expect("known reason must map"),
+            "value_not_retained"
+        );
+        assert_eq!(
+            product_record_reason("record_family_not_supported_in_phase6_projection")
+                .expect("known reason must map"),
+            "record_family_not_supported"
+        );
+        assert_eq!(
+            product_record_reason("resolver_family_pending").expect("product reason must pass"),
+            "resolver_family_pending"
+        );
+    }
+
+    #[test]
+    fn product_record_reason_rejects_unmapped_pipeline_vocabulary() {
+        let error = product_record_reason("raw_log_missing_record_cache")
+            .expect_err("pipeline vocabulary must fail loudly");
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
     }
 }

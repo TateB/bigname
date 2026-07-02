@@ -17,7 +17,8 @@ use crate::{
 
 use super::super::super::{MAX_PAGE_SIZE, validate_product_record};
 use super::{
-    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, diagnostic_envelope,
+    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2,
+    apply_diagnostics_dictionary_names, diagnostic_envelope,
     resolve_diagnostic_name_with_resolution_auxiliary,
 };
 
@@ -251,7 +252,7 @@ pub(crate) async fn get_name_execution_diagnostic(
         )));
     };
 
-    let data = build_resolution_execution_diagnostic_data(&row, &records, &trace, &outcome)
+    let mut data = build_resolution_execution_diagnostic_data(&row, &records, &trace, &outcome)
         .map_err(|build_error| {
             error!(
                 service = "api",
@@ -261,8 +262,69 @@ pub(crate) async fn get_name_execution_diagnostic(
             );
             V2Error::internal_error("failed to build resolution execution diagnostic")
         })?;
+    prepare_execution_diagnostic_dictionary_names(&mut data)?;
+    apply_diagnostics_dictionary_names(&mut data)?;
 
     diagnostic_envelope(data, &selected_snapshot)
+}
+
+fn prepare_execution_diagnostic_dictionary_names(value: &mut JsonValue) -> V2Result<()> {
+    match value {
+        JsonValue::Object(object) => {
+            remove_redundant_logical_name_id_from_name_ref(object)?;
+            for child in object.values_mut() {
+                prepare_execution_diagnostic_dictionary_names(child)?;
+            }
+        }
+        JsonValue::Array(items) => {
+            for child in items {
+                prepare_execution_diagnostic_dictionary_names(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn remove_redundant_logical_name_id_from_name_ref(
+    object: &mut serde_json::Map<String, JsonValue>,
+) -> V2Result<()> {
+    if !object.contains_key("logical_name_id")
+        || !object.contains_key("namespace")
+        || !object.contains_key("normalized_name")
+    {
+        return Ok(());
+    }
+
+    let logical_name_id = object
+        .get("logical_name_id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| V2Error::internal_error("failed to map diagnostics dictionary names"))?;
+    let Some((namespace, name)) = logical_name_id.split_once(':') else {
+        return Err(V2Error::internal_error(
+            "failed to map diagnostics dictionary names",
+        ));
+    };
+    let existing_namespace = object
+        .get("namespace")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| V2Error::internal_error("failed to map diagnostics dictionary names"))?;
+    let existing_name = object
+        .get("normalized_name")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| V2Error::internal_error("failed to map diagnostics dictionary names"))?;
+    if namespace.is_empty()
+        || name.is_empty()
+        || existing_namespace != namespace
+        || existing_name != name
+    {
+        return Err(V2Error::internal_error(
+            "failed to map diagnostics dictionary names",
+        ));
+    }
+
+    object.remove("logical_name_id");
+    Ok(())
 }
 
 fn parse_execution_keys(keys: Option<&str>) -> V2Result<Vec<crate::ResolutionRecordKey>> {

@@ -7,7 +7,7 @@ use axum::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
-    AddressNamesCurrentSortedCursorValue, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    AddressNamesCurrentSortedCursorValue, NameCurrentRow, PermissionsCurrentRow,
     PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,8 @@ use super::{
     AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist,
     QueryParams, RegistrationStatus, Relation, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
-    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    name_record::name_registration_fields, permission_powers_value, permission_scope_value,
+    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -222,22 +223,24 @@ pub(crate) async fn get_address_names(
         .entries
         .iter()
         .map(|entry| {
-            let role_summary = include_role_summary.then(|| {
-                build_address_name_role_summary(
+            let role_summary = if include_role_summary {
+                Some(build_address_name_role_summary(
                     permissions_by_resource
                         .get(&entry.resource_id)
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
-                )
-            });
-            build_address_name(
+                )?)
+            } else {
+                None
+            };
+            Ok(build_address_name(
                 entry,
                 name_rows.get(&entry.logical_name_id),
                 primary_name.as_deref(),
                 role_summary,
-            )
+            ))
         })
-        .collect();
+        .collect::<V2Result<Vec<_>>>()?;
     let meta = Meta {
         as_of: Some(as_of_meta(&selected_snapshot)?),
         ..Meta::default()
@@ -326,7 +329,7 @@ pub(crate) fn order_to_storage(order: SortOrder) -> AddressNamesCurrentOrder {
 
 pub(crate) fn build_address_name_role_summary(
     rows: &[PermissionsCurrentRow],
-) -> Vec<AddressNameRoleSummary> {
+) -> V2Result<Vec<AddressNameRoleSummary>> {
     let mut subjects = BTreeMap::<String, Vec<&PermissionsCurrentRow>>::new();
 
     for row in rows {
@@ -337,16 +340,18 @@ pub(crate) fn build_address_name_role_summary(
         .into_iter()
         .map(|(address, mut rows)| {
             rows.sort_by(|left, right| left.scope.storage_key().cmp(&right.scope.storage_key()));
-            AddressNameRoleSummary {
+            Ok(AddressNameRoleSummary {
                 address,
                 grants: rows
                     .into_iter()
-                    .map(|row| AddressNameGrant {
-                        grant_scope: permission_scope_value(&row.scope),
-                        powers: row.effective_powers.clone(),
+                    .map(|row| {
+                        Ok(AddressNameGrant {
+                            grant_scope: permission_scope_value(&row.scope)?,
+                            powers: permission_powers_value(&row.effective_powers)?,
+                        })
                     })
-                    .collect(),
-            }
+                    .collect::<V2Result<Vec<_>>>()?,
+            })
         })
         .collect()
 }
@@ -535,13 +540,6 @@ fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
 
 fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
-}
-
-pub(crate) fn permission_scope_value(scope: &PermissionScope) -> Value {
-    json!({
-        "kind": scope.kind(),
-        "detail": scope.detail(),
-    })
 }
 
 fn format_timestamp(value: OffsetDateTime) -> String {

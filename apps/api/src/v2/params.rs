@@ -1,7 +1,3 @@
-use axum::{
-    extract::{FromRequestParts, Query},
-    http::request::Parts,
-};
 use serde::Deserialize;
 use sqlx::types::Uuid;
 
@@ -83,20 +79,6 @@ pub(crate) enum RequestSource {
 pub(crate) enum SortOrder {
     Asc,
     Desc,
-}
-
-impl<S> FromRequestParts<S> for QueryParams
-where
-    S: Send + Sync,
-{
-    type Rejection = V2Error;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(raw) = Query::<RawQueryParams>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
-        Self::try_from(raw)
-    }
 }
 
 impl TryFrom<RawQueryParams> for QueryParams {
