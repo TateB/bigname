@@ -406,7 +406,7 @@ pub(super) fn extract_persisted_verified_primary_name_section(
         .with_context(|| format!("{section_context} must be a JSON object"))?;
     ensure_allowed_json_fields(
         section,
-        &["status", "name", "failure_reason"],
+        &["status", "name", "failure_reason", "unsupported_reason"],
         &section_context,
     )?;
 
@@ -418,10 +418,12 @@ pub(super) fn extract_persisted_verified_primary_name_section(
                 namespace,
             )?;
             ensure_json_field_absent(section, "failure_reason", &section_context)?;
+            ensure_json_field_absent(section, "unsupported_reason", &section_context)?;
         }
         "not_found" => {
             ensure_json_field_absent(section, "name", &section_context)?;
             optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+            ensure_json_field_absent(section, "unsupported_reason", &section_context)?;
         }
         "mismatch" => {
             validate_persisted_verified_primary_name_ref(
@@ -430,18 +432,26 @@ pub(super) fn extract_persisted_verified_primary_name_section(
                 namespace,
             )?;
             optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+            ensure_json_field_absent(section, "unsupported_reason", &section_context)?;
         }
         "invalid_name" => {
             ensure_json_field_absent(section, "name", &section_context)?;
             optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
+            ensure_json_field_absent(section, "unsupported_reason", &section_context)?;
         }
         "execution_failed" => {
             ensure_json_field_absent(section, "name", &section_context)?;
             required_json_string_field(section, "failure_reason", &section_context)?;
+            ensure_json_field_absent(section, "unsupported_reason", &section_context)?;
+        }
+        "unsupported" => {
+            ensure_json_field_absent(section, "name", &section_context)?;
+            ensure_json_field_absent(section, "failure_reason", &section_context)?;
+            optional_nonempty_json_string_field(section, "unsupported_reason", &section_context)?;
         }
         status => {
             bail!(
-                "{section_context} only supports success, not_found, mismatch, invalid_name, and execution_failed; found {status}"
+                "{section_context} only supports success, not_found, mismatch, invalid_name, execution_failed, and unsupported; found {status}"
             );
         }
     }

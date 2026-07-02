@@ -10,8 +10,8 @@ use crate::{AppState, normalize_inferred_route_name};
 
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
-    StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    permission_powers_value, permission_scope_value, resolve_v2_snapshot,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode,
+    encode_at_token, permission_powers_value, permission_scope_value, resolve_v2_snapshot_for,
     v2_exact_name_snapshot_scope,
 };
 
@@ -103,8 +103,14 @@ pub(crate) async fn get_permissions(
 
     let scope =
         v2_exact_name_snapshot_scope(&state, &filter_inputs.namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::Permissions,
+    )
+    .await?;
     let resolved = resolve_permissions_filter(
         &state,
         &params,

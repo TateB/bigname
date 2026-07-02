@@ -1,10 +1,10 @@
 use bigname_storage::NameCurrentRow;
 use serde_json::Value;
 
-use crate::{AppState, load_name_current_for_selected_snapshot};
+use crate::{AppState, load_name_current_for_selected_snapshot, map_internal_api_error};
 
 use super::super::chains::{DeploymentProfile, deployment_profile_for_slug};
-use super::super::{V2Error, V2Result};
+use super::super::{SnapshotReadResource, V2Error, V2Result, api_error_to_v2_for_resource};
 
 pub(super) async fn load_name_row_for_snapshot(
     state: &AppState,
@@ -34,12 +34,15 @@ pub(super) async fn load_name_row_for_snapshot(
         {
             Ok(None)
         }
-        Err(error) if error.code == "stale" => Err(V2Error::stale(
-            "requested snapshot is not available for permissions",
+        Err(error) => Err(api_error_to_v2_for_resource(
+            map_internal_api_error(
+                error,
+                format!(
+                    "failed to resolve current resource for name {namespace}/{normalized_name}"
+                ),
+            ),
+            SnapshotReadResource::Permissions,
         )),
-        Err(_) => Err(V2Error::internal_error(format!(
-            "failed to resolve current resource for name {namespace}/{normalized_name}"
-        ))),
     }
 }
 

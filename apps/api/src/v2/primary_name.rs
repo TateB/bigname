@@ -183,7 +183,7 @@ pub(crate) async fn get_primary_name(
             params.coin_type,
             params.source,
             &lookup_state,
-        ),
+        )?,
         page: None,
         meta: Meta {
             source: params.source.meta_source(),
@@ -198,8 +198,8 @@ pub(crate) fn build_primary_name(
     coin_type: String,
     source: PrimaryNameSourceSelection,
     lookup_state: &PrimaryNameLookupState,
-) -> PrimaryName {
-    let verified = build_verified_answer(&namespace, lookup_state);
+) -> V2Result<PrimaryName> {
+    let verified = build_verified_answer(&namespace, lookup_state)?;
     let mut answers = Vec::with_capacity(match source {
         PrimaryNameSourceSelection::Both => 2,
         PrimaryNameSourceSelection::Indexed | PrimaryNameSourceSelection::Verified => 1,
@@ -218,7 +218,7 @@ pub(crate) fn build_primary_name(
         answers.push(verified.answer.clone());
     }
 
-    PrimaryName {
+    Ok(PrimaryName {
         address,
         coin_type,
         namespace,
@@ -226,7 +226,7 @@ pub(crate) fn build_primary_name(
         verification: verified
             .outcome_exists
             .then(|| verification_from_answer(&verified.answer)),
-    }
+    })
 }
 
 fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAnswer {
@@ -266,12 +266,15 @@ fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAns
     }
 }
 
-fn build_verified_answer(namespace: &str, lookup_state: &PrimaryNameLookupState) -> VerifiedAnswer {
+fn build_verified_answer(
+    namespace: &str,
+    lookup_state: &PrimaryNameLookupState,
+) -> V2Result<VerifiedAnswer> {
     if let Some(persisted) = lookup_state.persisted_verified.as_ref() {
-        return VerifiedAnswer {
-            answer: verified_answer_from_value(&persisted.verified_primary_name, lookup_state),
+        return Ok(VerifiedAnswer {
+            answer: verified_answer_from_value(&persisted.verified_primary_name, lookup_state)?,
             outcome_exists: true,
-        };
+        });
     }
 
     match &lookup_state.tuple_state {
@@ -279,30 +282,30 @@ fn build_verified_answer(namespace: &str, lookup_state: &PrimaryNameLookupState)
             if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
                 &lookup_state.on_demand_verified
             {
-                return VerifiedAnswer {
-                    answer: verified_answer_from_value(on_demand_verified, lookup_state),
+                return Ok(VerifiedAnswer {
+                    answer: verified_answer_from_value(on_demand_verified, lookup_state)?,
                     outcome_exists: true,
-                };
+                });
             }
-            VerifiedAnswer {
+            Ok(VerifiedAnswer {
                 answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
                 outcome_exists: false,
-            }
+            })
         }
         PrimaryNameTupleState::TuplePresent(_) if primary_name_supported_namespace(namespace) => {
-            VerifiedAnswer {
+            Ok(VerifiedAnswer {
                 answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
                 outcome_exists: false,
-            }
+            })
         }
         PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
-            VerifiedAnswer {
+            Ok(VerifiedAnswer {
                 answer: PrimaryNameAnswer::unsupported(
                     Source::Verified,
                     "verified primary-name entrypoint is not yet supported",
                 ),
                 outcome_exists: false,
-            }
+            })
         }
     }
 }
@@ -310,7 +313,7 @@ fn build_verified_answer(namespace: &str, lookup_state: &PrimaryNameLookupState)
 fn verified_answer_from_value(
     verified_primary_name: &Value,
     lookup_state: &PrimaryNameLookupState,
-) -> PrimaryNameAnswer {
+) -> V2Result<PrimaryNameAnswer> {
     let status = status_from_v1(
         verified_primary_name
             .get("status")
@@ -319,13 +322,18 @@ fn verified_answer_from_value(
     );
     let mut answer = PrimaryNameAnswer::new(Source::Verified, status);
     answer.name = primary_name_from_value(verified_primary_name);
-    answer.unsupported_reason = string_field(verified_primary_name.get("unsupported_reason"));
-    answer.failure_reason = string_field(verified_primary_name.get("failure_reason"));
+    answer.unsupported_reason = primary_name_unsupported_reason(
+        string_field(verified_primary_name.get("unsupported_reason")).as_deref(),
+        status,
+    )?;
+    answer.failure_reason = string_field(verified_primary_name.get("failure_reason"))
+        .map(|reason| product_primary_name_reason(&reason))
+        .transpose()?;
     if status == Status::InvalidName {
         answer.raw_claim_name = string_field(verified_primary_name.get("raw_claim_name"))
             .or_else(|| raw_claim_name(lookup_state));
     }
-    answer
+    Ok(answer)
 }
 
 fn verification_from_answer(answer: &PrimaryNameAnswer) -> PrimaryNameVerification {
@@ -393,6 +401,55 @@ fn status_from_v1(status: &str) -> Status {
     }
 }
 
+fn primary_name_unsupported_reason(
+    reason: Option<&str>,
+    status: Status,
+) -> V2Result<Option<String>> {
+    if status != Status::Unsupported {
+        return Ok(None);
+    }
+
+    let reason = reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("unsupported_reason_missing");
+    product_primary_name_reason(reason).map(Some)
+}
+
+fn product_primary_name_reason(reason: &str) -> V2Result<String> {
+    match reason {
+        "projection_read_failed" => Ok("read_failed".to_owned()),
+        "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
+        "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
+        _ if primary_name_reason_contains_pipeline_vocabulary(reason) => Err(
+            V2Error::internal_error("failed to map primary-name reason vocabulary"),
+        ),
+        _ => Ok(reason.to_owned()),
+    }
+}
+
+fn primary_name_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
+    const PIPELINE_REASON_TERMS: &[&str] = &[
+        "address_names_current",
+        "coverage",
+        "enumeration_basis",
+        "exhaustiveness",
+        "manifest",
+        "name_current",
+        "normalized_event",
+        "normalized_events",
+        "projection",
+        "raw_fact",
+        "raw_log",
+        "record_inventory_current",
+        "source_classes_considered",
+    ];
+
+    PIPELINE_REASON_TERMS
+        .iter()
+        .any(|term| reason.contains(term))
+}
+
 fn primary_name_from_value(value: &Value) -> Option<String> {
     match value.get("name")? {
         Value::String(name) => Some(name.clone()),
@@ -442,154 +499,5 @@ fn invalid_parameter(parameter: &'static str) -> V2Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use bigname_storage::PrimaryNameCurrentRow;
-    use serde_json::json;
-
-    use crate::{PersistedPrimaryNameVerifiedReadback, v2::ErrorCode};
-
-    use super::*;
-
-    #[test]
-    fn builder_returns_indexed_then_verified_answers_for_both_sources() {
-        let lookup_state = PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TuplePresent(PrimaryNameCurrentRow {
-                address: "0x0000000000000000000000000000000000000abc".to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::Success,
-                raw_claim_name: None,
-                claim_provenance: json!({}),
-            }),
-            normalized_claim_name: Some("alice.eth".to_owned()),
-            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
-            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-            persisted_verified: Some(PersistedPrimaryNameVerifiedReadback {
-                verified_primary_name: json!({
-                    "status": "mismatch",
-                    "name": {
-                        "logical_name_id": "ens:alice.eth",
-                        "normalized_name": "alice.eth",
-                        "resource_id": "00000000-0000-0000-0000-000000000456"
-                    },
-                    "failure_reason": "resolved_target_mismatch"
-                }),
-                provenance: json!({}),
-                finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
-            }),
-        };
-
-        let response = build_primary_name(
-            "0x0000000000000000000000000000000000000abc".to_owned(),
-            "ens".to_owned(),
-            "60".to_owned(),
-            PrimaryNameSourceSelection::Both,
-            &lookup_state,
-        );
-
-        assert_eq!(
-            response.answers,
-            vec![
-                PrimaryNameAnswer::named(Source::Indexed, Status::Ok, "alice.eth"),
-                PrimaryNameAnswer {
-                    failure_reason: Some("resolved_target_mismatch".to_owned()),
-                    ..PrimaryNameAnswer::named(Source::Verified, Status::Mismatch, "alice.eth")
-                },
-            ]
-        );
-        assert_eq!(
-            response.verification,
-            Some(PrimaryNameVerification {
-                status: Status::Mismatch,
-                name: Some("alice.eth".to_owned()),
-                unsupported_reason: None,
-                failure_reason: Some("resolved_target_mismatch".to_owned()),
-            })
-        );
-    }
-
-    #[test]
-    fn builder_narrows_answers_to_requested_source() {
-        let lookup_state = PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TupleMissing,
-            normalized_claim_name: None,
-            on_demand_claim: OnDemandPrimaryNameClaimState::NotFound,
-            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-            persisted_verified: None,
-        };
-
-        let indexed = build_primary_name(
-            "0x0000000000000000000000000000000000000abc".to_owned(),
-            "ens".to_owned(),
-            "60".to_owned(),
-            PrimaryNameSourceSelection::Indexed,
-            &lookup_state,
-        );
-        let verified = build_primary_name(
-            "0x0000000000000000000000000000000000000abc".to_owned(),
-            "ens".to_owned(),
-            "60".to_owned(),
-            PrimaryNameSourceSelection::Verified,
-            &lookup_state,
-        );
-
-        assert_eq!(
-            indexed.answers,
-            vec![PrimaryNameAnswer::new(Source::Indexed, Status::NotFound)]
-        );
-        assert_eq!(
-            verified.answers,
-            vec![PrimaryNameAnswer::new(Source::Verified, Status::NotFound)]
-        );
-        assert_eq!(indexed.verification, None);
-        assert_eq!(verified.verification, None);
-    }
-
-    #[test]
-    fn primary_name_params_default_tuple_and_source_subset() {
-        let defaulted = PrimaryNameQueryParams::try_from(RawQueryParams::default())
-            .expect("default query must parse");
-        assert_eq!(defaulted.namespace, "ens");
-        assert_eq!(defaulted.coin_type, "60");
-        assert_eq!(defaulted.source, PrimaryNameSourceSelection::Both);
-
-        let indexed = PrimaryNameQueryParams::try_from(RawQueryParams {
-            namespace: Some("ens".to_owned()),
-            coin_type: Some("060".to_owned()),
-            source: Some("indexed".to_owned()),
-            ..RawQueryParams::default()
-        })
-        .expect("indexed primary-name source must parse");
-        assert_eq!(indexed.coin_type, "60");
-        assert_eq!(indexed.source, PrimaryNameSourceSelection::Indexed);
-
-        let verified = PrimaryNameQueryParams::try_from(RawQueryParams {
-            source: Some("verified".to_owned()),
-            ..RawQueryParams::default()
-        })
-        .expect("verified primary-name source must parse");
-        assert_eq!(verified.source, PrimaryNameSourceSelection::Verified);
-    }
-
-    #[test]
-    fn primary_name_params_reject_auto_and_snapshot_controls() {
-        for raw in [
-            RawQueryParams {
-                source: Some("auto".to_owned()),
-                ..RawQueryParams::default()
-            },
-            RawQueryParams {
-                at: Some("2026-06-10T00:00:00Z".to_owned()),
-                ..RawQueryParams::default()
-            },
-            RawQueryParams {
-                finality: Some("safe".to_owned()),
-                ..RawQueryParams::default()
-            },
-        ] {
-            let error = PrimaryNameQueryParams::try_from(raw)
-                .expect_err("bad primary-name query must fail");
-            assert_eq!(error.code(), ErrorCode::InvalidInput);
-        }
-    }
-}
+#[path = "primary_name/tests.rs"]
+mod tests;

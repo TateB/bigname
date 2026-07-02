@@ -3617,7 +3617,7 @@ fn primary_name_execution_trace(
                 },
             ],
         ),
-        ("ens" | "basenames", "not_found") => (
+        ("ens" | "basenames", "not_found" | "unsupported") => (
             json!([]),
             json!([]),
             vec![ExecutionTraceStep {

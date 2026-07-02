@@ -7,6 +7,9 @@ use bigname_storage::{
 };
 use serde_json::Value;
 use sqlx::PgPool;
+use tracing::{error, warn};
+
+use crate::ApiError;
 
 use super::{
     chains::slug_to_numeric,
@@ -76,32 +79,197 @@ pub(crate) async fn resolve_v2_snapshot(
     at: Option<&AtSelector>,
     finality: Finality,
 ) -> V2Result<SelectedSnapshot> {
+    resolve_v2_snapshot_for(pool, scope, at, finality, SnapshotReadResource::Resource).await
+}
+
+pub(crate) async fn resolve_v2_snapshot_for(
+    pool: &PgPool,
+    scope: &SnapshotSelectionScope,
+    at: Option<&AtSelector>,
+    finality: Finality,
+    resource: SnapshotReadResource,
+) -> V2Result<SelectedSnapshot> {
     let consistency = consistency_for_finality(finality);
     let at = match at {
         None => None,
         Some(AtSelector::Timestamp(timestamp)) => Some(SnapshotAt::Timestamp(
-            parse_rfc3339_utc_timestamp(timestamp).map_err(map_snapshot_error)?,
+            parse_rfc3339_utc_timestamp(timestamp)
+                .map_err(|error| map_snapshot_error_for_resource(error, resource))?,
         )),
         Some(AtSelector::SnapshotToken(token)) => Some(decode_at_token(token)?),
     };
-    let input = SnapshotSelectorInput::new(at, None, consistency).map_err(map_snapshot_error)?;
+    let input = SnapshotSelectorInput::new(at, None, consistency)
+        .map_err(|error| map_snapshot_error_for_resource(error, resource))?;
 
     resolve_exact_name_snapshot_selection(pool, scope, &input)
         .await
-        .map_err(map_snapshot_error)
+        .map_err(|error| map_snapshot_error_for_resource(error, resource))
 }
 
-fn map_snapshot_error(error: SnapshotSelectionError) -> V2Error {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotReadResource {
+    AddressHistory,
+    AddressNames,
+    DiagnosticData,
+    Events,
+    Name,
+    NameHistory,
+    NameRecords,
+    Permissions,
+    Resolver,
+    Resource,
+    Search,
+    Subnames,
+}
+
+impl SnapshotReadResource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AddressHistory => "address history",
+            Self::AddressNames => "address names",
+            Self::DiagnosticData => "diagnostic data",
+            Self::Events => "events",
+            Self::Name => "name",
+            Self::NameHistory => "name history",
+            Self::NameRecords => "name records",
+            Self::Permissions => "permissions",
+            Self::Resolver => "resolver",
+            Self::Resource => "resource",
+            Self::Search => "search results",
+            Self::Subnames => "subnames",
+        }
+    }
+}
+
+pub(crate) fn api_error_to_v2(error: ApiError) -> V2Error {
+    api_error_to_v2_for_resource(error, SnapshotReadResource::Resource)
+}
+
+pub(crate) fn api_error_to_v2_for_resource(
+    error: ApiError,
+    resource: SnapshotReadResource,
+) -> V2Error {
+    match error.code {
+        "invalid_input" => V2Error::invalid_input(error.message),
+        "not_found" => V2Error::not_found(error.message),
+        "unsupported" => V2Error::unsupported(error.message),
+        "stale" => {
+            log_sanitized_api_error(&error, resource);
+            V2Error::stale(stale_snapshot_message(resource))
+        }
+        "conflict" => {
+            log_sanitized_api_error(&error, resource);
+            V2Error::conflict(conflict_snapshot_message(resource))
+        }
+        _ => {
+            log_sanitized_api_error(&error, resource);
+            V2Error::internal_error(internal_api_message(resource))
+        }
+    }
+}
+
+fn map_snapshot_error_for_resource(
+    error: SnapshotSelectionError,
+    resource: SnapshotReadResource,
+) -> V2Error {
     match error.kind() {
         SnapshotSelectionErrorKind::InvalidInput => V2Error::invalid_input(error.message()),
-        SnapshotSelectionErrorKind::Conflict => V2Error::conflict(error.message()),
-        SnapshotSelectionErrorKind::Stale => V2Error::stale(error.message()),
-        SnapshotSelectionErrorKind::InternalError => V2Error::internal_error(error.message()),
+        SnapshotSelectionErrorKind::Conflict => {
+            log_sanitized_snapshot_error(&error, resource);
+            V2Error::conflict(conflict_snapshot_message(resource))
+        }
+        SnapshotSelectionErrorKind::Stale => {
+            log_sanitized_snapshot_error(&error, resource);
+            V2Error::stale(stale_snapshot_message(resource))
+        }
+        SnapshotSelectionErrorKind::InternalError => {
+            log_sanitized_snapshot_error(&error, resource);
+            V2Error::internal_error(internal_snapshot_message(resource))
+        }
     }
 }
 
 fn invalid_at_error() -> V2Error {
     V2Error::invalid_input("at is invalid")
+}
+
+fn stale_snapshot_message(resource: SnapshotReadResource) -> String {
+    format!(
+        "requested snapshot is not available for {}",
+        resource.label()
+    )
+}
+
+fn conflict_snapshot_message(resource: SnapshotReadResource) -> String {
+    format!(
+        "requested snapshot cannot be resolved for {}",
+        resource.label()
+    )
+}
+
+fn internal_snapshot_message(resource: SnapshotReadResource) -> String {
+    if resource == SnapshotReadResource::Resource {
+        return "failed to serve v2 request".to_owned();
+    }
+
+    format!(
+        "failed to select requested snapshot for {}",
+        resource.label()
+    )
+}
+
+fn internal_api_message(resource: SnapshotReadResource) -> String {
+    if resource == SnapshotReadResource::Resource {
+        return "failed to serve v2 request".to_owned();
+    }
+
+    format!("failed to load {}", resource.label())
+}
+
+fn log_sanitized_snapshot_error(error: &SnapshotSelectionError, resource: SnapshotReadResource) {
+    match error.kind() {
+        SnapshotSelectionErrorKind::InternalError => {
+            error!(
+                service = "api",
+                resource = %resource.label(),
+                kind = ?error.kind(),
+                message = %error.message(),
+                "sanitized v2 snapshot selection error"
+            );
+        }
+        SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale => {
+            warn!(
+                service = "api",
+                resource = %resource.label(),
+                kind = ?error.kind(),
+                message = %error.message(),
+                "sanitized v2 snapshot selection error"
+            );
+        }
+        SnapshotSelectionErrorKind::InvalidInput => {}
+    }
+}
+
+fn log_sanitized_api_error(error: &ApiError, resource: SnapshotReadResource) {
+    if error.code == "internal_error" {
+        error!(
+            service = "api",
+            resource = %resource.label(),
+            status = %error.status,
+            code = %error.code,
+            message = %error.message,
+            "sanitized v2 API error"
+        );
+    } else {
+        warn!(
+            service = "api",
+            resource = %resource.label(),
+            status = %error.status,
+            code = %error.code,
+            message = %error.message,
+            "sanitized v2 API error"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -235,10 +403,45 @@ mod tests {
                 ErrorCode::InternalError,
             ),
         ] {
-            let mapped = map_snapshot_error(error);
+            let mapped = map_snapshot_error_for_resource(error, SnapshotReadResource::NameRecords);
             assert_eq!(mapped.code(), expected);
-            assert_eq!(mapped.envelope().error.message, "snapshot error");
         }
+    }
+
+    #[test]
+    fn snapshot_errors_sanitize_non_input_messages() {
+        let invalid = map_snapshot_error_for_resource(
+            SnapshotSelectionError::invalid_input("at is invalid"),
+            SnapshotReadResource::NameRecords,
+        );
+        assert_eq!(invalid.envelope().error.message, "at is invalid");
+
+        let stale = map_snapshot_error_for_resource(
+            SnapshotSelectionError::stale("record_inventory_current projection does not match"),
+            SnapshotReadResource::NameRecords,
+        );
+        assert_eq!(
+            stale.envelope().error.message,
+            "requested snapshot is not available for name records"
+        );
+
+        let conflict = map_snapshot_error_for_resource(
+            SnapshotSelectionError::conflict("chain ethereum-mainnet has no checkpoint"),
+            SnapshotReadResource::NameRecords,
+        );
+        assert_eq!(
+            conflict.envelope().error.message,
+            "requested snapshot cannot be resolved for name records"
+        );
+
+        let internal = map_snapshot_error_for_resource(
+            SnapshotSelectionError::internal("failed to load chain_lineage: relation missing"),
+            SnapshotReadResource::NameRecords,
+        );
+        assert_eq!(
+            internal.envelope().error.message,
+            "failed to select requested snapshot for name records"
+        );
     }
 
     #[test]

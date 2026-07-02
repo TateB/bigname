@@ -448,13 +448,7 @@ async fn v2_error_envelopes_conform_family_wide() -> Result<()> {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{}", route.label);
 
         let payload: Value = read_json(response).await?;
-        assert_object_keys(&payload, &["error"], route.label);
-        assert_object_keys(
-            &payload["error"],
-            &["code", "message", "details"],
-            route.label,
-        );
-        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{}", route.label);
+        assert_v2_error_envelope(route.label, &payload, "invalid_input");
         assert_eq!(
             payload["error"]["message"],
             json!(case.expected_message),
@@ -469,6 +463,21 @@ async fn v2_error_envelopes_conform_family_wide() -> Result<()> {
     }
 
     database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_product_error_bodies_hide_pipeline_vocabulary_for_not_found_stale_conflict_and_internal(
+) -> Result<()> {
+    assert_v2_conformance_route_tables_match();
+
+    let mut violations = Vec::new();
+
+    collect_v2_stale_and_conflict_error_violations(&mut violations).await?;
+    collect_v2_not_found_error_violations(&mut violations).await?;
+    collect_v2_internal_error_violations(&mut violations).await?;
+
+    assert_no_conformance_violations("v2 product error-body conformance", &violations);
     Ok(())
 }
 
@@ -520,7 +529,7 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
         let response = v2_strict_query_response(&database, v2_conformance_strict_query_case(route))
             .await?;
         let payload: Value = read_json(response).await?;
-        collect_pipeline_vocabulary_in_error_message(route, &payload, &mut violations);
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, &mut violations);
     }
 
     database.cleanup().await?;
@@ -1025,6 +1034,369 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
     }
 }
 
+async fn collect_v2_stale_and_conflict_error_violations(
+    violations: &mut Vec<String>,
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+    let alice_stale_at = seed_v2_conformance_snapshot_position(
+        &database,
+        "ethereum",
+        "ethereum-mainnet",
+        21_000_002,
+        "0xbinding-old",
+        "2026-04-17T00:00:02Z",
+    )
+    .await?;
+    let conflict_at = v2_at_token(
+        "ethereum",
+        "ethereum-mainnet",
+        21_000_001,
+        "0xmissing-conflict",
+        "2026-04-17T00:00:01Z",
+    )?;
+
+    for (route, uri, expected_code) in [
+        (
+            v2_conformance_route(V2SuccessFixture::Name),
+            format!("/v2/names/Alice.eth?at={alice_stale_at}"),
+            "stale",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::NameRecords),
+            format!("/v2/names/Alice.eth/records?at={alice_stale_at}"),
+            "stale",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Name),
+            format!("/v2/names/Alice.eth?at={conflict_at}"),
+            "conflict",
+        ),
+    ] {
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, expected_code);
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resolver_conflict_at = v2_at_token(
+        "ethereum-mainnet",
+        "ethereum-mainnet",
+        21_000_001,
+        "0xmissing-conflict",
+        "2026-04-17T00:00:01Z",
+    )?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row_with_writer_alias(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+    for (route, uri, expected_code) in [
+        (
+            v2_conformance_route(V2SuccessFixture::AddressNames),
+            format!("/v2/addresses/{V2_ADDRESS}/names?at={conflict_at}"),
+            "conflict",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::AddressHistory),
+            format!("/v2/addresses/{V2_ADDRESS}/history?at={conflict_at}"),
+            "conflict",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Search),
+            format!("/v2/search?q=alpha&namespace=ens&at={conflict_at}"),
+            "conflict",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Events),
+            format!("/v2/events?name=history.eth&at={conflict_at}"),
+            "conflict",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Resolver),
+            format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
+            "conflict",
+        ),
+    ] {
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, expected_code);
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_history_fixture(&database).await?;
+    let name_tree_stale_at = seed_v2_conformance_snapshot_position(
+        &database,
+        "ethereum",
+        "ethereum-mainnet",
+        79,
+        "0xname4f",
+        "2026-04-17T00:00:19Z",
+    )
+    .await?;
+    for (route, uri, expected_code) in [
+        (
+            v2_conformance_route(V2SuccessFixture::Subnames),
+            format!("/v2/names/parent.eth/subnames?at={name_tree_stale_at}"),
+            "stale",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::NameHistory),
+            format!("/v2/names/History.eth/history?at={name_tree_stale_at}"),
+            "stale",
+        ),
+    ] {
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, expected_code);
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    seed_v2_permissions_mainnet_rewind_checkpoint(&database).await?;
+    let permissions_stale_at = v2_permissions_mainnet_rewind_snapshot_token()?;
+    for (route, uri, expected_code) in [(
+        v2_conformance_route(V2SuccessFixture::Permissions),
+        format!("/v2/permissions?name=Perms.eth&at={permissions_stale_at}"),
+        "stale",
+    )] {
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, expected_code);
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    }
+    database.cleanup().await?;
+
+    Ok(())
+}
+
+async fn collect_v2_not_found_error_violations(violations: &mut Vec<String>) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_conformance_snapshot_position(
+        &database,
+        "ethereum",
+        "ethereum-mainnet",
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+
+    for (route, uri) in [
+        (
+            v2_conformance_route(V2SuccessFixture::Name),
+            "/v2/names/missing.eth",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::NameRecords),
+            "/v2/names/missing.eth/records",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Subnames),
+            "/v2/names/missing.eth/subnames",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::NameHistory),
+            "/v2/names/missing.eth/history",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Resolver),
+            "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+        ),
+        (
+            v2_conformance_route(V2SuccessFixture::Namespace),
+            "/v2/namespaces/unknown",
+        ),
+    ] {
+        let response =
+            v2_conformance_response(&database, V2StrictQueryMethod::Get, uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, "not_found");
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+async fn collect_v2_internal_error_violations(violations: &mut Vec<String>) -> Result<()> {
+    for route in V2_CONFORMANCE_ROUTES
+        .iter()
+        .filter(|route| route.tier == V2RouteTier::Product)
+    {
+        let Some((method, uri)) = v2_internal_error_probe(route.success) else {
+            continue;
+        };
+        let database = if route.success == V2SuccessFixture::Namespace {
+            TestDatabase::new(true).await?
+        } else {
+            TestDatabase::new_migrated().await?
+        };
+        let state = database.app_state();
+        state.pool.close().await;
+
+        let response = app_router(state)
+            .oneshot(v2_conformance_request(method, uri))
+            .await
+            .with_context(|| format!("v2 internal-error probe failed for {}", route.label))?;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{} {uri}",
+            route.label
+        );
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(route.label, &payload, "internal_error");
+        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+
+        database.cleanup().await?;
+    }
+
+    Ok(())
+}
+
+fn v2_internal_error_probe(
+    fixture: V2SuccessFixture,
+) -> Option<(V2StrictQueryMethod, &'static str)> {
+    match fixture {
+        V2SuccessFixture::Lookup => Some((V2StrictQueryMethod::PostLookup, "/v2/lookup")),
+        V2SuccessFixture::Status => Some((V2StrictQueryMethod::Get, "/v2/status")),
+        V2SuccessFixture::Name => Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth")),
+        V2SuccessFixture::NameRecords => {
+            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/records"))
+        }
+        V2SuccessFixture::Subnames => {
+            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/subnames"))
+        }
+        V2SuccessFixture::NameHistory => {
+            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/history"))
+        }
+        V2SuccessFixture::Permissions => Some((
+            V2StrictQueryMethod::Get,
+            "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
+        )),
+        V2SuccessFixture::AddressNames => Some((
+            V2StrictQueryMethod::Get,
+            "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+        )),
+        V2SuccessFixture::PrimaryName => Some((
+            V2StrictQueryMethod::Get,
+            "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
+        )),
+        V2SuccessFixture::AddressHistory => Some((
+            V2StrictQueryMethod::Get,
+            "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+        )),
+        V2SuccessFixture::Search => Some((V2StrictQueryMethod::Get, "/v2/search?q=alice")),
+        V2SuccessFixture::Events => Some((V2StrictQueryMethod::Get, "/v2/events")),
+        V2SuccessFixture::Resolver => Some((
+            V2StrictQueryMethod::Get,
+            "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+        )),
+        V2SuccessFixture::Namespace => Some((V2StrictQueryMethod::Get, "/v2/namespaces/ens")),
+        V2SuccessFixture::DiagnosticsCoverage
+        | V2SuccessFixture::DiagnosticsBinding
+        | V2SuccessFixture::DiagnosticsAuthority
+        | V2SuccessFixture::DiagnosticsRecords
+        | V2SuccessFixture::DiagnosticsExecution
+        | V2SuccessFixture::DiagnosticsNamespaceManifests
+        | V2SuccessFixture::DiagnosticsEvents => None,
+    }
+}
+
+async fn seed_v2_conformance_snapshot_position(
+    database: &TestDatabase,
+    slot: &str,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<String> {
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            slot: {
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "block_hash": block_hash,
+                "timestamp": timestamp
+            }
+        }))
+        .await?;
+    v2_at_token(slot, chain_id, block_number, block_hash, timestamp)
+}
+
+fn v2_conformance_route(fixture: V2SuccessFixture) -> &'static V2ConformanceRoute {
+    V2_CONFORMANCE_ROUTES
+        .iter()
+        .find(|route| route.success == fixture)
+        .unwrap_or_else(|| panic!("v2 conformance route missing for fixture"))
+}
+
+async fn v2_conformance_response(
+    database: &TestDatabase,
+    method: V2StrictQueryMethod,
+    uri: &str,
+) -> Result<Response> {
+    app_router(database.app_state())
+        .oneshot(v2_conformance_request(method, uri))
+        .await
+        .with_context(|| format!("v2 conformance request failed for {uri}"))
+}
+
+fn v2_conformance_request(method: V2StrictQueryMethod, uri: &str) -> Request<Body> {
+    let mut request = Request::builder().uri(uri);
+    let body = match method {
+        V2StrictQueryMethod::Get => Body::empty(),
+        V2StrictQueryMethod::PostLookup => {
+            request = request.method("POST").header("content-type", "application/json");
+            Body::from(r#"{"inputs":[{"id":"name","name":"alice.eth"}]}"#)
+        }
+    };
+    request.body(body).expect("request must build")
+}
+
 async fn v2_conformance_name_records_verified_stale_payload() -> Result<Value> {
     v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
@@ -1272,6 +1644,20 @@ fn assert_v2_name_records_verified_stale_fixture(payload: &Value) {
     );
 }
 
+fn assert_v2_error_envelope(label: &str, payload: &Value, expected_code: &str) {
+    assert_object_keys(payload, &["error"], label);
+    assert_object_keys(&payload["error"], &["code", "message", "details"], label);
+    assert_eq!(payload["error"]["code"], json!(expected_code), "{label}");
+    assert!(
+        payload["error"]["message"].is_string(),
+        "{label} error message must be a string"
+    );
+    assert!(
+        payload["error"]["details"].is_object(),
+        "{label} error details must be an object"
+    );
+}
+
 fn assert_non_empty_json(value: &Value, context: &str, path: &str) {
     assert!(
         json_value_is_non_empty(value),
@@ -1385,20 +1771,18 @@ fn collect_pipeline_vocabulary_in_product_response(
     });
 }
 
-fn collect_pipeline_vocabulary_in_error_message(
-    route: &V2ConformanceRoute,
+fn collect_pipeline_vocabulary_in_error_body(
+    label: &str,
     payload: &Value,
     violations: &mut Vec<String>,
 ) {
-    let message = payload["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{} error message must be a string", route.label));
-    for term in matched_pipeline_terms(message) {
-        violations.push(format!(
-            "{} error message: {message:?} contains product-banned pipeline vocabulary {term:?}",
-            route.label
-        ));
-    }
+    walk_json_fields_and_strings(&payload["error"], "$.error", &mut |path, candidate| {
+        for term in matched_pipeline_terms(candidate) {
+            violations.push(format!(
+                "{label} at {path}: {candidate:?} contains product-banned pipeline vocabulary {term:?}"
+            ));
+        }
+    });
 }
 
 fn assert_no_conformance_violations(context: &str, violations: &[String]) {
@@ -1432,6 +1816,29 @@ fn walk_json_fields(
                 walk_json_fields(child, &format!("{path}[{index}]"), visit);
             }
         }
+        _ => {}
+    }
+}
+
+fn walk_json_fields_and_strings(
+    value: &Value,
+    path: &str,
+    visit: &mut impl FnMut(&str, &str),
+) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = json_path(path, key);
+                visit(&child_path, key);
+                walk_json_fields_and_strings(child, &child_path, visit);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                walk_json_fields_and_strings(child, &format!("{path}[{index}]"), visit);
+            }
+        }
+        Value::String(text) => visit(path, text),
         _ => {}
     }
 }

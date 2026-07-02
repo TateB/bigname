@@ -12,14 +12,15 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
 use crate::{
-    ApiError, AppState, ExactNameSnapshotSelector, load_name_current_for_selected_snapshot,
+    AppState, ExactNameSnapshotSelector, load_name_current_for_selected_snapshot,
     map_internal_api_error, normalize_inferred_route_name,
 };
 
 use super::{
     AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
-    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, as_of_meta, decode,
-    decode_at_token, encode, encode_at_token, resolve_v2_snapshot,
+    QueryParamAllowlist, QueryParams, SnapshotReadResource, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, api_error_to_v2_for_resource, as_of_meta, decode, decode_at_token, encode,
+    encode_at_token, resolve_v2_snapshot_for,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -72,8 +73,14 @@ pub(crate) async fn get_history(
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::NameHistory,
+    )
+    .await?;
     let parent = load_name_current_for_selected_snapshot(
         &state.pool,
         &namespace,
@@ -82,13 +89,16 @@ pub(crate) async fn get_history(
     )
     .await
     .map_err(|error| {
-        api_error_to_v2(map_internal_api_error(
-            error,
-            format!(
-                "failed to load history for {}/{}",
-                namespace, normalized.normalized_name
+        api_error_to_v2_for_resource(
+            map_internal_api_error(
+                error,
+                format!(
+                    "failed to load history for {}/{}",
+                    namespace, normalized.normalized_name
+                ),
             ),
-        ))
+            SnapshotReadResource::NameHistory,
+        )
     })?;
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
@@ -335,17 +345,6 @@ fn v2_snapshot_scope_at_selector(at: &AtSelector) -> V2Result<Option<String>> {
             };
             Ok(Some(chain_positions.to_value().to_string()))
         }
-    }
-}
-
-pub(crate) fn api_error_to_v2(error: ApiError) -> V2Error {
-    match error.code {
-        "invalid_input" => V2Error::invalid_input(error.message),
-        "not_found" => V2Error::not_found(error.message),
-        "unsupported" => V2Error::unsupported(error.message),
-        "stale" => V2Error::stale(error.message),
-        "conflict" => V2Error::conflict(error.message),
-        _ => V2Error::internal_error(error.message),
     }
 }
 

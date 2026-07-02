@@ -7,9 +7,10 @@ use crate::AppState;
 
 use super::events::{parse_events_filter, resolve_events_namespace};
 use super::{
-    Envelope, Meta, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
-    as_of_meta, decode, encode, encode_at_token, events_cursor_payload, events_storage_cursor,
-    format_timestamp, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    Envelope, Meta, Page, QueryParamAllowlist, QueryParams, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
+    events_cursor_payload, events_storage_cursor, format_timestamp, resolve_v2_snapshot_for,
+    v2_exact_name_snapshot_scope,
 };
 
 pub(crate) struct DiagnosticEventsQueryParams;
@@ -68,8 +69,14 @@ pub(crate) async fn get_diagnostic_events(
     let parsed = parse_events_filter(&params, &namespace)?;
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::DiagnosticData,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor

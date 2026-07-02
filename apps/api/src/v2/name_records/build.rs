@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::Value;
+use tracing::error;
 
 use crate::{ResolutionRecordKey, build_resolution_verified_state};
 
@@ -298,7 +299,15 @@ fn verified_record_answers(
     match verified_lookup {
         Some(VerifiedRecordLookup::Found(outcome)) => {
             let state = build_resolution_verified_state(row, records, Some(outcome.as_ref()))
-                .map_err(|error| V2Error::internal_error(error.to_string()))?;
+                .map_err(|error| {
+                    error!(
+                        service = "api",
+                        logical_name_id = %row.logical_name_id,
+                        error = ?error,
+                        "failed to build v2 verified name records"
+                    );
+                    V2Error::internal_error("failed to build verified name records")
+                })?;
             verified_queries_from_state(&state, records)
         }
         Some(VerifiedRecordLookup::Stale(reason)) => {

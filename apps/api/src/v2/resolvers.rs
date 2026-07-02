@@ -11,6 +11,7 @@ use bigname_storage::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::error;
 
 use crate::AppState;
 
@@ -25,9 +26,9 @@ mod overview_items;
 use overview_items::{projected_section_items, summary_is_supported};
 
 use super::{
-    Envelope, Meta, NameRecord, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error,
-    V2Result, api_error_to_v2, as_of_meta, build_name_record, decode, encode, encode_at_token,
-    name_record, numeric_to_slug, resolve_v2_snapshot,
+    Envelope, Meta, NameRecord, Page, QueryParamAllowlist, QueryParams, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta, build_name_record, decode,
+    encode, encode_at_token, name_record, numeric_to_slug, resolve_v2_snapshot_for,
     vocab::{Completeness, Status},
 };
 
@@ -138,8 +139,14 @@ pub(crate) async fn get_resolver(
     };
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::Resolver,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = BoundNamesCursorBinding {
         chain_id: numeric_chain_id,
@@ -193,7 +200,7 @@ pub(crate) async fn get_resolver(
         as_of: Some(as_of_meta(&selected_snapshot)?),
         ..Meta::default()
     };
-    apply_resolver_support_meta(&mut meta, &row, include);
+    apply_resolver_support_meta(&mut meta, &row, include)?;
     let data = build_resolver_overview(row, numeric_chain_id, include, bound_names)?;
 
     Ok(Json(Envelope {
@@ -306,7 +313,7 @@ fn apply_resolver_support_meta(
     meta: &mut Meta,
     row: &ResolverCurrentRow,
     include: ResolverOverviewInclude,
-) {
+) -> V2Result<()> {
     let mut fields = Vec::new();
     let mut reason = None;
     let requested_count = RESOLVER_SECTIONS
@@ -321,24 +328,31 @@ fn apply_resolver_support_meta(
         let summary = resolver_overview_summary(row, summary_key);
         if summary.is_none_or(|summary| !summary_is_supported(summary)) {
             fields.push(field_key.to_owned());
-            reason = reason.or_else(|| {
-                summary
+            if reason.is_none() {
+                reason = summary
                     .and_then(|summary| summary.get("unsupported_reason"))
                     .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
+                    .map(product_resolver_reason)
+                    .transpose()?;
+            }
         }
     }
 
     if !fields.is_empty() {
-        meta.completeness = Some(if fields.len() == requested_count {
+        let completeness = if fields.len() == requested_count {
             Completeness::Unsupported
         } else {
             Completeness::Partial
-        });
+        };
+        if completeness == Completeness::Unsupported && reason.is_none() {
+            reason = Some("resolver_overview_not_supported".to_owned());
+        }
+        meta.completeness = Some(completeness);
         meta.unsupported_fields = Some(fields);
         meta.unsupported_reason = reason;
     }
+
+    Ok(())
 }
 
 fn bound_name_cursor_from_row(row: &NameCurrentListRow) -> NameCurrentListCursor {
@@ -400,7 +414,15 @@ fn resolver_snapshot_scope(chain_id_slug: &str) -> V2Result<SnapshotSelectionSco
         )],
         Some(chain_id_slug.to_owned()),
     )
-    .map_err(|error| V2Error::internal_error(error.message().to_owned()))
+    .map_err(|error| {
+        error!(
+            service = "api",
+            chain_id = %chain_id_slug,
+            message = %error.message(),
+            "failed to build resolver snapshot scope"
+        );
+        V2Error::internal_error("failed to build resolver snapshot scope")
+    })
 }
 
 fn resolver_overview_summary<'a>(
@@ -423,6 +445,39 @@ fn projected_section_count(summary: &Value) -> Option<u64> {
             .and_then(Value::as_array)
             .map(|items| items.len() as u64)
     })
+}
+
+fn product_resolver_reason(reason: &str) -> V2Result<String> {
+    match reason {
+        "resolver_binding_enumeration_not_projected" => {
+            Ok("binding_enumeration_not_supported".to_owned())
+        }
+        _ if resolver_reason_contains_pipeline_vocabulary(reason) => Err(V2Error::internal_error(
+            "failed to map resolver reason vocabulary",
+        )),
+        _ => Ok(reason.to_owned()),
+    }
+}
+
+fn resolver_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
+    const PIPELINE_REASON_TERMS: &[&str] = &[
+        "address_names_current",
+        "coverage",
+        "manifest",
+        "name_current",
+        "normalized_event",
+        "normalized_events",
+        "not_projected",
+        "projection",
+        "raw_fact",
+        "raw_log",
+        "record_inventory_current",
+        "resolver_current",
+    ];
+
+    PIPELINE_REASON_TERMS
+        .iter()
+        .any(|term| reason.contains(term))
 }
 
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {

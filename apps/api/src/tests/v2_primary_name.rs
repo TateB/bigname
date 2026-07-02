@@ -215,6 +215,143 @@ async fn v2_get_primary_name_surfaces_persisted_mismatch_in_verification() -> Re
 }
 
 #[tokio::test]
+async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000064);
+    let verified_primary_name = json!({
+        "status": "unsupported"
+    });
+
+    database
+        .insert_primary_name_current_claim_row(
+            V2_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            V2_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            Some("alice.eth"),
+        )
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        V2_PRIMARY_NAME_ADDRESS,
+        "60",
+        verified_primary_name.clone(),
+        timestamp(1_717_172_464),
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        V2_PRIMARY_NAME_ADDRESS,
+        "60",
+        verified_primary_name,
+        timestamp(1_717_172_464),
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([
+            {
+                "source": "verified",
+                "status": "unsupported",
+                "unsupported_reason": "unsupported_reason_missing"
+            }
+        ])
+    );
+    assert_eq!(
+        payload["data"]["verification"],
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "unsupported_reason_missing"
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000065);
+    let verified_primary_name = json!({
+        "status": "unsupported",
+        "unsupported_reason": "primary_names_current_projection_missing"
+    });
+
+    database
+        .insert_primary_name_current_claim_row(
+            V2_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            V2_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            Some("alice.eth"),
+        )
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        V2_PRIMARY_NAME_ADDRESS,
+        "60",
+        verified_primary_name.clone(),
+        timestamp(1_717_172_465),
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        V2_PRIMARY_NAME_ADDRESS,
+        "60",
+        verified_primary_name,
+        timestamp(1_717_172_465),
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = v2_primary_name_response_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("failed to map primary-name reason vocabulary")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_primary_name_runs_on_demand_claim_and_verification_for_default_tuple() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
