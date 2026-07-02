@@ -122,4 +122,6 @@ include!("tests/v2_primary_name.rs");
 
 include!("tests/v2_lookup.rs");
 
+include!("tests/v2_query_params.rs");
+
 include!("tests/openapi.rs");

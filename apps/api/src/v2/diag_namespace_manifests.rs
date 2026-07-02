@@ -13,7 +13,7 @@ use tracing::error;
 
 use crate::{AppState, ensure_public_namespace};
 
-use super::{Envelope, Meta, V2Error, V2Result, api_error_to_v2, namespaces::NoQueryParams};
+use super::{Envelope, Meta, NoQueryParams, V2Error, V2Result, api_error_to_v2};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DiagnosticNamespaceManifests {

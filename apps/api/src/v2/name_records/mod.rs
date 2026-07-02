@@ -17,10 +17,10 @@ use crate::{
 };
 
 use super::{
-    Envelope, MAX_PAGE_SIZE, Meta, QueryParams, RequestSource, Resolver, Source, Status, V2Error,
-    V2Result, api_error_to_v2, as_of_meta, default_requested_records,
-    name_records_inventory::RecordInventory, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
-    validate_product_record,
+    Envelope, MAX_PAGE_SIZE, Meta, QueryParamAllowlist, QueryParams, RequestSource, Resolver,
+    Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
+    default_requested_records, name_records_inventory::RecordInventory, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope, validate_product_record,
 };
 
 mod build;
@@ -30,6 +30,15 @@ pub(crate) use build::{
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
+
+pub(crate) struct NameRecordsQueryParams;
+
+impl QueryParamAllowlist for NameRecordsQueryParams {
+    const ALLOWED: &'static [&'static str] =
+        &["namespace", "at", "finality", "source", "keys", "include"];
+}
+
+pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
@@ -62,9 +71,10 @@ pub(crate) enum VerifiedRecordLookup {
 
 pub(crate) async fn get_name_records(
     Path(input_name): Path<String>,
-    params: QueryParams,
+    params: NameRecordsQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<NameRecords>>> {
+    let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params

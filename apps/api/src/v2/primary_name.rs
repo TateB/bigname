@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{FromRequestParts, Path, State},
     http::request::Parts,
 };
 use bigname_storage::PrimaryNameClaimStatus;
@@ -75,9 +75,12 @@ where
     type Rejection = V2Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(raw) = Query::<RawQueryParams>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        let raw = super::parse_raw_query_params_with_allowlist::<RawQueryParams, S>(
+            parts,
+            state,
+            &["coin_type", "namespace", "source"],
+        )
+        .await?;
         Self::try_from(raw)
     }
 }

@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,
-    extract::{FromRequestParts, Path, State},
-    http::request::Parts,
+    extract::{Path, State},
 };
 use bigname_manifests::{
     ActiveManifestVersion, CapabilitySupportStatus, NamespaceManifestSnapshot,
@@ -15,8 +14,8 @@ use tracing::error;
 use crate::{AppState, ensure_public_namespace};
 
 use super::{
-    Completeness, Envelope, Meta, V2Error, V2Result, api_error_to_v2, numeric_to_slug,
-    slug_to_numeric,
+    Completeness, Envelope, Meta, NoQueryParams, V2Error, V2Result, api_error_to_v2,
+    numeric_to_slug, slug_to_numeric,
 };
 
 const UNSUPPORTED_REASON: &str = "not_supported_for_namespace";
@@ -40,26 +39,6 @@ pub(crate) struct NamespaceNetwork {
     pub(crate) network: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chain_id: Option<u64>,
-}
-
-#[derive(Debug)]
-pub(crate) struct NoQueryParams;
-
-impl<S> FromRequestParts<S> for NoQueryParams
-where
-    S: Send + Sync,
-{
-    type Rejection = V2Error;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        if parts.uri.query().is_some_and(|query| !query.is_empty()) {
-            return Err(V2Error::invalid_input(
-                "query parameters are not supported on this route",
-            ));
-        }
-
-        Ok(Self)
-    }
 }
 
 pub(crate) async fn get_namespace(
@@ -191,7 +170,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use axum::{
-        extract::Path,
+        extract::{FromRequestParts, Path},
         http::{Request, StatusCode},
         response::IntoResponse,
     };

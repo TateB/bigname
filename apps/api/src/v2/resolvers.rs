@@ -14,9 +14,15 @@ use serde_json::{Map, Value};
 
 use crate::AppState;
 
+#[path = "resolvers/bound_names_cursor.rs"]
+mod bound_names_cursor;
+pub(crate) use bound_names_cursor::{
+    BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
+};
+
 use super::{
-    CursorPayload, Envelope, Meta, NameRecord, Page, QueryParams, V2Error, V2Result,
-    api_error_to_v2, as_of_meta, build_name_record, decode, encode, encode_at_token,
+    Envelope, Meta, NameRecord, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error,
+    V2Result, api_error_to_v2, as_of_meta, build_name_record, decode, encode, encode_at_token,
     format_timestamp, name_record, numeric_to_slug, resolve_v2_snapshot,
     vocab::{Completeness, Status},
 };
@@ -24,20 +30,20 @@ use super::{
 const BOUND_NAMES_SORT: NameCurrentListSort = NameCurrentListSort::Name;
 const BOUND_NAMES_ORDER: NameCurrentListOrder = NameCurrentListOrder::Asc;
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
-const CHAIN_ID_FILTER_KEY: &str = "chain_id";
-const RESOLVER_FILTER_KEY: &str = "resolver";
-const NAMESPACE_FILTER_KEY: &str = "namespace";
-const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
-const CURSOR_NAMESPACE_KEY: &str = "namespace";
-const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
-const NAMEHASH_CURSOR_KEY: &str = "namehash";
-const NONE_FILTER_VALUE: &str = "";
 const RESOLVER_SECTIONS: [(&str, &str, &str); 4] = [
     ("nodes", "nodes", "bindings"),
     ("aliases", "aliases", "aliases"),
     ("roles", "role_holders", "role_holders"),
     ("events", "events", "event_summary"),
 ];
+
+pub(crate) struct ResolverQueryParams;
+
+impl QueryParamAllowlist for ResolverQueryParams {
+    const ALLOWED: &'static [&'static str] = &["include", "at", "finality", "cursor", "page_size"];
+}
+
+pub(crate) type ResolverQuery = StrictQueryParams<ResolverQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ResolverOverview {
@@ -101,9 +107,10 @@ impl ResolverOverviewInclude {
 
 pub(crate) async fn get_resolver(
     Path((chain_id, address)): Path<(String, String)>,
-    params: QueryParams,
+    params: ResolverQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<ResolverOverview>>> {
+    let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
@@ -387,85 +394,6 @@ pub(crate) fn resolver_overview_include(include: &[String]) -> V2Result<Resolver
     })
 }
 
-pub(crate) fn bound_names_cursor_payload(
-    cursor: &NameCurrentListCursor,
-    binding: &BoundNamesCursorBinding<'_>,
-) -> CursorPayload {
-    CursorPayload::new(
-        binding.sort,
-        BTreeMap::from([
-            (CHAIN_ID_FILTER_KEY.to_owned(), binding.chain_id.to_string()),
-            (
-                RESOLVER_FILTER_KEY.to_owned(),
-                binding.resolver_address.to_owned(),
-            ),
-            (
-                NAMESPACE_FILTER_KEY.to_owned(),
-                option_filter(binding.namespace),
-            ),
-        ]),
-        BTreeMap::from([
-            (SORT_VALUE_CURSOR_KEY.to_owned(), cursor_sort_value(cursor)),
-            (CURSOR_NAMESPACE_KEY.to_owned(), cursor.namespace.clone()),
-            (
-                NORMALIZED_NAME_CURSOR_KEY.to_owned(),
-                cursor.normalized_name.clone(),
-            ),
-            (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
-        ]),
-        Some(binding.snapshot_token.to_owned()),
-    )
-}
-
-pub(crate) fn bound_names_storage_cursor(
-    payload: &CursorPayload,
-    binding: &BoundNamesCursorBinding<'_>,
-) -> V2Result<NameCurrentListCursor> {
-    let expected_chain_id = binding.chain_id.to_string();
-    let expected_namespace = option_filter(binding.namespace);
-    if payload.sort != binding.sort {
-        return Err(invalid_bound_names_cursor());
-    }
-    if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_bound_names_cursor());
-    }
-    if payload.filters.len() != 3
-        || payload.filters.get(CHAIN_ID_FILTER_KEY).map(String::as_str)
-            != Some(expected_chain_id.as_str())
-        || payload.filters.get(RESOLVER_FILTER_KEY).map(String::as_str)
-            != Some(binding.resolver_address)
-        || payload
-            .filters
-            .get(NAMESPACE_FILTER_KEY)
-            .map(String::as_str)
-            != Some(expected_namespace.as_str())
-    {
-        return Err(invalid_bound_names_cursor());
-    }
-    if payload.last_item.len() != 4 {
-        return Err(invalid_bound_names_cursor());
-    }
-
-    Ok(NameCurrentListCursor {
-        sort_value: NameCurrentListCursorValue::Name(cursor_nonempty_value(
-            payload,
-            SORT_VALUE_CURSOR_KEY,
-        )?),
-        namespace: cursor_nonempty_value(payload, CURSOR_NAMESPACE_KEY)?,
-        normalized_name: cursor_nonempty_value(payload, NORMALIZED_NAME_CURSOR_KEY)?,
-        namehash: cursor_nonempty_value(payload, NAMEHASH_CURSOR_KEY)?,
-    })
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct BoundNamesCursorBinding<'a> {
-    pub(crate) chain_id: u64,
-    pub(crate) resolver_address: &'a str,
-    pub(crate) namespace: Option<&'a str>,
-    pub(crate) sort: &'a str,
-    pub(crate) snapshot_token: &'a str,
-}
-
 fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str)> {
     let value = value.trim();
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -564,30 +492,6 @@ fn insert_optional_string(object: &mut Map<String, Value>, key: &str, value: Opt
 
 fn summary_is_supported(summary: &Value) -> bool {
     summary.get("status").and_then(Value::as_str) == Some("supported")
-}
-
-fn cursor_sort_value(cursor: &NameCurrentListCursor) -> String {
-    match &cursor.sort_value {
-        NameCurrentListCursorValue::Name(value) => value.clone(),
-        NameCurrentListCursorValue::Timestamp(_) => String::new(),
-    }
-}
-
-fn cursor_nonempty_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_bound_names_cursor)
-}
-
-fn invalid_bound_names_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
-}
-
-fn option_filter(value: Option<&str>) -> String {
-    value.unwrap_or(NONE_FILTER_VALUE).to_owned()
 }
 
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {

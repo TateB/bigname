@@ -1,8 +1,4 @@
-use axum::{
-    Json,
-    extract::{FromRequestParts, Query},
-    http::request::Parts,
-};
+use axum::{Json, extract::FromRequestParts, http::request::Parts};
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -29,6 +25,8 @@ pub(crate) use coverage::get_name_coverage_diagnostic;
 pub(crate) use execution::get_name_execution_diagnostic;
 pub(crate) use records::get_name_records_diagnostic;
 
+const DIAGNOSTIC_NAME_QUERY_PARAMS: &[&str] = &["namespace", "at", "finality"];
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct RawDiagnosticNameQueryParams {
@@ -49,9 +47,11 @@ where
     type Rejection = V2Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(raw) = Query::<RawDiagnosticNameQueryParams>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        let raw = super::super::parse_raw_query_params_with_allowlist::<
+            RawDiagnosticNameQueryParams,
+            S,
+        >(parts, state, DIAGNOSTIC_NAME_QUERY_PARAMS)
+        .await?;
         Self::try_from(raw)
     }
 }

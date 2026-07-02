@@ -228,6 +228,8 @@ Common parameter rules:
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 No advertised-but-rejected parameters are part of the `v2` contract.
+Unknown or undocumented query parameters are rejected with `400 invalid_input`
+on every `v2` route.
 Snapshot-pinned reads require the ADR 0003 slice-3 snapshot-service enabler;
 ADR 0006 rollout step 3 includes that read-layer work.
 

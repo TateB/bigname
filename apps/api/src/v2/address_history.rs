@@ -9,9 +9,10 @@ use bigname_storage::{HistoryCursor, HistorySummaryMode};
 use crate::AppState;
 
 use super::{
-    CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParams, Relation, V2Error,
-    V2Result, api_error_to_v2, as_of_meta, build_event, decode, encode, encode_at_token,
-    history_storage_scope, relation_to_storage, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, QueryParams,
+    Relation, StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta, build_event,
+    decode, encode, encode_at_token, history_storage_scope, relation_to_storage,
+    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -22,11 +23,28 @@ const SCOPE_FILTER_KEY: &str = "scope";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
 const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
 
+pub(crate) struct AddressHistoryQueryParams;
+
+impl QueryParamAllowlist for AddressHistoryQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "at",
+        "finality",
+        "relation",
+        "scope",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type AddressHistoryQuery = StrictQueryParams<AddressHistoryQueryParams>;
+
 pub(crate) async fn get_address_history(
     Path(address): Path<String>,
-    params: QueryParams,
+    params: AddressHistoryQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
+    let params = params.into_inner();
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());

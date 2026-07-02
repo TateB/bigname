@@ -7,10 +7,30 @@ use crate::AppState;
 
 use super::events::{parse_events_filter, resolve_events_namespace};
 use super::{
-    Envelope, Meta, Page, QueryParams, V2Error, V2Result, as_of_meta, decode, encode,
-    encode_at_token, events_cursor_payload, events_storage_cursor, format_timestamp,
-    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    Envelope, Meta, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
+    as_of_meta, decode, encode, encode_at_token, events_cursor_payload, events_storage_cursor,
+    format_timestamp, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
+
+pub(crate) struct DiagnosticEventsQueryParams;
+
+impl QueryParamAllowlist for DiagnosticEventsQueryParams {
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "name",
+        "address",
+        "registration_id",
+        "type",
+        "from_block",
+        "to_block",
+        "at",
+        "finality",
+        "cursor",
+        "page_size",
+    ];
+}
+
+pub(crate) type DiagnosticEventsQuery = StrictQueryParams<DiagnosticEventsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct DiagnosticEvent {
@@ -40,9 +60,10 @@ pub(crate) struct DiagnosticEvent {
 /// Raw diagnostics twin of `/v2/events`; filtering and cursor anchoring match
 /// the product route, but rows are emitted without product event type mapping.
 pub(crate) async fn get_diagnostic_events(
-    params: QueryParams,
+    params: DiagnosticEventsQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<DiagnosticEvent>>>> {
+    let params = params.into_inner();
     let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 
