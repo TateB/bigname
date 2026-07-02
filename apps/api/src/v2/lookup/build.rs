@@ -3,21 +3,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
-use crate::v2::{Relation, Status, name_record};
+use crate::v2::{Relation, Status, V2Error, V2Result, name_record};
 
-const MISSING_COVERAGE_UNSUPPORTED_REASON: &str = "name_coverage_unsupported_reason_missing";
+const MISSING_UNSUPPORTED_REASON: &str = "unsupported_reason_missing";
 
 pub(super) fn build_forward_detail_record(
     record: &bigname_storage::IdentityNameRecordRow,
-) -> LookupRecord {
+) -> V2Result<LookupRecord> {
     build_detail_record(record, "60", None, Vec::new())
 }
 
 pub(super) fn build_forward_feed_record(
     record: &bigname_storage::IdentityNameRecordRow,
-) -> LookupRecord {
+) -> V2Result<LookupRecord> {
     let status = identity_record_status(&record.row.coverage);
-    LookupRecord {
+    Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
         display_name: record.row.canonical_display_name.clone(),
         namespace: record.row.namespace.clone(),
@@ -42,15 +42,15 @@ pub(super) fn build_forward_feed_record(
         is_primary: None,
         relations: Vec::new(),
         status,
-        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status),
-        failure_reason: identity_record_failure_reason(&record.row.coverage, status),
+        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status)?,
+        failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: Vec::new(),
-    }
+    })
 }
 
 pub(super) fn build_reverse_detail_record(
     record: &bigname_storage::ReverseIdentityRecordRow,
-) -> LookupRecord {
+) -> V2Result<LookupRecord> {
     build_detail_record(
         &record.name_record,
         &record.requested_coin_type,
@@ -61,9 +61,9 @@ pub(super) fn build_reverse_detail_record(
 
 pub(super) fn build_reverse_feed_record(
     record: &bigname_storage::ReverseIdentityRecordRow,
-) -> LookupRecord {
+) -> V2Result<LookupRecord> {
     let status = identity_record_status(&record.name_record.row.coverage);
-    LookupRecord {
+    Ok(LookupRecord {
         name: record.name_record.row.normalized_name.clone(),
         display_name: record.name_record.row.canonical_display_name.clone(),
         namespace: record.name_record.row.namespace.clone(),
@@ -94,10 +94,10 @@ pub(super) fn build_reverse_feed_record(
         unsupported_reason: identity_record_unsupported_reason(
             &record.name_record.row.coverage,
             status,
-        ),
-        failure_reason: identity_record_failure_reason(&record.name_record.row.coverage, status),
+        )?,
+        failure_reason: identity_record_failure_reason(&record.name_record.row.coverage, status)?,
         unsupported_fields: Vec::new(),
-    }
+    })
 }
 
 pub(super) fn lookup_address_status(records: &[LookupRecord]) -> Status {
@@ -122,7 +122,7 @@ fn build_detail_record(
     primary_coin_type: &str,
     is_primary: Option<bool>,
     relations: Vec<Relation>,
-) -> LookupRecord {
+) -> V2Result<LookupRecord> {
     let addresses = identity_addresses(record.record_inventory_current.as_ref());
     let text_records = identity_text_records(record.record_inventory_current.as_ref());
     let content_hash = identity_content_hash(record.record_inventory_current.as_ref());
@@ -141,7 +141,7 @@ fn build_detail_record(
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
     let status = identity_record_status(&record.row.coverage);
 
-    LookupRecord {
+    Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
         display_name: record.row.canonical_display_name.clone(),
         namespace: record.row.namespace.clone(),
@@ -173,10 +173,10 @@ fn build_detail_record(
         is_primary,
         relations,
         status,
-        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status),
-        failure_reason: identity_record_failure_reason(&record.row.coverage, status),
+        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status)?,
+        failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: unsupported_fields.into_iter().collect(),
-    }
+    })
 }
 
 fn identity_addresses(
@@ -311,19 +311,63 @@ fn identity_record_status(coverage: &Value) -> Status {
     }
 }
 
-fn identity_record_unsupported_reason(coverage: &Value, status: Status) -> Option<String> {
-    (status == Status::Unsupported).then(|| {
-        string_field(coverage.get("unsupported_reason"))
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| MISSING_COVERAGE_UNSUPPORTED_REASON.to_owned())
-    })
+fn identity_record_unsupported_reason(
+    coverage: &Value,
+    status: Status,
+) -> V2Result<Option<String>> {
+    if status != Status::Unsupported {
+        return Ok(None);
+    }
+
+    let reason = string_field(coverage.get("unsupported_reason"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
+    product_lookup_reason(&reason).map(Some)
 }
 
-fn identity_record_failure_reason(coverage: &Value, status: Status) -> Option<String> {
-    matches!(status, Status::Failed | Status::NotFound | Status::Mismatch)
-        .then(|| string_field(coverage.get("failure_reason")))
-        .flatten()
+fn identity_record_failure_reason(coverage: &Value, status: Status) -> V2Result<Option<String>> {
+    if !matches!(status, Status::Failed | Status::NotFound | Status::Mismatch) {
+        return Ok(None);
+    }
+
+    string_field(coverage.get("failure_reason"))
         .filter(|value| !value.trim().is_empty())
+        .map(|reason| product_lookup_reason(&reason))
+        .transpose()
+}
+
+fn product_lookup_reason(reason: &str) -> V2Result<String> {
+    match reason {
+        "projection_read_failed" => Ok("read_failed".to_owned()),
+        "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
+        "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
+        _ if lookup_reason_contains_pipeline_vocabulary(reason) => Err(V2Error::internal_error(
+            "failed to map lookup reason vocabulary",
+        )),
+        _ => Ok(reason.to_owned()),
+    }
+}
+
+fn lookup_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
+    const PIPELINE_REASON_TERMS: &[&str] = &[
+        "address_names_current",
+        "coverage",
+        "enumeration_basis",
+        "exhaustiveness",
+        "manifest",
+        "name_current",
+        "normalized_event",
+        "normalized_events",
+        "projection",
+        "raw_fact",
+        "raw_log",
+        "record_inventory_current",
+        "source_classes_considered",
+    ];
+
+    PIPELINE_REASON_TERMS
+        .iter()
+        .any(|term| reason.contains(term))
 }
 
 fn identity_network(namespace: &str, chain_positions: &Value) -> String {

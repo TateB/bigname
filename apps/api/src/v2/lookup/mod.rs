@@ -32,6 +32,8 @@ use parse::{
     parse_name_input,
 };
 
+const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ReverseStorageKey {
     address: String,
@@ -125,7 +127,7 @@ async fn render_name_lookup_results(
                     let record = match profile {
                         LookupProfile::Feed => build_forward_feed_record(record),
                         LookupProfile::Detail => build_forward_detail_record(record),
-                    };
+                    }?;
                     (record.status, Some(record))
                 }
                 None => (Status::NotFound, None),
@@ -263,9 +265,13 @@ async fn load_exact_relation_reverse_page(
 ) -> V2Result<ReverseLookupPage> {
     let target_len = input.page_size as usize;
     let scan_size = input.page_size.max(50);
+    let scan_cap = scan_size.saturating_mul(EXACT_RELATION_SCAN_MULTIPLIER);
     let mut cursor = input.page_cursor.clone();
     let mut entries = Vec::with_capacity(target_len.saturating_add(1));
     let mut has_more = false;
+    let mut hit_scan_cap = false;
+    let mut rows_examined = 0_u64;
+    let mut last_examined = None;
 
     loop {
         let storage_input = bigname_storage::ReverseIdentityStorageInput {
@@ -301,6 +307,8 @@ async fn load_exact_relation_reverse_page(
         }
         for entry in group.entries {
             let next_scan_cursor = reverse_identity_storage_cursor(&entry);
+            rows_examined = rows_examined.saturating_add(1);
+            last_examined = Some(entry.clone());
             if reverse_record_matches_relation(&entry, input.relation) {
                 entries.push(trim_reverse_record_relations(entry, input.relation));
                 if entries.len() > target_len {
@@ -309,9 +317,13 @@ async fn load_exact_relation_reverse_page(
                 }
             }
             cursor = Some(next_scan_cursor);
+            if rows_examined >= scan_cap && broad_has_more {
+                hit_scan_cap = true;
+                break;
+            }
         }
 
-        if has_more || !broad_has_more {
+        if has_more || hit_scan_cap || !broad_has_more {
             break;
         }
         if cursor.is_none() {
@@ -319,19 +331,22 @@ async fn load_exact_relation_reverse_page(
         }
     }
 
-    let next_cursor = if has_more {
+    let binding = LookupReverseCursorBinding {
+        address: &input.address,
+        coin_type: input.coin_type,
+        relation: input.relation,
+    };
+    let next_cursor_record = if has_more {
         entries.truncate(target_len);
-        let binding = LookupReverseCursorBinding {
-            address: &input.address,
-            coin_type: input.coin_type,
-            relation: input.relation,
-        };
-        entries
-            .last()
-            .map(|record| encode(&lookup_reverse_cursor_payload(record, &binding)))
+        entries.last()
+    } else if hit_scan_cap {
+        has_more = true;
+        last_examined.as_ref()
     } else {
         None
     };
+    let next_cursor =
+        next_cursor_record.map(|record| encode(&lookup_reverse_cursor_payload(record, &binding)));
 
     Ok(ReverseLookupPage {
         entries,
@@ -354,7 +369,7 @@ fn render_reverse_input_result(
             LookupProfile::Feed => build_reverse_feed_record(record),
             LookupProfile::Detail => build_reverse_detail_record(record),
         })
-        .collect::<Vec<_>>();
+        .collect::<V2Result<Vec<_>>>()?;
     let status = lookup_address_status(&records);
     results[input.index] = Some(address_lookup_result(
         input,

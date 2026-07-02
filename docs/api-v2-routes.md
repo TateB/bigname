@@ -94,11 +94,17 @@ Field ownership:
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
-  default `page_size` to 50 and use the common max of 200.
+  default `page_size` to 50 and use the common max of 200. Exact `owner` and
+  `registrant` filters may return an as-filled page with `has_more=true` when
+  the API reaches its bounded post-filter scan cap; clients continue with the
+  returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
-  array for the input.
+  array for the input. Lookup record-level reason values are mapped to product
+  vocabulary before serialization; current values include `read_failed`,
+  `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
+  `unsupported_reason_missing`.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`

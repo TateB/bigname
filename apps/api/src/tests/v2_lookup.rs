@@ -473,16 +473,55 @@ async fn v2_lookup_reverse_failed_record_sets_failed_result_and_reason() -> Resu
     assert_eq!(payload["data"][0]["status"], json!("failed"));
     assert_eq!(
         payload["data"][0]["failure_reason"],
-        json!("projection_read_failed")
+        json!("read_failed")
     );
     assert_eq!(payload["data"][0]["records"][0]["status"], json!("failed"));
     assert_eq!(
         payload["data"][0]["records"][0]["failure_reason"],
-        json!("projection_read_failed")
+        json!("read_failed")
     );
     assert_eq!(payload["data"][0]["records"][1]["status"], json!("stale"));
     assert!(payload["data"][0].get("unsupported_reason").is_none());
     assert!(payload["data"][0]["records"][0].get("unsupported_reason").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET coverage = $2::jsonb
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind("ens:alice.eth")
+    .bind(json!({
+        "status": "failed",
+        "failure_reason": "raw_log_decoder_failed"
+    }))
+    .execute(&database.pool)
+    .await?;
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
 
     database.cleanup().await?;
     Ok(())
@@ -556,6 +595,100 @@ async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Re
         json!(["registrant"])
     );
     assert_eq!(registrant["data"][0]["page"]["total_count"], Value::Null);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_relation_filter_resumes_across_scan_boundaries() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_relation_scan_fixture(&database, address, 125, &[50, 101]).await?;
+
+    let first_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "owner",
+                "page_size": 1
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&first_page), vec!["scan050.eth"]);
+    assert_eq!(first_page["data"][0]["page"]["has_more"], json!(true));
+    let cursor = first_page["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("overflow page must include next_cursor");
+
+    let second_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "owner",
+                "page_size": 1,
+                "cursor": cursor
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&second_page), vec!["scan101.eth"]);
+    assert_eq!(second_page["data"][0]["page"]["has_more"], json!(false));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_relation_filter_scan_cap_returns_resume_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_relation_scan_fixture(&database, address, 502, &[500]).await?;
+
+    let capped_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "owner",
+                "page_size": 1
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(
+        capped_page["data"][0]["records"]
+            .as_array()
+            .expect("records must be an array")
+            .len(),
+        0
+    );
+    assert_eq!(capped_page["data"][0]["page"]["has_more"], json!(true));
+    let cursor = capped_page["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("scan-capped page must include next_cursor");
+
+    let resumed_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "owner",
+                "page_size": 1,
+                "cursor": cursor
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&resumed_page), vec!["scan500.eth"]);
+    assert_eq!(resumed_page["data"][0]["page"]["has_more"], json!(false));
 
     database.cleanup().await?;
     Ok(())
@@ -689,6 +822,155 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
     )
     .await?;
     Ok(())
+}
+
+async fn seed_v2_lookup_relation_scan_fixture(
+    database: &TestDatabase,
+    address: &str,
+    row_count: usize,
+    owner_match_indexes: &[usize],
+) -> Result<()> {
+    let owner_match_indexes = owner_match_indexes
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut raw_blocks = Vec::new();
+    let mut surfaces = Vec::new();
+    let mut token_lineages = Vec::new();
+    let mut resources = Vec::new();
+    let mut bindings = Vec::new();
+    let mut name_rows = Vec::new();
+    let mut address_rows = Vec::new();
+
+    for index in 0..row_count {
+        let block_number = 1_000 + index as i64;
+        let name = format!("scan{index:03}.eth");
+        let logical_name_id = format!("ens:{name}");
+        let namehash = format!("namehash:{name}");
+        let resource_id = Uuid::from_u128(0x7100_0000 + index as u128 * 3);
+        let token_lineage_id = Uuid::from_u128(0x7100_0001 + index as u128 * 3);
+        let surface_binding_id = Uuid::from_u128(0x7100_0002 + index as u128 * 3);
+        let storage_block_hash = format!("0xlookupscan{index:064x}");
+        let name_block_hash = format!("0xname{block_number:02x}");
+        let address_block_hash = format!("0xaddr{block_number:02x}");
+        let relation = if owner_match_indexes.contains(&index) {
+            bigname_storage::AddressNameRelation::TokenHolder
+        } else {
+            bigname_storage::AddressNameRelation::Registrant
+        };
+
+        raw_blocks.extend([
+            raw_block(
+                "ethereum-mainnet",
+                &storage_block_hash,
+                None,
+                block_number,
+                1_717_180_000 + block_number,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                &name_block_hash,
+                None,
+                block_number,
+                1_717_180_000 + block_number,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                &address_block_hash,
+                None,
+                block_number,
+                1_717_180_000 + block_number,
+            ),
+        ]);
+        surfaces.push(collection_name_surface(
+            &logical_name_id,
+            &name,
+            &namehash,
+            block_number,
+        ));
+        token_lineages.push(address_name_token_lineage(
+            token_lineage_id,
+            &storage_block_hash,
+            block_number,
+        ));
+        resources.push(address_name_resource(
+            resource_id,
+            Some(token_lineage_id),
+            &storage_block_hash,
+            block_number,
+        ));
+        bindings.push(address_name_surface_binding(
+            surface_binding_id,
+            &logical_name_id,
+            resource_id,
+            &storage_block_hash,
+            block_number,
+            1_717_180_000 + block_number,
+        ));
+        name_rows.push(address_name_name_current_row(
+            &logical_name_id,
+            &name,
+            &name,
+            &namehash,
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            block_number,
+            compact_name_declared_summary(
+                address,
+                address,
+                address,
+                1_900_000_000,
+                "2026-04-17T00:00:21Z",
+                "2026-04-17T00:00:11Z",
+            ),
+        ));
+        address_rows.push(address_name_current_row(
+            address,
+            &logical_name_id,
+            relation,
+            &name,
+            &name,
+            &namehash,
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            block_number,
+        ));
+    }
+
+    bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
+        .await
+        .context("failed to seed lookup scan raw blocks")?;
+    bigname_storage::upsert_name_surfaces(&database.pool, &surfaces)
+        .await
+        .context("failed to seed lookup scan name surfaces")?;
+    bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+        .await
+        .context("failed to seed lookup scan token lineages")?;
+    bigname_storage::upsert_resources(&database.pool, &resources)
+        .await
+        .context("failed to seed lookup scan resources")?;
+    bigname_storage::upsert_surface_bindings(&database.pool, &bindings)
+        .await
+        .context("failed to seed lookup scan surface bindings")?;
+    bigname_storage::upsert_name_current_rows(&database.pool, &name_rows)
+        .await
+        .context("failed to seed lookup scan name_current rows")?;
+    bigname_storage::upsert_address_names_current_rows(&database.pool, &address_rows)
+        .await
+        .context("failed to seed lookup scan address-name rows")?;
+
+    Ok(())
+}
+
+fn lookup_record_names(payload: &Value) -> Vec<&str> {
+    payload["data"][0]["records"]
+        .as_array()
+        .expect("lookup records must be an array")
+        .iter()
+        .map(|record| record["name"].as_str().expect("record must include name"))
+        .collect()
 }
 
 async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
