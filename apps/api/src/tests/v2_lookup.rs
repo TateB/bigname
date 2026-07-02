@@ -493,35 +493,42 @@ async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-    sqlx::query(
-        r#"
-        UPDATE name_current
-        SET coverage = $2::jsonb
-        WHERE logical_name_id = $1
-        "#,
-    )
-    .bind("ens:alice.eth")
-    .bind(json!({
-        "status": "failed",
-        "failure_reason": "raw_log_decoder_failed"
-    }))
-    .execute(&database.pool)
-    .await?;
 
-    let response = v2_lookup_response_for_database(
-        &database,
-        "/v2/lookup",
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "address": address
-            }]
-        }),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("internal_error"));
+    for failure_reason in ["raw_log_decoder_failed", "identity_sidecar_missing"] {
+        sqlx::query(
+            r#"
+            UPDATE name_current
+            SET coverage = $2::jsonb
+            WHERE logical_name_id = $1
+            "#,
+        )
+        .bind("ens:alice.eth")
+        .bind(json!({
+            "status": "failed",
+            "failure_reason": failure_reason
+        }))
+        .execute(&database.pool)
+        .await?;
+
+        let response = v2_lookup_response_for_database(
+            &database,
+            "/v2/lookup",
+            json!({
+                "profile": "detail",
+                "inputs": [{
+                    "address": address
+                }]
+            }),
+        )
+        .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{failure_reason}"
+        );
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("internal_error"));
+    }
 
     database.cleanup().await?;
     Ok(())

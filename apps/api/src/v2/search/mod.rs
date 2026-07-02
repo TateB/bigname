@@ -10,14 +10,16 @@ use bigname_storage::{
     NameCurrentListRow, NameCurrentListSort, SnapshotPositionRequirement, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 use crate::{AppState, PUBLIC_NAMESPACES};
 
 use super::chains::deployment_profile_for_slug;
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
-    RegistrationStatus, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    RegistrationStatus, SnapshotReadResource, V2Error, V2Result, as_of_meta, decode, encode,
+    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for,
+    v2_exact_name_snapshot_scope,
 };
 
 const SEARCH_SORT: &str = "name_asc";
@@ -150,8 +152,14 @@ pub(crate) async fn get_search(
     // select response metadata and cursor binding for the latest-row read.
     let scope =
         search_snapshot_scope(&state, params.namespace.as_deref(), params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::Search,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = SearchCursorBinding {
         q: &params.q,
@@ -312,8 +320,14 @@ async fn search_snapshot_scope(
         }
         validate_single_deployment_profile(&requirements)?;
 
-        return SnapshotSelectionScope::new(requirements, None)
-            .map_err(|error| V2Error::internal_error(error.message()));
+        return SnapshotSelectionScope::new(requirements, None).map_err(|error| {
+            error!(
+                service = "api",
+                message = %error.message(),
+                "failed to build v2 search snapshot scope"
+            );
+            V2Error::internal_error("failed to build search snapshot scope")
+        });
     };
 
     v2_exact_name_snapshot_scope(state, namespace, at).await

@@ -17,8 +17,8 @@ use crate::{
 
 use super::super::super::{MAX_PAGE_SIZE, validate_product_record};
 use super::{
-    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2,
-    apply_diagnostics_dictionary_names, diagnostic_envelope,
+    Envelope, QueryParams, RawQueryParams, SnapshotReadResource, V2Error, V2Result,
+    api_error_to_v2_for_resource, apply_diagnostics_dictionary_names, diagnostic_envelope,
     resolve_diagnostic_name_with_resolution_auxiliary,
 };
 
@@ -98,7 +98,10 @@ pub(crate) async fn get_name_execution_diagnostic(
                 error = ?load_error,
                 "failed to load declared record inventory for v2 resolution execution diagnostic"
             );
-            return Err(api_error_to_v2(snapshot_selection_api_error(load_error)));
+            return Err(api_error_to_v2_for_resource(
+                snapshot_selection_api_error(load_error),
+                SnapshotReadResource::DiagnosticData,
+            ));
         }
     };
 

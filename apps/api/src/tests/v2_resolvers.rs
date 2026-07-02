@@ -576,6 +576,89 @@ async fn v2_get_resolver_does_not_advertise_wrong_chain_lookahead_as_more() -> R
 }
 
 #[tokio::test]
+async fn v2_get_resolver_maps_unsupported_reason_to_product_vocabulary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["bindings"] = json!({
+        "status": "unsupported",
+        "unsupported_reason": "resolver_binding_enumeration_not_projected"
+    });
+    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["completeness"], json!("unsupported"));
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["nodes"]));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("binding_enumeration_not_supported")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_rejects_pipeline_unsupported_reason() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["bindings"] = json!({
+        "status": "unsupported",
+        "unsupported_reason": "resolver_sidecar_missing"
+    });
+    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+
+    let response = v2_resolver_response_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "internal_error");
+    assert_eq!(
+        payload.error.message,
+        "failed to map resolver reason vocabulary"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_supplies_reason_when_unsupported_summary_omits_one() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["bindings"] = json!({
+        "status": "unsupported"
+    });
+    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["completeness"], json!("unsupported"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("resolver_overview_not_supported")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 

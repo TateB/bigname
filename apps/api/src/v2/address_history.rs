@@ -10,9 +10,9 @@ use crate::AppState;
 
 use super::{
     CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, QueryParams,
-    Relation, StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta, build_event,
-    decode, encode, encode_at_token, history_storage_scope, relation_to_storage,
-    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    Relation, SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
+    as_of_meta, build_event, decode, encode, encode_at_token, history_storage_scope,
+    relation_to_storage, resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -52,8 +52,14 @@ pub(crate) async fn get_address_history(
     let storage_scope = history_storage_scope(params.scope);
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::AddressHistory,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = AddressHistoryCursorBinding {
         address: &normalized_address,

@@ -18,9 +18,10 @@ use crate::{
 
 use super::{
     Envelope, MAX_PAGE_SIZE, Meta, QueryParamAllowlist, QueryParams, RequestSource, Resolver,
-    Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    default_requested_records, name_records_inventory::RecordInventory, resolve_v2_snapshot,
-    v2_exact_name_snapshot_scope, validate_product_record,
+    SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
+    api_error_to_v2_for_resource, as_of_meta, default_requested_records,
+    name_records_inventory::RecordInventory, resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
+    validate_product_record,
 };
 
 mod build;
@@ -86,8 +87,14 @@ pub(crate) async fn get_name_records(
     let include_inventory = records_include_inventory(&params.include)?;
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::NameRecords,
+    )
+    .await?;
     let row = load_name_current_for_selected_snapshot(
         &state.pool,
         &namespace,
@@ -96,19 +103,27 @@ pub(crate) async fn get_name_records(
     )
     .await
     .map_err(|error| {
-        api_error_to_v2(map_internal_api_error(
-            error,
-            format!(
-                "failed to load name records for {}/{}",
-                namespace, normalized.normalized_name
+        api_error_to_v2_for_resource(
+            map_internal_api_error(
+                error,
+                format!(
+                    "failed to load name records for {}/{}",
+                    namespace, normalized.normalized_name
+                ),
             ),
-        ))
+            SnapshotReadResource::NameRecords,
+        )
     })?;
 
     let record_inventory =
         load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
             .await
-            .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))?;
+            .map_err(|error| {
+                api_error_to_v2_for_resource(
+                    snapshot_selection_api_error(error),
+                    SnapshotReadResource::NameRecords,
+                )
+            })?;
     let default_records;
     let requested_records = match requested_records.as_deref() {
         Some(records) => Some(records),
@@ -297,7 +312,10 @@ async fn load_verified_record_lookup_with_persistence(
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
             VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
         )),
-        Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
+        Err(error) => Err(api_error_to_v2_for_resource(
+            snapshot_selection_api_error(error),
+            SnapshotReadResource::NameRecords,
+        )),
     }
 }
 

@@ -21,10 +21,10 @@ use super::{
 };
 
 use crate::v2::{
-    RecordAnswer, Source, api_error_to_v2, build_indexed_name_records, build_verified_name_records,
-    default_requested_records, load_ephemeral_verified_record_lookup,
-    load_persisted_verified_record_lookup, parse_raw_query_params_with_allowlist,
-    parse_record_keys,
+    RecordAnswer, SnapshotReadResource, Source, api_error_to_v2_for_resource,
+    build_indexed_name_records, build_verified_name_records, default_requested_records,
+    load_ephemeral_verified_record_lookup, load_persisted_verified_record_lookup,
+    parse_raw_query_params_with_allowlist, parse_record_keys,
 };
 
 pub(crate) const DIAGNOSTIC_RECORDS_DEFAULT_COMPARISON_LIMIT: usize = 16;
@@ -257,7 +257,12 @@ async fn load_diagnostic_record_inventory_current(
 ) -> V2Result<Option<RecordInventoryCurrentRow>> {
     load_supported_record_inventory_current_for_snapshot(&state.pool, row, selected_snapshot)
         .await
-        .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))
+        .map_err(|error| {
+            api_error_to_v2_for_resource(
+                snapshot_selection_api_error(error),
+                SnapshotReadResource::DiagnosticData,
+            )
+        })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

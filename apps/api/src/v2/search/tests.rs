@@ -23,7 +23,7 @@ use sqlx::types::{
 };
 use tower::ServiceExt;
 
-use crate::v2::ErrorCode;
+use crate::v2::{ErrorCode, SnapshotReadResource, resolve_v2_snapshot_for};
 
 use super::*;
 
@@ -670,10 +670,15 @@ impl SearchDatabase {
         let scope = v2_exact_name_snapshot_scope(&state, namespace, Some(&at_selector))
             .await
             .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
-        let selected =
-            resolve_v2_snapshot(self.pool(), &scope, Some(&at_selector), Finality::Latest)
-                .await
-                .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
+        let selected = resolve_v2_snapshot_for(
+            self.pool(),
+            &scope,
+            Some(&at_selector),
+            Finality::Latest,
+            SnapshotReadResource::Search,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
 
         Ok(encode_at_token(&selected))
     }

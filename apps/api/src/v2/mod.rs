@@ -49,8 +49,8 @@ pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
 pub(crate) use history::{
-    HistoryEvent, api_error_to_v2, build_history_event, format_timestamp, get_history,
-    history_cursor_payload, history_event_type, history_storage_cursor, history_storage_scope,
+    HistoryEvent, build_history_event, format_timestamp, get_history, history_cursor_payload,
+    history_event_type, history_storage_cursor, history_storage_scope,
     v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 pub(crate) use lookup::get_lookup;
@@ -85,7 +85,9 @@ pub(crate) use search::{
     search_cursor_payload, search_storage_cursor,
 };
 pub(crate) use snapshots::{
-    as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
+    SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
+    consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
+    resolve_v2_snapshot_for,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{
@@ -96,7 +98,8 @@ pub(crate) use subnames::{
 };
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
-    OpsStatus, RegistrationStatus, Relation, Resolver, Source, Status,
+    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, Resolver, Source, Status,
+    contains_boundary_vocabulary, contains_pipeline_vocabulary, matched_pipeline_vocabulary_terms,
 };
 
 use axum::Router;

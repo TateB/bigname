@@ -16,9 +16,9 @@ use crate::{
 
 use super::{
     CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams, RegistrationStatus,
-    StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta, decode, encode,
-    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot,
-    v2_exact_name_snapshot_scope,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource,
+    as_of_meta, decode, encode, encode_at_token, name_record::name_registration_fields,
+    resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -80,8 +80,14 @@ pub(crate) async fn get_subnames(
     let include_counts = subnames_include_counts(&params.include)?;
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::Subnames,
+    )
+    .await?;
     let parent = load_name_current_for_selected_snapshot(
         &state.pool,
         &namespace,
@@ -90,13 +96,16 @@ pub(crate) async fn get_subnames(
     )
     .await
     .map_err(|error| {
-        api_error_to_v2(map_internal_api_error(
-            error,
-            format!(
-                "failed to load subnames for {}/{}",
-                namespace, normalized.normalized_name
+        api_error_to_v2_for_resource(
+            map_internal_api_error(
+                error,
+                format!(
+                    "failed to load subnames for {}/{}",
+                    namespace, normalized.normalized_name
+                ),
             ),
-        ))
+            SnapshotReadResource::Subnames,
+        )
     })?;
 
     let snapshot_token = encode_at_token(&selected_snapshot);

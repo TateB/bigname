@@ -21,10 +21,10 @@ use crate::AppState;
 
 use super::{
     AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist,
-    QueryParams, RegistrationStatus, Relation, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
+    QueryParams, RegistrationStatus, Relation, SnapshotReadResource, SortOrder, StrictQueryParams,
+    V2Error, V2Result, api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
     name_record::name_registration_fields, permission_powers_value, permission_scope_value,
-    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -119,8 +119,14 @@ pub(crate) async fn get_address_names(
 
     let scope =
         v2_exact_name_snapshot_scope(&state, snapshot_namespace, params.at.as_ref()).await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::AddressNames,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,

@@ -190,6 +190,13 @@ pub(super) async fn load_exact_name_inventory_read(
 
 pub(super) fn map_internal_api_error(error: ApiError, message: impl Into<String>) -> ApiError {
     if error.status == StatusCode::INTERNAL_SERVER_ERROR && error.code == "internal_error" {
+        error!(
+            service = "api",
+            status = %error.status,
+            code = %error.code,
+            message = %error.message,
+            "sanitized internal API error"
+        );
         ApiError::internal_error(message)
     } else {
         error

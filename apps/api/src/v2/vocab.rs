@@ -181,6 +181,154 @@ pub(crate) struct Resolver {
     pub(crate) address: String,
 }
 
+pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
+    "projection",
+    "sidecar",
+    "manifest_version",
+    "manifest",
+    "normalized_event",
+    "normalized event",
+    "permission_row",
+    "raw_log",
+    "raw_fact",
+    "raw fact",
+    "coverage",
+    "resource_authority",
+    "resource_rebound",
+    "derivation_kind",
+    "exhaustiveness",
+    "enumeration_basis",
+    "source_classes_considered",
+    "address_names_current",
+    "address_names_current_identity_counts",
+    "address_names_current_identity_feed",
+    "backfill_jobs",
+    "backfill_ranges",
+    "chain_checkpoints",
+    "chain_header_audit",
+    "chain_lineage",
+    "children_current",
+    "contract_instance_addresses",
+    "contract_instances",
+    "current_projection_replay_status",
+    "discovery_edges",
+    "event_silent_resolver_call_observations",
+    "execution_cache_outcomes",
+    "execution_steps",
+    "execution_traces",
+    "label_preimage_backfill_runs",
+    "label_preimages",
+    "manifest_alert_observations",
+    "manifest_capability_flags",
+    "manifest_contract_instances",
+    "manifest_discovery_rules",
+    "manifest_versions",
+    "name_current",
+    "name_surface_normalization_repair_findings",
+    "name_surfaces",
+    "normalized_events",
+    "normalized_replay_adapter_checkpoint_items",
+    "normalized_replay_adapter_checkpoints",
+    "normalized_replay_cursors",
+    "permission_current",
+    "permissions_current",
+    "primary_names_current",
+    "projection_apply_cursors",
+    "projection_invalidations",
+    "projection_invalidation_dead_letters",
+    "projection_normalized_event_changes",
+    "raw_call_snapshots",
+    "raw_code_hashes",
+    "raw_logs",
+    "raw_payload_cache_metadata",
+    "raw_receipts",
+    "raw_transactions",
+    "record_inventory_current",
+    "resolver_current",
+    "resources",
+    "surface_bindings",
+    "token_lineages",
+];
+
+pub(crate) fn contains_boundary_vocabulary(candidate: &str, terms: &[&str]) -> bool {
+    let normalized_candidate = normalize_pipeline_candidate(candidate);
+    terms
+        .iter()
+        .any(|term| pipeline_term_matches(&normalized_candidate, term))
+}
+
+pub(crate) fn matched_boundary_vocabulary_terms<'a>(
+    candidate: &str,
+    terms: &'a [&'a str],
+) -> Vec<&'a str> {
+    let normalized_candidate = normalize_pipeline_candidate(candidate);
+    terms
+        .iter()
+        .copied()
+        .filter(|term| pipeline_term_matches(&normalized_candidate, term))
+        .collect()
+}
+
+pub(crate) fn contains_pipeline_vocabulary(candidate: &str, terms: &[&str]) -> bool {
+    contains_boundary_vocabulary(candidate, terms)
+}
+
+pub(crate) fn matched_pipeline_vocabulary_terms<'a>(
+    candidate: &str,
+    terms: &'a [&'a str],
+) -> Vec<&'a str> {
+    matched_boundary_vocabulary_terms(candidate, terms)
+}
+
+fn pipeline_term_matches(normalized_candidate: &str, term: &str) -> bool {
+    let normalized_term = normalize_pipeline_candidate(term);
+    pipeline_term_variants(&normalized_term)
+        .iter()
+        .any(|variant| candidate_has_underscore_boundary_term(normalized_candidate, variant))
+}
+
+fn normalize_pipeline_candidate(candidate: &str) -> String {
+    candidate
+        .chars()
+        .map(|ch| match ch {
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            '-' | ' ' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn pipeline_term_variants(term: &str) -> Vec<String> {
+    let mut variants = vec![term.to_owned(), format!("{term}s"), format!("{term}es")];
+    if let Some(singular) = term.strip_suffix('s') {
+        variants.push(singular.to_owned());
+    }
+    variants.sort_unstable();
+    variants.dedup();
+    variants
+}
+
+fn candidate_has_underscore_boundary_term(candidate: &str, term: &str) -> bool {
+    candidate
+        .match_indices(term)
+        .any(|(start, _)| term_match_has_underscore_boundaries(candidate, term, start))
+}
+
+fn term_match_has_underscore_boundaries(candidate: &str, term: &str, start: usize) -> bool {
+    let before_is_boundary = start == 0 || candidate.as_bytes()[start - 1] == b'_';
+    if !before_is_boundary {
+        return false;
+    }
+
+    let end = start + term.len();
+    if end == candidate.len() || candidate.as_bytes()[end] == b'_' {
+        return true;
+    }
+
+    candidate.as_bytes()[end] == b's'
+        && (end + 1 == candidate.len() || candidate.as_bytes()[end + 1] == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use serde::Serialize;
@@ -301,5 +449,25 @@ mod tests {
         assert_wire(AddressNamesSort::Name, "name");
         assert_wire(AddressNamesSort::ExpiresAt, "expires_at");
         assert_wire(AddressNamesSort::RegisteredAt, "registered_at");
+    }
+
+    #[test]
+    fn pipeline_vocabulary_matching_uses_underscore_boundaries_and_plural_suffixes() {
+        const TERMS: &[&str] = &["coverage", "raw_fact", "normalized_events"];
+
+        assert_eq!(
+            matched_pipeline_vocabulary_terms("insufficient_coverage", TERMS),
+            vec!["coverage"]
+        );
+        assert!(contains_pipeline_vocabulary("coverage_gap", TERMS));
+        assert!(contains_pipeline_vocabulary("coverages", TERMS));
+        assert!(contains_pipeline_vocabulary("raw facts", TERMS));
+        assert!(contains_pipeline_vocabulary("normalized_event", TERMS));
+        assert!(contains_pipeline_vocabulary(
+            "identity_sidecar_missing",
+            PRODUCT_PIPELINE_TERMS
+        ));
+        assert!(!contains_pipeline_vocabulary("discoverage", TERMS));
+        assert!(!contains_pipeline_vocabulary("rawfactory", TERMS));
     }
 }

@@ -6,8 +6,9 @@ use serde_json::{Map, Value as JsonValue};
 use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferred_route_name};
 
 use super::super::{
-    Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    resolve_v2_snapshot, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    Envelope, Meta, QueryParams, RawQueryParams, SnapshotReadResource, V2Error, V2Result,
+    api_error_to_v2_for_resource, as_of_meta, resolve_v2_snapshot_for,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod authority;
@@ -98,8 +99,14 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
         include_resolution_auxiliary,
     )
     .await?;
-    let selected_snapshot =
-        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::DiagnosticData,
+    )
+    .await?;
     let row = load_name_current_for_selected_snapshot(
         &state.pool,
         &namespace,
@@ -107,7 +114,7 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
         &selected_snapshot,
     )
     .await
-    .map_err(api_error_to_v2)?;
+    .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::DiagnosticData))?;
 
     Ok((row, selected_snapshot))
 }
