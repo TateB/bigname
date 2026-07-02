@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bigname_storage::{ReverseIdentityCursor, ReverseIdentityRecordRow};
 
-use crate::v2::{CursorPayload, Relation, V2Error, V2Result};
+use crate::v2::{CursorPayload, Relation, RelationSet, V2Error, V2Result};
 
 const SORT: &str = "primary_relation_name_namespace_namehash_asc";
 const NONE_FILTER_VALUE: &str = "any";
@@ -17,11 +17,11 @@ const NORMALIZED_NAME_CURSOR: &str = "normalized_name";
 const NAMESPACE_CURSOR: &str = "namespace";
 const NAMEHASH_CURSOR: &str = "namehash";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct LookupReverseCursorBinding<'a> {
     pub(super) address: &'a str,
     pub(super) coin_type: u64,
-    pub(super) relation: Option<Relation>,
+    pub(super) relation: Option<&'a RelationSet>,
 }
 
 pub(super) fn lookup_reverse_cursor_payload(
@@ -150,9 +150,8 @@ fn cursor_filters(binding: &LookupReverseCursorBinding<'_>) -> BTreeMap<String, 
             RELATION_FILTER.to_owned(),
             binding
                 .relation
-                .map(Relation::as_str)
-                .unwrap_or(NONE_FILTER_VALUE)
-                .to_owned(),
+                .map(RelationSet::canonical_value)
+                .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned()),
         ),
     ])
 }
@@ -181,7 +180,7 @@ mod tests {
         let binding = LookupReverseCursorBinding {
             address: "0x0000000000000000000000000000000000000abc",
             coin_type: 60,
-            relation: Some(Relation::Owner),
+            relation: Some(&RelationSet::from(Relation::Owner)),
         };
         let mut payload = CursorPayload::new(
             SORT,

@@ -226,6 +226,15 @@ pub(crate) fn parse_events_filter(
     if params.relation.is_some() && params.address.is_none() {
         return Err(V2Error::invalid_input("relation requires address"));
     }
+    let relation = params
+        .relation
+        .as_ref()
+        .map(|relation| {
+            relation
+                .single()
+                .ok_or_else(|| V2Error::invalid_input("relation must be singular for events"))
+        })
+        .transpose()?;
     if matches!(
         (params.from_block, params.to_block),
         (Some(from_block), Some(to_block)) if from_block > to_block
@@ -280,7 +289,7 @@ pub(crate) fn parse_events_filter(
     if let Some(event_type) = params.event_type {
         cursor_filters.insert(TYPE_FILTER_KEY.to_owned(), event_type.as_str().to_owned());
     }
-    if let Some(relation) = params.relation {
+    if let Some(relation) = relation {
         cursor_filters.insert(RELATION_FILTER_KEY.to_owned(), relation.as_str().to_owned());
     }
     if let Some(from_block) = params.from_block {
@@ -300,7 +309,7 @@ pub(crate) fn parse_events_filter(
                 .as_ref()
                 .map(|address| EventHistoryAddressFilter {
                     address: address.clone(),
-                    relation: params.relation.map(relation_to_storage),
+                    relation: relation.map(relation_to_storage),
                 }),
             event_kinds,
             from_block: params.from_block,

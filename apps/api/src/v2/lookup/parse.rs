@@ -9,8 +9,8 @@ use super::{
 use crate::{
     normalize_inferred_route_name, parse_evm_address,
     v2::{
-        DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Relation, V2Error, V2Result, api_error_to_v2, decode,
-        encode,
+        DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Relation, RelationSet, V2Error, V2Result,
+        api_error_to_v2, decode, encode, parse_relation_set_param,
     },
 };
 
@@ -30,7 +30,7 @@ pub(super) struct ParsedAddressLookup {
     pub(super) input: LookupResultInput,
     pub(super) address: String,
     pub(super) coin_type: u64,
-    pub(super) relation: Option<Relation>,
+    pub(super) relation: Option<RelationSet>,
     pub(super) roles: bigname_storage::ReverseIdentityRoles,
     pub(super) page_size: u64,
     pub(super) page_cursor: Option<bigname_storage::ReverseIdentityCursor>,
@@ -106,11 +106,15 @@ pub(super) fn parse_address_input(
         .map_err(api_error_to_v2)?
         .parse::<u64>()
         .map_err(|_| V2Error::invalid_input("coin_type must fit in an unsigned 64-bit integer"))?;
-    let relation = parse_relation(input.relation.as_deref())?;
-    let roles = relation_to_storage_roles(relation);
+    let relation = parse_relation_set_param(input.relation.as_deref())?;
+    let roles = relation_to_storage_roles(relation.as_ref());
     let page_size = parse_page_size(input.page_size)?;
-    let (page_cursor, page_cursor_token) =
-        parse_reverse_cursor(input.cursor.as_deref(), &address, coin_type, relation)?;
+    let (page_cursor, page_cursor_token) = parse_reverse_cursor(
+        input.cursor.as_deref(),
+        &address,
+        coin_type,
+        relation.as_ref(),
+    )?;
 
     Ok(ParsedAddressLookup {
         index,
@@ -119,7 +123,7 @@ pub(super) fn parse_address_input(
             name: None,
             address: Some(address.clone()),
             coin_type: Some(coin_type),
-            relation,
+            relation: relation.as_ref().map(RelationSet::canonical_value),
             page_size: input.page_size,
             cursor: input.cursor.clone(),
         },
@@ -181,7 +185,7 @@ fn parse_reverse_cursor(
     cursor: Option<&str>,
     address: &str,
     coin_type: u64,
-    relation: Option<Relation>,
+    relation: Option<&RelationSet>,
 ) -> V2Result<(
     Option<bigname_storage::ReverseIdentityCursor>,
     Option<String>,
@@ -199,25 +203,23 @@ fn parse_reverse_cursor(
     Ok((Some(storage_cursor), Some(encode(&payload))))
 }
 
-fn parse_relation(value: Option<&str>) -> V2Result<Option<Relation>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("owner") => Ok(Some(Relation::Owner)),
-        Some("manager") => Ok(Some(Relation::Manager)),
-        Some("registrant") => Ok(Some(Relation::Registrant)),
-        Some(_) => Err(V2Error::invalid_input(
-            "relation must be one of: owner, manager, registrant",
-        )),
-    }
-}
-
-fn relation_to_storage_roles(relation: Option<Relation>) -> bigname_storage::ReverseIdentityRoles {
+fn relation_to_storage_roles(
+    relation: Option<&RelationSet>,
+) -> bigname_storage::ReverseIdentityRoles {
     match relation {
-        Some(Relation::Manager) => bigname_storage::ReverseIdentityRoles::Managed,
-        Some(Relation::Owner | Relation::Registrant) => {
+        Some(relation) if relation.is_exact_manager() => {
+            bigname_storage::ReverseIdentityRoles::Managed
+        }
+        Some(relation)
+            if relation
+                .as_slice()
+                .iter()
+                .all(|relation| matches!(relation, Relation::Owner | Relation::Registrant)) =>
+        {
             bigname_storage::ReverseIdentityRoles::Owned
         }
         None => bigname_storage::ReverseIdentityRoles::Both,
+        Some(_) => bigname_storage::ReverseIdentityRoles::Both,
     }
 }
 
@@ -278,15 +280,15 @@ mod tests {
     #[test]
     fn lookup_relation_maps_to_existing_storage_roles() {
         assert_eq!(
-            relation_to_storage_roles(Some(Relation::Owner)),
+            relation_to_storage_roles(Some(&RelationSet::from(Relation::Owner))),
             bigname_storage::ReverseIdentityRoles::Owned
         );
         assert_eq!(
-            relation_to_storage_roles(Some(Relation::Registrant)),
+            relation_to_storage_roles(Some(&RelationSet::from(Relation::Registrant))),
             bigname_storage::ReverseIdentityRoles::Owned
         );
         assert_eq!(
-            relation_to_storage_roles(Some(Relation::Manager)),
+            relation_to_storage_roles(Some(&RelationSet::from(Relation::Manager))),
             bigname_storage::ReverseIdentityRoles::Managed
         );
         assert_eq!(

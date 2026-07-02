@@ -23,8 +23,15 @@ pub use full_rebuild::{
     drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
     publish_address_names_current_full_rebuild, rebuild_address_names_current_identity_sidecars,
 };
-pub use page::{load_address_names_current_page, load_address_names_current_page_sorted};
-pub use read::{load_address_names_current, load_address_names_current_including_noncanonical};
+pub use page::{
+    load_address_names_current_page, load_address_names_current_page_sorted,
+    load_address_names_current_page_sorted_for_relations,
+};
+pub use read::{
+    load_address_names_current, load_address_names_current_for_relations,
+    load_address_names_current_including_noncanonical,
+    load_address_names_current_including_noncanonical_for_relations,
+};
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,

@@ -1341,6 +1341,7 @@ async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
 
     assert!(payload["data"].get("records").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(payload["data"]["namespace"], json!("ens"));
     assert_eq!(
         payload["data"]["resolver"],
         json!({

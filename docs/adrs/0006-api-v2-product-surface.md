@@ -379,8 +379,9 @@ Rules:
   primitive is a current-state read: it does not accept `at`/`finality`, and
   `meta.as_of`/`meta.as_of_token` record the served positions for staleness
   attribution and shadow-diff correlation. Batch limit 1000
-  (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`, which renames
-  `BIGNAME_API_IDENTITY_BATCH_LIMIT`). `profile=shadow` is
+  (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`; the v1
+  `BIGNAME_API_IDENTITY_BATCH_LIMIT` setting remains wired separately).
+  `profile=shadow` is
   removed from the public contract; it survives as an undocumented
   compatibility alias of `detail` until partner-1 shadow comparison completes.
 - `GET /v2/addresses/{address}/primary-name` is also a current-state read. It

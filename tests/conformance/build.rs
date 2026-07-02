@@ -159,6 +159,20 @@ fn parse_mod_decl(line: &str) -> Option<(&str, &str)> {
 
 fn resolve_module_path(source_path: &Path, module_name: &str) -> Option<PathBuf> {
     let parent = source_path.parent()?;
+    if source_path.file_name().is_some_and(|name| name != "mod.rs") {
+        if let Some(stem) = source_path.file_stem() {
+            let child_file_path = parent.join(stem).join(format!("{module_name}.rs"));
+            if child_file_path.exists() {
+                return Some(child_file_path);
+            }
+
+            let child_mod_path = parent.join(stem).join(module_name).join("mod.rs");
+            if child_mod_path.exists() {
+                return Some(child_mod_path);
+            }
+        }
+    }
+
     let file_path = parent.join(format!("{module_name}.rs"));
     if file_path.exists() {
         return Some(file_path);

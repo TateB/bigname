@@ -47,6 +47,7 @@ pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
+    pub(crate) namespace: String,
     pub(crate) resolver: Option<Resolver>,
     pub(crate) addresses: BTreeMap<String, String>,
     pub(crate) text_records: BTreeMap<String, String>,

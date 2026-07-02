@@ -67,7 +67,7 @@ pub(crate) use name_records_inventory::{default_requested_records, validate_prod
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
-    SortOrder,
+    SortOrder, parse_relation_set_param,
 };
 pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
 pub(crate) use permissions::{PermissionLineage, PermissionRow, get_permissions};
@@ -98,8 +98,9 @@ pub(crate) use subnames::{
 };
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
-    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, Resolver, Source, Status,
-    contains_boundary_vocabulary, contains_pipeline_vocabulary, matched_pipeline_vocabulary_terms,
+    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet, Resolver, Source,
+    Status, contains_boundary_vocabulary, contains_pipeline_vocabulary,
+    matched_pipeline_vocabulary_terms,
 };
 
 use axum::Router;

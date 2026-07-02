@@ -108,6 +108,44 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
 }
 
 #[tokio::test]
+async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
+    let (database, set_payload) = v2_address_names_payload(&format!(
+        "/v2/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
+    ))
+    .await?;
+    let any_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=any"),
+    )
+    .await?;
+
+    let set_rows = set_payload["data"]
+        .as_array()
+        .expect("relation set data must be an array");
+    assert_eq!(names(set_rows), vec!["alpha.eth", "beta.eth"]);
+    assert_eq!(set_rows[0]["relations"], json!(["registrant"]));
+    assert_eq!(set_rows[1]["relations"], json!(["manager"]));
+
+    let any_rows = any_payload["data"]
+        .as_array()
+        .expect("relation any data must be an array");
+    assert_eq!(
+        names(any_rows),
+        vec![
+            "alpha.eth",
+            "beta.eth",
+            "gamma.eth",
+            "shared-one.eth",
+            "shared-two.eth"
+        ]
+    );
+    assert_eq!(any_rows[0]["relations"], json!(["registrant", "owner"]));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
@@ -342,21 +380,84 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     .await?;
     assert_eq!(cross_timestamp_sort.status(), StatusCode::BAD_REQUEST);
 
+    let relation_set_page = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=manager,owner&page_size=1"),
+    )
+    .await?;
+    let relation_set_cursor = relation_set_page["page"]["next_cursor"]
+        .as_str()
+        .expect("relation set page must include a cursor");
+    let reordered_relation_set = v2_address_names_response_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?relation=owner,manager&page_size=1&cursor={relation_set_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(reordered_relation_set.status(), StatusCode::OK);
+    let changed_relation_set = v2_address_names_response_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={relation_set_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(changed_relation_set.status(), StatusCode::BAD_REQUEST);
+
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn v2_get_address_names_include_role_summary_groups_permissions_by_address() -> Result<()> {
-    let (database, payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"
-    ))
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let alpha = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    let current_inventory = address_name_record_inventory_current_row(&alpha);
+    let mut stale_inventory = current_inventory.clone();
+    stale_inventory.record_version_boundary =
+        address_name_record_inventory_boundary_with_pointer(&alpha, Some(9_999), Some("TextChanged"));
+    stale_inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        }
+    ]);
+    stale_inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc"
+            }
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(current_inventory)
+        .await?;
+    database
+        .insert_record_inventory_current_row(stale_inventory)
+        .await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
+    )
     .await?;
 
     let row = &payload["data"]
         .as_array()
         .expect("role-summary data must be an array")[0];
     assert_eq!(row["name"], json!("alpha.eth"));
+    assert_eq!(row["record_count"], json!(3));
     assert_eq!(
         row["role_summary"],
         json!([
@@ -873,4 +974,38 @@ struct V2AddressNameSpec {
     created_at: &'static str,
     expires_at: &'static str,
     relations: &'static [bigname_storage::AddressNameRelation],
+}
+
+fn address_name_record_inventory_current_row(
+    spec: &V2AddressNameSpec,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    let mut row = record_inventory_current_row(spec.logical_name_id, spec.resource_id);
+    row.record_version_boundary = address_name_record_inventory_boundary_with_pointer(spec, None, None);
+    row.chain_positions = json!({
+        "ethereum-mainnet": address_name_record_inventory_chain_position(spec)
+    });
+    row
+}
+
+fn address_name_record_inventory_boundary_with_pointer(
+    spec: &V2AddressNameSpec,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<&str>,
+) -> Value {
+    json!({
+        "logical_name_id": spec.logical_name_id,
+        "resource_id": spec.resource_id.to_string(),
+        "normalized_event_id": normalized_event_id,
+        "event_kind": event_kind,
+        "chain_position": address_name_record_inventory_chain_position(spec)
+    })
+}
+
+fn address_name_record_inventory_chain_position(spec: &V2AddressNameSpec) -> Value {
+    json!({
+        "chain_id": "ethereum-mainnet",
+        "block_number": spec.block_number,
+        "block_hash": format!("0xname{:02x}", spec.block_number),
+        "timestamp": format!("2026-04-17T00:00:{:02}Z", spec.block_number % 60)
+    })
 }

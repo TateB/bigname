@@ -285,9 +285,11 @@ the union search scope requires every public namespace slot. A multi-chain
 token from namespace-omitted search replays on the same union search and is
 rejected by single-namespace routes whose scope does not include every token
 slot.
-For event and history rows, `finality` selects rows at blocks at or below the
-selected chain checkpoint; `safe` and `finalized` exclude rows above their
-respective checkpoints.
+Event, history, and other collection routes use `at`/`finality` to resolve
+`meta.as_of`/`meta.as_of_token`, but their row sets currently read the latest
+projection or normalized-event rows unless the route section explicitly says
+otherwise. True row-bounding by `at`, `safe`, or `finalized` is deferred to
+storage follow-up work.
 
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and

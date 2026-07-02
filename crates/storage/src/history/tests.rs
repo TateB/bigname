@@ -2209,6 +2209,134 @@ async fn address_history_effective_controller_includes_registry_owner_matches() 
 }
 
 #[tokio::test]
+async fn address_history_relation_filters_distinguish_registrant_and_token_holder_matches()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let registrant_logical_name_id = "ens:registrant-only.eth";
+    let owner_logical_name_id = "ens:owner-only.eth";
+    let registrant_resource_id = Uuid::from_u128(0xa250);
+    let owner_resource_id = Uuid::from_u128(0xa251);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-sepolia", "0xrel450", None, 450, 1_700_000_450),
+            raw_block(
+                "ethereum-sepolia",
+                "0xrel451",
+                Some("0xrel450"),
+                451,
+                1_700_000_451,
+            ),
+        ],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[
+            resource(registrant_resource_id),
+            resource(owner_resource_id),
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface(registrant_logical_name_id),
+            name_surface(owner_logical_name_id),
+        ],
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            ensv2_registry_event(
+                "registrant-match",
+                registrant_logical_name_id,
+                Some(registrant_resource_id),
+                "RegistrationGranted",
+                451,
+                "0xrel451",
+                json!({
+                    "registrant": "0x0000000000000000000000000000000000000ABC",
+                }),
+                CanonicalityState::Canonical,
+            ),
+            ensv2_registry_event(
+                "owner-match",
+                owner_logical_name_id,
+                Some(owner_resource_id),
+                "TokenControlTransferred",
+                450,
+                "0xrel450",
+                json!({
+                    "to": "0x0000000000000000000000000000000000000ABC",
+                }),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let registrant_rows = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::Registrant),
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert_eq!(
+        registrant_rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["registrant-match"]
+    );
+
+    let owner_rows = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::TokenHolder),
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert_eq!(
+        owner_rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["owner-match"]
+    );
+
+    let any_token_rows = load_address_history_for_relations(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(&[
+            AddressNameRelation::TokenHolder,
+            AddressNameRelation::Registrant,
+        ]),
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert_eq!(
+        any_token_rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["registrant-match", "owner-match"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn history_reads_use_deterministic_chain_position_desc_ordering() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0xa300);

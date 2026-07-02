@@ -8,7 +8,9 @@ use tracing::error;
 
 use crate::AppState;
 
-use super::{Envelope, Meta, NoQueryParams, Page, Relation, Status, V2Error, V2Result, encode};
+use super::{
+    Envelope, Meta, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
+};
 
 mod build;
 mod cursor;
@@ -193,7 +195,7 @@ async fn render_reverse_lookup_results(
     render_storage_exact_reverse_lookup_results(state, profile, inputs, results).await?;
     for input in inputs
         .iter()
-        .filter(|input| requires_relation_post_filter(input.relation))
+        .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
         let page = load_exact_relation_reverse_page(state, input).await?;
         render_reverse_input_result(profile, input, page, results)?;
@@ -209,7 +211,7 @@ async fn render_storage_exact_reverse_lookup_results(
 ) -> V2Result<()> {
     let storage_exact_inputs = inputs
         .iter()
-        .filter(|input| !requires_relation_post_filter(input.relation))
+        .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
     let groups = bigname_storage::load_reverse_identity_records(&state.pool, &storage_inputs)
@@ -242,7 +244,7 @@ async fn render_storage_exact_reverse_lookup_results(
         let binding = LookupReverseCursorBinding {
             address: &input.address,
             coin_type: input.coin_type,
-            relation: input.relation,
+            relation: input.relation.as_ref(),
         };
         let next_cursor = if has_more {
             entries
@@ -313,8 +315,11 @@ async fn load_exact_relation_reverse_page(
             let next_scan_cursor = reverse_identity_storage_cursor(&entry);
             rows_examined = rows_examined.saturating_add(1);
             last_examined = Some(entry.clone());
-            if reverse_record_matches_relation(&entry, input.relation) {
-                entries.push(trim_reverse_record_relations(entry, input.relation));
+            if reverse_record_matches_relation(&entry, input.relation.as_ref()) {
+                entries.push(trim_reverse_record_relations(
+                    entry,
+                    input.relation.as_ref(),
+                ));
                 if entries.len() > target_len {
                     has_more = true;
                     break;
@@ -338,7 +343,7 @@ async fn load_exact_relation_reverse_page(
     let binding = LookupReverseCursorBinding {
         address: &input.address,
         coin_type: input.coin_type,
-        relation: input.relation,
+        relation: input.relation.as_ref(),
     };
     let next_cursor_record = if has_more {
         entries.truncate(target_len);
@@ -447,28 +452,39 @@ fn result_failure_reason<'a>(
         .flatten()
 }
 
-fn requires_relation_post_filter(relation: Option<Relation>) -> bool {
-    matches!(relation, Some(Relation::Owner | Relation::Registrant))
+fn requires_relation_post_filter(relation: Option<&RelationSet>) -> bool {
+    relation.is_some_and(|relation| {
+        !relation.is_all()
+            && !relation.is_exact_manager()
+            && !relation.is_exact_owner_and_registrant()
+    })
 }
 
 fn reverse_record_matches_relation(
     record: &bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<Relation>,
+    relation: Option<&RelationSet>,
 ) -> bool {
     relation.is_none_or(|relation| {
-        record
-            .relation_facets
-            .contains(&relation_to_storage(relation))
+        record.relation_facets.iter().any(|facet| {
+            relation
+                .as_slice()
+                .iter()
+                .any(|relation| relation_to_storage(*relation) == *facet)
+        })
     })
 }
 
 fn trim_reverse_record_relations(
     mut record: bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<Relation>,
+    relation: Option<&RelationSet>,
 ) -> bigname_storage::ReverseIdentityRecordRow {
     if let Some(relation) = relation {
-        let relation = relation_to_storage(relation);
-        record.relation_facets.retain(|facet| *facet == relation);
+        record.relation_facets.retain(|facet| {
+            relation
+                .as_slice()
+                .iter()
+                .any(|relation| relation_to_storage(*relation) == *facet)
+        });
     }
     record
 }

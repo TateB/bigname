@@ -46,10 +46,13 @@ pub use address_names::{
     drop_address_names_current_address_replacement, drop_address_names_current_full_rebuild,
     insert_address_names_current_address_replacement_rows,
     insert_address_names_current_full_rebuild_rows, load_address_names_current,
-    load_address_names_current_including_noncanonical, load_address_names_current_page,
-    load_address_names_current_page_sorted, publish_address_names_current_address_replacement,
-    publish_address_names_current_full_rebuild, rebuild_address_names_current_identity_sidecars,
-    replace_address_names_current_logical_names, upsert_address_names_current_rows,
+    load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
+    load_address_names_current_including_noncanonical_for_relations,
+    load_address_names_current_page, load_address_names_current_page_sorted,
+    load_address_names_current_page_sorted_for_relations,
+    publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
+    rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
+    upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
@@ -97,7 +100,8 @@ pub use execution::{
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
     HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
-    InvalidHistoryCursor, load_address_history, load_address_history_page, load_event_history,
+    InvalidHistoryCursor, load_address_history, load_address_history_for_relations,
+    load_address_history_page, load_address_history_page_for_relations, load_event_history,
     load_event_history_page, load_name_history, load_name_history_head, load_name_history_page,
     load_resource_history, load_resource_history_page,
 };
@@ -202,7 +206,8 @@ pub use raw_payload_cache::{
     upsert_raw_payload_cache_metadata, verify_raw_payload_cache_digest,
 };
 pub use record_inventory::{
-    RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
+    RecordInventoryCurrentRow, clear_record_inventory_current,
+    count_record_inventory_selectors_by_lookup_keys, delete_record_inventory_current,
     load_record_inventory_current, load_record_inventory_current_batch,
     load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
     upsert_record_inventory_current_rows,

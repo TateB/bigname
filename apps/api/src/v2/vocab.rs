@@ -123,7 +123,7 @@ pub(crate) enum RegistrationStatus {
     Unregistered,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Relation {
     Owner,
@@ -132,11 +132,88 @@ pub(crate) enum Relation {
 }
 
 impl Relation {
+    pub(crate) const ALL: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Owner => "owner",
             Self::Manager => "manager",
             Self::Registrant => "registrant",
+        }
+    }
+
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "owner" => Some(Self::Owner),
+            "manager" => Some(Self::Manager),
+            "registrant" => Some(Self::Registrant),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RelationSet {
+    relations: Vec<Relation>,
+}
+
+impl RelationSet {
+    pub(crate) fn all() -> Self {
+        Self {
+            relations: Relation::ALL.to_vec(),
+        }
+    }
+
+    pub(crate) fn from_relations(relations: impl IntoIterator<Item = Relation>) -> Option<Self> {
+        let requested = relations.into_iter().collect::<Vec<_>>();
+        let mut normalized = Vec::new();
+        for candidate in Relation::ALL {
+            if requested.contains(&candidate) && !normalized.contains(&candidate) {
+                normalized.push(candidate);
+            }
+        }
+        (!normalized.is_empty()).then_some(Self {
+            relations: normalized,
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Relation] {
+        &self.relations
+    }
+
+    pub(crate) fn contains(&self, relation: Relation) -> bool {
+        self.relations.contains(&relation)
+    }
+
+    pub(crate) fn single(&self) -> Option<Relation> {
+        (self.relations.len() == 1).then_some(self.relations[0])
+    }
+
+    pub(crate) fn canonical_value(&self) -> String {
+        self.relations
+            .iter()
+            .map(|relation| relation.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub(crate) fn is_all(&self) -> bool {
+        self.relations == Relation::ALL
+    }
+
+    pub(crate) fn is_exact_manager(&self) -> bool {
+        self.relations == [Relation::Manager]
+    }
+
+    pub(crate) fn is_exact_owner_and_registrant(&self) -> bool {
+        self.relations == [Relation::Owner, Relation::Registrant]
+    }
+}
+
+impl From<Relation> for RelationSet {
+    fn from(value: Relation) -> Self {
+        Self {
+            relations: vec![value],
         }
     }
 }

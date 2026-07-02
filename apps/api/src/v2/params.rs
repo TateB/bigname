@@ -5,6 +5,7 @@ use super::{
     error::{V2Error, V2Result},
     vocab::{
         AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryScope, Relation,
+        RelationSet,
     },
 };
 
@@ -51,7 +52,7 @@ pub(crate) struct QueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
-    pub(crate) relation: Option<Relation>,
+    pub(crate) relation: Option<RelationSet>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
     pub(crate) q: Option<String>,
@@ -98,7 +99,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             name: trim_to_option(raw.name),
             registration_id: parse_registration_id(raw.registration_id)?,
             address: parse_address(raw.address)?,
-            relation: parse_relation(raw.relation.as_deref())?,
+            relation: parse_relation_set_param(raw.relation.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
             q: trim_to_option(raw.q),
@@ -189,14 +190,35 @@ fn parse_event_type(value: Option<&str>) -> V2Result<Option<HistoryEventType>> {
     }
 }
 
-fn parse_relation(value: Option<&str>) -> V2Result<Option<Relation>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("owner") => Ok(Some(Relation::Owner)),
-        Some("manager") => Ok(Some(Relation::Manager)),
-        Some("registrant") => Ok(Some(Relation::Registrant)),
-        Some(_) => Err(invalid_parameter("relation")),
+pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<RelationSet>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut has_any = false;
+    let mut relations = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if part == "any" {
+            has_any = true;
+            continue;
+        }
+        let Some(relation) = Relation::from_wire(part) else {
+            return Err(invalid_parameter("relation"));
+        };
+        relations.push(relation);
     }
+
+    if has_any {
+        return Ok(Some(RelationSet::all()));
+    }
+
+    RelationSet::from_relations(relations)
+        .map(Some)
+        .ok_or_else(|| invalid_parameter("relation"))
 }
 
 fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {
@@ -369,11 +391,41 @@ mod tests {
         })
         .expect("address-name controls must parse");
 
-        assert_eq!(params.relation, Some(Relation::Owner));
+        assert_eq!(params.relation, Some(RelationSet::from(Relation::Owner)));
         assert_eq!(params.q, Some("alice".to_owned()));
         assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
         assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
         assert_eq!(params.order, SortOrder::Desc);
+    }
+
+    #[test]
+    fn relation_sets_parse_any_and_canonicalize_duplicates() {
+        let params = parse(RawQueryParams {
+            relation: Some("registrant,owner,owner".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("relation set must parse");
+        assert_eq!(
+            params.relation.as_ref().map(RelationSet::canonical_value),
+            Some("owner,registrant".to_owned())
+        );
+
+        let params = parse(RawQueryParams {
+            relation: Some("any".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("relation any must parse");
+        assert_eq!(
+            params.relation.as_ref().map(RelationSet::canonical_value),
+            Some("owner,manager,registrant".to_owned())
+        );
+
+        let error = parse(RawQueryParams {
+            relation: Some("any,invalid".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect_err("invalid mixed relation set must fail");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 
     #[test]

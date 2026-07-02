@@ -1,11 +1,14 @@
 use super::*;
 use crate::v2::decode;
+use bigname_storage::{AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue};
+use sqlx::types::Uuid;
 
 fn binding(sort: AddressNamesSort) -> AddressNamesCursorBinding<'static> {
+    let relation = Box::leak(Box::new(RelationSet::from(Relation::Owner)));
     AddressNamesCursorBinding {
         address: "0x00000000000000000000000000000000000000aa",
         namespace: Some("ens"),
-        relation: Some(Relation::Owner),
+        relation: Some(relation),
         dedupe: AddressNamesDedupe::Name,
         q: Some("al"),
         sort,

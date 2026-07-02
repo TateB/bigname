@@ -37,7 +37,7 @@ fn builder_returns_indexed_then_verified_answers_for_both_sources() {
     let response = build_primary_name(
         "0x0000000000000000000000000000000000000abc".to_owned(),
         "ens".to_owned(),
-        "60".to_owned(),
+        60,
         PrimaryNameSourceSelection::Both,
         &lookup_state,
     )
@@ -77,7 +77,7 @@ fn builder_narrows_answers_to_requested_source() {
     let indexed = build_primary_name(
         "0x0000000000000000000000000000000000000abc".to_owned(),
         "ens".to_owned(),
-        "60".to_owned(),
+        60,
         PrimaryNameSourceSelection::Indexed,
         &lookup_state,
     )
@@ -85,7 +85,7 @@ fn builder_narrows_answers_to_requested_source() {
     let verified = build_primary_name(
         "0x0000000000000000000000000000000000000abc".to_owned(),
         "ens".to_owned(),
-        "60".to_owned(),
+        60,
         PrimaryNameSourceSelection::Verified,
         &lookup_state,
     )

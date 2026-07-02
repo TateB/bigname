@@ -2297,6 +2297,64 @@ async fn address_names_current_sorted_page_orders_expiry_and_registered_at() -> 
 }
 
 #[tokio::test]
+async fn address_names_current_sorted_page_control_expiry_fallback_order() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_timestamp_sort_rows(&database, address).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET declared_summary = $1
+        WHERE logical_name_id = 'ens:null-expiry.eth'
+        "#,
+    )
+    .bind(json!({
+        "registration": {
+            "status": "registered",
+            "registered_at": "2025-04-01T00:00:00Z"
+        },
+        "control": {
+            "expiry": "2026-06-01T00:00:00Z"
+        }
+    }))
+    .execute(database.pool())
+    .await
+    .context("failed to rewrite timestamp-sort row with control-only expiry")?;
+
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::ExpiresAt,
+        AddressNamesCurrentOrder::Asc,
+        &[
+            "beta.eth",
+            "delta.eth",
+            "null-expiry.eth",
+            "alpha.eth",
+            "gamma.eth",
+        ],
+    )
+    .await?;
+    assert_sorted_page_order(
+        database.pool(),
+        address,
+        AddressNamesCurrentSort::ExpiresAt,
+        AddressNamesCurrentOrder::Desc,
+        &[
+            "gamma.eth",
+            "alpha.eth",
+            "null-expiry.eth",
+            "beta.eth",
+            "delta.eth",
+        ],
+    )
+    .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_names_current_sorted_page_keysets_each_timestamp_sort_order() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";

@@ -55,6 +55,7 @@ pub(crate) fn build_indexed_name_records(
     };
 
     Ok(NameRecords {
+        namespace: row.namespace.clone(),
         resolver: resolver(&row.declared_summary),
         addresses: values.addresses,
         text_records: values.text_records,
@@ -115,6 +116,7 @@ pub(crate) fn build_auto_name_records(
     Ok((
         source,
         NameRecords {
+            namespace: row.namespace.clone(),
             resolver: resolver(&row.declared_summary),
             addresses: values.addresses,
             text_records: values.text_records,
@@ -142,6 +144,7 @@ pub(crate) fn build_verified_name_records(
         .unwrap_or_default();
 
     Ok(NameRecords {
+        namespace: row.namespace.clone(),
         resolver: resolver(&row.declared_summary),
         addresses: values.addresses,
         text_records: values.text_records,

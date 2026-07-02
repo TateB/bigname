@@ -539,6 +539,70 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_relation_sets_and_any_match_any_listed_relation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [
+                {"id": "set", "address": address, "relation": "manager,owner"},
+                {"id": "any", "address": address, "relation": "any"}
+            ]
+        }),
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"][0]["input"],
+        json!({
+            "id": "set",
+            "address": address,
+            "coin_type": 60,
+            "relation": "owner,manager"
+        })
+    );
+    let set_record_names = payload["data"][0]["records"]
+        .as_array()
+        .expect("set lookup records must be an array")
+        .iter()
+        .map(|record| record["name"].as_str().expect("record must include name"))
+        .collect::<Vec<_>>();
+    assert_eq!(set_record_names, vec!["alice.eth", "bob.eth"]);
+    assert_eq!(
+        payload["data"][0]["records"][0]["relations"],
+        json!(["owner"])
+    );
+    assert_eq!(
+        payload["data"][0]["records"][1]["relations"],
+        json!(["manager"])
+    );
+
+    assert_eq!(
+        payload["data"][1]["input"],
+        json!({
+            "id": "any",
+            "address": address,
+            "coin_type": 60,
+            "relation": "owner,manager,registrant"
+        })
+    );
+    let any_record_names = payload["data"][1]["records"]
+        .as_array()
+        .expect("any lookup records must be an array")
+        .iter()
+        .map(|record| record["name"].as_str().expect("record must include name"))
+        .collect::<Vec<_>>();
+    assert_eq!(any_record_names, vec!["alice.eth", "bob.eth"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_reverse_feed_uses_detail_pagination_semantics() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";

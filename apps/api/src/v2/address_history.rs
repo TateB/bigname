@@ -8,11 +8,12 @@ use bigname_storage::{HistoryCursor, HistorySummaryMode};
 
 use crate::AppState;
 
+use super::address_names::relation_set_to_storage;
 use super::{
-    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, QueryParams, Relation,
+    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, RelationSet,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event,
-    decode, encode, encode_at_token, history_storage_scope, relation_to_storage,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    decode, encode, encode_at_token, history_storage_scope, resolve_v2_snapshot_for, snapshot_meta,
+    v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -48,7 +49,12 @@ pub(crate) async fn get_address_history(
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
-    let storage_relation = params.relation.map(relation_to_storage);
+    let storage_relations = params
+        .relation
+        .as_ref()
+        .map(relation_set_to_storage)
+        .unwrap_or_default();
+    let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_scope = history_storage_scope(params.scope);
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
@@ -64,7 +70,7 @@ pub(crate) async fn get_address_history(
     let cursor_binding = AddressHistoryCursorBinding {
         address: &normalized_address,
         namespace: &namespace,
-        relation: params.relation,
+        relation: params.relation.as_ref(),
         scope: params.scope,
         snapshot_token: &snapshot_token,
     };
@@ -77,11 +83,11 @@ pub(crate) async fn get_address_history(
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_address_history_page(
+    let storage_page = bigname_storage::load_address_history_page_for_relations(
         &state.pool,
         &normalized_address,
         Some(&namespace),
-        storage_relation,
+        storage_relations,
         storage_scope,
         true,
         storage_cursor.as_ref(),
@@ -121,11 +127,11 @@ pub(crate) async fn get_address_history(
     }))
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct AddressHistoryCursorBinding<'a> {
     pub(crate) address: &'a str,
     pub(crate) namespace: &'a str,
-    pub(crate) relation: Option<Relation>,
+    pub(crate) relation: Option<&'a RelationSet>,
     pub(crate) scope: HistoryScope,
     pub(crate) snapshot_token: &'a str,
 }
@@ -194,7 +200,7 @@ fn address_history_cursor_filters(
         ),
     ]);
     if let Some(relation) = binding.relation {
-        filters.insert(RELATION_FILTER_KEY.to_owned(), relation.as_str().to_owned());
+        filters.insert(RELATION_FILTER_KEY.to_owned(), relation.canonical_value());
     }
     filters
 }
@@ -215,6 +221,7 @@ fn invalid_address_history_cursor() -> V2Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v2::Relation;
 
     const ADDRESS: &str = "0x00000000000000000000000000000000000000aa";
     const OTHER_ADDRESS: &str = "0x00000000000000000000000000000000000000bb";
@@ -227,10 +234,11 @@ mod tests {
     }
 
     fn sample_binding() -> AddressHistoryCursorBinding<'static> {
+        let relation = Box::leak(Box::new(RelationSet::from(Relation::Manager)));
         AddressHistoryCursorBinding {
             address: ADDRESS,
             namespace: "ens",
-            relation: Some(Relation::Manager),
+            relation: Some(relation),
             scope: HistoryScope::Both,
             snapshot_token: "snapshot-1",
         }

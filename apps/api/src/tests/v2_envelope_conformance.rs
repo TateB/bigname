@@ -395,6 +395,72 @@ async fn v2_error_envelopes_conform_family_wide() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_history_conformance_fixture(&database).await?;
+    let beta = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.logical_name_id == "ens:beta.eth")
+        .expect("beta address-name fixture must exist");
+    let mut beta_event = history_event(
+        "v2-address-history-beta-resource",
+        None,
+        Some(beta.resource_id),
+        Some("ethereum-mainnet"),
+        Some(beta.block_number),
+        Some(beta.block_hash),
+        Some("0xv2addrhist03"),
+        Some(2),
+        CanonicalityState::Canonical,
+    );
+    beta_event.event_kind = "RegistrationRenewed".to_owned();
+    bigname_storage::upsert_normalized_events(&database.pool, &[beta_event]).await?;
+
+    let set_payload = v2_conformance_get_json(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/history?relation=registrant,manager&page_size=20"),
+    )
+    .await?;
+    let set_rows = set_payload["data"]
+        .as_array()
+        .expect("address-history data must be an array");
+    assert!(
+        set_rows.iter().all(|row| row["namespace"] == json!("ens")),
+        "omitted namespace must default address history to ens"
+    );
+    assert!(
+        set_rows
+            .iter()
+            .any(|row| row["transaction_hash"] == json!("0xv2addrhist02")),
+        "registrant half of the relation set must match alpha resource history"
+    );
+    assert!(
+        set_rows
+            .iter()
+            .any(|row| row["transaction_hash"] == json!("0xv2addrhist03")),
+        "manager half of the relation set must match beta resource history"
+    );
+
+    let owner_payload = v2_conformance_get_json(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/history?relation=owner&page_size=20"),
+    )
+    .await?;
+    let owner_rows = owner_payload["data"]
+        .as_array()
+        .expect("owner address-history data must be an array");
+    assert!(
+        owner_rows
+            .iter()
+            .all(|row| row["transaction_hash"] != json!("0xv2addrhist03")),
+        "owner-only relation filter must exclude manager-only beta history"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_product_error_bodies_hide_pipeline_vocabulary_for_not_found_stale_conflict_and_internal(
 ) -> Result<()> {
     assert_v2_conformance_route_tables_match();

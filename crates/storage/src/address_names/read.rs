@@ -14,7 +14,9 @@ pub async fn load_address_names_current(
     namespace: Option<&str>,
     relation: Option<AddressNameRelation>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    load_address_names_current_internal(pool, address, namespace, relation, false).await
+    let relations = relation.into_iter().collect::<Vec<_>>();
+    let relations = (!relations.is_empty()).then_some(relations.as_slice());
+    load_address_names_current_for_relations(pool, address, namespace, relations).await
 }
 
 /// Load current address-name relation rows, including noncanonical supporting identity rows.
@@ -24,14 +26,39 @@ pub async fn load_address_names_current_including_noncanonical(
     namespace: Option<&str>,
     relation: Option<AddressNameRelation>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    load_address_names_current_internal(pool, address, namespace, relation, true).await
+    let relations = relation.into_iter().collect::<Vec<_>>();
+    let relations = (!relations.is_empty()).then_some(relations.as_slice());
+    load_address_names_current_including_noncanonical_for_relations(
+        pool, address, namespace, relations,
+    )
+    .await
+}
+
+/// Load current address-name relation rows from the default canonical read set.
+pub async fn load_address_names_current_for_relations(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    load_address_names_current_internal(pool, address, namespace, relations, false).await
+}
+
+/// Load current address-name relation rows, including noncanonical supporting identity rows.
+pub async fn load_address_names_current_including_noncanonical_for_relations(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    load_address_names_current_internal(pool, address, namespace, relations, true).await
 }
 
 async fn load_address_names_current_internal(
     pool: &PgPool,
     address: &str,
     namespace: Option<&str>,
-    relation: Option<AddressNameRelation>,
+    relations: Option<&[AddressNameRelation]>,
     include_noncanonical: bool,
 ) -> Result<Vec<AddressNameCurrentRow>> {
     let mut builder = QueryBuilder::<Postgres>::new(
@@ -72,9 +99,14 @@ async fn load_address_names_current_internal(
         builder.push(" AND anc.namespace = ");
         builder.push_bind(namespace);
     }
-    if let Some(relation) = relation {
-        builder.push(" AND anc.relation = ");
-        builder.push_bind(relation.as_str());
+    if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+        let relation_values = relations
+            .iter()
+            .map(|relation| relation.as_str().to_owned())
+            .collect::<Vec<_>>();
+        builder.push(" AND anc.relation::TEXT = ANY(");
+        builder.push_bind(relation_values);
+        builder.push(")");
     }
     if !include_noncanonical {
         builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
@@ -99,8 +131,15 @@ async fn load_address_names_current_internal(
         if let Some(namespace) = namespace {
             parts.push(format!("namespace {namespace}"));
         }
-        if let Some(relation) = relation {
-            parts.push(format!("relation {}", relation.as_str()));
+        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+            parts.push(format!(
+                "relations {}",
+                relations
+                    .iter()
+                    .map(|relation| relation.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         format!(
             "failed to load address_names_current rows for {}",

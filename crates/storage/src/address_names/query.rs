@@ -37,7 +37,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
     namespace: Option<&'a str>,
-    relation: Option<AddressNameRelation>,
+    relations: Option<&'a [AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&'a str>,
 ) {
@@ -87,9 +87,14 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push(" AND anc.namespace = ");
         builder.push_bind(namespace);
     }
-    if let Some(relation) = relation {
-        builder.push(" AND anc.relation = ");
-        builder.push_bind(relation.as_str());
+    if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+        let relation_values = relations
+            .iter()
+            .map(|relation| relation.as_str().to_owned())
+            .collect::<Vec<_>>();
+        builder.push(" AND anc.relation::TEXT = ANY(");
+        builder.push_bind(relation_values);
+        builder.push(")");
     }
     if let Some(prefix) = q {
         builder.push(" AND anc.normalized_name LIKE ");
@@ -463,12 +468,39 @@ fn push_address_names_current_sort_timestamp_expr(
             builder.push("NULL::TIMESTAMPTZ");
         }
         AddressNamesCurrentSort::ExpiresAt => {
-            push_json_timestamp_expr(builder, &["registration", "expiry"]);
+            push_json_timestamp_coalesce_expr(
+                builder,
+                &[
+                    &["registration", "expires_at"],
+                    &["registration", "expiry_date"],
+                    &["registration", "expiry"],
+                    &["control", "expires_at"],
+                    &["control", "expiry_date"],
+                    &["control", "expiry"],
+                ],
+            );
         }
         AddressNamesCurrentSort::RegisteredAt => {
-            push_json_timestamp_expr(builder, &["registration", "registered_at"]);
+            push_json_timestamp_coalesce_expr(
+                builder,
+                &[
+                    &["registration", "registered_at"],
+                    &["registration", "registration_date"],
+                ],
+            );
         }
     };
+}
+
+fn push_json_timestamp_coalesce_expr(builder: &mut QueryBuilder<'_, Postgres>, paths: &[&[&str]]) {
+    builder.push("COALESCE(");
+    for (index, path) in paths.iter().enumerate() {
+        if index > 0 {
+            builder.push(", ");
+        }
+        push_json_timestamp_expr(builder, path);
+    }
+    builder.push(")");
 }
 
 fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {

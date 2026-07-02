@@ -21,7 +21,7 @@ use super::{
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PrimaryName {
     pub(crate) address: String,
-    pub(crate) coin_type: String,
+    pub(crate) coin_type: u64,
     pub(crate) namespace: String,
     pub(crate) answers: Vec<PrimaryNameAnswer>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +137,7 @@ pub(crate) async fn get_primary_name(
 ) -> V2Result<Json<Envelope<PrimaryName>>> {
     let address = crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let mode = params.source.resolution_mode();
+    let coin_type = primary_name_coin_type_number(&params.coin_type)?;
     let mut lookup_state = crate::load_primary_name_lookup_state(
         &state.pool,
         &address,
@@ -180,7 +181,15 @@ pub(crate) async fn get_primary_name(
         .map_err(api_error_to_v2)?;
     }
 
-    let mut meta = if primary_name_uses_on_demand_fallback(&lookup_state) {
+    let mut meta = if matches!(
+        lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::NotFound
+            | OnDemandPrimaryNameClaimState::InvalidName(_)
+            | OnDemandPrimaryNameClaimState::Found(_)
+    ) || matches!(
+        lookup_state.on_demand_verified,
+        OnDemandPrimaryNameVerificationState::Verified(_)
+    ) {
         Meta::default()
     } else {
         let snapshot_scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
@@ -198,7 +207,7 @@ pub(crate) async fn get_primary_name(
         data: build_primary_name(
             address,
             params.namespace,
-            params.coin_type,
+            coin_type,
             params.source,
             &lookup_state,
         )?,
@@ -207,22 +216,10 @@ pub(crate) async fn get_primary_name(
     }))
 }
 
-fn primary_name_uses_on_demand_fallback(lookup_state: &PrimaryNameLookupState) -> bool {
-    matches!(
-        lookup_state.on_demand_claim,
-        OnDemandPrimaryNameClaimState::NotFound
-            | OnDemandPrimaryNameClaimState::InvalidName(_)
-            | OnDemandPrimaryNameClaimState::Found(_)
-    ) || matches!(
-        lookup_state.on_demand_verified,
-        OnDemandPrimaryNameVerificationState::Verified(_)
-    )
-}
-
 pub(crate) fn build_primary_name(
     address: String,
     namespace: String,
-    coin_type: String,
+    coin_type: u64,
     source: PrimaryNameSourceSelection,
     lookup_state: &PrimaryNameLookupState,
 ) -> V2Result<PrimaryName> {
@@ -500,6 +497,12 @@ fn parse_primary_name_source(value: Option<&str>) -> V2Result<PrimaryNameSourceS
         Some("verified") => Ok(PrimaryNameSourceSelection::Verified),
         Some(_) => Err(invalid_parameter("source")),
     }
+}
+
+fn primary_name_coin_type_number(coin_type: &str) -> V2Result<u64> {
+    coin_type
+        .parse::<u64>()
+        .map_err(|_| invalid_parameter("coin_type"))
 }
 
 fn nonempty(value: Option<&str>) -> bool {

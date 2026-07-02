@@ -319,12 +319,27 @@ pub async fn load_address_history(
     scope: HistoryScope,
     canonical_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
+    let relations = relation.into_iter().collect::<Vec<_>>();
+    let relations = (!relations.is_empty()).then_some(relations.as_slice());
+    load_address_history_for_relations(pool, address, namespace, relations, scope, canonical_only)
+        .await
+}
+
+/// Load history rows for one address-derived anchor set.
+pub async fn load_address_history_for_relations(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<Vec<HistoryEvent>> {
     let normalized_address = address.to_ascii_lowercase();
     let selector = load_address_history_selector(
         pool,
         &normalized_address,
         namespace,
-        relation,
+        relations,
         scope,
         canonical_only,
     )
@@ -337,8 +352,15 @@ pub async fn load_address_history(
             if let Some(namespace) = namespace {
                 parts.push(format!("namespace {namespace}"));
             }
-            if let Some(relation) = relation {
-                parts.push(format!("relation {}", relation.as_str()));
+            if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+                parts.push(format!(
+                    "relations {}",
+                    relations
+                        .iter()
+                        .map(|relation| relation.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
             }
             parts.push(format!("scope {}", scope.as_str()));
             format!("failed to load history for {}", parts.join(" "))
@@ -358,12 +380,41 @@ pub async fn load_address_history_page(
     page_size: u64,
     summary_mode: HistorySummaryMode,
 ) -> Result<HistoryPage> {
+    let relations = relation.into_iter().collect::<Vec<_>>();
+    let relations = (!relations.is_empty()).then_some(relations.as_slice());
+    load_address_history_page_for_relations(
+        pool,
+        address,
+        namespace,
+        relations,
+        scope,
+        canonical_only,
+        cursor,
+        page_size,
+        summary_mode,
+    )
+    .await
+}
+
+/// Load one SQL-keyset page for one address-derived anchor set.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_address_history_page_for_relations(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    scope: HistoryScope,
+    canonical_only: bool,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+) -> Result<HistoryPage> {
     let normalized_address = address.to_ascii_lowercase();
     let selector = load_address_history_selector(
         pool,
         &normalized_address,
         namespace,
-        relation,
+        relations,
         scope,
         canonical_only,
     )
@@ -386,8 +437,15 @@ pub async fn load_address_history_page(
         if let Some(namespace) = namespace {
             parts.push(format!("namespace {namespace}"));
         }
-        if let Some(relation) = relation {
-            parts.push(format!("relation {}", relation.as_str()));
+        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+            parts.push(format!(
+                "relations {}",
+                relations
+                    .iter()
+                    .map(|relation| relation.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         parts.push(format!("scope {}", scope.as_str()));
         format!("failed to load history page for {}", parts.join(" "))
@@ -435,12 +493,14 @@ async fn event_history_read_filter(
 
     if let Some(address_filter) = filter.address.as_ref() {
         let normalized_address = address_filter.address.to_ascii_lowercase();
+        let relations = address_filter.relation.into_iter().collect::<Vec<_>>();
+        let relations = (!relations.is_empty()).then_some(relations.as_slice());
         selectors.push(
             load_address_history_selector(
                 pool,
                 &normalized_address,
                 filter.namespace.as_deref(),
-                address_filter.relation,
+                relations,
                 HistoryScope::Both,
                 canonical_only,
             )

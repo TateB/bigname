@@ -79,8 +79,11 @@ Field ownership:
   full records.
 - Request parameters: body `{inputs, profile, namespace?}`. Each input is
   `{id?, name}` or `{id?, address, coin_type?, relation?, page_size?, cursor?}`.
-  Reverse inputs default to `coin_type=60` when omitted. Batch limit is 1000
-  and is configurable with `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
+  Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
+  accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
+  is the normalized all-three set. Reverse rows match when any listed relation
+  matches. Batch limit is 1000 and is configurable with
+  `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
 - Response shape: the common envelope. `data` is an array of result objects,
   not an object wrapper. The array contains one result per input in caller
   order. Each result is `{input, kind, status, unsupported_reason?,
@@ -89,15 +92,18 @@ Field ownership:
   synthesized. `kind` is `name` or `address`. Name results use `record` for the
   single record object. Reverse results use `records` for zero or more record
   rows with `is_primary` and `relations` in addition to the shared record
-  fields. `profile=feed` returns a documented core-field subset of the same
-  record object; it does not introduce another DTO.
+  fields. Reverse `input.relation` echoes the normalized relation set; `any`
+  serializes as `owner,manager,registrant` and reordered sets use canonical
+  dictionary order. `profile=feed` returns a documented core-field subset of
+  the same record object; it does not introduce another DTO.
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
-  default `page_size` to 50 and use the common max of 200. Exact `owner` and
-  `registrant` filters may return an as-filled page with `has_more=true` when
-  the API reaches its bounded post-filter scan cap; clients continue with the
-  returned `next_cursor`.
+  default `page_size` to 50 and use the common max of 200. Relation filters
+  that cannot be satisfied by one storage role (including exact `owner`, exact
+  `registrant`, and partial relation sets such as `owner,manager`) may return
+  an as-filled page with `has_more=true` when the API reaches its bounded
+  post-filter scan cap; clients continue with the returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
@@ -172,8 +178,9 @@ Field ownership:
 - Purpose: resolver records.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source=indexed|verified|auto`, `keys`, `include=inventory`.
-- Response shape: `data` returns resolver record values using `resolver`,
-  `addresses`, `text_records`, and `content_hash`. `keys` is a comma-separated
+- Response shape: `data` returns resolver record values using `namespace`,
+  `resolver`, `addresses`, `text_records`, and `content_hash`. `keys` is a
+  comma-separated
   record-key allowlist using the existing app key grammar: `addr:<coin_type>`,
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
@@ -309,8 +316,9 @@ Field ownership:
   `q` applies prefix matching to the dictionary `name` field case-insensitively:
   the prefix is lowercased to match the normalized name, and full Unicode
   normalization of partial prefixes is a follow-up. This route does not accept
-  `match`. `relation` accepts the v2 vocabulary
-  `owner|manager|registrant`; the storage relations map as
+  `match`. `relation` accepts a comma-separated set of v2 vocabulary values
+  `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
+  Rows match when any listed relation matches. The storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and
   registrant -> `registrant`. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
@@ -324,11 +332,14 @@ Field ownership:
   `GET /v2/names/{name}/records` for resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
-  permission subject address. `grant_scope` uses the same shape documented for
+  permission subject address and `record_count` when record inventory exists
+  for the row. `record_count` counts the known record selectors for the name's
+  current registration, including unsupported-family selectors and excluding
+  explicit gaps. `grant_scope` uses the same shape documented for
   `GET /v2/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
-  address, optional namespace filter, relation filter, `q`, dedupe mode, sort,
-  order, and the snapshot token emitted as `meta.as_of_token`.
+  address, optional namespace filter, normalized relation set, `q`, dedupe
+  mode, sort, order, and the snapshot token emitted as `meta.as_of_token`.
 - Snapshot behavior: `at` and `finality` are accepted and used only to resolve
   `meta.as_of`/`meta.as_of_token` (default namespace `ens` when `namespace` is
   omitted). The address-name collection itself reads the latest
@@ -348,7 +359,8 @@ Field ownership:
   `namespace` default `ens`, and `source`. This is a current-state read and
   does not accept `at` or `finality`.
 - Response shape: `data` is
-  `{address, coin_type, namespace, answers, verification?}`. `answers` is an
+  `{address, coin_type, namespace, answers, verification?}` with `coin_type`
+  serialized as a JSON number. `answers` is an
   array of `{source, status, name?, raw_claim_name?, unsupported_reason?,
   failure_reason?}` entries. When `source` is omitted, the route returns one
   entry for each answer source in stable `indexed`, then `verified` order;
@@ -370,6 +382,12 @@ Field ownership:
   indexed-only responses and missing persisted verified outcomes remain
   Base-scoped.
 - Pagination behavior: none.
+- Snapshot behavior: current-state read over chain-derived primary-name state.
+  The route does not accept `at` or `finality`. Successful responses carry
+  `meta.as_of` and `meta.as_of_token` for indexed and persisted state served at
+  the API's current chain head. When the tuple is missing and the route falls
+  through to the live on-demand ENS RPC fallback, both fields are omitted because
+  that fallback is not yet pinned to the indexed head.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
@@ -384,9 +402,17 @@ Field ownership:
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `at`, `finality`,
   `relation`, `scope=name|registration|both`, `cursor`, `page_size`.
+  `namespace` defaults to `ens` when omitted. `relation` accepts a
+  comma-separated set of `owner`, `manager`, and `registrant`; `any`
+  normalizes to all three values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary.
 - Pagination behavior: standard collection pagination.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve
+  `meta.as_of`/`meta.as_of_token` (default namespace `ens` when `namespace` is
+  omitted). The address-history collection currently reads latest
+  normalized-event rows; true as-of/finality row-bounding is deferred to a
+  storage follow-up.
 - Status semantics: no matching activity returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
@@ -422,10 +448,17 @@ Field ownership:
   block filters.
 - Request parameters: query `namespace`, `name`, `address`,
   `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
-  `cursor`, and `page_size`.
+  `cursor`, and `page_size`. When `name` is present and `namespace` is omitted,
+  namespace is inferred from the name; `namespace` defaults to `ens` only when
+  there is no name filter.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only.
 - Pagination behavior: standard collection pagination.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve
+  `meta.as_of`/`meta.as_of_token` using the same name-inference and default
+  namespace rules as request parameters. The event collection currently reads
+  latest normalized-event rows; true as-of/finality row-bounding is deferred to
+  a storage follow-up.
 - Status semantics: no matching events returns `200` with empty `data`.
   Malformed filters return `400 invalid_input`.
 - Replaces (v1): `GET /v1/events` compact event search.
@@ -616,7 +649,9 @@ Diagnostic snapshot rules:
   full provenance.
 - Request parameters: query `namespace`, `name`, `address`,
   `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
-  `cursor`, and `page_size`.
+  `cursor`, and `page_size`. When `name` is present and `namespace` is omitted,
+  namespace is inferred from the name; `namespace` defaults to `ens` only when
+  there is no name filter.
 - Response shape: `data` is an array of raw normalized-event rows in
   diagnostics vocabulary:
   `{normalized_event_id, event_identity, namespace, name?, registration_id?,
@@ -624,6 +659,11 @@ Diagnostic snapshot rules:
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
   canonicality_state, before_state?, after_state?, provenance, coverage}`.
 - Pagination behavior: standard collection pagination.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve
+  `meta.as_of`/`meta.as_of_token` using the same name-inference and default
+  namespace rules as request parameters. The diagnostics event collection
+  currently reads latest normalized-event rows; true as-of/finality row-bounding
+  is deferred to a storage follow-up.
 - Status semantics: no matching rows returns `200` with empty `data`.
 - Replaces (v1): `view=full` on `GET /v1/history/names/{namespace}/{name}`,
   `GET /v1/history/resources/{resource_id}`, and

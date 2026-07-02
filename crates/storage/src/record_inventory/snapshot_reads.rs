@@ -15,7 +15,7 @@ use super::{
     row_decode::{RecordInventoryCurrentRow, decode_record_inventory_current_row},
 };
 
-const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
+pub(super) const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,

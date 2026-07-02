@@ -40,7 +40,7 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
         omitted["data"],
         json!({
             "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": "60",
+            "coin_type": 60,
             "namespace": "ens",
             "answers": [
                 {
@@ -106,7 +106,7 @@ async fn v2_get_primary_name_no_claim_tuple_returns_in_band_not_found() -> Resul
         payload["data"],
         json!({
             "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": "60",
+            "coin_type": 60,
             "namespace": "ens",
             "answers": [
                 {
@@ -193,7 +193,7 @@ async fn v2_get_primary_name_surfaces_persisted_mismatch_in_verification() -> Re
         payload["data"],
         json!({
             "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": "60",
+            "coin_type": 60,
             "namespace": "ens",
             "answers": [
                 {
@@ -334,6 +334,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
 #[tokio::test]
 async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000064);
     let verified_primary_name = json!({
         "status": "unsupported"
@@ -407,6 +408,7 @@ async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Resul
 #[tokio::test]
 async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000065);
     let verified_primary_name = json!({
         "status": "unsupported",
@@ -500,7 +502,7 @@ async fn v2_get_primary_name_runs_on_demand_claim_and_verification_for_default_t
         payload["data"],
         json!({
             "address": V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "coin_type": "60",
+            "coin_type": 60,
             "namespace": "ens",
             "answers": [
                 {

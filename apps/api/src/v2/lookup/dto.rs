@@ -74,7 +74,7 @@ pub(super) struct LookupResultInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) coin_type: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) relation: Option<Relation>,
+    pub(super) relation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) page_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
