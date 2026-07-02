@@ -2,31 +2,33 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use axum::extract::{Path, State};
-use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
+use bigname_storage::{BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurrentRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppState, load_name_current_for_selected_snapshot,
-    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
+    AppState, load_name_current_for_selected_snapshot, map_internal_api_error,
     normalize_inferred_route_name, snapshot_selection_api_error,
 };
 
 use super::{
     Envelope, Meta, QueryParamAllowlist, QueryParams, RequestSource, SnapshotReadResource,
     StrictQueryParams, V2Error, V2Result, api_error_to_v2, api_error_to_v2_for_resource,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
     vocab::{RegistrationStatus, Resolver, Source, Status},
 };
 
+#[path = "name_record/inventory.rs"]
+mod inventory;
 #[path = "name_record/values.rs"]
 mod values;
 #[path = "name_record/verified.rs"]
 mod verified;
 
+use inventory::load_name_record_inventory;
 use values::{
     json_address_at_paths, json_chain_id, json_string_at_paths, json_timestamp_at_paths,
-    json_value_present, object_field, response_chain_id,
+    json_value_present, network, object_field, response_chain_id,
 };
 pub(super) use values::{string_field, value_to_string};
 
@@ -99,7 +101,15 @@ pub(crate) async fn get_name_record(
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let route_source = route_source(params.source)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
+    let include_resolution_auxiliary =
+        namespace == BASENAMES_NAMESPACE && route_source == Source::Verified;
+    let scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
+        &state,
+        &namespace,
+        params.at.as_ref(),
+        include_resolution_auxiliary,
+    )
+    .await?;
     let selected_snapshot = resolve_v2_snapshot_for(
         &state.pool,
         &scope,
@@ -128,15 +138,19 @@ pub(crate) async fn get_name_record(
         )
     })?;
 
-    let record_inventory =
-        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
-            .await
-            .map_err(|error| {
-                api_error_to_v2_for_resource(
-                    snapshot_selection_api_error(error),
-                    SnapshotReadResource::Name,
-                )
-            })?;
+    let record_inventory = load_name_record_inventory(
+        &state.pool,
+        &row,
+        &selected_snapshot,
+        include_resolution_auxiliary,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2_for_resource(
+            snapshot_selection_api_error(error),
+            SnapshotReadResource::Name,
+        )
+    })?;
     let chain_id = response_chain_id(&selected_snapshot);
     let record = verified::build_name_record_for_source(
         &state,
@@ -169,26 +183,24 @@ pub(crate) fn build_name_record(
 ) -> NameRecord {
     let registration = name_registration_fields(Some(row), &row.namespace);
     let unsupported_fields = unsupported_fields(record_inventory);
-    let addresses = (!unsupported_fields.iter().any(|field| field == "addresses"))
-        .then(|| record_addresses(record_inventory));
-    let text_records = (!unsupported_fields
-        .iter()
-        .any(|field| field == "text_records"))
-    .then(|| record_text_records(record_inventory));
-    let content_hash = (!unsupported_fields
-        .iter()
-        .any(|field| field == "content_hash"))
-    .then(|| record_content_hash(record_inventory))
-    .flatten();
-    let primary_address = (!unsupported_fields
-        .iter()
-        .any(|field| field == "primary_address"))
-    .then(|| {
-        addresses
-            .as_ref()
-            .and_then(|addresses| addresses.get("60").cloned())
-    })
-    .flatten();
+    let field_supported = |field: &str| {
+        !unsupported_fields
+            .iter()
+            .any(|unsupported| unsupported == field)
+    };
+    let addresses = field_supported("addresses").then(|| record_addresses(record_inventory));
+    let text_records =
+        field_supported("text_records").then(|| record_text_records(record_inventory));
+    let content_hash = field_supported("content_hash")
+        .then(|| record_content_hash(record_inventory))
+        .flatten();
+    let primary_address = field_supported("primary_address")
+        .then(|| {
+            addresses
+                .as_ref()
+                .and_then(|addresses| addresses.get("60").cloned())
+        })
+        .flatten();
 
     NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
@@ -594,30 +606,6 @@ fn route_source(source: RequestSource) -> V2Result<Source> {
             "source must be one of: indexed, verified",
         )),
     }
-}
-
-fn network(row: &NameCurrentRow) -> String {
-    match row.namespace.as_str() {
-        "basenames" if has_chain_position(&row.chain_positions, "base-sepolia") => {
-            "base-sepolia".to_owned()
-        }
-        "basenames" => "base".to_owned(),
-        "ens" if has_chain_position(&row.chain_positions, "ethereum-sepolia") => {
-            "ethereum-sepolia".to_owned()
-        }
-        "ens" => "ethereum".to_owned(),
-        namespace => namespace.to_owned(),
-    }
-}
-
-fn has_chain_position(chain_positions: &Value, chain_id: &str) -> bool {
-    chain_positions
-        .as_object()
-        .into_iter()
-        .flatten()
-        .any(|(slot, value)| {
-            slot == chain_id || string_field(value.get("chain_id")).as_deref() == Some(chain_id)
-        })
 }
 
 #[cfg(test)]

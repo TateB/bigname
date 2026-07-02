@@ -165,6 +165,444 @@ async fn v2_get_name_verified_source_reads_persisted_verified_record_fields() ->
 }
 
 #[tokio::test]
+async fn v2_get_name_verified_source_basenames_uses_auxiliary_snapshot_for_persisted_outcome(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9230);
+    let token_lineage_id = Uuid::from_u128(0x9231);
+    let surface_binding_id = Uuid::from_u128(0x9232);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000007b);
+    let verified_address = "0x0000000000000000000000000000000000000b45";
+    let base_chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    let chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": verified_address
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://verified.example/base-avatar.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "ipfs://verified-base"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Verified Basename profile"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_snapshot_selector_chain_positions(&chain_positions)
+        .await?;
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            "alice.base.eth",
+            "Alice.base.eth",
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.canonical_display_name = "Alice.base.eth".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    row.provenance = json!({
+        "manifest_versions": [basenames_execution_manifest_version()]
+    });
+    row.chain_positions = chain_positions.clone();
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized",
+            "ethereum-mainnet": "finalized"
+        }
+    });
+    database.insert_name_current_row(row.clone()).await?;
+
+    let mut inventory = basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary =
+        basenames_dynamic_resolver_record_inventory_boundary(logical_name_id, resource_id, None, None);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "cacheable": true
+        }
+    ]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000a11"
+            }
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "https://indexed.example/base-avatar.png"
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://indexed-base"
+            }
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Indexed Basename profile"
+            }
+        }
+    ]);
+    inventory.chain_positions = base_chain_positions;
+    inventory.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(inventory.clone())
+        .await?;
+
+    let requested_records = V2_PROFILE_VERIFIED_RECORD_KEYS
+        .iter()
+        .map(|record_key| {
+            parse_resolution_record_key(record_key)
+                .expect("v2 profile verified selector must parse")
+        })
+        .collect::<Vec<_>>();
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
+        &row,
+        &requested_records,
+        Some(&inventory),
+        row.chain_positions.clone(),
+    )?;
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &cache_key.request_key,
+        V2_PROFILE_VERIFIED_RECORD_KEYS,
+        verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = cache_key.request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": cache_key.requested_chain_positions.clone()
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": cache_key.manifest_versions.clone()
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:basenames-profile"]);
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &cache_key.request_key,
+        verified_queries,
+        cache_key.topology_version_boundary.clone(),
+        cache_key.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key = cache_key;
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified =
+        v2_name_record_payload_for_database(&database, "/v2/names/alice.base.eth?source=verified")
+            .await?;
+    assert_eq!(verified["meta"]["source"], json!("verified"));
+    assert_v2_name_snapshot_meta_chain_ids(&verified, &["1", "8453"]);
+    assert_v2_name_snapshot_token_slots(&verified, &["base", "ethereum"]);
+    assert_eq!(
+        verified["meta"]["as_of"]["8453"]["block_hash"],
+        json!("0xbase-binding")
+    );
+    assert_eq!(
+        verified["meta"]["as_of"]["1"]["block_hash"],
+        json!("0xbasenamesl1")
+    );
+    assert_eq!(verified["data"]["status"], json!("ok"));
+    assert_eq!(
+        verified["data"]["addresses"],
+        json!({
+            "60": verified_address
+        })
+    );
+    assert_eq!(
+        verified["data"]["text_records"],
+        json!({
+            "avatar": "https://verified.example/base-avatar.png",
+            "description": "Verified Basename profile"
+        })
+    );
+    assert_eq!(verified["data"]["content_hash"], json!("ipfs://verified-base"));
+    assert_eq!(verified["data"]["primary_address"], json!(verified_address));
+    assert!(verified["data"].get("failure_reason").is_none());
+
+    let indexed =
+        v2_name_record_payload_for_database(&database, "/v2/names/alice.base.eth?source=indexed")
+            .await?;
+    assert_eq!(indexed["meta"]["source"], json!("indexed"));
+    assert_v2_name_snapshot_meta_chain_ids(&indexed, &["8453"]);
+    assert_v2_name_snapshot_token_slots(&indexed, &["base"]);
+    assert_eq!(
+        indexed["meta"]["as_of"]["8453"]["block_hash"],
+        json!("0xbase-binding")
+    );
+    assert!(indexed["meta"]["as_of"].get("1").is_none());
+    assert_eq!(
+        indexed["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000a11"
+        })
+    );
+    assert_eq!(
+        indexed["data"]["text_records"],
+        json!({
+            "avatar": "https://indexed.example/base-avatar.png",
+            "description": "Indexed Basename profile"
+        })
+    );
+    assert_eq!(indexed["data"]["content_hash"], json!("ipfs://indexed-base"));
+    assert_eq!(
+        indexed["data"]["primary_address"],
+        json!("0x0000000000000000000000000000000000000a11")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_when_auxiliary_fallback_misses(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9240);
+    let token_lineage_id = Uuid::from_u128(0x9241);
+    let surface_binding_id = Uuid::from_u128(0x9242);
+    let chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+
+    database
+        .seed_snapshot_selector_chain_positions(&chain_positions)
+        .await?;
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            "alice.base.eth",
+            "Alice.base.eth",
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.canonical_display_name = "Alice.base.eth".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    row.provenance = json!({
+        "manifest_versions": [basenames_execution_manifest_version()]
+    });
+    row.chain_positions = chain_positions;
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized",
+            "ethereum-mainnet": "finalized"
+        }
+    });
+    database.insert_name_current_row(row).await?;
+
+    let mut inventory =
+        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary =
+        basenames_dynamic_resolver_record_inventory_boundary(logical_name_id, resource_id, None, None);
+    inventory.chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_004,
+            "block_hash": "0xbase-stale",
+            "timestamp": "2026-04-17T00:00:04Z"
+        }
+    });
+    inventory.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.base.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 stale basenames verified name profile request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("requested snapshot is not available for name")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_verified_source_cache_miss_reports_stale_without_indexed_record_values(
 ) -> Result<()> {
     let payload = v2_name_record_payload_with_verified("/v2/names/Alice.eth?source=verified", None)
@@ -3597,6 +4035,42 @@ fn assert_v2_name_snapshot_meta(payload: &Value) {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')),
         "meta.as_of_token must be URL-safe"
     );
+}
+
+fn assert_v2_name_snapshot_meta_chain_ids(payload: &Value, expected_chain_ids: &[&str]) {
+    assert_v2_name_snapshot_meta(payload);
+    let actual = payload["meta"]["as_of"]
+        .as_object()
+        .expect("name meta.as_of must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected_chain_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
+fn assert_v2_name_snapshot_token_slots(payload: &Value, expected_slots: &[&str]) {
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("name response must include meta.as_of_token");
+    let bigname_storage::SnapshotAt::ResolvedPositions(chain_positions) =
+        crate::v2::decode_at_token(token).expect("name token must decode")
+    else {
+        panic!("name token must contain resolved chain positions");
+    };
+    let actual = chain_positions
+        .as_map()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected_slots
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
 }
 
 fn assert_v2_name_omits_snapshot_meta(payload: &Value) {

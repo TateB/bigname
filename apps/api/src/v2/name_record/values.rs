@@ -1,4 +1,4 @@
-use bigname_storage::SelectedSnapshot;
+use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde_json::Value;
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
@@ -18,6 +18,30 @@ pub(super) fn response_chain_id(selected_snapshot: &SelectedSnapshot) -> Option<
         .as_map()
         .values()
         .find_map(|position| slug_to_numeric(&position.chain_id))
+}
+
+pub(super) fn network(row: &NameCurrentRow) -> String {
+    match row.namespace.as_str() {
+        "basenames" if has_chain_position(&row.chain_positions, "base-sepolia") => {
+            "base-sepolia".to_owned()
+        }
+        "basenames" => "base".to_owned(),
+        "ens" if has_chain_position(&row.chain_positions, "ethereum-sepolia") => {
+            "ethereum-sepolia".to_owned()
+        }
+        "ens" => "ethereum".to_owned(),
+        namespace => namespace.to_owned(),
+    }
+}
+
+fn has_chain_position(chain_positions: &Value, chain_id: &str) -> bool {
+    chain_positions
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(slot, value)| {
+            slot == chain_id || string_field(value.get("chain_id")).as_deref() == Some(chain_id)
+        })
 }
 
 pub(super) fn object_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
