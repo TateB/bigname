@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -6,11 +8,12 @@ use axum::{
     response::Response,
 };
 use bigname_storage::{
-    CanonicalityState, ChainCheckpointUpdate, ChainLineageBlock, CheckpointBlockRef,
-    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow, NameSurface, Resource,
-    SurfaceBinding, SurfaceBindingKind, TokenLineage, advance_chain_checkpoints,
-    upsert_chain_lineage_blocks, upsert_name_current_rows, upsert_name_surfaces, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    CanonicalityState, ChainCheckpointUpdate, ChainLineageBlock, ChainPosition, ChainPositions,
+    CheckpointBlockRef, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
+    NameSurface, Resource, SelectedSnapshot, SnapshotConsistency, SurfaceBinding,
+    SurfaceBindingKind, TokenLineage, advance_chain_checkpoints, upsert_chain_lineage_blocks,
+    upsert_name_current_rows, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -436,6 +439,62 @@ async fn v2_search_snapshot_selectors_unknown_params_and_empty_matches() -> Resu
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn v2_search_union_at_replay_rejects_single_name_scope() -> Result<()> {
+    let database = SearchDatabase::new().await?;
+    seed_search_fixture(&database).await?;
+    seed_chain(
+        &database,
+        "ethereum-sepolia",
+        "0xsepolia",
+        300,
+        310,
+        1_776_384_300,
+    )
+    .await?;
+
+    let initial_at = sepolia_base_snapshot_token();
+    let first = search_payload(&database, &format!("/v2/search?q=alpha&at={initial_at}")).await?;
+    assert_eq!(
+        names(first["data"].as_array().unwrap()),
+        vec!["alpha.base.eth", "alpha.eth"]
+    );
+    assert_eq!(
+        first["meta"]["as_of"]["11155111"],
+        json!({
+            "block_number": 308,
+            "block_hash": "0xsepolia308",
+            "timestamp": "2026-04-17T00:05:08Z"
+        })
+    );
+    assert_eq!(
+        first["meta"]["as_of"]["8453"],
+        json!({
+            "block_number": 208,
+            "block_hash": "0xbase208",
+            "timestamp": "2026-04-17T00:03:28Z"
+        })
+    );
+    assert!(first["meta"]["as_of"].get("1").is_none());
+
+    let replay_at = search_union_at_token_from_meta_as_of(&first)?;
+    let replay = search_payload(&database, &format!("/v2/search?q=alpha&at={replay_at}")).await?;
+    assert_eq!(replay["meta"]["as_of"], first["meta"]["as_of"]);
+    assert_eq!(replay["data"], first["data"]);
+
+    let rejected =
+        search_response(&database, &format!("/v2/names/alpha.eth?at={replay_at}")).await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let error = read_json(rejected).await?;
+    assert_eq!(error["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        error["error"]["message"],
+        json!("unsupported snapshot position slot base")
+    );
+
+    database.cleanup().await
+}
+
 fn cursor_binding<'a>(
     q: &'a str,
     match_mode: SearchMatch,
@@ -454,6 +513,94 @@ fn names(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["name"].as_str().expect("row must include name"))
         .collect()
+}
+
+fn sepolia_base_snapshot_token() -> String {
+    encode_at_token(&SelectedSnapshot {
+        chain_positions: ChainPositions::new(BTreeMap::from([
+            (
+                "base".to_owned(),
+                snapshot_position("base", "base-mainnet", 208, "0xbase208", 1_776_384_208),
+            ),
+            (
+                "ethereum-sepolia".to_owned(),
+                snapshot_position(
+                    "ethereum-sepolia",
+                    "ethereum-sepolia",
+                    308,
+                    "0xsepolia308",
+                    1_776_384_308,
+                ),
+            ),
+        ])),
+        consistency: SnapshotConsistency::Head,
+    })
+}
+
+fn search_union_at_token_from_meta_as_of(payload: &Value) -> Result<String> {
+    Ok(encode_at_token(&SelectedSnapshot {
+        chain_positions: ChainPositions::new(BTreeMap::from([
+            snapshot_position_from_meta_as_of(payload, "8453", "base", "base-mainnet")?,
+            snapshot_position_from_meta_as_of(
+                payload,
+                "11155111",
+                "ethereum-sepolia",
+                "ethereum-sepolia",
+            )?,
+        ])),
+        consistency: SnapshotConsistency::Head,
+    }))
+}
+
+fn snapshot_position_from_meta_as_of(
+    payload: &Value,
+    numeric_chain_id: &str,
+    slot: &str,
+    chain_id: &str,
+) -> Result<(String, ChainPosition)> {
+    let as_of = payload
+        .pointer(&format!("/meta/as_of/{numeric_chain_id}"))
+        .with_context(|| format!("response must include meta.as_of[{numeric_chain_id}]"))?;
+    let block_number = as_of
+        .get("block_number")
+        .and_then(Value::as_i64)
+        .context("meta.as_of block_number must be an i64")?;
+    let block_hash = as_of
+        .get("block_hash")
+        .and_then(Value::as_str)
+        .context("meta.as_of block_hash must be a string")?;
+    let timestamp = as_of
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .context("meta.as_of timestamp must be a string")?;
+
+    Ok((
+        slot.to_owned(),
+        ChainPosition {
+            slot: slot.to_owned(),
+            chain_id: chain_id.to_owned(),
+            block_number,
+            block_hash: block_hash.to_owned(),
+            timestamp: bigname_storage::parse_rfc3339_utc_timestamp(timestamp)
+                .map_err(|error| anyhow::anyhow!("{error}"))?,
+        },
+    ))
+}
+
+fn snapshot_position(
+    slot: &str,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    unix_seconds: i64,
+) -> ChainPosition {
+    ChainPosition {
+        slot: slot.to_owned(),
+        chain_id: chain_id.to_owned(),
+        block_number,
+        block_hash: block_hash.to_owned(),
+        timestamp: timestamp(unix_seconds),
+    }
 }
 
 async fn search_payload(database: &SearchDatabase, uri: &str) -> Result<Value> {

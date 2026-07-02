@@ -11,12 +11,10 @@ struct ChainIdMapping {
     numeric: u64,
 }
 
-// Only the two mainnet mappings are exercised today: the current scope builder
-// emits mainnet storage slugs. The Sepolia slugs are provisional placeholders
-// using the existing "<chain>-<network>" convention; no codebase-wide Sepolia
-// storage constants exist yet, so verify them against real testnet config
-// before relying on Sepolia snapshots. The numeric ids are canonical EVM chain
-// ids.
+// V2 snapshot tokens stay storage-native, while meta.as_of renders numeric EVM
+// chain ids. Mainnet remains the default exact-name profile, but a position
+// pinned `at` token can select the ENSv2 Sepolia profile, so the registry must
+// cover those slugs for both emitted metadata and token replay.
 const CHAIN_ID_MAPPINGS: &[ChainIdMapping] = &[
     ChainIdMapping {
         slug: STORAGE_ETHEREUM_MAINNET_CHAIN_ID,
