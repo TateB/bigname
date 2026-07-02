@@ -503,9 +503,13 @@ Diagnostic snapshot rules:
 - Method/path: `GET /v2/diagnostics/names/{name}/records`
 - Tier: diagnostics.
 - Purpose: record inventory and cache internals.
-- Request parameters: path `name`; query `namespace`, `at`, `finality`.
+- Request parameters: path `name`; query `namespace`, `at`, `finality`, and
+  optional `keys`. `keys` uses the same record-key grammar as
+  `/v2/names/{name}/records`: `addr:<coin_type>`, `text:<key>`, `avatar`, and
+  `contenthash`.
 - Response shape: `data` is
-  `{record_inventory, record_cache, value_sources, comparison}`.
+  `{record_inventory, record_cache, value_sources, comparison,
+  comparison_explicit_gaps?}`.
   `record_inventory` is
   `{record_version_boundary, enumeration_basis, selectors, explicit_gaps,
   unsupported_families, last_change}` using the existing diagnostic selector
@@ -515,7 +519,16 @@ Diagnostic snapshot rules:
   unsupported_reason?, failure_reason?}`. `value_sources` summarizes the
   indexed or verified origin per key. `comparison` is keyed by `record_key` and
   carries side-by-side `{indexed, verified}` record answers for the former
-  `mode=both` workflow. Identity objects in these diagnostics use dictionary
+  `mode=both` workflow. Without `keys`, `comparison` defaults to the first 16
+  inventory-derived supported record keys in deterministic order. The indexed
+  `record_inventory` and `record_cache` sections remain complete. When more
+  than 16 default comparison keys are available, `comparison_explicit_gaps`
+  lists each uncompared selector as
+  `{record_key, record_family, selector_key, gap_reason}` with
+  `gap_reason=diagnostics_comparison_default_limit_exceeded`. With `keys`, the
+  comparison is scoped exactly to the requested keys. On-demand verified
+  comparison execution is chunked to at most 4 in-flight selector RPCs per
+  diagnostics request burst. Identity objects in these diagnostics use dictionary
   spellings (`namespace`, `name`, `display_name`, `registration_id`), while
   pipeline-only identifiers such as `normalized_event_id` keep their pipeline
   names per the tier-3 rule.

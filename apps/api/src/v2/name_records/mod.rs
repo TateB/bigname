@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppState, ExecutionOutcome,
+    AppState, ExecutionOutcome, ResolutionVerifiedOutcomeLookup,
     handler_resolution_on_demand::load_or_execute_resolution_verified_outcome,
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
-    map_internal_api_error, normalize_inferred_route_name, parse_resolution_record_key,
-    snapshot_selection_api_error,
+    lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
+    parse_resolution_record_key, snapshot_selection_api_error,
 };
 
 use super::{
@@ -235,6 +235,40 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
     .await
 }
 
+pub(crate) async fn load_persisted_verified_record_lookup(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<Option<VerifiedRecordLookup>> {
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    match lookup_resolution_verified_outcome(
+        &state.pool,
+        row,
+        records,
+        record_inventory,
+        selected_snapshot,
+    )
+    .await
+    {
+        Ok(ResolutionVerifiedOutcomeLookup::Found(outcome)) => {
+            Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome))))
+        }
+        Ok(ResolutionVerifiedOutcomeLookup::NotSupported) => {
+            Ok(Some(VerifiedRecordLookup::NotSupported))
+        }
+        Ok(ResolutionVerifiedOutcomeLookup::CacheMiss) => Ok(None),
+        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
+            VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
+        )),
+        Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
+    }
+}
+
 async fn load_verified_record_lookup_with_persistence(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
@@ -267,7 +301,9 @@ async fn load_verified_record_lookup_with_persistence(
     }
 }
 
-fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<crate::ResolutionRecordKey>>> {
+pub(crate) fn parse_record_keys(
+    keys: Option<&str>,
+) -> V2Result<Option<Vec<crate::ResolutionRecordKey>>> {
     let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };

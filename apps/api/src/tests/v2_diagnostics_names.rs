@@ -253,6 +253,206 @@ async fn v2_diagnostics_name_records_returns_sections_comparison_and_value_sourc
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_records_keys_scope_comparison_exactly() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000081);
+    seed_v2_alice_name_records_fixture(
+        &database,
+        |_, _, _| {},
+        Some((
+            &["contenthash", "text:description"],
+            json!([
+                {
+                    "record_key": "contenthash",
+                    "status": "success",
+                    "value": {
+                        "value": "ipfs://verified-alice"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
+                {
+                    "record_key": "text:description",
+                    "status": "success",
+                    "value": {
+                        "key": "description",
+                        "value": "Verified Alice profile"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]),
+        )),
+    )
+    .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/Alice.eth/records?keys=contenthash,text:description",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["comparison"]
+            .as_object()
+            .expect("comparison must be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["contenthash".to_owned(), "text:description".to_owned()]
+    );
+    assert_eq!(
+        payload["data"]["comparison"]["contenthash"]["verified"],
+        json!({
+            "status": "ok",
+            "value": "ipfs://verified-alice"
+        })
+    );
+    assert_eq!(
+        payload["data"]["comparison"]["text:description"]["verified"],
+        json!({
+            "status": "ok",
+            "value": "Verified Alice profile"
+        })
+    );
+    assert!(
+        payload["data"].get("comparison_explicit_gaps").is_none(),
+        "keys-scoped comparisons must not report default-cap truncation"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_caps_default_comparison_and_lists_explicit_gaps() -> Result<()>
+{
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000082);
+    let verified_record_keys = diagnostic_text_record_keys(16);
+    let verified_record_key_refs = verified_record_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    seed_v2_alice_name_records_fixture(
+        &database,
+        |_, _, inventory| {
+            inventory.selectors = Value::Array(diagnostic_text_record_selectors(18));
+            inventory.entries = Value::Array(diagnostic_text_record_entries(18));
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        Some((
+            verified_record_key_refs.as_slice(),
+            diagnostic_text_verified_queries(16, execution_trace_id),
+        )),
+    )
+    .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/Alice.eth/records",
+        StatusCode::OK,
+    )
+    .await?;
+
+    let comparison = payload["data"]["comparison"]
+        .as_object()
+        .expect("comparison must be an object");
+    assert_eq!(comparison.len(), 16);
+    assert!(comparison.contains_key("text:key00"));
+    assert!(comparison.contains_key("text:key15"));
+    assert!(!comparison.contains_key("text:key16"));
+    assert!(!comparison.contains_key("text:key17"));
+    assert_eq!(
+        comparison["text:key00"]["verified"],
+        json!({
+            "status": "ok",
+            "value": "verified-00"
+        })
+    );
+    assert_eq!(
+        comparison["text:key15"]["verified"],
+        json!({
+            "status": "ok",
+            "value": "verified-15"
+        })
+    );
+    assert_eq!(
+        payload["data"]["comparison_explicit_gaps"],
+        json!([
+            {
+                "record_key": "text:key16",
+                "record_family": "text",
+                "selector_key": "key16",
+                "gap_reason": "diagnostics_comparison_default_limit_exceeded"
+            },
+            {
+                "record_key": "text:key17",
+                "record_family": "text",
+                "selector_key": "key17",
+                "gap_reason": "diagnostics_comparison_default_limit_exceeded"
+            }
+        ])
+    );
+    assert_eq!(
+        payload["data"]["record_inventory"]["selectors"]
+            .as_array()
+            .expect("selectors must be an array")
+            .len(),
+        18
+    );
+    assert_eq!(
+        payload["data"]["record_cache"]["entries"]
+            .as_array()
+            .expect("record cache entries must be an array")
+            .len(),
+        18
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_at_or_below_cap_has_no_truncation_note() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(
+        &database,
+        |_, _, inventory| {
+            inventory.selectors = Value::Array(diagnostic_text_record_selectors(16));
+            inventory.entries = Value::Array(diagnostic_text_record_entries(16));
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        None,
+    )
+    .await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/Alice.eth/records",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["comparison"]
+            .as_object()
+            .expect("comparison must be an object")
+            .len(),
+        16
+    );
+    assert!(payload["data"].get("comparison_explicit_gaps").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallback() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
@@ -561,6 +761,110 @@ async fn v2_diagnostics_name_records_executes_verified_on_demand_without_persist
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_records_bounds_on_demand_rpc_burst_for_keyed_comparison()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_block_hash =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row({
+            let mut row = exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            );
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            row
+        })
+        .await?;
+    database
+        .insert_record_inventory_current_row({
+            let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            inventory
+        })
+        .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000f0f";
+    let (rpc_url, rpc_handle) =
+        spawn_diagnostics_burst_observing_mock_rpc(5, executed_address).await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v2/diagnostics/names/Alice.eth/records?keys=addr:0,addr:1,addr:2,addr:3,addr:4",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostics bounded on-demand verified name records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["comparison"]
+            .as_object()
+            .expect("comparison must be an object")
+            .len(),
+        5
+    );
+
+    let rpc_stats = join_diagnostics_burst_observing_mock_rpc(rpc_handle).await?;
+    assert_eq!(rpc_stats.requests.len(), 5);
+    assert_eq!(
+        rpc_stats.max_in_flight, 4,
+        "diagnostics records on-demand RPC burst must stay bounded to four concurrent selectors"
+    );
+    for request in rpc_stats.requests {
+        assert_eq!(request["method"], json!("eth_call"));
+        assert_eq!(
+            request["params"][1],
+            json!({
+                "blockHash": execution_block_hash,
+                "requireCanonical": true
+            })
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_routes_return_not_found_for_missing_name() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     database.seed_default_ens_snapshot_selector_position().await?;
@@ -694,7 +998,7 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
         chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
     };
 
-    for suffix in ["coverage", "binding", "authority", "records"] {
+    for suffix in ["coverage", "binding", "authority"] {
         for (query, expected_message) in [
             ("source=verified", "unknown query parameter: source"),
             ("keys=addr:60", "unknown query parameter: keys"),
@@ -721,6 +1025,83 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
                 "{uri}"
             );
         }
+    }
+
+    for (query, expected_message) in [
+        ("source=verified", "unknown query parameter: source"),
+        ("address=bad", "unknown query parameter: address"),
+        ("page_size=201", "unknown query parameter: page_size"),
+    ] {
+        let uri = format!("/v2/diagnostics/names/alice.eth/records?{query}");
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("v2 diagnostic records undocumented query request failed")?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+        assert_eq!(
+            payload["error"]["message"],
+            json!(expected_message),
+            "{uri}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_records_rejects_malformed_duplicate_and_unknown_query_params()
+-> Result<()> {
+    let state = AppState {
+        phase: "test",
+        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+            .expect("query rejection does not use the database"),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    };
+
+    for (uri, expected_message) in [
+        (
+            "/v2/diagnostics/names/alice.eth/records?keys=bad%20key",
+            "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/records?keys=abi",
+            "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/records?keys=addr:060,addr:60",
+            "keys must not contain duplicate record keys",
+        ),
+        (
+            "/v2/diagnostics/names/alice.eth/records?keys=addr:60&source=verified",
+            "unknown query parameter: source",
+        ),
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("v2 records diagnostic invalid keys request failed")?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{uri}");
+        assert_eq!(
+            payload["error"]["message"],
+            json!(expected_message),
+            "{uri}"
+        );
     }
 
     Ok(())
@@ -1559,6 +1940,97 @@ async fn request_v2_diagnostics_json(
     Ok(payload)
 }
 
+struct DiagnosticsBurstRpcStats {
+    requests: Vec<Value>,
+    max_in_flight: usize,
+}
+
+async fn spawn_diagnostics_burst_observing_mock_rpc(
+    request_count: usize,
+    address: &str,
+) -> Result<(
+    String,
+    tokio::task::JoinHandle<Result<DiagnosticsBurstRpcStats>>,
+)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind diagnostics burst mock RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let response = resolution_universal_resolver_addr60_response(address);
+    let handle = tokio::spawn(async move {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..request_count {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept diagnostics burst mock RPC request")?;
+            let requests = Arc::clone(&requests);
+            let in_flight = Arc::clone(&in_flight);
+            let max_in_flight = Arc::clone(&max_in_flight);
+            let response = response.clone();
+            tasks.push(tokio::spawn(async move {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                update_diagnostics_burst_max(&max_in_flight, current);
+                let result = async {
+                    let request_payload = read_primary_name_mock_rpc_request(&mut socket).await?;
+                    requests.lock().await.push(request_payload);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    write_primary_name_mock_rpc_response(&mut socket, response).await
+                }
+                .await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
+            }));
+        }
+
+        for task in tasks {
+            task.await
+                .context("diagnostics burst mock RPC task panicked or was cancelled")??;
+        }
+
+        Ok(DiagnosticsBurstRpcStats {
+            requests: std::mem::take(&mut *requests.lock().await),
+            max_in_flight: max_in_flight.load(Ordering::SeqCst),
+        })
+    });
+
+    Ok((url, handle))
+}
+
+fn update_diagnostics_burst_max(max_in_flight: &std::sync::atomic::AtomicUsize, current: usize) {
+    use std::sync::atomic::Ordering;
+
+    let mut observed = max_in_flight.load(Ordering::Relaxed);
+    while current > observed {
+        match max_in_flight.compare_exchange(
+            observed,
+            current,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(next_observed) => observed = next_observed,
+        }
+    }
+}
+
+async fn join_diagnostics_burst_observing_mock_rpc(
+    handle: tokio::task::JoinHandle<Result<DiagnosticsBurstRpcStats>>,
+) -> Result<DiagnosticsBurstRpcStats> {
+    handle
+        .await
+        .context("diagnostics burst mock RPC task panicked or was cancelled")?
+}
+
 async fn seed_v2_diagnostics_execution_name(
     database: &TestDatabase,
     migrated_schema: bool,
@@ -1758,6 +2230,62 @@ fn v2_text_execution_verified_queries(execution_trace_id: Uuid) -> Value {
             }
         }
     ])
+}
+
+fn diagnostic_text_record_selectors(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|index| {
+            json!({
+                "record_key": format!("text:key{index:02}"),
+                "record_family": "text",
+                "selector_key": format!("key{index:02}"),
+                "cacheable": true
+            })
+        })
+        .collect()
+}
+
+fn diagnostic_text_record_entries(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|index| {
+            json!({
+                "record_key": format!("text:key{index:02}"),
+                "record_family": "text",
+                "selector_key": format!("key{index:02}"),
+                "status": "success",
+                "value": {
+                    "key": format!("key{index:02}"),
+                    "value": format!("value-{index:02}")
+                }
+            })
+        })
+        .collect()
+}
+
+fn diagnostic_text_record_keys(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| format!("text:key{index:02}"))
+        .collect()
+}
+
+fn diagnostic_text_verified_queries(count: usize, execution_trace_id: Uuid) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|index| {
+                json!({
+                    "record_key": format!("text:key{index:02}"),
+                    "status": "success",
+                    "value": {
+                        "key": format!("key{index:02}"),
+                        "value": format!("verified-{index:02}")
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                })
+            })
+            .collect(),
+    )
 }
 
 fn v2_execution_chain_positions(block_number: i64, block_hash: &str) -> Value {
