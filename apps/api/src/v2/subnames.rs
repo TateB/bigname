@@ -48,12 +48,18 @@ pub(crate) struct Subname {
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) labelhash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,

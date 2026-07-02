@@ -27,7 +27,7 @@ use overview_items::{projected_section_items, summary_is_supported};
 use super::{
     Envelope, Meta, NameRecord, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error,
     V2Result, api_error_to_v2, as_of_meta, build_name_record, decode, encode, encode_at_token,
-    format_timestamp, name_record, numeric_to_slug, resolve_v2_snapshot,
+    name_record, numeric_to_slug, resolve_v2_snapshot,
     vocab::{Completeness, Status},
 };
 
@@ -250,31 +250,7 @@ pub(crate) fn build_resolver_overview(
 }
 
 pub(crate) fn build_bound_name_record(row: &NameCurrentListRow, chain_id: u64) -> NameRecord {
-    let mut record = build_name_record(&row.row, None, Some(chain_id), Status::Ok);
-    let registration = name_record::name_registration_fields(Some(&row.row), &row.row.namespace);
-
-    record.token_id = row.token_id.clone().or(record.token_id);
-    record.owner = registration.owner;
-    record.registrant = registration.registrant;
-    record.registered_at = row
-        .registration_date
-        .map(format_timestamp)
-        .or(registration.registered_at);
-    record.created_at = row
-        .created_at
-        .map(format_timestamp)
-        .or(registration.created_at);
-    record.expires_at = row
-        .expiry_date
-        .map(format_timestamp)
-        .or(registration.expires_at);
-    record.registration_status = name_record::classify_registration_status(
-        &row.row.namespace,
-        name_record::declared_registration(&row.row.declared_summary),
-        record.owner.as_deref(),
-        has_name_binding(&row.row),
-    );
-    record
+    build_name_record(&row.row, None, Some(chain_id), Status::Ok)
 }
 
 async fn load_bound_name_rows(
@@ -452,8 +428,4 @@ fn projected_section_count(summary: &Value) -> Option<u64> {
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {
     name_record::resolver(&row.row.declared_summary)
         .is_some_and(|resolver| resolver.chain_id == chain_id)
-}
-
-fn has_name_binding(row: &bigname_storage::NameCurrentRow) -> bool {
-    row.surface_binding_id.is_some() || row.resource_id.is_some() || row.binding_kind.is_some()
 }

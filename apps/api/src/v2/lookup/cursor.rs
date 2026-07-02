@@ -83,6 +83,18 @@ pub(super) fn reverse_identity_sort(
         ))
 }
 
+pub(super) fn reverse_identity_storage_cursor(
+    record: &ReverseIdentityRecordRow,
+) -> ReverseIdentityCursor {
+    ReverseIdentityCursor {
+        is_primary: reverse_identity_is_primary(record),
+        role_rank: reverse_identity_role_rank(record).into(),
+        normalized_name: record.name_record.row.normalized_name.clone(),
+        namespace: record.name_record.row.namespace.clone(),
+        namehash: record.name_record.row.namehash.clone(),
+    }
+}
+
 pub(super) fn reverse_identity_is_primary(record: &ReverseIdentityRecordRow) -> bool {
     record.primary_name.as_ref().is_some_and(|primary| {
         primary.claim_status == bigname_storage::PrimaryNameClaimStatus::Success

@@ -71,11 +71,16 @@ pub(crate) struct AddressName {
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     pub(crate) relations: Vec<Relation>,
     pub(crate) is_primary: bool,
@@ -177,25 +182,15 @@ pub(crate) async fn get_address_names(
                     "failed to load address-name registration summaries for {normalized_address}"
                 ))
             })?;
-    let primary_name = bigname_storage::load_primary_name_current_snapshot(
+    let primary_names_by_namespace = load_primary_names_by_namespace(
         &state.pool,
         &normalized_address,
-        snapshot_namespace,
-        "60",
+        storage_page
+            .entries
+            .iter()
+            .map(|entry| entry.namespace.as_str()),
     )
-    .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load primary name for address {normalized_address}"
-        ))
-    })?
-    .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
-    .and_then(|snapshot| {
-        snapshot
-            .normalized_claim_name
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-    });
+    .await?;
     let permissions_by_resource = if include_role_summary {
         let resource_ids = storage_page
             .entries
@@ -237,7 +232,9 @@ pub(crate) async fn get_address_names(
             Ok(build_address_name(
                 entry,
                 name_rows.get(&entry.logical_name_id),
-                primary_name.as_deref(),
+                primary_names_by_namespace
+                    .get(&entry.namespace)
+                    .and_then(Option::as_deref),
                 role_summary,
             ))
         })
@@ -258,6 +255,34 @@ pub(crate) async fn get_address_names(
         }),
         meta,
     }))
+}
+
+async fn load_primary_names_by_namespace<'a>(
+    pool: &sqlx::PgPool,
+    address: &str,
+    namespaces: impl Iterator<Item = &'a str>,
+) -> V2Result<BTreeMap<String, Option<String>>> {
+    let namespaces = namespaces.collect::<BTreeSet<_>>();
+    let mut primary_names = BTreeMap::new();
+    for namespace in namespaces {
+        let primary_name =
+            bigname_storage::load_primary_name_current_snapshot(pool, address, namespace, "60")
+                .await
+                .map_err(|_| {
+                    V2Error::internal_error(format!(
+                        "failed to load primary name for address {address}"
+                    ))
+                })?
+                .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
+                .and_then(|snapshot| {
+                    snapshot
+                        .normalized_claim_name
+                        .map(|name| name.trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                });
+        primary_names.insert(namespace.to_owned(), primary_name);
+    }
+    Ok(primary_names)
 }
 
 pub(crate) fn build_address_name(

@@ -176,7 +176,15 @@ sections or route-documented expensive metadata. No route supports
 
 `profile=feed` on `POST /v2/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
-the same name and type as its detail counterpart.
+the same name and type as its detail counterpart. Feed does not change reverse
+lookup pagination semantics: `cursor`, `page_size`, `next_cursor`, and
+`has_more` mean the same thing as detail.
+
+Flat record optional fields are omitted when there is no backed value. Routes
+do not serialize permanently-null placeholders for optionals such as `manager`.
+Known-empty maps on detail records, such as `addresses` and `text_records`,
+serialize as `{}`; omission means the field is outside the requested field
+budget or unsupported by the served source.
 
 ## Tiers
 
@@ -254,7 +262,7 @@ Rules:
 - `mismatch` is the verification state where a claimed answer verifies to a
   different value.
 - `completeness` is `full`, `partial`, or `unsupported`.
-- Empty arrays mean known-empty, not unknown.
+- Empty arrays and empty maps mean known-empty, not unknown.
 
 ## Finality And Snapshots
 
