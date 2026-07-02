@@ -1217,6 +1217,87 @@ async fn resolution_execution_outcome_at_snapshot_skips_forked_older_block_hash(
 }
 
 #[tokio::test]
+async fn resolution_execution_outcome_at_snapshot_skips_non_unique_canonical_older_height()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request_key = "ens:alice.eth:addr:60";
+    seed_canonical_execution_lineage(&database, &[101, 102, 103]).await?;
+
+    let (fallback_trace, fallback_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001013),
+        request_key,
+        101,
+        1_717_171_700,
+        34,
+    );
+    let (canonical_trace, canonical_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001014),
+        request_key,
+        102,
+        1_717_171_900,
+        34,
+    );
+    insert_trace_and_outcome(&database, &fallback_trace, &fallback_outcome).await?;
+    insert_trace_and_outcome(&database, &canonical_trace, &canonical_outcome).await?;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &canonical_outcome.cache_key,
+        &selected_execution_snapshot_positions(103, &execution_block_hash(103)),
+    )
+    .await?
+    .expect("unique canonical older-block candidate must be selected");
+    assert_eq!(
+        selected.execution_trace_id,
+        canonical_trace.execution_trace_id
+    );
+
+    let fork_hash = execution_block_hash(9_202);
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[lineage_block_with_parent(
+            "ethereum-mainnet",
+            &fork_hash,
+            Some(&execution_block_hash(101)),
+            102,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    let (mut fork_trace, mut fork_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001015),
+        request_key,
+        102,
+        1_717_171_950,
+        34,
+    );
+    fork_trace.steps[0].canonicality_dependency = json!({
+        "ethereum-mainnet": {
+            "block_hash": &fork_hash,
+            "block_number": 102,
+            "state": "canonical"
+        }
+    });
+    fork_outcome.cache_key.requested_chain_positions =
+        requested_execution_positions(102, &fork_hash);
+    insert_trace_and_outcome(&database, &fork_trace, &fork_outcome).await?;
+
+    let selected_after_duplicate_height = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &canonical_outcome.cache_key,
+        &selected_execution_snapshot_positions(103, &execution_block_hash(103)),
+    )
+    .await?
+    .expect("older unique canonical candidate must remain eligible");
+    assert_eq!(
+        selected_after_duplicate_height.execution_trace_id, fallback_trace.execution_trace_id,
+        "non-unique canonical height candidates must be skipped conservatively"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn resolution_execution_outcome_at_snapshot_rejects_wrong_hash_at_same_height() -> Result<()>
 {
     let database = TestDatabase::new().await?;

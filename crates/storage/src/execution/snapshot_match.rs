@@ -41,6 +41,7 @@ pub(super) async fn resolution_execution_outcome_is_at_or_before_snapshot(
             pool,
             &requested_position.chain_id,
             &selected_position.block_hash,
+            selected_position.block_number,
             requested_position.block_number,
             &requested_position.block_hash,
         )

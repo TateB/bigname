@@ -237,12 +237,22 @@ where
     Ok(contains)
 }
 
-/// Prove that one stored `(chain_id, block_number, block_hash)` is on the
-/// canonical lineage path for a selected descendant block.
+/// Check whether one stored `(chain_id, block_number, block_hash)` is eligible
+/// as an older canonical ancestor of a selected canonical descendant block.
+///
+/// This intentionally avoids walking parent links. `chain_lineage` is
+/// append-only, and reorg repair flips whole losing branches to `orphaned`.
+/// If the selected block is canonical-marked, the candidate is canonical-marked,
+/// and the candidate is the unique canonical/safe/finalized row at that height,
+/// both rows are on the same canonical chain and block-number ordering implies
+/// ancestry. During a mid-reorg window where two rows at the candidate height
+/// are still canonical-marked, uniqueness fails and the caller skips the
+/// candidate conservatively.
 pub(crate) async fn chain_lineage_contains_canonical_ancestor_position<'e, E>(
     executor: E,
     chain_id: &str,
     descendant_hash: &str,
+    descendant_block_number: i64,
     ancestor_block_number: i64,
     ancestor_hash: &str,
 ) -> Result<bool>
@@ -251,62 +261,52 @@ where
 {
     let contains = sqlx::query_scalar::<_, bool>(
         r#"
-        WITH RECURSIVE ancestor AS (
-            SELECT block_number
+        WITH canonical_at_candidate_height AS (
+            SELECT block_hash
             FROM chain_lineage
             WHERE chain_id = $1
-              AND block_hash = $3
               AND block_number = $4
               AND canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
-        ),
-        lineage_path AS (
-            SELECT chain_id, block_hash, parent_hash, block_number
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND block_hash = $2
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-
-            UNION ALL
-
-            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, parent.block_number
-            FROM chain_lineage AS parent
-            JOIN lineage_path
-              ON parent.chain_id = lineage_path.chain_id
-             AND parent.block_hash = lineage_path.parent_hash
-            JOIN ancestor
-              ON lineage_path.block_number > ancestor.block_number
-            WHERE lineage_path.block_hash <> $3
-              AND parent.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+            LIMIT 2
         )
-        SELECT EXISTS (
-            SELECT 1
-            FROM lineage_path
-            WHERE block_hash = $3
-              AND block_number = $4
-        )
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND block_hash = $2
+                  AND block_number = $3
+                  AND canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+            )
+            AND (
+                SELECT COUNT(*) = 1
+                FROM canonical_at_candidate_height
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM canonical_at_candidate_height
+                WHERE block_hash = $5
+            )
         "#,
     )
     .bind(chain_id)
     .bind(descendant_hash)
-    .bind(ancestor_hash)
+    .bind(descendant_block_number)
     .bind(ancestor_block_number)
+    .bind(ancestor_hash)
     .fetch_one(executor)
     .await
     .with_context(|| {
         format!(
-            "failed to prove canonical lineage ancestry for chain {chain_id} descendant {descendant_hash} ancestor {ancestor_hash} at block {ancestor_block_number}"
+            "failed to check canonical lineage uniqueness for chain {chain_id} descendant {descendant_hash} ancestor {ancestor_hash} at block {ancestor_block_number}"
         )
     })?;
 
