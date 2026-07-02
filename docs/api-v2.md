@@ -158,7 +158,8 @@ Rules:
   it cheap or where a route explicitly documents `include=total_count`. Routes
   must not run unconditional full counts on the request path to fill it.
 - `meta` is always present. Routes that read chain-derived state include
-  `meta.as_of` and `meta.as_of_token`; control-plane routes (`/v2/status`,
+  `meta.as_of` and `meta.as_of_token` when they can attribute at least one
+  served chain position; control-plane routes (`/v2/status`,
   `/v2/namespaces/{namespace}`) omit both. `meta.as_of` is human-readable
   staleness attribution. `meta.as_of_token` is opaque and is the value to pass
   to `at` when a route supports snapshot replay. `meta.completeness`,
@@ -274,22 +275,27 @@ Rules:
 uniform across snapshot-read routes. Each chain-derived response carries
 `meta.as_of`, keyed by stringified `chain_id`, and `meta.as_of_token`, an
 opaque token that can round-trip as `at` to pin exact per-chain positions.
-Tokens are accepted when their chain positions are in the target route's
-snapshot scope. A multi-chain token from a namespace-omitted search replays on
-the same union search and is rejected by single-namespace routes whose scope
-does not include every token slot.
+Tokens must cover every required slot in the target route's snapshot scope and
+must not carry extra slots outside that scope. A single-chain token from a
+namespace-scoped read is rejected by namespace-omitted `/v2/search`, because
+the union search scope requires every public namespace slot. A multi-chain
+token from namespace-omitted search replays on the same union search and is
+rejected by single-namespace routes whose scope does not include every token
+slot.
 For event and history rows, `finality` selects rows at blocks at or below the
 selected chain checkpoint; `safe` and `finalized` exclude rows above their
 respective checkpoints.
 
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
-`finality`; its `meta.as_of` and `meta.as_of_token` record the served positions
-for staleness attribution and shadow-diff correlation.
+`finality`; when a served head is available, its `meta.as_of` and
+`meta.as_of_token` record the served positions for staleness attribution and
+shadow-diff correlation. Lookup rejects partial scoped heads instead of
+emitting a token that cannot replay on a compatible snapshot-read route.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
-does not accept `at` or `finality`; its `meta.as_of` and `meta.as_of_token`
-record the served positions for staleness attribution and shadow-diff
-correlation.
+does not accept `at` or `finality`; when a served head is available, its
+`meta.as_of` and `meta.as_of_token` record the served positions for staleness
+attribution and shadow-diff correlation.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 

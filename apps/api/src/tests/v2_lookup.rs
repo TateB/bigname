@@ -99,6 +99,16 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
             "timestamp": "2026-04-17T00:00:38Z"
         })
     );
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("lookup response must include meta.as_of_token");
+    let replay = v2_get_json(
+        &database,
+        &format!("/v2/search?q=case&namespace=ens&at={token}"),
+    )
+    .await?;
+    assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
+    assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
 
     assert_eq!(payload["data"][0]["input"], json!({"id": "hit", "name": "Case.eth"}));
     assert_eq!(payload["data"][0]["kind"], json!("name"));
@@ -163,6 +173,84 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     )
     .await?;
     assert_eq!(shadow["data"][0]["record"], detail["data"][0]["record"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_namespace_scoped_token_replays_with_union_checkpoint_present() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 38,
+                "block_hash": "0xname26",
+                "timestamp": "2026-04-17T00:00:38Z"
+            },
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 88,
+                "block_hash": "0xlookup-base-head",
+                "timestamp": "2026-04-17T00:01:28Z"
+            }
+        }))
+        .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "namespace": "ens",
+            "inputs": [{"id": "miss", "name": "missing.eth"}]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    assert!(payload["meta"]["as_of"]["1"].is_object());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("lookup response must include meta.as_of_token");
+
+    let replay = v2_get_json(
+        &database,
+        &format!("/v2/search?q=missing&namespace=ens&at={token}"),
+    )
+    .await?;
+    assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
+    assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
+
+    let union_replay =
+        v2_get_response(&database, &format!("/v2/search?q=missing&at={token}")).await?;
+    assert_eq!(union_replay.status(), StatusCode::BAD_REQUEST);
+
+    let public_payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "namespace": "public",
+            "inputs": [
+                {"id": "ens-miss", "name": "missing.eth"},
+                {"id": "basenames-miss", "name": "missing.base.eth"}
+            ]
+        }),
+    )
+    .await?;
+    assert!(public_payload["meta"]["as_of"]["1"].is_object());
+    assert!(public_payload["meta"]["as_of"]["8453"].is_object());
+    let public_token = public_payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("public lookup response must include meta.as_of_token");
+    let public_replay =
+        v2_get_json(&database, &format!("/v2/search?q=missing&at={public_token}")).await?;
+    assert_eq!(public_replay["meta"]["as_of"], public_payload["meta"]["as_of"]);
+    assert_eq!(
+        public_replay["meta"]["as_of_token"],
+        public_payload["meta"]["as_of_token"]
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -293,6 +381,30 @@ async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
     .await
     .context("failed to seed checkpoint row without a canonical hash")?;
 
+    let public_response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({
+            "inputs": [
+                {"id": "ens-miss", "name": "missing.eth"},
+                {"id": "basenames-miss", "name": "missing.base.eth"}
+            ]
+        }),
+    )
+    .await?;
+    assert_eq!(public_response.status(), StatusCode::CONFLICT);
+    let public_payload: Value = read_json(public_response).await?;
+    assert_eq!(public_payload["error"]["code"], json!("conflict"));
+
+    let invalid_only = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"id": "bad", "name": "bad name.eth"}]}),
+    )
+    .await?;
+    assert_eq!(invalid_only["data"][0]["status"], json!("invalid_name"));
+    assert!(invalid_only["meta"].get("as_of").is_none());
+    assert!(invalid_only["meta"].get("as_of_token").is_none());
+
     let payload = v2_lookup_json(
         &database,
         json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
@@ -309,6 +421,7 @@ async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
         })
     );
     assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert!(payload["meta"]["as_of_token"].is_string());
 
     database.cleanup().await?;
     Ok(())
@@ -566,6 +679,7 @@ async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Re
         45,
     )
     .await?;
+    seed_v2_lookup_base_head(&database).await?;
 
     let owner = v2_lookup_json(
         &database,
@@ -828,7 +942,38 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
         }],
     )
     .await?;
+    seed_v2_lookup_base_head(database).await?;
     Ok(())
+}
+
+async fn seed_v2_lookup_base_head(database: &TestDatabase) -> Result<()> {
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 88,
+                "block_hash": "0xlookup-base-head",
+                "timestamp": "2026-04-17T00:01:28Z"
+            }
+        }))
+        .await
+}
+
+async fn seed_v2_lookup_ethereum_head(
+    database: &TestDatabase,
+    block_number: i64,
+    block_hash: &str,
+) -> Result<()> {
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": block_hash,
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
+            }
+        }))
+        .await
 }
 
 async fn seed_v2_lookup_relation_scan_fixture(
@@ -837,6 +982,9 @@ async fn seed_v2_lookup_relation_scan_fixture(
     row_count: usize,
     owner_match_indexes: &[usize],
 ) -> Result<()> {
+    seed_v2_lookup_ethereum_head(database, 10_000, "0xlookup-scan-head").await?;
+    seed_v2_lookup_base_head(database).await?;
+
     let owner_match_indexes = owner_match_indexes
         .iter()
         .copied()
@@ -984,6 +1132,25 @@ async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
     let response = v2_lookup_response_for_database(database, "/v2/lookup", body).await?;
     assert_eq!(response.status(), StatusCode::OK);
     read_json(response).await
+}
+
+async fn v2_get_json(database: &TestDatabase, uri: &str) -> Result<Value> {
+    let response = v2_get_response(database, uri).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
+}
+
+async fn v2_get_response(database: &TestDatabase, uri: &str) -> Result<Response<Body>> {
+    app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 GET request failed")
 }
 
 async fn v2_lookup_response_for_database(

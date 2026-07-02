@@ -345,9 +345,9 @@ Field ownership:
   a persisted or on-demand verified outcome exists. The `verified` answer
   entry is the source-specific payload; `verification` is the typed comparison
   summary and must not contradict that entry. Claimed-vs-verified remains one
-  call without `declared_state`/`verified_state`. `meta.as_of` and
-  `meta.as_of_token` record the served positions for staleness attribution and
-  shadow-diff correlation.
+  call without `declared_state`/`verified_state`. When a served head is
+  available, `meta.as_of` and `meta.as_of_token` record the served positions
+  for staleness attribution and shadow-diff correlation.
 - Pagination behavior: none.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,

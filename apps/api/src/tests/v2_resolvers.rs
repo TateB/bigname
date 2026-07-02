@@ -452,6 +452,14 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
     .await?;
 
     assert_eq!(payload["data"]["nodes"], Value::Null);
+    assert!(
+        payload["meta"]["as_of"]["1"].is_object(),
+        "resolver unsupported meta must preserve as_of"
+    );
+    assert!(
+        payload["meta"]["as_of_token"].is_string(),
+        "resolver unsupported meta must preserve the snapshot token"
+    );
     assert_eq!(
         payload["meta"]["unsupported_fields"],
         json!(["nodes", "aliases", "roles", "events"])

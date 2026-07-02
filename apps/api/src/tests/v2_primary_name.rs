@@ -1,6 +1,7 @@
 #[tokio::test]
 async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     database
         .insert_primary_name_current_claim_row(
             V2_PRIMARY_NAME_ADDRESS,
