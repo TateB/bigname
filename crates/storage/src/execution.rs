@@ -2,6 +2,7 @@ mod decode;
 mod invalidation;
 mod keying;
 mod outcome;
+mod snapshot_match;
 mod trace;
 mod trace_rows;
 mod trace_validation;

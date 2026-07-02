@@ -237,6 +237,82 @@ where
     Ok(contains)
 }
 
+/// Prove that one stored `(chain_id, block_number, block_hash)` is on the
+/// canonical lineage path for a selected descendant block.
+pub(crate) async fn chain_lineage_contains_canonical_ancestor_position<'e, E>(
+    executor: E,
+    chain_id: &str,
+    descendant_hash: &str,
+    ancestor_block_number: i64,
+    ancestor_hash: &str,
+) -> Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let contains = sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH RECURSIVE ancestor AS (
+            SELECT block_number
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $3
+              AND block_number = $4
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        ),
+        lineage_path AS (
+            SELECT chain_id, block_hash, parent_hash, block_number
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $2
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+
+            UNION ALL
+
+            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, parent.block_number
+            FROM chain_lineage AS parent
+            JOIN lineage_path
+              ON parent.chain_id = lineage_path.chain_id
+             AND parent.block_hash = lineage_path.parent_hash
+            JOIN ancestor
+              ON lineage_path.block_number > ancestor.block_number
+            WHERE lineage_path.block_hash <> $3
+              AND parent.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        )
+        SELECT EXISTS (
+            SELECT 1
+            FROM lineage_path
+            WHERE block_hash = $3
+              AND block_number = $4
+        )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(descendant_hash)
+    .bind(ancestor_hash)
+    .bind(ancestor_block_number)
+    .fetch_one(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to prove canonical lineage ancestry for chain {chain_id} descendant {descendant_hash} ancestor {ancestor_hash} at block {ancestor_block_number}"
+        )
+    })?;
+
+    Ok(contains)
+}
+
 pub(crate) async fn load_lineage_snapshots_for_hashes<'e, E>(
     executor: E,
     chain_id: &str,

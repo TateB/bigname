@@ -1281,6 +1281,16 @@ async fn v2_diagnostics_name_execution_selects_artifact_at_or_before_snapshot() 
     database
         .seed_snapshot_selector_chain_positions(&later_positions)
         .await?;
+    seed_v2_execution_lineage_path(
+        &database,
+        &[
+            (21_000_003, "0xbinding"),
+            (21_000_004, "0xbinding004"),
+            (21_000_005, "0xbinding005"),
+            (21_000_006, "0xbinding006"),
+        ],
+    )
+    .await?;
 
     let request_key = resolution_execution_request_key(&["addr:60"]);
     let older_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002010);
@@ -1367,6 +1377,162 @@ async fn v2_diagnostics_name_execution_selects_artifact_at_or_before_snapshot() 
         latest_payload["meta"]["as_of"]["1"]["block_number"],
         json!(21_000_006)
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_skips_forked_older_artifact() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    seed_v2_execution_lineage_path(
+        &database,
+        &[(21_000_002, "0xbinding002"), (21_000_003, "0xbinding")],
+    )
+    .await?;
+    let fork_hash = "0x00000000000000000000000000000000000000000000000000000000feed0002";
+    seed_v2_execution_lineage_block(
+        &database,
+        "ethereum-mainnet",
+        21_000_002,
+        fork_hash,
+        Some("0xbinding001"),
+        "orphaned",
+    )
+    .await?;
+
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let canonical_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002050);
+    let fork_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002051);
+    let canonical_queries = v2_execution_verified_queries(
+        canonical_trace_id,
+        "0x00000000000000000000000000000000000000aa",
+    );
+    let fork_queries = v2_execution_verified_queries(
+        fork_trace_id,
+        "0x00000000000000000000000000000000000000ff",
+    );
+    let mut canonical_trace = resolution_execution_trace(
+        canonical_trace_id,
+        &request_key,
+        &["addr:60"],
+        canonical_queries.clone(),
+    );
+    let mut canonical_outcome = resolution_execution_outcome(
+        canonical_trace_id,
+        &request_key,
+        canonical_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    set_resolution_execution_artifact_position(
+        &mut canonical_trace,
+        &mut canonical_outcome,
+        21_000_002,
+        "0xbinding002",
+    );
+    canonical_trace.finished_at = Some(timestamp(1_717_172_000));
+    canonical_outcome.finished_at = timestamp(1_717_172_000);
+
+    let mut fork_trace =
+        resolution_execution_trace(fork_trace_id, &request_key, &["addr:60"], fork_queries.clone());
+    let mut fork_outcome = resolution_execution_outcome(
+        fork_trace_id,
+        &request_key,
+        fork_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    set_resolution_execution_artifact_position(
+        &mut fork_trace,
+        &mut fork_outcome,
+        21_000_002,
+        fork_hash,
+    );
+    fork_trace.finished_at = Some(timestamp(1_717_172_100));
+    fork_outcome.finished_at = timestamp(1_717_172_100);
+
+    upsert_execution_trace(&database.pool, &canonical_trace).await?;
+    upsert_execution_outcome(&database.pool, &canonical_outcome).await?;
+    upsert_execution_trace(&database.pool, &fork_trace).await?;
+    upsert_execution_outcome(&database.pool, &fork_outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["execution_trace_id"],
+        json!(canonical_trace_id.to_string())
+    );
+    assert_eq!(
+        payload["data"]["verified_queries"][0]["value"]["value"],
+        json!("0x00000000000000000000000000000000000000aa")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostics_name_execution_returns_not_found_for_only_forked_older_artifact()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let (logical_name_id, resource_id, _) =
+        seed_v2_diagnostics_execution_name(&database, false).await?;
+    seed_v2_execution_lineage_path(
+        &database,
+        &[(21_000_002, "0xbinding002"), (21_000_003, "0xbinding")],
+    )
+    .await?;
+    let fork_hash = "0x00000000000000000000000000000000000000000000000000000000feed0003";
+    seed_v2_execution_lineage_block(
+        &database,
+        "ethereum-mainnet",
+        21_000_002,
+        fork_hash,
+        Some("0xbinding001"),
+        "orphaned",
+    )
+    .await?;
+
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let fork_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002052);
+    let fork_queries = v2_execution_verified_queries(
+        fork_trace_id,
+        "0x00000000000000000000000000000000000000ff",
+    );
+    let mut fork_trace =
+        resolution_execution_trace(fork_trace_id, &request_key, &["addr:60"], fork_queries.clone());
+    let mut fork_outcome = resolution_execution_outcome(
+        fork_trace_id,
+        &request_key,
+        fork_queries,
+        &logical_name_id,
+        resource_id,
+    );
+    set_resolution_execution_artifact_position(
+        &mut fork_trace,
+        &mut fork_outcome,
+        21_000_002,
+        fork_hash,
+    );
+    upsert_execution_trace(&database.pool, &fork_trace).await?;
+    upsert_execution_outcome(&database.pool, &fork_outcome).await?;
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
+        StatusCode::NOT_FOUND,
+    )
+    .await?;
+
+    assert_eq!(payload["error"]["code"], json!("not_found"));
 
     database.cleanup().await?;
     Ok(())
@@ -1603,6 +1769,72 @@ fn v2_execution_chain_positions(block_number: i64, block_hash: &str) -> Value {
             "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
         }
     })
+}
+
+async fn seed_v2_execution_lineage_path(
+    database: &TestDatabase,
+    blocks: &[(i64, &str)],
+) -> Result<()> {
+    let mut parent_hash = None;
+    for (block_number, block_hash) in blocks {
+        seed_v2_execution_lineage_block(
+            database,
+            "ethereum-mainnet",
+            *block_number,
+            block_hash,
+            parent_hash,
+            "finalized",
+        )
+        .await?;
+        parent_hash = Some(*block_hash);
+    }
+    Ok(())
+}
+
+async fn seed_v2_execution_lineage_block(
+    database: &TestDatabase,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    parent_hash: Option<&str>,
+    canonicality_state: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            parent_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5::timestamptz, $6::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO UPDATE SET
+            parent_hash = EXCLUDED.parent_hash,
+            block_number = EXCLUDED.block_number,
+            block_timestamp = EXCLUDED.block_timestamp,
+            canonicality_state = EXCLUDED.canonicality_state
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(parent_hash)
+    .bind(block_number)
+    .bind(format!(
+        "2026-04-17T00:00:{:02}Z",
+        block_number.rem_euclid(60)
+    ))
+    .bind(canonicality_state)
+    .execute(&database.pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to seed v2 execution lineage block {chain_id} {block_hash} at {block_number}"
+        )
+    })?;
+
+    Ok(())
 }
 
 fn v2_basenames_execution_chain_positions() -> Value {

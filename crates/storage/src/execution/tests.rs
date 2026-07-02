@@ -137,10 +137,20 @@ fn lineage_block(
     block_number: i64,
     canonicality_state: CanonicalityState,
 ) -> ChainLineageBlock {
+    lineage_block_with_parent(chain_id, block_hash, None, block_number, canonicality_state)
+}
+
+fn lineage_block_with_parent(
+    chain_id: &str,
+    block_hash: &str,
+    parent_hash: Option<&str>,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> ChainLineageBlock {
     ChainLineageBlock {
         chain_id: chain_id.to_owned(),
         block_hash: block_hash.to_owned(),
-        parent_hash: None,
+        parent_hash: parent_hash.map(str::to_owned),
         block_number,
         block_timestamp: timestamp(1_717_180_000 + block_number.rem_euclid(1_000)),
         logs_bloom: None,
@@ -149,6 +159,27 @@ fn lineage_block(
         state_root: Some(format!("0xst-{block_hash}")),
         canonicality_state,
     }
+}
+
+async fn seed_canonical_execution_lineage(
+    database: &TestDatabase,
+    block_numbers: &[i64],
+) -> Result<()> {
+    let mut blocks = Vec::with_capacity(block_numbers.len());
+    let mut parent_hash = None;
+    for block_number in block_numbers {
+        let block_hash = execution_block_hash(*block_number);
+        blocks.push(lineage_block_with_parent(
+            "ethereum-mainnet",
+            &block_hash,
+            parent_hash.as_deref(),
+            *block_number,
+            CanonicalityState::Canonical,
+        ));
+        parent_hash = Some(block_hash);
+    }
+    upsert_chain_lineage_blocks(database.pool(), &blocks).await?;
+    Ok(())
 }
 
 fn execution_trace() -> ExecutionTrace {
@@ -1031,6 +1062,7 @@ async fn upserts_and_loads_execution_outcome_by_cache_key() -> Result<()> {
 async fn loads_resolution_execution_outcome_at_snapshot_by_candidate_order() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request_key = "ens:alice.eth:addr:60";
+    seed_canonical_execution_lineage(&database, &[100, 101, 102, 103, 104]).await?;
 
     let candidates = [
         resolution_execution_outcome_candidate(
@@ -1102,6 +1134,83 @@ async fn loads_resolution_execution_outcome_at_snapshot_by_candidate_order() -> 
         .await?
         .is_none(),
         "snapshots before all persisted candidates must miss"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolution_execution_outcome_at_snapshot_skips_forked_older_block_hash() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request_key = "ens:alice.eth:addr:60";
+    seed_canonical_execution_lineage(&database, &[101, 102, 103]).await?;
+    let fork_hash = execution_block_hash(9_102);
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[lineage_block_with_parent(
+            "ethereum-mainnet",
+            &fork_hash,
+            Some(&execution_block_hash(101)),
+            102,
+            CanonicalityState::Orphaned,
+        )],
+    )
+    .await?;
+
+    let (canonical_trace, canonical_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001009),
+        request_key,
+        102,
+        1_717_171_800,
+        33,
+    );
+    let (mut fork_trace, mut fork_outcome) = resolution_execution_outcome_candidate(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000001010),
+        request_key,
+        102,
+        1_717_171_950,
+        33,
+    );
+    fork_trace.steps[0].canonicality_dependency = json!({
+        "ethereum-mainnet": {
+            "block_hash": &fork_hash,
+            "block_number": 102,
+            "state": "orphaned"
+        }
+    });
+    fork_outcome.cache_key.requested_chain_positions =
+        requested_execution_positions(102, &fork_hash);
+
+    insert_trace_and_outcome(&database, &canonical_trace, &canonical_outcome).await?;
+    insert_trace_and_outcome(&database, &fork_trace, &fork_outcome).await?;
+
+    let selected = load_resolution_execution_outcome_at_snapshot(
+        database.pool(),
+        &canonical_outcome.cache_key,
+        &selected_execution_snapshot_positions(103, &execution_block_hash(103)),
+    )
+    .await?
+    .expect("canonical older-block candidate must be selected");
+    assert_eq!(
+        selected.execution_trace_id,
+        canonical_trace.execution_trace_id
+    );
+
+    sqlx::query("DELETE FROM execution_cache_outcomes WHERE execution_trace_id = $1")
+        .bind(canonical_trace.execution_trace_id)
+        .execute(database.pool())
+        .await
+        .context("failed to remove canonical execution outcome for fork-only miss check")?;
+
+    assert!(
+        load_resolution_execution_outcome_at_snapshot(
+            database.pool(),
+            &canonical_outcome.cache_key,
+            &selected_execution_snapshot_positions(103, &execution_block_hash(103)),
+        )
+        .await?
+        .is_none(),
+        "fork-only older-block candidate must be skipped as a cache miss"
     );
 
     database.cleanup().await

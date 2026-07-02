@@ -16,7 +16,10 @@ pub use upserts::{
 };
 
 pub(crate) use canonicality::promote_chain_lineage_path;
-pub(crate) use reads::{chain_lineage_contains_ancestor_internal, ensure_chain_lineage_block};
+pub(crate) use reads::{
+    chain_lineage_contains_ancestor_internal, chain_lineage_contains_canonical_ancestor_position,
+    ensure_chain_lineage_block,
+};
 
 #[cfg(test)]
 mod tests;
