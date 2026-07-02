@@ -45,7 +45,10 @@ values. The compact records routes are the selector-specific app paths. Each
 route first looks for matching persisted execution output at the selected
 exact-name snapshot. On miss, the API performs Universal Resolver execution
 against that selected chain position, persists the trace and outcome, and
-returns the persisted outcome in the same response.
+returns the persisted outcome in the same response. V2 product envelopes that
+document route-local on-demand omission, including the verified name-profile
+path, omit `meta.as_of` and `meta.as_of_token` on that live response; later
+persisted reads can carry snapshot attribution for the same outcome.
 
 Live-execution rules:
 

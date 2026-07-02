@@ -297,7 +297,7 @@ fn verified_record_answers(
     verified_lookup: Option<VerifiedRecordLookup>,
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     match verified_lookup {
-        Some(VerifiedRecordLookup::Found(outcome)) => {
+        Some(VerifiedRecordLookup::Found { outcome, .. }) => {
             let state = build_resolution_verified_state(row, records, Some(outcome.as_ref()))
                 .map_err(|error| {
                     error!(

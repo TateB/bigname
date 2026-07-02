@@ -160,7 +160,8 @@ Rules:
 - `meta` is always present. Routes that read chain-derived state include
   `meta.as_of` and `meta.as_of_token` when they can attribute at least one
   served snapshot-pinned chain position; control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`) and primary-name responses served by the
+  `/v2/namespaces/{namespace}`), verified name-profile responses served by the
+  route-local on-demand fallback, and primary-name responses served by the
   route-local on-demand fallback omit both. `meta.as_of` is human-readable
   staleness attribution. `meta.as_of_token` is opaque and is the value to pass
   to `at` when a route supports snapshot replay. `meta.completeness`,

@@ -138,24 +138,24 @@ pub(crate) async fn get_name_record(
                 )
             })?;
     let chain_id = response_chain_id(&selected_snapshot);
-    let data = match route_source {
-        Source::Indexed => build_name_record(&row, record_inventory.as_ref(), chain_id, Status::Ok),
-        Source::Verified => {
-            verified::build_verified_name_record(
-                &state,
-                &row,
-                record_inventory.as_ref(),
-                chain_id,
-                &selected_snapshot,
-            )
-            .await?
-        }
+    let record = verified::build_name_record_for_source(
+        &state,
+        &row,
+        record_inventory.as_ref(),
+        chain_id,
+        &selected_snapshot,
+        route_source,
+    )
+    .await?;
+    let mut meta = if record.uses_on_demand_fallback {
+        Meta::default()
+    } else {
+        snapshot_meta(&selected_snapshot)?
     };
-    let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
     Ok(Json(Envelope {
-        data,
+        data: record.record,
         page: None,
         meta,
     }))

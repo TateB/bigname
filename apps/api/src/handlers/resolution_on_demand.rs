@@ -6,6 +6,17 @@ pub(crate) struct VerifiedOutcomeExecutionOptions {
     pub(crate) partial_compact_hits: PartialCompactHits,
 }
 
+pub(crate) struct LoadedResolutionVerifiedOutcome {
+    pub(crate) outcome: ExecutionOutcome,
+    pub(crate) origin: ResolutionVerifiedOutcomeOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolutionVerifiedOutcomeOrigin {
+    Persisted,
+    OnDemand,
+}
+
 /// Loads a cached verified outcome or executes on miss using the requested compact-hit policy.
 pub(crate) async fn load_or_execute_resolution_verified_outcome(
     state: &AppState,
@@ -14,7 +25,7 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
     options: VerifiedOutcomeExecutionOptions,
-) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
+) -> std::result::Result<Option<LoadedResolutionVerifiedOutcome>, SnapshotSelectionError> {
     let lookup = lookup_resolution_verified_outcome(
         &state.pool,
         row,
@@ -26,10 +37,13 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
     .await?;
 
     match lookup {
-        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(outcome)),
+        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(LoadedResolutionVerifiedOutcome {
+            outcome,
+            origin: ResolutionVerifiedOutcomeOrigin::Persisted,
+        })),
         ResolutionVerifiedOutcomeLookup::NotSupported => Ok(None),
-        ResolutionVerifiedOutcomeLookup::CacheMiss => Ok(Some(
-            execute_ens_verified_resolution_cache_miss(
+        ResolutionVerifiedOutcomeLookup::CacheMiss => {
+            let outcome = execute_ens_verified_resolution_cache_miss(
                 &state.pool,
                 &state.chain_rpc_urls,
                 row,
@@ -39,8 +53,12 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
                 options.use_latest_block_tag,
                 options.persist_execution,
             )
-            .await?,
-        )),
+            .await?;
+            Ok(Some(LoadedResolutionVerifiedOutcome {
+                outcome,
+                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
+            }))
+        }
     }
 }
 

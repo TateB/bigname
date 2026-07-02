@@ -246,9 +246,10 @@ Rules:
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
 - `meta` is always present: `as_of` and `as_of_token` on routes that read
-  snapshot-pinned chain-derived state (control-plane routes — `/v2/status`,
-  `/v2/namespaces/{namespace}` — and primary-name responses served by the
-  route-local on-demand fallback omit both); `completeness`,
+  snapshot-pinned chain-derived state; control-plane routes (`/v2/status`,
+  `/v2/namespaces/{namespace}`), verified name-profile responses served by the
+  route-local on-demand fallback, and primary-name responses served by the
+  route-local on-demand fallback omit both. `completeness`,
   `unsupported_fields`, and `unsupported_reason` only when the read is not clean;
   `source` when the route supports
   `?source=`. There is no `meta` query parameter — no `meta=full` (deeper

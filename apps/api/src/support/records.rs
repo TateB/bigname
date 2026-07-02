@@ -131,6 +131,7 @@ pub(super) async fn load_name_profile_records_read(
             },
         )
         .await
+        .map(|outcome| outcome.map(|outcome| outcome.outcome))
         .map_err(snapshot_selection_api_error)?
     } else {
         None
@@ -543,6 +544,7 @@ async fn load_compact_records_verified_outcome(
         },
     )
     .await
+    .map(|outcome| outcome.map(|outcome| outcome.outcome))
     .map_err(snapshot_selection_api_error)
 }
 

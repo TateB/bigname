@@ -150,7 +150,10 @@ Field ownership:
   (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
   `registration_status`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
-  projection values because they are not resolver records. On a `200` profile,
+  projection values because they are not resolver records. Persisted or
+  snapshot-pinned verified profile responses include
+  `meta.as_of`/`meta.as_of_token`; the response supplied by route-local
+  on-demand verified execution omits both. On a `200` profile,
   `status` is the flat-record result: `ok` for clean indexed reads; `failed`,
   `stale`, or `unsupported` may appear only when `source=verified` cannot serve
   the verified sections, with `failure_reason` or `unsupported_reason` carrying

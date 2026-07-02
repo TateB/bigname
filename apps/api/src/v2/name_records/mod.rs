@@ -11,7 +11,8 @@ use serde_json::Value;
 use crate::{
     AppState, ExecutionOutcome, PartialCompactHits, ResolutionVerifiedOutcomeLookup,
     handler_resolution_on_demand::{
-        VerifiedOutcomeExecutionOptions, load_or_execute_resolution_verified_outcome,
+        ResolutionVerifiedOutcomeOrigin, VerifiedOutcomeExecutionOptions,
+        load_or_execute_resolution_verified_outcome,
     },
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
@@ -68,9 +69,24 @@ pub(crate) struct RecordAnswer {
 }
 
 pub(crate) enum VerifiedRecordLookup {
-    Found(Box<ExecutionOutcome>),
+    Found {
+        outcome: Box<ExecutionOutcome>,
+        origin: ResolutionVerifiedOutcomeOrigin,
+    },
     Stale(String),
     NotSupported,
+}
+
+impl VerifiedRecordLookup {
+    pub(crate) fn uses_on_demand_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::Found {
+                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
+                ..
+            }
+        )
+    }
 }
 
 pub(crate) async fn get_name_records(
@@ -292,7 +308,10 @@ pub(crate) async fn load_persisted_verified_record_lookup(
     .await
     {
         Ok(ResolutionVerifiedOutcomeLookup::Found(outcome)) => {
-            Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome))))
+            Ok(Some(VerifiedRecordLookup::Found {
+                outcome: Box::new(outcome),
+                origin: ResolutionVerifiedOutcomeOrigin::Persisted,
+            }))
         }
         Ok(ResolutionVerifiedOutcomeLookup::NotSupported) => {
             Ok(Some(VerifiedRecordLookup::NotSupported))
@@ -332,7 +351,10 @@ async fn load_verified_record_lookup_with_persistence(
     )
     .await
     {
-        Ok(Some(outcome)) => Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome)))),
+        Ok(Some(loaded)) => Ok(Some(VerifiedRecordLookup::Found {
+            outcome: Box::new(loaded.outcome),
+            origin: loaded.origin,
+        })),
         Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
             VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),

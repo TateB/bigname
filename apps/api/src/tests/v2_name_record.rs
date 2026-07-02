@@ -136,6 +136,7 @@ async fn v2_get_name_verified_source_reads_persisted_verified_record_fields() ->
     .await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_v2_name_snapshot_meta(&payload);
     assert_eq!(payload["data"]["status"], json!("ok"));
     assert_eq!(
         payload["data"]["addresses"],
@@ -471,6 +472,7 @@ async fn v2_get_name_verified_source_executes_on_demand_for_cache_miss() -> Resu
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_v2_name_omits_snapshot_meta(&payload);
     assert_eq!(payload["data"]["status"], json!("ok"));
     assert_eq!(
         payload["data"]["addresses"],
@@ -514,6 +516,7 @@ async fn v2_get_name_verified_source_executes_on_demand_for_cache_miss() -> Resu
         .context("v2 cached verified name profile request failed")?;
     assert_eq!(cached_response.status(), StatusCode::OK);
     let cached_payload: Value = read_json(cached_response).await?;
+    assert_v2_name_snapshot_meta(&cached_payload);
     assert_eq!(cached_payload["data"]["addresses"]["60"], json!(executed_address));
 
     database.cleanup().await?;
@@ -3577,6 +3580,34 @@ fn resolution_left_pad_hex(value: &str, width: usize) -> String {
 fn resolution_right_pad_hex(value: &str, width: usize) -> String {
     assert!(value.len() <= width, "test hex value must fit padded width");
     format!("{value:0<width$}")
+}
+
+fn assert_v2_name_snapshot_meta(payload: &Value) {
+    assert!(
+        payload["meta"]["as_of"].is_object(),
+        "name response must include meta.as_of"
+    );
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("name response must include meta.as_of_token");
+    assert!(!token.is_empty(), "meta.as_of_token must not be empty");
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')),
+        "meta.as_of_token must be URL-safe"
+    );
+}
+
+fn assert_v2_name_omits_snapshot_meta(payload: &Value) {
+    assert!(
+        payload["meta"].get("as_of").is_none(),
+        "name response must omit meta.as_of"
+    );
+    assert!(
+        payload["meta"].get("as_of_token").is_none(),
+        "name response must omit meta.as_of_token"
+    );
 }
 
 fn assert_no_banned_v1_spellings(value: &Value) {
