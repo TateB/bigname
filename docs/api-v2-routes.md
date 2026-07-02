@@ -83,15 +83,18 @@ Field ownership:
   and is configurable with `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
 - Response shape: the common envelope. `data` is an array of result objects,
   not an object wrapper. The array contains one result per input in caller
-  order. Each result is `{input, kind, status, normalization?, record?,
-  records?, page?}`. `input` echoes the caller-supplied input, including `id`
-  when supplied. `kind` is `name` or `address`. Name results use `record` for
-  the single record object. Reverse results use `records` for zero or more
-  record rows with `is_primary` and `relations` in addition to the shared
-  record fields. `profile=feed` returns a documented core-field subset of the
-  same record object; it does not introduce another DTO.
+  order. Each result is `{input, kind, status, unsupported_reason?,
+  failure_reason?, normalization?, record?, records?, page?}`. `input` echoes
+  the caller-supplied input, including `id` when supplied; omitted `id` is not
+  synthesized. `kind` is `name` or `address`. Name results use `record` for the
+  single record object. Reverse results use `records` for zero or more record
+  rows with `is_primary` and `relations` in addition to the shared record
+  fields. `profile=feed` returns a documented core-field subset of the same
+  record object; it does not introduce another DTO.
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
-  standard `page` object inside each result.
+  standard `page` object inside each result. Detail and feed use identical
+  pagination semantics; feed only reduces returned fields. Reverse inputs
+  default `page_size` to 50 and use the common max of 200.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
@@ -126,8 +129,10 @@ Field ownership:
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
-  the same object. The profile portion uses `name`, `display_name`, `namespace`,
-  `namehash`, `resolver`, `addresses`, `text_records`, `content_hash`,
+  the same object when backed. `manager` is omitted when no forward-read source
+  can derive it; it is not emitted as a permanent null placeholder. The profile
+  portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
+  `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
   `unsupported_fields` when those fields are served. On a `200` profile,
   `status` is the flat-record result: `ok` for clean indexed reads; `failed`
@@ -292,8 +297,10 @@ Field ownership:
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, and `registrant` that matched. Resolver records
-  are not included; use `GET /v2/names/{name}/records` for resolver data.
+  subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
+  evaluated against that row namespace's coin-type-60 primary-name claim, not a
+  route-wide namespace shortcut. Resolver records are not included; use
+  `GET /v2/names/{name}/records` for resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
   permission subject address. `grant_scope` uses the same shape documented for

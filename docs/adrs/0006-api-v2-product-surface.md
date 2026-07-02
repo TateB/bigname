@@ -296,8 +296,9 @@ unchanged, only its spelling.
 shape, not a second DTO: it returns the record object restricted to a
 documented core-field subset (identity fields, `is_primary`/`relations`,
 `status`), and every feed field is identical in name and type to its detail
-counterpart. The latency contract is preserved by returning fewer fields, not
-different ones.
+counterpart. Reverse feed and detail requests use the same cursor and
+`page_size` semantics; the latency contract is preserved by returning fewer
+fields, not different ones.
 
 Name-history rows use a dedicated lean product shape:
 `{type, name, namespace, registration_id, block_number, timestamp,
@@ -391,7 +392,8 @@ Rules:
   block.
 - One not-found philosophy: single-resource GETs return 404; collections return
   200 with empty `data`; batch lookup results carry in-band `status` per input
-  (a batch never 404s). Empty arrays mean known-empty, never unknown. The
+  (a batch never 404s). Empty arrays and empty maps mean known-empty, never
+  unknown. The
   primary-name route is the documented exception to the 404 rule: a valid
   `{address, coin_type, namespace}` tuple with no claim, or an
   unsupported/mismatched verification, is an answer about that tuple rather

@@ -8,11 +8,13 @@ use super::{
 };
 use crate::{
     normalize_inferred_route_name, parse_evm_address,
-    v2::{MAX_PAGE_SIZE, Relation, V2Error, V2Result, api_error_to_v2, decode, encode},
+    v2::{
+        DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Relation, V2Error, V2Result, api_error_to_v2, decode,
+        encode,
+    },
 };
 
 const DEFAULT_LOOKUP_BATCH_LIMIT: usize = 1000;
-const DEFAULT_LOOKUP_REVERSE_PAGE_SIZE: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ParsedNameLookup {
@@ -52,7 +54,7 @@ pub(super) fn parse_name_input(
     input: &LookupNameInput,
     namespace: Option<&str>,
 ) -> V2Result<ParsedNameLookup> {
-    let id = required_id(input.id.as_deref())?;
+    let id = optional_id(input.id.as_deref())?;
     let input_name = input.name.clone();
     let (lookup, normalization) =
         match parse_identity_name_lookup_with_namespace(&input_name, namespace) {
@@ -97,7 +99,7 @@ pub(super) fn parse_address_input(
     index: usize,
     input: &LookupAddressInput,
 ) -> V2Result<ParsedAddressLookup> {
-    let id = required_id(input.id.as_deref())?;
+    let id = optional_id(input.id.as_deref())?;
     let address = parse_evm_address(&input.address, "address").map_err(api_error_to_v2)?;
     let coin_type = input.coin_type.unwrap_or(60);
     let coin_type = crate::parse_primary_name_coin_type(Some(&coin_type.to_string()))
@@ -221,7 +223,7 @@ fn relation_to_storage_roles(relation: Option<Relation>) -> bigname_storage::Rev
 
 fn parse_page_size(value: Option<u64>) -> V2Result<u64> {
     match value {
-        None => Ok(DEFAULT_LOOKUP_REVERSE_PAGE_SIZE),
+        None => Ok(DEFAULT_PAGE_SIZE),
         Some(value) if !(1..=MAX_PAGE_SIZE).contains(&value) => Err(V2Error::invalid_input(
             format!("page_size must be between 1 and {MAX_PAGE_SIZE}"),
         )),
@@ -229,11 +231,15 @@ fn parse_page_size(value: Option<u64>) -> V2Result<u64> {
     }
 }
 
-fn required_id(value: Option<&str>) -> V2Result<String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Err(V2Error::invalid_input("lookup input id must not be empty"));
-    };
-    Ok(value.to_owned())
+fn optional_id(value: Option<&str>) -> V2Result<Option<String>> {
+    value
+        .map(str::trim)
+        .map(|value| {
+            (!value.is_empty())
+                .then(|| value.to_owned())
+                .ok_or_else(|| V2Error::invalid_input("lookup input id must not be empty"))
+        })
+        .transpose()
 }
 
 fn parse_identity_name_lookup_with_namespace(
@@ -291,7 +297,10 @@ mod tests {
 
     #[test]
     fn lookup_page_size_uses_v2_limit() {
-        assert_eq!(parse_page_size(None).expect("default page size"), 1);
+        assert_eq!(
+            parse_page_size(None).expect("default page size"),
+            DEFAULT_PAGE_SIZE
+        );
         assert_eq!(parse_page_size(Some(MAX_PAGE_SIZE)).unwrap(), MAX_PAGE_SIZE);
         let error = parse_page_size(Some(MAX_PAGE_SIZE + 1)).unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidInput);

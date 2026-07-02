@@ -528,6 +528,139 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:case.eth";
+    let resource_id = Uuid::from_u128(0x5a0101);
+    let record_boundary = json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": null,
+        "event_kind": null,
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 38,
+            "block_hash": "0xname26",
+            "timestamp": "2026-04-17T00:00:38Z"
+        }
+    });
+
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "Case.eth",
+        "case.eth",
+        "namehash:case.eth",
+        resource_id,
+        Uuid::from_u128(0x5a0102),
+        Uuid::from_u128(0x5a0103),
+        address,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET declared_summary = jsonb_set(
+            declared_summary,
+            '{topology}',
+            $2::jsonb
+        )
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(json!({
+        "version_boundaries": {
+            "topology_version_boundary": record_boundary.clone(),
+            "record_version_boundary": record_boundary.clone(),
+        }
+    }))
+    .execute(&database.pool)
+    .await?;
+    let mut record_inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    record_inventory.record_version_boundary = record_boundary;
+    record_inventory.chain_positions = json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 38,
+            "block_hash": "0xname26",
+            "timestamp": "2026-04-17T00:00:38Z"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(record_inventory)
+        .await?;
+
+    let profile = v2_conformance_get_json(&database, "/v2/names/Case.eth").await?;
+    let lookup = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "namespace": "public",
+            "inputs": [{"name": "Case.eth"}]
+        }),
+    )
+    .await?;
+    assert_eq!(lookup["data"][0]["record"], profile["data"]);
+    assert!(
+        lookup["data"][0]["record"].get("manager").is_none(),
+        "forward relation context must not synthesize the flat manager field"
+    );
+
+    let profile_record = &profile["data"];
+    let search = v2_conformance_get_json(&database, "/v2/search?q=case&namespace=ens").await?;
+    assert_shared_record_subset(
+        profile_record,
+        data_row_named(&search, "case.eth", "search"),
+        SHARED_LIST_RECORD_FIELDS,
+        "search",
+    );
+
+    let address_names = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{address}/names"),
+    )
+    .await?;
+    let address_name_row = data_row_named(&address_names, "case.eth", "address-names");
+    assert_eq!(address_name_row["relations"], json!(["manager"]));
+    assert_shared_record_subset(
+        profile_record,
+        address_name_row,
+        SHARED_LIST_RECORD_FIELDS,
+        "address-names",
+    );
+
+    seed_v2_subnames_fixture(&database).await?;
+    let subname_at = v2_at_token(
+        "ethereum",
+        "ethereum-mainnet",
+        81,
+        "0xname51",
+        "2026-04-17T00:00:21Z",
+    )?;
+    let subname_profile = v2_conformance_get_json(
+        &database,
+        &format!("/v2/names/Alpha.Parent.eth?at={subname_at}"),
+    )
+    .await?;
+    let subnames =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=3")
+            .await?;
+    assert_shared_record_subset(
+        &subname_profile["data"],
+        data_row_named(&subnames, "alpha.parent.eth", "subnames"),
+        SHARED_LIST_RECORD_FIELDS,
+        "subnames",
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Value> {
     match route.success {
         V2SuccessFixture::Lookup => {
@@ -809,6 +942,43 @@ async fn v2_conformance_get_json(database: &TestDatabase, uri: &str) -> Result<V
 
     assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
     Ok(payload)
+}
+
+const SHARED_LIST_RECORD_FIELDS: &[&str] = &[
+    "name",
+    "display_name",
+    "namespace",
+    "namehash",
+    "owner",
+    "registrant",
+    "registration_status",
+    "registered_at",
+    "created_at",
+    "expires_at",
+];
+
+fn data_row_named<'a>(payload: &'a Value, name: &str, label: &str) -> &'a Value {
+    payload["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} data must be an array"))
+        .iter()
+        .find(|row| row["name"] == json!(name))
+        .unwrap_or_else(|| panic!("{label} must include {name}"))
+}
+
+fn assert_shared_record_subset(
+    profile_record: &Value,
+    row: &Value,
+    fields: &[&str],
+    label: &str,
+) {
+    for field in fields {
+        assert_eq!(
+            row.get(*field),
+            profile_record.get(*field),
+            "{label} field {field} must match the profile record"
+        );
+    }
 }
 
 async fn seed_v2_address_history_conformance_fixture(database: &TestDatabase) -> Result<()> {

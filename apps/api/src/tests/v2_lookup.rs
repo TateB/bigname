@@ -8,7 +8,6 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
             json!({"inputs": [{"id": "both", "name": "alice.eth", "address": "0x0000000000000000000000000000000000000abc"}]}),
         ),
         ("/v2/lookup", json!({"inputs": [{"id": "neither"}]})),
-        ("/v2/lookup", json!({"inputs": [{"name": "alice.eth"}]})),
         ("/v2/lookup", json!({"inputs": [{"id": "", "name": "alice.eth"}]})),
         (
             "/v2/lookup",
@@ -122,6 +121,14 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     );
     assert_eq!(payload["data"][0]["record"]["primary_address"], json!(address));
     assert!(payload["data"][0].get("records").is_none());
+
+    let omitted_id = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "case.eth"}]}),
+    )
+    .await?;
+    assert_eq!(omitted_id["data"][0]["input"], json!({"name": "case.eth"}));
+    assert_eq!(omitted_id["data"][0]["status"], json!("ok"));
 
     assert_eq!(payload["data"][1]["input"]["id"], json!("miss"));
     assert_eq!(payload["data"][1]["status"], json!("not_found"));
@@ -332,7 +339,8 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
         json!(["owner"])
     );
     assert!(payload["data"][0]["records"][0].get("addresses").is_none());
-    assert_eq!(payload["data"][0]["page"]["total_count"], json!(1));
+    assert_eq!(payload["data"][0]["page"]["page_size"], json!(50));
+    assert_eq!(payload["data"][0]["page"]["total_count"], Value::Null);
     assert_eq!(payload["data"][1]["status"], json!("ok"));
     assert_eq!(payload["data"][1]["records"], json!([]));
     assert_eq!(payload["data"][1]["page"]["total_count"], json!(0));
@@ -365,6 +373,191 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
 
     database.cleanup().await?;
     empty_database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_feed_uses_detail_pagination_semantics() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+
+    let first_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "feed",
+            "inputs": [{
+                "address": address,
+                "page_size": 1
+            }]
+        }),
+    )
+    .await?;
+
+    assert_eq!(first_page["data"][0]["input"], json!({
+        "address": address,
+        "coin_type": 60,
+        "page_size": 1
+    }));
+    assert_eq!(first_page["data"][0]["records"][0]["name"], json!("alice.eth"));
+    assert_eq!(first_page["data"][0]["page"]["has_more"], json!(true));
+    assert_eq!(first_page["data"][0]["page"]["total_count"], json!(2));
+    let cursor = first_page["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("feed first page must include next_cursor");
+
+    let second_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "feed",
+            "inputs": [{
+                "address": address,
+                "page_size": 1,
+                "cursor": cursor
+            }]
+        }),
+    )
+    .await?;
+
+    assert_eq!(second_page["data"][0]["records"][0]["name"], json!("bob.eth"));
+    assert_eq!(second_page["data"][0]["page"]["has_more"], json!(false));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_failed_record_sets_failed_result_and_reason() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET coverage = $2::jsonb
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind("ens:alice.eth")
+    .bind(json!({
+        "status": "failed",
+        "failure_reason": "projection_read_failed"
+    }))
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET coverage = $2::jsonb
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind("ens:bob.eth")
+    .bind(json!({
+        "status": "stale"
+    }))
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address
+            }]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("failed"));
+    assert_eq!(
+        payload["data"][0]["failure_reason"],
+        json!("projection_read_failed")
+    );
+    assert_eq!(payload["data"][0]["records"][0]["status"], json!("failed"));
+    assert_eq!(
+        payload["data"][0]["records"][0]["failure_reason"],
+        json!("projection_read_failed")
+    );
+    assert_eq!(payload["data"][0]["records"][1]["status"], json!("stale"));
+    assert!(payload["data"][0].get("unsupported_reason").is_none());
+    assert!(payload["data"][0]["records"][0].get("unsupported_reason").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_identity_name(
+        &database,
+        "ens:holder.eth",
+        "holder.eth",
+        "holder.eth",
+        "namehash:holder.eth",
+        Uuid::from_u128(0x5a0301),
+        Uuid::from_u128(0x5a0302),
+        Uuid::from_u128(0x5a0303),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        44,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:registrant.eth",
+        "registrant.eth",
+        "registrant.eth",
+        "namehash:registrant.eth",
+        Uuid::from_u128(0x5a0311),
+        Uuid::from_u128(0x5a0312),
+        Uuid::from_u128(0x5a0313),
+        address,
+        bigname_storage::AddressNameRelation::Registrant,
+        45,
+    )
+    .await?;
+
+    let owner = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "owner"
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(owner["data"][0]["records"][0]["name"], json!("holder.eth"));
+    assert_eq!(owner["data"][0]["records"][0]["relations"], json!(["owner"]));
+    assert_eq!(owner["data"][0]["page"]["total_count"], Value::Null);
+
+    let registrant = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "relation": "registrant"
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(
+        registrant["data"][0]["records"][0]["name"],
+        json!("registrant.eth")
+    );
+    assert_eq!(
+        registrant["data"][0]["records"][0]["relations"],
+        json!(["registrant"])
+    );
+    assert_eq!(registrant["data"][0]["page"]["total_count"], Value::Null);
+
+    database.cleanup().await?;
     Ok(())
 }
 

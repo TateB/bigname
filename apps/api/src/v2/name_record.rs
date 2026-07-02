@@ -33,25 +33,40 @@ pub(crate) type NameRecordQuery = StrictQueryParams<NameRecordQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) token_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
-    pub(crate) addresses: BTreeMap<String, String>,
-    pub(crate) text_records: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) addresses: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text_records: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chain_id: Option<u64>,
     pub(crate) network: String,
     pub(crate) status: Status,
@@ -131,18 +146,30 @@ pub(crate) fn build_name_record(
     status: Status,
 ) -> NameRecord {
     let registration = name_registration_fields(Some(row), &row.namespace);
-    let addresses = record_addresses(record_inventory);
-    let text_records = record_text_records(record_inventory);
-    let content_hash = record_content_hash(record_inventory);
-    let primary_address = addresses.get("60").cloned();
     let unsupported_fields = unsupported_fields(record_inventory);
+    let addresses = (!unsupported_fields.iter().any(|field| field == "addresses"))
+        .then(|| record_addresses(record_inventory));
+    let text_records = (!unsupported_fields
+        .iter()
+        .any(|field| field == "text_records"))
+    .then(|| record_text_records(record_inventory));
+    let content_hash = (!unsupported_fields
+        .iter()
+        .any(|field| field == "content_hash"))
+    .then(|| record_content_hash(record_inventory))
+    .flatten();
+    let primary_address = addresses
+        .as_ref()
+        .filter(|_| {
+            !unsupported_fields
+                .iter()
+                .any(|field| field == "primary_address")
+        })
+        .and_then(|addresses| addresses.get("60").cloned());
 
     NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
-        // The current worker-emitted declared_summary has no token_id or
-        // manager/controller source; keep these null until projection enrichment
-        // adds canonical fields.
-        token_id: None,
+        token_id: declared_token_id(row),
         owner: registration.owner.clone(),
         manager: None,
         registrant: registration.registrant,
@@ -189,29 +216,64 @@ pub(super) fn name_registration_fields(
     namespace: &str,
 ) -> NameRegistrationFields {
     let Some(row) = row else {
-        return NameRegistrationFields {
-            owner: None,
-            registrant: None,
-            registered_at: None,
-            created_at: None,
-            expires_at: None,
-            registration_status: classify_registration_status(namespace, None, None, false),
-        };
+        return empty_registration_fields(namespace);
     };
 
-    let registration = declared_registration(&row.declared_summary);
-    let owner = declared_owner(&row.declared_summary);
+    registration_fields_from_parts(
+        &row.namespace,
+        &row.declared_summary,
+        &row.chain_positions,
+        has_name_binding(row),
+    )
+}
+
+pub(super) fn identity_name_registration_fields(
+    row: Option<&bigname_storage::IdentityNameCurrentRow>,
+    namespace: &str,
+) -> NameRegistrationFields {
+    let Some(row) = row else {
+        return empty_registration_fields(namespace);
+    };
+
+    registration_fields_from_parts(
+        &row.namespace,
+        &row.declared_summary,
+        &row.chain_positions,
+        row.resource_id.is_some(),
+    )
+}
+
+fn empty_registration_fields(namespace: &str) -> NameRegistrationFields {
+    NameRegistrationFields {
+        owner: None,
+        registrant: None,
+        registered_at: None,
+        created_at: None,
+        expires_at: None,
+        registration_status: classify_registration_status(namespace, None, None, false),
+    }
+}
+
+fn registration_fields_from_parts(
+    namespace: &str,
+    declared_summary: &Value,
+    chain_positions: &Value,
+    has_binding: bool,
+) -> NameRegistrationFields {
+    let registration = declared_registration(declared_summary);
+    let owner = declared_owner(declared_summary);
 
     NameRegistrationFields {
-        registrant: declared_registrant(&row.declared_summary),
-        registered_at: declared_registered_at(&row.declared_summary),
-        created_at: declared_created_at(&row.declared_summary),
-        expires_at: declared_expires_at(&row.declared_summary),
+        registrant: declared_registrant(declared_summary),
+        registered_at: declared_registered_at(declared_summary),
+        created_at: declared_created_at(declared_summary)
+            .or_else(|| chain_positions_created_at(chain_positions)),
+        expires_at: declared_expires_at(declared_summary),
         registration_status: classify_registration_status(
-            &row.namespace,
+            namespace,
             registration,
             owner.as_deref(),
-            has_binding(row),
+            has_binding,
         ),
         owner,
     }
@@ -236,11 +298,20 @@ pub(super) fn declared_registrant(summary: &Value) -> Option<String> {
 }
 
 pub(super) fn declared_registered_at(summary: &Value) -> Option<String> {
-    json_timestamp_at_paths(summary, &[&["registration", "registered_at"]])
+    json_timestamp_at_paths(
+        summary,
+        &[
+            &["registration", "registered_at"],
+            &["registration", "registration_date"],
+        ],
+    )
 }
 
 pub(super) fn declared_created_at(summary: &Value) -> Option<String> {
-    json_timestamp_at_paths(summary, &[&["registration", "created_at"]])
+    json_timestamp_at_paths(
+        summary,
+        &[&["registration", "created_at"], &["history", "created_at"]],
+    )
 }
 
 pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
@@ -248,15 +319,94 @@ pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
         summary,
         &[
             &["registration", "expires_at"],
+            &["registration", "expiry_date"],
             &["registration", "expiry"],
             &["control", "expires_at"],
+            &["control", "expiry_date"],
             &["control", "expiry"],
         ],
     )
 }
 
-fn has_binding(row: &NameCurrentRow) -> bool {
+fn has_name_binding(row: &NameCurrentRow) -> bool {
     row.surface_binding_id.is_some() || row.resource_id.is_some() || row.binding_kind.is_some()
+}
+
+pub(super) fn declared_token_id(row: &NameCurrentRow) -> Option<String> {
+    declared_token_id_from_parts(
+        &row.declared_summary,
+        &row.namespace,
+        &row.normalized_name,
+        None,
+    )
+}
+
+pub(super) fn identity_declared_token_id(
+    row: &bigname_storage::IdentityNameCurrentRow,
+) -> Option<String> {
+    let labelhash = row.labelhash.as_deref().filter(|value| {
+        row.labelhash_count
+            .is_none_or(|label_count| label_count == 2)
+            && !value.trim().is_empty()
+    });
+    declared_token_id_from_parts(
+        &row.declared_summary,
+        &row.namespace,
+        &row.normalized_name,
+        labelhash,
+    )
+}
+
+fn declared_token_id_from_parts(
+    summary: &Value,
+    namespace: &str,
+    normalized_name: &str,
+    labelhash: Option<&str>,
+) -> Option<String> {
+    json_string_at_paths(
+        summary,
+        &[
+            &["authority", "token_id"],
+            &["registration", "token_id"],
+            &["registration", "upstream_resource"],
+            &["control", "token_id"],
+        ],
+    )
+    .or_else(|| eth_2ld_labelhash_token_id(namespace, normalized_name, labelhash))
+}
+
+fn eth_2ld_labelhash_token_id(
+    namespace: &str,
+    normalized_name: &str,
+    labelhash: Option<&str>,
+) -> Option<String> {
+    if namespace != "ens" {
+        return None;
+    }
+    let mut labels = normalized_name.split('.');
+    let label = labels.next()?;
+    if labels.next() != Some("eth") || labels.next().is_some() || label.trim().is_empty() {
+        return None;
+    }
+    let labelhash = labelhash.map(str::to_owned).unwrap_or_else(|| {
+        format!(
+            "0x{}",
+            alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
+        )
+    });
+    let hex = labelhash.strip_prefix("0x").unwrap_or(&labelhash);
+    alloy_primitives::U256::from_str_radix(hex, 16)
+        .ok()
+        .map(|value| value.to_string())
+}
+
+fn chain_positions_created_at(chain_positions: &Value) -> Option<String> {
+    chain_positions
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, position)| json_timestamp_at_paths(position, &[&["timestamp"]]))
+        .min()
 }
 
 pub(crate) fn classify_registration_status(
@@ -422,6 +572,10 @@ fn mark_unserved_verified_fields(record: &mut NameRecord) {
             record.unsupported_fields.push(field.to_owned());
         }
     }
+    record.addresses = None;
+    record.text_records = None;
+    record.content_hash = None;
+    record.primary_address = None;
     record.unsupported_fields.sort();
 }
 

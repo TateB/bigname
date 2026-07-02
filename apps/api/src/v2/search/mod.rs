@@ -17,8 +17,7 @@ use super::chains::deployment_profile_for_slug;
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    format_timestamp, name_record::name_registration_fields, resolve_v2_snapshot,
-    v2_exact_name_snapshot_scope,
+    name_record::name_registration_fields, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const SEARCH_SORT: &str = "name_asc";
@@ -45,11 +44,16 @@ pub(crate) struct SearchName {
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
 }
 
@@ -207,18 +211,9 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
         owner: registration.owner,
         registrant: registration.registrant,
         registration_status: registration.registration_status,
-        registered_at: row
-            .registration_date
-            .map(format_timestamp)
-            .or(registration.registered_at),
-        created_at: row
-            .created_at
-            .map(format_timestamp)
-            .or(registration.created_at),
-        expires_at: row
-            .expiry_date
-            .map(format_timestamp)
-            .or(registration.expires_at),
+        registered_at: registration.registered_at,
+        created_at: registration.created_at,
+        expires_at: registration.expires_at,
     }
 }
 

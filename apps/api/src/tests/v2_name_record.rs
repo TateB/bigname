@@ -33,12 +33,17 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         data.get("registration_id"),
         Some(&json!(Uuid::from_u128(0x2200).to_string()))
     );
-    assert_eq!(data.get("token_id"), Some(&Value::Null));
+    assert_eq!(
+        data.get("token_id"),
+        Some(&json!(
+            "70564938991660933374592024341600875602376452319261984317470407481576058979585"
+        ))
+    );
     assert_eq!(
         data.get("owner"),
         Some(&json!("0x00000000000000000000000000000000000000bb"))
     );
-    assert_eq!(data.get("manager"), Some(&Value::Null));
+    assert!(data.get("manager").is_none());
     assert_eq!(
         data.get("registrant"),
         Some(&json!("0x00000000000000000000000000000000000000aa"))
@@ -87,6 +92,26 @@ async fn v2_get_name_verified_source_uses_in_record_failed_status() -> Result<()
         payload["data"]["unsupported_fields"],
         json!(["addresses", "content_hash", "primary_address", "text_records"])
     );
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> {
+    let payload = v2_name_payload_without_inventory("/v2/names/Alice.eth").await?;
+
+    assert_eq!(
+        payload["data"]["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
 
     Ok(())
 }
@@ -643,7 +668,7 @@ async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Resul
 #[tokio::test]
 async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> Result<()> {
     let payload =
-        v2_name_records_payload_without_inventory("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+        v2_name_payload_without_inventory("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
             .await?;
 
     assert_eq!(
@@ -1919,7 +1944,7 @@ async fn v2_name_records_payload_with_row_and_setup(
     Ok(payload)
 }
 
-async fn v2_name_records_payload_without_inventory(uri: &str) -> Result<Value> {
+async fn v2_name_payload_without_inventory(uri: &str) -> Result<Value> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);

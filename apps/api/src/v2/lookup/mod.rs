@@ -8,7 +8,7 @@ use tracing::error;
 
 use crate::AppState;
 
-use super::{Envelope, Meta, NoQueryParams, Page, Status, V2Error, V2Result, encode};
+use super::{Envelope, Meta, NoQueryParams, Page, Relation, Status, V2Error, V2Result, encode};
 
 mod build;
 mod cursor;
@@ -20,7 +20,10 @@ use build::{
     build_forward_detail_record, build_forward_feed_record, build_reverse_detail_record,
     build_reverse_feed_record, lookup_address_status,
 };
-use cursor::{LookupReverseCursorBinding, lookup_reverse_cursor_payload, reverse_identity_sort};
+use cursor::{
+    LookupReverseCursorBinding, lookup_reverse_cursor_payload, reverse_identity_sort,
+    reverse_identity_storage_cursor,
+};
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
 use head::load_served_head_meta;
 use parse::{
@@ -78,14 +81,7 @@ pub(crate) async fn get_lookup(
 
     let mut results = vec![None; body.inputs.len()];
     render_name_lookup_results(&state, profile, &name_inputs, &mut results).await?;
-    match profile {
-        LookupProfile::Feed => {
-            render_feed_lookup_results(&state, &address_inputs, &mut results).await?;
-        }
-        LookupProfile::Detail => {
-            render_detail_lookup_results(&state, &address_inputs, &mut results).await?;
-        }
-    }
+    render_reverse_lookup_results(&state, profile, &address_inputs, &mut results).await?;
 
     let data = results
         .into_iter()
@@ -139,6 +135,8 @@ async fn render_name_lookup_results(
             input: input.input.clone(),
             kind: LookupKind::Name,
             status,
+            unsupported_reason: result_unsupported_reason(status, record.iter()),
+            failure_reason: result_failure_reason(status, record.iter()),
             normalization: input.normalization.clone(),
             record,
             records: None,
@@ -180,78 +178,34 @@ async fn load_name_records(
         .collect())
 }
 
-async fn render_feed_lookup_results(
+async fn render_reverse_lookup_results(
     state: &AppState,
+    profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
-    let storage_inputs = inputs
+    render_storage_exact_reverse_lookup_results(state, profile, inputs, results).await?;
+    for input in inputs
         .iter()
-        .map(|input| {
-            (
-                (input.address.clone(), input.coin_type, input.roles),
-                bigname_storage::ReverseIdentityFeedInput {
-                    address: input.address.clone(),
-                    coin_type: input.coin_type.to_string(),
-                    roles: input.roles,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>()
-        .into_values()
-        .collect::<Vec<_>>();
-    let groups = bigname_storage::load_reverse_identity_feed_records(&state.pool, &storage_inputs)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                input_count = inputs.len(),
-                error = ?load_error,
-                "failed to load v2 lookup reverse feed records"
-            );
-            V2Error::internal_error("failed to load lookup reverse feed records")
-        })?
-        .into_iter()
-        .map(|group| {
-            (
-                (
-                    group.input.address.clone(),
-                    group.input.coin_type.parse::<u64>().unwrap_or_default(),
-                    group.input.roles,
-                ),
-                group,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    for input in inputs {
-        let group = groups.get(&(input.address.clone(), input.coin_type, input.roles));
-        let records = group
-            .and_then(|group| group.record.as_ref())
-            .map(build_reverse_feed_record)
-            .into_iter()
-            .collect::<Vec<_>>();
-        let status = lookup_address_status(&records);
-        let total_count = Some(group.map(|group| group.total_count).unwrap_or(0));
-        results[input.index] = Some(address_lookup_result(
-            input,
-            records,
-            None,
-            total_count,
-            false,
-            status,
-        ));
+        .filter(|input| requires_relation_post_filter(input.relation))
+    {
+        let page = load_exact_relation_reverse_page(state, input).await?;
+        render_reverse_input_result(profile, input, page, results)?;
     }
-
     Ok(())
 }
 
-async fn render_detail_lookup_results(
+async fn render_storage_exact_reverse_lookup_results(
     state: &AppState,
+    profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
-    let storage_inputs = deduped_reverse_storage_inputs(inputs);
+    let storage_exact_inputs = inputs
+        .iter()
+        .filter(|input| !requires_relation_post_filter(input.relation))
+        .collect::<Vec<_>>();
+    let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
     let groups = bigname_storage::load_reverse_identity_records(&state.pool, &storage_inputs)
         .await
         .map_err(|load_error| {
@@ -267,7 +221,7 @@ async fn render_detail_lookup_results(
         .map(|group| (reverse_group_key(&group), group))
         .collect::<BTreeMap<_, _>>();
 
-    for input in inputs {
+    for input in storage_exact_inputs {
         let key = ReverseStorageKey::from(input);
         let mut entries = groups
             .get(&key)
@@ -291,21 +245,125 @@ async fn render_detail_lookup_results(
         } else {
             None
         };
-        let records = entries
-            .iter()
-            .map(build_reverse_detail_record)
-            .collect::<Vec<_>>();
-        let status = lookup_address_status(&records);
-        results[input.index] = Some(address_lookup_result(
-            input,
-            records,
+        let page = ReverseLookupPage {
+            entries,
             next_cursor,
             total_count,
             has_more,
-            status,
-        ));
+        };
+        render_reverse_input_result(profile, input, page, results)?;
     }
 
+    Ok(())
+}
+
+async fn load_exact_relation_reverse_page(
+    state: &AppState,
+    input: &ParsedAddressLookup,
+) -> V2Result<ReverseLookupPage> {
+    let target_len = input.page_size as usize;
+    let scan_size = input.page_size.max(50);
+    let mut cursor = input.page_cursor.clone();
+    let mut entries = Vec::with_capacity(target_len.saturating_add(1));
+    let mut has_more = false;
+
+    loop {
+        let storage_input = bigname_storage::ReverseIdentityStorageInput {
+            address: input.address.clone(),
+            coin_type: input.coin_type.to_string(),
+            roles: input.roles,
+            page_size: scan_size as i64,
+            cursor: cursor.clone(),
+        };
+        let mut groups = bigname_storage::load_reverse_identity_records(
+            &state.pool,
+            std::slice::from_ref(&storage_input),
+        )
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                input_count = 1,
+                relation = ?input.relation,
+                error = ?load_error,
+                "failed to load v2 lookup reverse exact-relation records"
+            );
+            V2Error::internal_error("failed to load lookup reverse records")
+        })?;
+        let Some(mut group) = groups.pop() else {
+            break;
+        };
+
+        group.entries.sort_by(reverse_identity_sort);
+        let broad_has_more = group.has_more;
+        if group.entries.is_empty() {
+            break;
+        }
+        for entry in group.entries {
+            let next_scan_cursor = reverse_identity_storage_cursor(&entry);
+            if reverse_record_matches_relation(&entry, input.relation) {
+                entries.push(trim_reverse_record_relations(entry, input.relation));
+                if entries.len() > target_len {
+                    has_more = true;
+                    break;
+                }
+            }
+            cursor = Some(next_scan_cursor);
+        }
+
+        if has_more || !broad_has_more {
+            break;
+        }
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let next_cursor = if has_more {
+        entries.truncate(target_len);
+        let binding = LookupReverseCursorBinding {
+            address: &input.address,
+            coin_type: input.coin_type,
+            relation: input.relation,
+        };
+        entries
+            .last()
+            .map(|record| encode(&lookup_reverse_cursor_payload(record, &binding)))
+    } else {
+        None
+    };
+
+    Ok(ReverseLookupPage {
+        entries,
+        next_cursor,
+        total_count: None,
+        has_more,
+    })
+}
+
+fn render_reverse_input_result(
+    profile: LookupProfile,
+    input: &ParsedAddressLookup,
+    page: ReverseLookupPage,
+    results: &mut [Option<LookupResult>],
+) -> V2Result<()> {
+    let records = page
+        .entries
+        .iter()
+        .map(|record| match profile {
+            LookupProfile::Feed => build_reverse_feed_record(record),
+            LookupProfile::Detail => build_reverse_detail_record(record),
+        })
+        .collect::<Vec<_>>();
+    let status = lookup_address_status(&records);
+    results[input.index] = Some(address_lookup_result(
+        input,
+        records,
+        page.next_cursor,
+        page.total_count,
+        page.has_more,
+        status,
+    ));
     Ok(())
 }
 
@@ -318,6 +376,8 @@ fn address_lookup_result(
     status: Status,
 ) -> LookupResult {
     LookupResult {
+        unsupported_reason: result_unsupported_reason(status, records.iter()),
+        failure_reason: result_failure_reason(status, records.iter()),
         input: input.input.clone(),
         kind: LookupKind::Address,
         status,
@@ -334,11 +394,78 @@ fn address_lookup_result(
     }
 }
 
-fn deduped_reverse_storage_inputs(
-    inputs: &[ParsedAddressLookup],
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReverseLookupPage {
+    entries: Vec<bigname_storage::ReverseIdentityRecordRow>,
+    next_cursor: Option<String>,
+    total_count: Option<u64>,
+    has_more: bool,
+}
+
+fn result_unsupported_reason<'a>(
+    status: Status,
+    records: impl Iterator<Item = &'a LookupRecord>,
+) -> Option<String> {
+    (status == Status::Unsupported)
+        .then(|| {
+            records
+                .filter_map(|record| record.unsupported_reason.clone())
+                .next()
+        })
+        .flatten()
+}
+
+fn result_failure_reason<'a>(
+    status: Status,
+    records: impl Iterator<Item = &'a LookupRecord>,
+) -> Option<String> {
+    matches!(status, Status::Failed | Status::NotFound | Status::Mismatch)
+        .then(|| {
+            records
+                .filter_map(|record| record.failure_reason.clone())
+                .next()
+        })
+        .flatten()
+}
+
+fn requires_relation_post_filter(relation: Option<Relation>) -> bool {
+    matches!(relation, Some(Relation::Owner | Relation::Registrant))
+}
+
+fn reverse_record_matches_relation(
+    record: &bigname_storage::ReverseIdentityRecordRow,
+    relation: Option<Relation>,
+) -> bool {
+    relation.is_none_or(|relation| {
+        record
+            .relation_facets
+            .contains(&relation_to_storage(relation))
+    })
+}
+
+fn trim_reverse_record_relations(
+    mut record: bigname_storage::ReverseIdentityRecordRow,
+    relation: Option<Relation>,
+) -> bigname_storage::ReverseIdentityRecordRow {
+    if let Some(relation) = relation {
+        let relation = relation_to_storage(relation);
+        record.relation_facets.retain(|facet| *facet == relation);
+    }
+    record
+}
+
+fn relation_to_storage(relation: Relation) -> bigname_storage::AddressNameRelation {
+    match relation {
+        Relation::Owner => bigname_storage::AddressNameRelation::TokenHolder,
+        Relation::Manager => bigname_storage::AddressNameRelation::EffectiveController,
+        Relation::Registrant => bigname_storage::AddressNameRelation::Registrant,
+    }
+}
+
+fn deduped_reverse_storage_inputs<'a>(
+    inputs: impl Iterator<Item = &'a ParsedAddressLookup>,
 ) -> Vec<bigname_storage::ReverseIdentityStorageInput> {
     inputs
-        .iter()
         .map(ReverseStorageKey::from)
         .collect::<BTreeSet<_>>()
         .into_iter()

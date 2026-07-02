@@ -146,6 +146,49 @@ async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() 
 }
 
 #[tokio::test]
+async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "basenames:alpha.eth",
+        "alpha.eth",
+        "alpha.eth",
+        "node:basenames-alpha.eth",
+        Uuid::from_u128(0xe100),
+        Uuid::from_u128(0xe101),
+        Uuid::from_u128(0xe102),
+        V2_ADDRESS,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        106,
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    let ens_alpha = rows
+        .iter()
+        .find(|row| row["namespace"] == json!("ens") && row["name"] == json!("alpha.eth"))
+        .expect("ens alpha row must be present");
+    let basenames_alpha = rows
+        .iter()
+        .find(|row| row["namespace"] == json!("basenames") && row["name"] == json!("alpha.eth"))
+        .expect("basenames alpha row must be present");
+
+    assert_eq!(ens_alpha["is_primary"], json!(true));
+    assert_eq!(basenames_alpha["is_primary"], json!(false));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
     let (database, dedupe_name) = v2_address_names_payload(&format!(
         "/v2/addresses/{V2_ADDRESS}/names?dedupe=name"

@@ -50,6 +50,10 @@ pub(crate) struct LookupResult {
     pub(super) kind: LookupKind,
     pub(super) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) normalization: Option<NormalizationInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) record: Option<LookupRecord>,
@@ -61,7 +65,8 @@ pub(crate) struct LookupResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct LookupResultInput {
-    pub(super) id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,10 +114,10 @@ pub(crate) struct LookupRecord {
     pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) addresses: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) text_records: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) addresses: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text_records: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +132,10 @@ pub(crate) struct LookupRecord {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) relations: Vec<Relation>,
     pub(crate) status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) unsupported_fields: Vec<String>,
 }
