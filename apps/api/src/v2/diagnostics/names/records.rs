@@ -90,7 +90,7 @@ async fn build_name_records_diagnostic(
     records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<NameRecordsDiagnostic> {
-    let indexed = build_indexed_name_records(row, record_inventory, Some(records), false);
+    let indexed = build_indexed_name_records(row, record_inventory, Some(records), false)?;
     let verified_lookup = load_ephemeral_verified_record_lookup(
         state,
         row,
@@ -117,8 +117,8 @@ async fn build_name_records_diagnostic(
         &[],
         RECORD_CACHE_UNSUPPORTED_REASON,
     );
-    apply_diagnostics_dictionary_names(&mut record_inventory_section);
-    apply_diagnostics_dictionary_names(&mut record_cache_section);
+    apply_diagnostics_dictionary_names(&mut record_inventory_section)?;
+    apply_diagnostics_dictionary_names(&mut record_cache_section)?;
 
     Ok(NameRecordsDiagnostic {
         record_inventory: record_inventory_section,

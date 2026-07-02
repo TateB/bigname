@@ -329,10 +329,10 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
                     },
                     {
                         "grant_scope": {
-                            "kind": "resource",
+                            "kind": "registration",
                             "detail": {}
                         },
-                        "powers": ["set_resolver", "set_records"]
+                        "powers": ["registration_control", "resolver_control"]
                     }
                 ]
             },
@@ -653,16 +653,25 @@ async fn seed_v2_address_name_relations(
 
 async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()> {
     let alpha_resource_id = Uuid::from_u128(0xa100);
+    let mut resource_row = permission_current_row(
+        alpha_resource_id,
+        V2_PERMISSION_SUBJECT,
+        PermissionScope::Resource,
+        7,
+        107,
+    );
+    resource_row.effective_powers = json!(["resource_control", "resolver_control"]);
+    resource_row.grant_source = json!({
+        "kind": "ens_v1_authority",
+        "authority_kind": "registry_owner",
+        "authority_key": "registry:ethereum-mainnet:alpha",
+        "source_event_kind": "Transfer"
+    });
+
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_SUBJECT,
-                PermissionScope::Resource,
-                7,
-                107,
-            ),
+            resource_row,
             permission_current_row(
                 alpha_resource_id,
                 V2_PERMISSION_SUBJECT,

@@ -1,17 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use axum::Json;
-use axum::extract::{Path, State};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
-    AddressNamesCurrentSortedCursorValue, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    AddressNamesCurrentSortedCursorValue, NameCurrentRow, PermissionsCurrentRow,
     PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::types::Uuid;
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::{
+    Uuid,
+    time::{OffsetDateTime, UtcOffset},
+};
 
 use crate::AppState;
 
@@ -19,8 +23,8 @@ use super::{
     AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist,
     QueryParams, RegistrationStatus, Relation, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, as_of_meta, decode, encode, encode_at_token,
-    name_record::name_registration_fields, resolve_v2_snapshot, slug_to_numeric,
-    v2_exact_name_snapshot_scope,
+    name_record::name_registration_fields, permission_powers_value, permission_scope_value,
+    resolve_v2_snapshot, v2_exact_name_snapshot_scope,
 };
 
 const ADDRESS_NAMES_SORT_NAME: &str = "name";
@@ -343,7 +347,7 @@ pub(crate) fn build_address_name_role_summary(
                     .map(|row| {
                         Ok(AddressNameGrant {
                             grant_scope: permission_scope_value(&row.scope)?,
-                            powers: row.effective_powers.clone(),
+                            powers: permission_powers_value(&row.effective_powers)?,
                         })
                     })
                     .collect::<V2Result<Vec<_>>>()?,
@@ -536,49 +540,6 @@ fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
 
 fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
-}
-
-pub(crate) fn permission_scope_value(scope: &PermissionScope) -> V2Result<Value> {
-    let detail = match scope {
-        PermissionScope::Root | PermissionScope::Registry | PermissionScope::Resource => json!({}),
-        PermissionScope::Resolver {
-            chain_id,
-            resolver_address,
-        } => json!({
-            "resolver": {
-                "chain_id": permission_scope_chain_id(chain_id)?,
-                "address": resolver_address.to_ascii_lowercase(),
-            }
-        }),
-        PermissionScope::RecordManager {
-            chain_id,
-            manager_address,
-        } => json!({
-            "chain_id": permission_scope_chain_id(chain_id)?,
-            "manager": manager_address.to_ascii_lowercase(),
-        }),
-        PermissionScope::MigrationDerived {
-            predecessor_resource_id,
-        } => json!({
-            "predecessor_registration_id": predecessor_resource_id.to_string(),
-        }),
-        PermissionScope::TransportDerived { transport } => json!({
-            "transport": transport,
-        }),
-    };
-
-    Ok(json!({
-        "kind": scope.kind(),
-        "detail": detail,
-    }))
-}
-
-fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
-    slug_to_numeric(storage_chain_id).ok_or_else(|| {
-        V2Error::internal_error(format!(
-            "permission scope uses unmapped chain_id {storage_chain_id}"
-        ))
-    })
 }
 
 fn format_timestamp(value: OffsetDateTime) -> String {

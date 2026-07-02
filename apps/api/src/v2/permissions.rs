@@ -13,7 +13,8 @@ use crate::{AppState, normalize_inferred_route_name};
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
-    permission_scope_value, resolve_v2_snapshot, v2_exact_name_snapshot_scope,
+    permission_powers_value, permission_scope_value, resolve_v2_snapshot,
+    v2_exact_name_snapshot_scope,
 };
 
 #[path = "permissions/lineage.rs"]
@@ -291,7 +292,7 @@ pub(crate) fn build_permission_row(
         address: row.subject.clone(),
         grant: AddressNameGrant {
             grant_scope: permission_scope_value(&row.scope)?,
-            powers: row.effective_powers.clone(),
+            powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
         name: name.cloned(),
@@ -414,14 +415,20 @@ mod tests {
             },
             effective_powers: json!(["set_resolver"]),
             grant_source: json!({
-                "kind": "normalized_event",
-                "normalized_event_id": 10,
-                "manifest_version": 8
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "upstream_resource": "root",
+                "root_resource": true,
+                "changed_powers": ["set_resolver"],
+                "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000010"
             }),
             revocation_source: Some(json!({
-                "kind": "permission_row",
-                "resource_id": REGISTRATION_ID,
-                "manifest_version": 7
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "upstream_resource": "root",
+                "root_resource": true,
+                "changed_powers": ["set_resolver"],
+                "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000011"
             })),
             inheritance_path,
             transfer_behavior,
@@ -476,10 +483,12 @@ mod tests {
     fn build_permission_row_maps_scope_powers_name_and_lineage() {
         let row = sample_permissions_row(
             json!([{
-                "kind": "resource_authority",
-                "resource_id": REGISTRATION_ID
+                "kind": "resolver_root_fallback",
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": "0x0000000000000000000000000000000000000ABC",
+                "upstream_resource": "root"
             }]),
-            json!({"kind": "resource_rebound"}),
+            Value::Null,
         );
         let name = "alice.eth".to_owned();
         let mapped =
@@ -504,16 +513,18 @@ mod tests {
         assert_eq!(
             mapped.lineage,
             Some(PermissionLineage {
-                grant: json!({"kind": "event", "event_id": 10}),
+                grant: json!({"kind": "event"}),
                 revocation: Some(json!({
-                    "kind": "permission",
-                    "registration_id": REGISTRATION_ID
+                    "kind": "event"
                 })),
                 inheritance_path: Some(json!([{
-                    "kind": "registration_authority",
-                    "registration_id": REGISTRATION_ID
+                    "kind": "resolver_root_fallback",
+                    "resolver": {
+                        "chain_id": 1,
+                        "address": "0x0000000000000000000000000000000000000abc"
+                    }
                 }])),
-                transfer_behavior: Some(json!({"kind": "registration_rebound"})),
+                transfer_behavior: None,
             })
         );
     }
@@ -527,7 +538,7 @@ mod tests {
         let lineage = mapped.lineage.expect("lineage must be present");
 
         assert_eq!(mapped.name, None);
-        assert_eq!(lineage.grant, json!({"kind": "event", "event_id": 10}));
+        assert_eq!(lineage.grant, json!({"kind": "event"}));
         assert_eq!(lineage.revocation, None);
         assert_eq!(lineage.inheritance_path, None);
         assert_eq!(lineage.transfer_behavior, None);

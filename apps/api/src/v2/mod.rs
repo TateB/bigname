@@ -17,6 +17,7 @@ mod name_records;
 mod name_records_inventory;
 mod namespaces;
 mod params;
+mod permission_values;
 mod permissions;
 mod primary_name;
 mod resolvers;
@@ -32,8 +33,7 @@ pub(crate) use address_history::get_address_history;
 pub(crate) use address_names::{
     AddressName, AddressNameGrant, AddressNamesCursorBinding, address_names_cursor_payload,
     address_names_storage_cursor, build_address_name, build_address_name_role_summary,
-    dedupe_to_storage, get_address_names, order_to_storage, permission_scope_value,
-    relation_to_storage, sort_to_storage,
+    dedupe_to_storage, get_address_names, order_to_storage, relation_to_storage, sort_to_storage,
 };
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
@@ -69,6 +69,7 @@ pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder,
 };
+pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
 pub(crate) use permissions::{PermissionLineage, PermissionRow, get_permissions};
 pub(crate) use primary_name::{
     PrimaryName, PrimaryNameAnswer, PrimaryNameQueryParams, PrimaryNameSourceSelection,

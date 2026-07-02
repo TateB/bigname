@@ -9,7 +9,7 @@ struct V2ConformanceRoute {
     dictionary_allowlist: &'static [&'static str],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum V2SuccessFixture {
     Lookup,
     Status,
@@ -113,6 +113,8 @@ const PRODUCT_ONLY_BANNED_FIELD_NAMES: &[&str] = &[
     "manifest_version",
     "manifest_versions",
     "provenance",
+    "raw_log",
+    "coverage",
     // Ratified API-boundary rule: product resource_* compounds use
     // registration_* spelling when the prefix names the v1 resource concept.
     "resource",
@@ -135,8 +137,10 @@ const PRODUCT_PIPELINE_TERMS: &[&str] = &[
     "normalized_event",
     "normalized event",
     "permission_row",
+    "raw_log",
     "raw_fact",
     "raw fact",
+    "coverage",
     "resource_authority",
     "resource_rebound",
     "derivation_kind",
@@ -214,9 +218,18 @@ const DIAGNOSTICS_AUTHORITY_DICTIONARY_ALLOWLIST: &[&str] = &[
 ];
 
 const DIAGNOSTICS_EVENTS_DICTIONARY_ALLOWLIST: &[&str] = &[
-    // docs/api-v2-routes.md documents diagnostics events as raw
-    // normalized-event rows with event identity and full provenance.
+    // docs/api-v2-routes.md L554-L559 documents diagnostics events as raw
+    // normalized-event rows with raw fact refs, chain position, and full provenance.
     "normalized_event_id",
+    "chain_position",
+    "raw_fact_ref",
+    "raw_fact_refs",
+];
+
+const DIAGNOSTICS_RECORDS_DICTIONARY_ALLOWLIST: &[&str] = &[
+    // Diagnostics records expose storage version boundaries; the route is not a
+    // product envelope and uses the persisted singular chain_position shape.
+    "chain_position",
 ];
 
 const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
@@ -380,7 +393,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
         tier: V2RouteTier::Diagnostics,
-        dictionary_allowlist: &[],
+        dictionary_allowlist: DIAGNOSTICS_RECORDS_DICTIONARY_ALLOWLIST,
     },
     V2ConformanceRoute {
         label: "GET /v2/diagnostics/names/{name}/execution",
@@ -541,8 +554,24 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::Name => v2_name_record_payload("/v2/names/Alice.eth").await,
         V2SuccessFixture::NameRecords => {
-            v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
-                .await
+            v2_name_records_payload_with_setup(
+                "/v2/names/Alice.eth/records?keys=addr:60&include=inventory",
+                |_, _, inventory| {
+                    let entries = inventory
+                        .entries
+                        .as_array_mut()
+                        .expect("record inventory entries must be an array");
+                    entries[0] = json!({
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events"
+                    });
+                },
+                None,
+            )
+            .await
         }
         V2SuccessFixture::Subnames => {
             let (database, payload) =
@@ -602,10 +631,10 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::AddressHistory => {
             let database = TestDatabase::new_migrated().await?;
-            seed_v2_history_fixture(&database).await?;
+            seed_v2_address_history_conformance_fixture(&database).await?;
             let payload = v2_conformance_get_json(
                 &database,
-                "/v2/addresses/0x00000000000000000000000000000000000000dd/history?page_size=20",
+                &format!("/v2/addresses/{V2_ADDRESS}/history?page_size=20"),
             )
             .await?;
             database.cleanup().await?;
@@ -631,9 +660,13 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Resolver => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_resolver_bound_names_fixture(&database).await?;
+            let mut resolver_row =
+                resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+            resolver_row.declared_summary["role_holders"]["items"][0]["effective_powers"] =
+                json!(["resource_control", "set_resolver"]);
             bigname_storage::upsert_resolver_current_rows(
                 &database.pool,
-                &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+                &[resolver_row],
             )
             .await?;
             let payload = v2_resolver_payload_for_database(
@@ -757,6 +790,43 @@ async fn v2_conformance_get_json(database: &TestDatabase, uri: &str) -> Result<V
     Ok(payload)
 }
 
+async fn seed_v2_address_history_conformance_fixture(database: &TestDatabase) -> Result<()> {
+    seed_v2_address_names_fixture(database).await?;
+
+    let alpha = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.logical_name_id == "ens:alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    let mut surface_event = history_event(
+        "v2-address-history-surface",
+        Some(alpha.logical_name_id),
+        None,
+        Some("ethereum-mainnet"),
+        Some(alpha.block_number),
+        Some(alpha.block_hash),
+        Some("0xv2addrhist01"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    surface_event.event_kind = "ResolverChanged".to_owned();
+    let mut resource_event = history_event(
+        "v2-address-history-resource",
+        None,
+        Some(alpha.resource_id),
+        Some("ethereum-mainnet"),
+        Some(alpha.block_number),
+        Some(alpha.block_hash),
+        Some("0xv2addrhist02"),
+        Some(1),
+        CanonicalityState::Canonical,
+    );
+    resource_event.event_kind = "RegistrationRenewed".to_owned();
+
+    bigname_storage::upsert_normalized_events(&database.pool, &[surface_event, resource_event])
+        .await?;
+    Ok(())
+}
+
 async fn seed_v2_conformance_namespace_manifests(database: &TestDatabase) -> Result<()> {
     let ens_l1 = database
         .insert_manifest(
@@ -819,6 +889,90 @@ fn assert_v2_success_envelope(route: &V2ConformanceRoute, payload: &Value) {
             route.label
         ),
     }
+
+    assert_non_empty_json(&payload["data"], route.label, "$.data");
+    assert_v2_exercised_expansions_non_empty(route, payload);
+}
+
+fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload: &Value) {
+    match route.success {
+        V2SuccessFixture::NameRecords => {
+            assert_non_empty_json(&payload["data"]["records"], route.label, "$.data.records");
+            assert_non_empty_json(
+                &payload["data"]["inventory"],
+                route.label,
+                "$.data.inventory",
+            );
+            assert_non_empty_json(
+                &payload["data"]["inventory"]["known_keys"],
+                route.label,
+                "$.data.inventory.known_keys",
+            );
+            assert_eq!(
+                payload["data"]["records"]["addr:60"]["unsupported_reason"],
+                json!("value_not_retained"),
+                "{} records fixture must exercise product reason mapping",
+                route.label
+            );
+        }
+        V2SuccessFixture::Subnames => {
+            assert!(
+                payload["data"][0]["subname_count"].is_u64(),
+                "{} include=counts must populate data[0].subname_count",
+                route.label
+            );
+        }
+        V2SuccessFixture::Permissions => {
+            let rows = payload["data"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} data must be an array", route.label));
+            assert!(
+                rows.iter()
+                    .any(|row| row.get("lineage").is_some_and(json_value_is_non_empty)),
+                "{} include=lineage must populate at least one non-empty lineage section",
+                route.label
+            );
+        }
+        V2SuccessFixture::AddressNames => {
+            let rows = payload["data"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} data must be an array", route.label));
+            assert!(
+                rows.iter()
+                    .any(|row| row.get("role_summary").is_some_and(json_value_is_non_empty)),
+                "{} include=role_summary must populate at least one non-empty role_summary section",
+                route.label
+            );
+        }
+        V2SuccessFixture::Resolver => {
+            for key in ["nodes", "aliases", "roles", "events"] {
+                assert_non_empty_json(&payload["data"][key], route.label, &format!("$.data.{key}"));
+            }
+        }
+        V2SuccessFixture::DiagnosticsRecords => {
+            for key in ["record_inventory", "record_cache", "value_sources", "comparison"] {
+                assert_non_empty_json(&payload["data"][key], route.label, &format!("$.data.{key}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_non_empty_json(value: &Value, context: &str, path: &str) {
+    assert!(
+        json_value_is_non_empty(value),
+        "{context} {path} must be non-empty"
+    );
+}
+
+fn json_value_is_non_empty(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => !object.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::String(text) => !text.is_empty(),
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+    }
 }
 
 fn assert_as_of_shape(route: &V2ConformanceRoute, as_of: &Value) {
@@ -866,24 +1020,24 @@ fn collect_banned_dictionary_fields(
     violations: &mut Vec<String>,
 ) {
     walk_json_fields(value, "$", &mut |path, key| {
-        if is_dictionary_allowlisted(route, key) {
+        if is_dictionary_allowlisted(route, path, key) {
             return;
         }
 
-        if let Some(term) = matched_banned_dictionary_field_name(key) {
+        for term in matched_banned_dictionary_field_names(key) {
             violations.push(format!(
                 "{} at {path}: field {key:?} matches banned v1 field term {term:?}",
                 route.label
             ));
         }
 
-        if route.tier == V2RouteTier::Product
-            && let Some(term) = matched_field_name_term(key, PRODUCT_ONLY_BANNED_FIELD_NAMES)
-        {
-            violations.push(format!(
-                "{} at {path}: field {key:?} matches product-banned field term {term:?}",
-                route.label
-            ));
+        if route.tier == V2RouteTier::Product {
+            for term in matched_field_name_terms(key, PRODUCT_ONLY_BANNED_FIELD_NAMES) {
+                violations.push(format!(
+                    "{} at {path}: field {key:?} matches product-banned field term {term:?}",
+                    route.label
+                ));
+            }
         }
     });
 }
@@ -893,10 +1047,24 @@ fn collect_pipeline_vocabulary_in_product_response(
     value: &Value,
     violations: &mut Vec<String>,
 ) {
-    walk_product_pipeline_response(value, "$", None, &mut |path, candidate| {
-        if let Some(term) = matched_pipeline_term(candidate) {
+    walk_product_pipeline_response(value, "$", None, &mut |path, value_key, candidate| {
+        for term in matched_pipeline_terms(candidate) {
             violations.push(format!(
                 "{} at {path}: {candidate:?} contains product-banned pipeline vocabulary {term:?}",
+                route.label
+            ));
+        }
+
+        if value_key == Some("chain_id") && !candidate.bytes().all(|byte| byte.is_ascii_digit()) {
+            violations.push(format!(
+                "{} at {path}: chain_id value {candidate:?} must use a numeric string on product routes",
+                route.label
+            ));
+        }
+
+        if value_key == Some("powers") && candidate == "resource_control" {
+            violations.push(format!(
+                "{} at {path}: powers value {candidate:?} uses storage permission vocabulary",
                 route.label
             ));
         }
@@ -911,7 +1079,7 @@ fn collect_pipeline_vocabulary_in_error_message(
     let message = payload["error"]["message"]
         .as_str()
         .unwrap_or_else(|| panic!("{} error message must be a string", route.label));
-    if let Some(term) = matched_pipeline_term(message) {
+    for term in matched_pipeline_terms(message) {
         violations.push(format!(
             "{} error message: {message:?} contains product-banned pipeline vocabulary {term:?}",
             route.label
@@ -958,13 +1126,13 @@ fn walk_product_pipeline_response(
     value: &Value,
     path: &str,
     value_key: Option<&str>,
-    visit: &mut impl FnMut(&str, &str),
+    visit: &mut impl FnMut(&str, Option<&str>, &str),
 ) {
     match value {
         Value::Object(object) => {
             for (key, child) in object {
                 let child_path = json_path(path, key);
-                visit(&child_path, key);
+                visit(&child_path, None, key);
                 walk_product_pipeline_response(child, &child_path, Some(key), visit);
             }
         }
@@ -973,8 +1141,12 @@ fn walk_product_pipeline_response(
                 walk_product_pipeline_response(child, &format!("{path}[{index}]"), value_key, visit);
             }
         }
-        Value::String(text) if value_key.is_some_and(is_enumish_product_value_key) => {
-            visit(path, text);
+        Value::String(text)
+            if value_key.is_some_and(|key| {
+                is_enumish_product_value_key(key) || key == "chain_id" || key == "powers"
+            }) =>
+        {
+            visit(path, value_key, text);
         }
         _ => {}
     }
@@ -998,13 +1170,17 @@ fn is_enumish_product_value_key(key: &str) -> bool {
         || key.ends_with("_reason")
 }
 
-fn matched_pipeline_term(candidate: &str) -> Option<&'static str> {
+fn matched_pipeline_terms(candidate: &str) -> Vec<&'static str> {
     let normalized_candidate = normalize_pipeline_candidate(candidate);
 
-    PRODUCT_PIPELINE_TERMS.iter().copied().find(|term| {
-        let normalized_term = normalize_pipeline_candidate(term);
-        normalized_candidate.contains(&normalized_term)
-    })
+    PRODUCT_PIPELINE_TERMS
+        .iter()
+        .copied()
+        .filter(|term| {
+            let normalized_term = normalize_pipeline_candidate(term);
+            normalized_candidate.contains(&normalized_term)
+        })
+        .collect()
 }
 
 fn normalize_pipeline_candidate(candidate: &str) -> String {
@@ -1018,29 +1194,55 @@ fn normalize_pipeline_candidate(candidate: &str) -> String {
         .collect()
 }
 
-fn is_dictionary_allowlisted(route: &V2ConformanceRoute, key: &str) -> bool {
+fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    if route.success == V2SuccessFixture::DiagnosticsEvents
+        && diagnostics_events_raw_state_subtree(path)
+    {
+        return true;
+    }
+
     route.dictionary_allowlist.contains(&key)
         || (route.tier == V2RouteTier::Diagnostics
-            && matched_field_name_term(key, DIAGNOSTICS_ONLY_PIPELINE_IDENTIFIER_FIELD_NAMES)
-                .is_some())
+            && !matched_field_name_terms(key, DIAGNOSTICS_ONLY_PIPELINE_IDENTIFIER_FIELD_NAMES)
+                .is_empty())
 }
 
-fn matched_banned_dictionary_field_name(key: &str) -> Option<&'static str> {
-    if let Some(term) = BANNED_V1_EXACT_FIELD_NAMES
+fn diagnostics_events_raw_state_subtree(path: &str) -> bool {
+    path.contains(".before_state.") || path.contains(".after_state.")
+}
+
+fn matched_banned_dictionary_field_names(key: &str) -> Vec<&'static str> {
+    let mut matches = BANNED_V1_EXACT_FIELD_NAMES
         .iter()
         .copied()
-        .find(|term| *term == key)
-    {
-        return Some(term);
-    }
-    matched_field_name_term(key, BANNED_V1_FIELD_NAMES)
+        .filter(|term| *term == key)
+        .collect::<Vec<_>>();
+    matches.extend(matched_field_name_terms(key, BANNED_V1_FIELD_NAMES));
+    matches
 }
 
-fn matched_field_name_term(key: &str, terms: &'static [&'static str]) -> Option<&'static str> {
+fn matched_field_name_terms(key: &str, terms: &'static [&'static str]) -> Vec<&'static str> {
     terms
         .iter()
         .copied()
-        .find(|term| key_has_underscore_boundary_term(key, term))
+        .filter(|term| field_name_term_matches(key, term))
+        .collect()
+}
+
+fn field_name_term_matches(key: &str, term: &str) -> bool {
+    field_name_term_variants(term)
+        .iter()
+        .any(|variant| key_has_underscore_boundary_term(key, variant))
+}
+
+fn field_name_term_variants(term: &str) -> Vec<String> {
+    let mut variants = vec![term.to_owned(), format!("{term}s"), format!("{term}es")];
+    if let Some(singular) = term.strip_suffix('s') {
+        variants.push(singular.to_owned());
+    }
+    variants.sort_unstable();
+    variants.dedup();
+    variants
 }
 
 fn key_has_underscore_boundary_term(key: &str, term: &str) -> bool {
@@ -1066,30 +1268,83 @@ fn term_match_has_underscore_boundaries(key: &str, term: &str, start: usize) -> 
 #[test]
 fn v2_dictionary_field_matching_uses_underscore_boundaries_and_plural_suffixes() {
     assert_eq!(
-        matched_banned_dictionary_field_name("resource_ids"),
-        Some("resource_id")
+        matched_banned_dictionary_field_names("resource_ids"),
+        vec!["resource_id"]
     );
     assert_eq!(
-        matched_banned_dictionary_field_name("predecessor_resource_id"),
-        Some("resource_id")
+        matched_banned_dictionary_field_names("predecessor_resource_ids"),
+        vec!["resource_id", "predecessor_resource_id"]
     );
     assert_eq!(
-        matched_banned_dictionary_field_name("last_normalized_event_id"),
-        Some("normalized_event_id")
+        matched_banned_dictionary_field_names("last_normalized_event_id"),
+        vec!["normalized_event_id"]
     );
     assert_eq!(
-        matched_banned_dictionary_field_name("permission_row_count"),
-        Some("permission_row")
+        matched_banned_dictionary_field_names("permission_row_count"),
+        vec!["permission_row"]
     );
-    assert_eq!(matched_banned_dictionary_field_name("subject"), Some("subject"));
-    assert_eq!(matched_banned_dictionary_field_name("resource"), Some("resource"));
-    assert_eq!(matched_banned_dictionary_field_name("registration_ids"), None);
-    assert_eq!(matched_banned_dictionary_field_name("registration_count"), None);
     assert_eq!(
-        matched_field_name_term("resource_count", PRODUCT_ONLY_BANNED_FIELD_NAMES),
-        Some("resource")
+        matched_banned_dictionary_field_names("owner_addresses"),
+        vec!["owner_address"]
     );
-    assert_eq!(matched_banned_dictionary_field_name("unnormalized_name"), None);
+    assert_eq!(
+        matched_banned_dictionary_field_names("chain_position"),
+        vec!["chain_positions"]
+    );
+    assert_eq!(
+        matched_banned_dictionary_field_names("raw_fact_ref"),
+        vec!["raw_fact_refs"]
+    );
+    assert_eq!(
+        matched_banned_dictionary_field_names("subject"),
+        vec!["subject"]
+    );
+    assert_eq!(
+        matched_banned_dictionary_field_names("resource"),
+        vec!["resource"]
+    );
+    assert!(matched_banned_dictionary_field_names("registration_ids").is_empty());
+    assert!(matched_banned_dictionary_field_names("registration_count").is_empty());
+    assert_eq!(
+        matched_field_name_terms("resource_count", PRODUCT_ONLY_BANNED_FIELD_NAMES),
+        vec!["resource"]
+    );
+    assert!(matched_banned_dictionary_field_names("unnormalized_name").is_empty());
+}
+
+#[test]
+fn v2_product_value_matching_targets_chain_ids_and_storage_powers() {
+    let route = V2ConformanceRoute {
+        label: "test",
+        error_uri: "/test",
+        success: V2SuccessFixture::Status,
+        envelope: V2TopLevelEnvelope::DataMeta,
+        as_of: V2AsOfExpectation::Absent,
+        tier: V2RouteTier::Product,
+        dictionary_allowlist: &[],
+    };
+    let payload = json!({
+        "data": {
+            "chain_id": "ethereum-mainnet",
+            "powers": ["resource_control", "resolver_control"]
+        },
+        "meta": {}
+    });
+    let mut violations = Vec::new();
+
+    collect_pipeline_vocabulary_in_product_response(&route, &payload, &mut violations);
+
+    assert_eq!(violations.len(), 2);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("chain_id value"))
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("resource_control"))
+    );
 }
 
 fn assert_object_keys(value: &Value, expected: &[&str], context: &str) {

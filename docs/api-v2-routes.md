@@ -156,6 +156,9 @@ Field ownership:
   available and otherwise attempt on-demand verified execution behind `source=`.
   A supported verified value that cannot be served or executed for the selected
   snapshot is reported per key as `status=stale` with a `failure_reason`.
+  Product records use product reason vocabulary: retained-selector misses use
+  `value_not_retained`, and phase-unsupported record families use
+  `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
   readback or on-demand execution.
@@ -243,15 +246,17 @@ Field ownership:
 - Response shape: `data` is an array of permission rows
   `{address, grant_scope, powers, registration_id, name}`. `include=lineage`
   adds route-local `lineage` per row:
-  `{grant, revocation?, inheritance_path?, transfer_behavior?}`. `grant` and
-  `revocation` identify the event or permission that created or removed the
-  powers; `inheritance_path` lists inherited grant scopes in order; and
-  `transfer_behavior` describes whether the powers follow a registration
-  transfer. Lineage source objects use product `kind` values such as `event`,
-  `permission`, `registration_authority`, and `registration_rebound`; use
-  `registration_id` for registration handles; and omit diagnostics-only
-  manifest-version fields. `grant_scope` is `{kind, detail}`. Detail is `{}`
-  for `root`, `registry`, and `resource`;
+  `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
+  is a bounded summary; deep provenance stays on diagnostics authority/events
+  routes. Lineage objects expose only allowlisted fields: `kind`,
+  `registration_id`, `resolver: {chain_id, address}`, and `powers` when those
+  fields apply. `kind` values are `event`, `permission`,
+  `registration_authority`, `registration_rebound`, `ens_v1_authority`,
+  `resolver_root_fallback`, and `registry_root_fallback`. Diagnostics-only
+  storage keys such as event provenance, upstream/root resources,
+  contract-instance ids, changed powers, and manifest versions are omitted.
+  `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
+  and `registration`;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; `{predecessor_registration_id}`
   for `migration_derived`; and `{transport}` for `transport_derived`.
@@ -391,6 +396,14 @@ Field ownership:
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
   of record-shaped name rows that replaces resolver-based name filtering.
+  `include=aliases` exposes binding rows as `{namespace, name, display_name,
+  namehash}` and resolver alias rows as `{namespace, from_name, to_name,
+  from_display_name?, to_display_name?, state, resolver: {chain_id, address},
+  to_registration_id?}`. `to_name` is `null` when the latest alias state is
+  `removed` or `unknown`. `include=events` exposes `{count, by_type}` where
+  `by_type` aggregates raw resolver event kinds that map to the same friendly
+  `type` vocabulary as `GET /v2/events`; raw kinds without a product event type
+  remain included in `count` but are excluded from `by_type`.
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
 - Status semantics: an otherwise valid resolver with no overview row returns

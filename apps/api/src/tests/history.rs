@@ -3086,24 +3086,21 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     assert_eq!(
         resolver_row.get("grant_source"),
         Some(&json!({
-            "kind": "normalized_event",
-            "manifest_version": 8,
+            "kind": "raw_log",
+            "source_event": "EACRolesChanged",
+            "upstream_resource": resource_id.to_string(),
+            "root_resource": false,
+            "changed_powers": ["set_resolver", "create_subnames"],
+            "registry_contract_instance_id": "00000000-0000-0000-0000-00000000c001",
         }))
     );
     assert_eq!(
         resolver_row.get("inheritance_path"),
-        Some(&json!([
-            {
-                "kind": "resource_authority",
-                "resource_id": resource_id,
-            }
-        ]))
+        Some(&json!([]))
     );
     assert_eq!(
         resolver_row.get("transfer_behavior"),
-        Some(&json!({
-            "kind": "resource_rebound",
-        }))
+        Some(&json!({}))
     );
 
     let first_page_response = app_router(database.app_state())

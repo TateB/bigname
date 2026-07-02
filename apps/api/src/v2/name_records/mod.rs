@@ -126,7 +126,7 @@ pub(crate) async fn get_name_records(
                 record_inventory.as_ref(),
                 requested_records,
                 include_inventory,
-            ),
+            )?,
         ),
         RequestSource::Verified => {
             let verified_lookup = load_verified_record_lookup(
@@ -158,14 +158,14 @@ pub(crate) async fn get_name_records(
                         record_inventory.as_ref(),
                         requested_records,
                         include_inventory,
-                    ),
+                    )?,
                 )
             } else {
                 let fallback_records = indexed_records_requiring_verified_fallback(
                     &row,
                     record_inventory.as_ref(),
                     records,
-                );
+                )?;
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,

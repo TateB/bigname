@@ -10,7 +10,7 @@ use bigname_storage::{
     SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::AppState;
 
@@ -19,6 +19,10 @@ mod bound_names_cursor;
 pub(crate) use bound_names_cursor::{
     BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
 };
+
+#[path = "resolvers/overview_items.rs"]
+mod overview_items;
+use overview_items::{projected_section_items, summary_is_supported};
 
 use super::{
     Envelope, Meta, NameRecord, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error,
@@ -190,7 +194,7 @@ pub(crate) async fn get_resolver(
         ..Meta::default()
     };
     apply_resolver_support_meta(&mut meta, &row, include);
-    let data = build_resolver_overview(row, numeric_chain_id, include, bound_names);
+    let data = build_resolver_overview(row, numeric_chain_id, include, bound_names)?;
 
     Ok(Json(Envelope {
         data,
@@ -204,7 +208,7 @@ pub(crate) fn build_resolver_overview(
     chain_id: u64,
     include: ResolverOverviewInclude,
     bound_names: BoundNames,
-) -> ResolverOverview {
+) -> V2Result<ResolverOverview> {
     let mut counts = BTreeMap::new();
     let mut nodes = None;
     let mut aliases = None;
@@ -219,7 +223,9 @@ pub(crate) fn build_resolver_overview(
 
         if include.requests(field_key) {
             let items = section_summary
-                .and_then(|summary| projected_section_items(summary, field_key))
+                .map(|summary| projected_section_items(summary, field_key))
+                .transpose()?
+                .flatten()
                 .unwrap_or(Value::Null);
             match field_key {
                 "nodes" => nodes = Some(items),
@@ -231,7 +237,7 @@ pub(crate) fn build_resolver_overview(
         }
     }
 
-    ResolverOverview {
+    Ok(ResolverOverview {
         chain_id,
         address: row.resolver_address,
         counts,
@@ -240,7 +246,7 @@ pub(crate) fn build_resolver_overview(
         roles,
         events,
         bound_names,
-    }
+    })
 }
 
 pub(crate) fn build_bound_name_record(row: &NameCurrentListRow, chain_id: u64) -> NameRecord {
@@ -441,78 +447,6 @@ fn projected_section_count(summary: &Value) -> Option<u64> {
             .and_then(Value::as_array)
             .map(|items| items.len() as u64)
     })
-}
-
-fn projected_section_items(summary: &Value, field_key: &str) -> Option<Value> {
-    if !summary_is_supported(summary) {
-        return None;
-    }
-
-    summary
-        .get("items")
-        .and_then(Value::as_array)
-        .map(|items| match field_key {
-            "nodes" | "aliases" => {
-                Value::Array(items.iter().map(compact_resolver_binding_item).collect())
-            }
-            "roles" => Value::Array(items.iter().map(compact_resolver_role_item).collect()),
-            _ => Value::Array(items.clone()),
-        })
-}
-
-fn compact_resolver_binding_item(item: &Value) -> Value {
-    let mut compact = Map::new();
-    if let Some(logical_name_id) = item.get("logical_name_id").and_then(Value::as_str)
-        && let Some((namespace, _)) = logical_name_id.split_once(':')
-    {
-        insert_optional_string(&mut compact, "namespace", Some(namespace.to_owned()));
-    }
-    insert_optional_string(&mut compact, "name", item_string(item, "normalized_name"));
-    insert_optional_string(
-        &mut compact,
-        "display_name",
-        item_string(item, "canonical_display_name"),
-    );
-    insert_optional_string(&mut compact, "namehash", item_string(item, "namehash"));
-    Value::Object(compact)
-}
-
-fn compact_resolver_role_item(item: &Value) -> Value {
-    let Some(object) = item.as_object() else {
-        return item.clone();
-    };
-
-    let mut compact = object.clone();
-    if let Some(value) = compact.remove("subject") {
-        compact.insert("address".to_owned(), value);
-    }
-    if let Some(value) = compact.remove("resource_count") {
-        compact.insert("registration_count".to_owned(), value);
-    }
-    if let Some(value) = compact.remove("permission_row_count") {
-        compact.insert("permission_count".to_owned(), value);
-    }
-    if let Some(value) = compact.remove("effective_powers") {
-        compact.insert("powers".to_owned(), value);
-    }
-    if let Some(value) = compact.remove("resource_ids") {
-        compact.insert("registration_ids".to_owned(), value);
-    }
-    Value::Object(compact)
-}
-
-fn item_string(item: &Value, key: &str) -> Option<String> {
-    item.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn insert_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        object.insert(key.to_owned(), Value::String(value));
-    }
-}
-
-fn summary_is_supported(summary: &Value) -> bool {
-    summary.get("status").and_then(Value::as_str) == Some("supported")
 }
 
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {

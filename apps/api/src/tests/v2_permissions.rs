@@ -97,22 +97,23 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
         resolver["lineage"],
         json!({
             "grant": {
-                "kind": "event",
-                "event_id": 108
+                "kind": "event"
             },
             "revocation": {
-                "kind": "permission",
-                "registration_id": current_resource_id.to_string()
+                "kind": "event"
             },
             "inheritance_path": [
                 {
-                    "kind": "registration_authority",
-                    "registration_id": current_resource_id.to_string()
+                    "kind": "resolver_root_fallback",
+                    "resolver": {
+                        "chain_id": 1,
+                        "address": "0x0000000000000000000000000000000000000abc"
+                    }
+                },
+                {
+                    "kind": "registry_root_fallback"
                 }
-            ],
-            "transfer_behavior": {
-                "kind": "follows_registration_transfer"
-            }
+            ]
         })
     );
 
@@ -150,16 +151,19 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert_eq!(
         stale["grant_scope"],
         json!({
-            "kind": "resource",
+            "kind": "registration",
             "detail": {}
         })
+    );
+    assert_eq!(
+        stale["powers"],
+        json!(["registration_control", "resolver_control"])
     );
     assert_eq!(
         stale["lineage"],
         json!({
             "grant": {
-                "kind": "event",
-                "event_id": 109
+                "kind": "ens_v1_authority"
             }
         })
     );
@@ -374,24 +378,36 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         108,
     );
     current_row.grant_source = json!({
-        "kind": "normalized_event",
-        "normalized_event_id": 108,
-        "manifest_version": 8
+        "kind": "raw_log",
+        "source_event": "EACRolesChanged",
+        "upstream_resource": "root",
+        "root_resource": true,
+        "changed_powers": ["set_resolver"],
+        "resolver_contract_instance_id": "00000000-0000-0000-0000-00000000c108"
     });
     current_row.revocation_source = Some(json!({
-        "kind": "permission_row",
-        "resource_id": current_resource_id,
-        "manifest_version": 8
+        "kind": "raw_log",
+        "source_event": "EACRolesChanged",
+        "upstream_resource": "root",
+        "root_resource": true,
+        "changed_powers": ["set_resolver"],
+        "resolver_contract_instance_id": "00000000-0000-0000-0000-00000000c109"
     }));
     current_row.inheritance_path = json!([
         {
-            "kind": "resource_authority",
-            "resource_id": current_resource_id
+            "kind": "resolver_root_fallback",
+            "chain_id": "ethereum-mainnet",
+            "resolver_address": "0x0000000000000000000000000000000000000ABC",
+            "upstream_resource": "root"
+        },
+        {
+            "kind": "registry_root_fallback",
+            "chain_id": "ethereum-mainnet",
+            "registry_address": "0x0000000000000000000000000000000000000DEF",
+            "upstream_resource": "root"
         }
     ]);
-    current_row.transfer_behavior = json!({
-        "kind": "follows_registration_transfer"
-    });
+    current_row.transfer_behavior = json!({});
 
     let mut stale_row = permission_current_row(
         stale_resource_id,
@@ -400,15 +416,17 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         7,
         109,
     );
+    stale_row.effective_powers = json!(["resource_control", "resolver_control"]);
     stale_row.grant_source = json!({
-        "kind": "normalized_event",
-        "normalized_event_id": 109,
-        "manifest_version": 7
+        "kind": "ens_v1_authority",
+        "authority_kind": "registry_owner",
+        "authority_key": "registry:ethereum-mainnet:perms",
+        "source_event_kind": "Transfer"
     });
     stale_row.inheritance_path = json!([]);
     stale_row.transfer_behavior = Value::Null;
 
-    let record_manager_row = permission_current_row(
+    let mut record_manager_row = permission_current_row(
         current_resource_id,
         V2_PERMISSIONS_SUBJECT,
         PermissionScope::RecordManager {
@@ -418,7 +436,8 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         10,
         111,
     );
-    let migration_derived_row = permission_current_row(
+    apply_raw_log_permission_lineage(&mut record_manager_row, "set_records", 111);
+    let mut migration_derived_row = permission_current_row(
         current_resource_id,
         V2_PERMISSIONS_SUBJECT,
         PermissionScope::MigrationDerived {
@@ -427,7 +446,8 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         11,
         112,
     );
-    let transport_derived_row = permission_current_row(
+    apply_raw_log_permission_lineage(&mut migration_derived_row, "set_records", 112);
+    let mut transport_derived_row = permission_current_row(
         current_resource_id,
         V2_PERMISSIONS_SUBJECT,
         PermissionScope::TransportDerived {
@@ -436,6 +456,7 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         12,
         113,
     );
+    apply_raw_log_permission_lineage(&mut transport_derived_row, "set_resolver", 113);
 
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
@@ -457,6 +478,20 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+fn apply_raw_log_permission_lineage(row: &mut bigname_storage::PermissionsCurrentRow, power: &str, suffix: i64) {
+    row.grant_source = json!({
+        "kind": "raw_log",
+        "source_event": "EACRolesChanged",
+        "upstream_resource": "root",
+        "root_resource": true,
+        "changed_powers": [power],
+        "resolver_contract_instance_id": format!("00000000-0000-0000-0000-00000000c{suffix:03}")
+    });
+    row.revocation_source = None;
+    row.inheritance_path = json!([]);
+    row.transfer_behavior = Value::Null;
 }
 
 fn permission_row_by_registration(rows: &[Value], resource_id: Uuid) -> &Value {

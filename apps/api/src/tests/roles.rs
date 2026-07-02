@@ -386,10 +386,12 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     let mut root_grant =
         permission_current_row(root_resource_id, root_account, PermissionScope::Root, 24, 54);
     root_grant.grant_source = json!({
-        "kind": "normalized_event",
-        "event_kind": "RootPermissionChanged",
+        "kind": "raw_log",
+        "source_event": "EACRolesChanged",
+        "upstream_resource": ENSV2_ROOT_UPSTREAM_RESOURCE,
         "root_resource": true,
-        "registry_address": registry_address,
+        "changed_powers": ["resource_control", "resolver_control"],
+        "registry_contract_instance_id": registry_contract_instance_id.to_string(),
     });
     root_grant.inheritance_path = json!([
         {
