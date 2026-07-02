@@ -443,39 +443,29 @@ async fn v2_search_snapshot_selectors_unknown_params_and_empty_matches() -> Resu
 async fn v2_search_union_at_replay_rejects_single_name_scope() -> Result<()> {
     let database = SearchDatabase::new().await?;
     seed_search_fixture(&database).await?;
-    seed_chain(
-        &database,
-        "ethereum-sepolia",
-        "0xsepolia",
-        300,
-        310,
-        1_776_384_300,
-    )
-    .await?;
 
-    let initial_at = sepolia_base_snapshot_token();
-    let first = search_payload(&database, &format!("/v2/search?q=alpha&at={initial_at}")).await?;
+    let first = search_payload(&database, "/v2/search?q=alpha").await?;
     assert_eq!(
         names(first["data"].as_array().unwrap()),
         vec!["alpha.base.eth", "alpha.eth"]
     );
     assert_eq!(
-        first["meta"]["as_of"]["11155111"],
+        first["meta"]["as_of"]["1"],
         json!({
-            "block_number": 308,
-            "block_hash": "0xsepolia308",
-            "timestamp": "2026-04-17T00:05:08Z"
+            "block_number": 110,
+            "block_hash": "0xeth110",
+            "timestamp": "2026-04-17T00:01:50Z"
         })
     );
     assert_eq!(
         first["meta"]["as_of"]["8453"],
         json!({
-            "block_number": 208,
-            "block_hash": "0xbase208",
-            "timestamp": "2026-04-17T00:03:28Z"
+            "block_number": 210,
+            "block_hash": "0xbase210",
+            "timestamp": "2026-04-17T00:03:30Z"
         })
     );
-    assert!(first["meta"]["as_of"].get("1").is_none());
+    assert!(first["meta"]["as_of"].get("11155111").is_none());
 
     let replay_at = search_union_at_token_from_meta_as_of(&first)?;
     let replay = search_payload(&database, &format!("/v2/search?q=alpha&at={replay_at}")).await?;
@@ -490,6 +480,26 @@ async fn v2_search_union_at_replay_rejects_single_name_scope() -> Result<()> {
     assert_eq!(
         error["error"]["message"],
         json!("unsupported snapshot position slot base")
+    );
+
+    seed_chain(
+        &database,
+        "ethereum-sepolia",
+        "0xsepolia",
+        300,
+        310,
+        1_776_384_300,
+    )
+    .await?;
+    let sepolia_at = sepolia_snapshot_token();
+    let mixed_profile =
+        search_response(&database, &format!("/v2/search?q=alpha&at={sepolia_at}")).await?;
+    assert_eq!(mixed_profile.status(), StatusCode::CONFLICT);
+    let error = read_json(mixed_profile).await?;
+    assert_eq!(error["error"]["code"], json!("conflict"));
+    assert_eq!(
+        error["error"]["message"],
+        json!("snapshot selector cannot form one canonical snapshot across deployment profiles")
     );
 
     database.cleanup().await
@@ -515,24 +525,18 @@ fn names(rows: &[Value]) -> Vec<&str> {
         .collect()
 }
 
-fn sepolia_base_snapshot_token() -> String {
+fn sepolia_snapshot_token() -> String {
     encode_at_token(&SelectedSnapshot {
-        chain_positions: ChainPositions::new(BTreeMap::from([
-            (
-                "base".to_owned(),
-                snapshot_position("base", "base-mainnet", 208, "0xbase208", 1_776_384_208),
+        chain_positions: ChainPositions::new(BTreeMap::from([(
+            "ethereum-sepolia".to_owned(),
+            snapshot_position(
+                "ethereum-sepolia",
+                "ethereum-sepolia",
+                308,
+                "0xsepolia308",
+                1_776_384_308,
             ),
-            (
-                "ethereum-sepolia".to_owned(),
-                snapshot_position(
-                    "ethereum-sepolia",
-                    "ethereum-sepolia",
-                    308,
-                    "0xsepolia308",
-                    1_776_384_308,
-                ),
-            ),
-        ])),
+        )])),
         consistency: SnapshotConsistency::Head,
     })
 }
@@ -540,13 +544,8 @@ fn sepolia_base_snapshot_token() -> String {
 fn search_union_at_token_from_meta_as_of(payload: &Value) -> Result<String> {
     Ok(encode_at_token(&SelectedSnapshot {
         chain_positions: ChainPositions::new(BTreeMap::from([
+            snapshot_position_from_meta_as_of(payload, "1", "ethereum", "ethereum-mainnet")?,
             snapshot_position_from_meta_as_of(payload, "8453", "base", "base-mainnet")?,
-            snapshot_position_from_meta_as_of(
-                payload,
-                "11155111",
-                "ethereum-sepolia",
-                "ethereum-sepolia",
-            )?,
         ])),
         consistency: SnapshotConsistency::Head,
     }))

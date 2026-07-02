@@ -6,9 +6,16 @@ use bigname_storage::{
 const ETHEREUM_SEPOLIA_CHAIN_ID: &str = "ethereum-sepolia";
 const BASE_SEPOLIA_CHAIN_ID: &str = "base-sepolia";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeploymentProfile {
+    Mainnet,
+    Sepolia,
+}
+
 struct ChainIdMapping {
     slug: &'static str,
     numeric: u64,
+    profile: DeploymentProfile,
 }
 
 // V2 snapshot tokens stay storage-native, while meta.as_of renders numeric EVM
@@ -19,18 +26,22 @@ const CHAIN_ID_MAPPINGS: &[ChainIdMapping] = &[
     ChainIdMapping {
         slug: STORAGE_ETHEREUM_MAINNET_CHAIN_ID,
         numeric: 1,
+        profile: DeploymentProfile::Mainnet,
     },
     ChainIdMapping {
         slug: STORAGE_BASE_MAINNET_CHAIN_ID,
         numeric: 8453,
+        profile: DeploymentProfile::Mainnet,
     },
     ChainIdMapping {
         slug: ETHEREUM_SEPOLIA_CHAIN_ID,
         numeric: 11_155_111,
+        profile: DeploymentProfile::Sepolia,
     },
     ChainIdMapping {
         slug: BASE_SEPOLIA_CHAIN_ID,
         numeric: 84_532,
+        profile: DeploymentProfile::Sepolia,
     },
 ];
 
@@ -46,6 +57,13 @@ pub(crate) fn numeric_to_slug(chain_id: u64) -> Option<&'static str> {
         .iter()
         .find(|mapping| mapping.numeric == chain_id)
         .map(|mapping| mapping.slug)
+}
+
+pub(crate) fn deployment_profile_for_slug(slug: &str) -> Option<DeploymentProfile> {
+    CHAIN_ID_MAPPINGS
+        .iter()
+        .find(|mapping| mapping.slug == slug)
+        .map(|mapping| mapping.profile)
 }
 
 #[cfg(test)]
@@ -81,5 +99,26 @@ mod tests {
             numeric_to_slug(8453),
             Some(bigname_storage::BASE_MAINNET_CHAIN_ID)
         );
+    }
+
+    #[test]
+    fn chain_id_registry_classifies_deployment_profiles() {
+        assert_eq!(
+            deployment_profile_for_slug(STORAGE_ETHEREUM_MAINNET_CHAIN_ID),
+            Some(DeploymentProfile::Mainnet)
+        );
+        assert_eq!(
+            deployment_profile_for_slug(STORAGE_BASE_MAINNET_CHAIN_ID),
+            Some(DeploymentProfile::Mainnet)
+        );
+        assert_eq!(
+            deployment_profile_for_slug(ETHEREUM_SEPOLIA_CHAIN_ID),
+            Some(DeploymentProfile::Sepolia)
+        );
+        assert_eq!(
+            deployment_profile_for_slug(BASE_SEPOLIA_CHAIN_ID),
+            Some(DeploymentProfile::Sepolia)
+        );
+        assert_eq!(deployment_profile_for_slug("unknown-mainnet"), None);
     }
 }

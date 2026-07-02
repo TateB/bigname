@@ -261,8 +261,13 @@ Field ownership:
   `{chain_id, manager}` for `record_manager`; `{predecessor_registration_id}`
   for `migration_derived`; and `{transport}` for `transport_derived`.
 - Pagination behavior: standard collection pagination.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve
+  `meta.as_of` and the `name` filter's registration anchor. Permission rows
+  read the latest permissions projection; true as-of permission enumeration is
+  deferred to a storage follow-up.
 - Status semantics: no matching permission rows returns `200` with empty
-  `data`. Unsupported filter combinations return `422 unsupported`.
+  `data`, including when a `name` filter has no registration anchor in the
+  selected snapshot. Unsupported filter combinations return `422 unsupported`.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -367,6 +372,9 @@ Field ownership:
   enumeration is deferred to a storage follow-up.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`.
+  Namespace-omitted search returns `409 conflict` when the selector cannot form
+  one canonical snapshot across the public namespaces' deployment profiles;
+  specify `namespace` to search a single namespace profile.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 

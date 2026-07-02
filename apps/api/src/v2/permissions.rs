@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
-use bigname_storage::{
-    NameCurrentRow, PermissionsCurrentAccountResourceCursor, PermissionsCurrentRow,
-};
+use bigname_storage::{PermissionsCurrentAccountResourceCursor, PermissionsCurrentRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, types::Uuid};
+use sqlx::types::Uuid;
 
 use crate::{AppState, normalize_inferred_route_name};
 
@@ -20,6 +18,9 @@ use super::{
 #[path = "permissions/lineage.rs"]
 mod lineage;
 use lineage::permission_lineage;
+#[path = "permissions/snapshot.rs"]
+mod snapshot;
+use snapshot::load_name_row_for_snapshot;
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -73,7 +74,6 @@ pub(crate) struct PermissionLineage {
 
 #[derive(Debug)]
 struct ResolvedPermissionsFilter {
-    namespace: String,
     subject: Option<String>,
     resource_id: Option<Uuid>,
     known_empty: bool,
@@ -86,18 +86,33 @@ struct NormalizedNameFilter {
     normalized_name: String,
 }
 
+#[derive(Debug)]
+struct PermissionsFilterInputs {
+    namespace: String,
+    name_filter: Option<NormalizedNameFilter>,
+    requested_resource_id: Option<Uuid>,
+}
+
 pub(crate) async fn get_permissions(
     params: PermissionsQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
     let params = params.into_inner();
     let include_lineage = permissions_include_lineage(&params.include)?;
-    let resolved = resolve_permissions_filter(&state.pool, &params, include_lineage).await?;
+    let filter_inputs = permissions_filter_inputs(&params)?;
 
     let scope =
-        v2_exact_name_snapshot_scope(&state, &resolved.namespace, params.at.as_ref()).await?;
+        v2_exact_name_snapshot_scope(&state, &filter_inputs.namespace, params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let resolved = resolve_permissions_filter(
+        &state,
+        &params,
+        include_lineage,
+        &filter_inputs,
+        &selected_snapshot,
+    )
+    .await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor
@@ -184,11 +199,7 @@ fn empty_permissions_response(
     }))
 }
 
-async fn resolve_permissions_filter(
-    pool: &PgPool,
-    params: &QueryParams,
-    include_lineage: bool,
-) -> V2Result<ResolvedPermissionsFilter> {
+fn permissions_filter_inputs(params: &QueryParams) -> V2Result<PermissionsFilterInputs> {
     let name_filter = normalized_name_filter(params)?;
     if name_filter.is_none() && params.registration_id.is_none() && params.address.is_none() {
         return Err(V2Error::invalid_input(
@@ -204,8 +215,37 @@ async fn resolve_permissions_filter(
                 .map_err(|_| V2Error::invalid_input("registration_id must be a UUID"))
         })
         .transpose()?;
-    let resolved_name_row = match name_filter.as_ref() {
-        Some(name_filter) => Some(load_permissions_name_row(pool, name_filter).await?),
+
+    let namespace = name_filter
+        .as_ref()
+        .map(|name_filter| name_filter.namespace.clone())
+        .or_else(|| params.namespace.clone())
+        .unwrap_or_else(|| "ens".to_owned());
+
+    Ok(PermissionsFilterInputs {
+        namespace,
+        name_filter,
+        requested_resource_id,
+    })
+}
+
+async fn resolve_permissions_filter(
+    state: &AppState,
+    params: &QueryParams,
+    include_lineage: bool,
+    inputs: &PermissionsFilterInputs,
+    selected_snapshot: &bigname_storage::SelectedSnapshot,
+) -> V2Result<ResolvedPermissionsFilter> {
+    let resolved_name_row = match inputs.name_filter.as_ref() {
+        Some(name_filter) => Some(
+            load_name_row_for_snapshot(
+                state,
+                &name_filter.namespace,
+                &name_filter.normalized_name,
+                selected_snapshot,
+            )
+            .await?,
+        ),
         None => None,
     };
     let name_resource_id = resolved_name_row
@@ -213,21 +253,17 @@ async fn resolve_permissions_filter(
         .and_then(|row| row.as_ref())
         .and_then(|row| row.resource_id);
 
-    if let (Some(requested), Some(resolved)) = (requested_resource_id, name_resource_id)
+    if let (Some(requested), Some(resolved)) = (inputs.requested_resource_id, name_resource_id)
         && requested != resolved
     {
         return Err(V2Error::unsupported("conflicting registration filters"));
     }
 
-    let namespace = name_filter
-        .as_ref()
-        .map(|name_filter| name_filter.namespace.clone())
-        .or_else(|| params.namespace.clone())
-        .unwrap_or_else(|| "ens".to_owned());
-    let resource_id = requested_resource_id.or(name_resource_id);
-    let known_empty = name_filter.is_some() && name_resource_id.is_none();
+    let namespace = inputs.namespace.clone();
+    let resource_id = inputs.requested_resource_id.or(name_resource_id);
+    let known_empty = inputs.name_filter.is_some() && name_resource_id.is_none();
     let mut cursor_filters = BTreeMap::new();
-    if params.namespace.is_some() || name_filter.is_some() {
+    if params.namespace.is_some() || inputs.name_filter.is_some() {
         cursor_filters.insert(NAMESPACE_FILTER_KEY.to_owned(), namespace.clone());
     }
     if let Some(address) = params.address.as_ref() {
@@ -244,7 +280,6 @@ async fn resolve_permissions_filter(
     }
 
     Ok(ResolvedPermissionsFilter {
-        namespace,
         subject: params.address.clone(),
         resource_id,
         known_empty,
@@ -267,21 +302,6 @@ fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNam
         namespace,
         normalized_name: normalized.normalized_name.to_owned(),
     }))
-}
-
-async fn load_permissions_name_row(
-    pool: &PgPool,
-    filter: &NormalizedNameFilter,
-) -> V2Result<Option<NameCurrentRow>> {
-    let logical_name_id = format!("{}:{}", filter.namespace, filter.normalized_name);
-    bigname_storage::load_name_current(pool, &logical_name_id)
-        .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to resolve current resource for name {}/{}",
-                filter.namespace, filter.normalized_name
-            ))
-        })
 }
 
 pub(crate) fn build_permission_row(
