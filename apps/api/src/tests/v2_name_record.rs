@@ -521,6 +521,108 @@ async fn v2_get_name_verified_source_executes_on_demand_for_cache_miss() -> Resu
 }
 
 #[tokio::test]
+async fn v2_get_name_verified_source_executes_when_compact_cache_hit_lacks_avatar() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, _| {},
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0b";
+    let executed_avatar = "https://verified.example/on-demand-avatar.png";
+    let executed_contenthash = "0xe3010170";
+    let executed_description = "on-demand profile";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified name profile compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(payload["data"]["primary_address"], json!(executed_address));
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert!(payload["data"].get("unsupported_fields").is_none());
+    assert!(payload["data"].get("failure_reason").is_none());
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
     let default_payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
     let indexed_payload = v2_name_record_payload("/v2/names/Alice.eth?source=indexed").await?;
@@ -1274,6 +1376,270 @@ async fn v2_get_name_records_source_verified_executes_on_demand_for_cache_miss()
             "value": executed_address
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_keysless_executes_when_compact_cache_hit_lacks_avatar(
+) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, _| {},
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0c";
+    let executed_avatar = "https://verified.example/records-avatar.png";
+    let executed_contenthash = "0xe3010171";
+    let executed_description = "on-demand records";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified name records compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert_eq!(
+        payload["data"]["records"]["avatar"],
+        json!({
+            "status": "ok",
+            "value": executed_avatar
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_executes_when_compact_cache_hit_lacks_avatar() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, inventory| {
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "text:description",
+                    "record_family": "text",
+                    "selector_key": "description",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([
+                {
+                    "record_family": "avatar",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                }
+            ]);
+        },
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0d";
+    let executed_avatar = "https://verified.example/auto-avatar.png";
+    let executed_contenthash = "0xe3010172";
+    let executed_description = "on-demand auto";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60,avatar,contenthash,text:description")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 auto name records compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert_eq!(
+        payload["data"]["records"]["avatar"],
+        json!({
+            "status": "ok",
+            "value": executed_avatar
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
 
     database.cleanup().await?;
     Ok(())
@@ -3074,6 +3440,65 @@ fn normalized_name_from_logical_name_id(logical_name_id: &str) -> &str {
     split_logical_name_id(logical_name_id).1
 }
 
+async fn spawn_resolution_verified_profile_mock_rpc(
+    expected_request_count: usize,
+    address: &str,
+    avatar: &str,
+    contenthash: &str,
+    description: &str,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let address_response = resolution_universal_resolver_addr60_response(address);
+    let avatar_response = resolution_universal_resolver_string_response(avatar);
+    let contenthash_response = resolution_universal_resolver_bytes_response(contenthash);
+    let description_response = resolution_universal_resolver_string_response(description);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock verified profile RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..expected_request_count {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept mock verified profile RPC request")?;
+            let request_payload = read_primary_name_mock_rpc_request(&mut socket).await?;
+            let response = match resolution_verified_record_key_from_rpc_request(&request_payload)? {
+                "addr:60" => address_response.clone(),
+                "avatar" => avatar_response.clone(),
+                "contenthash" => contenthash_response.clone(),
+                "text:description" => description_response.clone(),
+                record_key => anyhow::bail!("unexpected verified profile record key {record_key}"),
+            };
+            requests.push(request_payload);
+            write_primary_name_mock_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+fn resolution_verified_record_key_from_rpc_request(request: &Value) -> Result<&'static str> {
+    let calldata = request
+        .pointer("/params/0/data")
+        .and_then(Value::as_str)
+        .context("mock verified profile RPC request must include call data")?;
+
+    if calldata.contains("3b3b57de") {
+        Ok("addr:60")
+    } else if calldata.contains("bc1c58d1") {
+        Ok("contenthash")
+    } else if calldata.contains(&resolution_ascii_hex("avatar")) {
+        Ok("avatar")
+    } else if calldata.contains(&resolution_ascii_hex("description")) {
+        Ok("text:description")
+    } else {
+        anyhow::bail!("unrecognized verified profile RPC calldata {calldata}")
+    }
+}
+
 fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
     json!(format!(
         "0x{}{}{}{}",
@@ -3082,6 +3507,58 @@ fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
         resolution_left_pad_hex("20", 64),
         resolution_padded_address_hex(address),
     ))
+}
+
+fn resolution_universal_resolver_string_response(value: &str) -> Value {
+    resolution_universal_resolver_selector_response(&resolution_abi_dynamic_response(
+        &resolution_ascii_hex(value),
+    ))
+}
+
+fn resolution_universal_resolver_bytes_response(value: &str) -> Value {
+    resolution_universal_resolver_selector_response(&resolution_abi_dynamic_response(
+        value.strip_prefix("0x").unwrap_or(value),
+    ))
+}
+
+fn resolution_universal_resolver_selector_response(selector_response: &str) -> Value {
+    let stripped = selector_response
+        .strip_prefix("0x")
+        .expect("selector response must be 0x-prefixed");
+    assert_eq!(
+        stripped.len() % 2,
+        0,
+        "selector response must contain whole bytes"
+    );
+    json!(format!(
+        "0x{}{}{}{}",
+        resolution_left_pad_hex("40", 64),
+        resolution_padded_address_hex(bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS),
+        resolution_left_pad_hex(&format!("{:x}", stripped.len() / 2), 64),
+        resolution_right_pad_hex(stripped, stripped.len().next_multiple_of(64)),
+    ))
+}
+
+fn resolution_abi_dynamic_response(value_hex: &str) -> String {
+    assert_eq!(
+        value_hex.len() % 2,
+        0,
+        "dynamic ABI value must contain whole bytes"
+    );
+    format!(
+        "0x{}{}{}",
+        resolution_left_pad_hex("20", 64),
+        resolution_left_pad_hex(&format!("{:x}", value_hex.len() / 2), 64),
+        resolution_right_pad_hex(value_hex, value_hex.len().next_multiple_of(64)),
+    )
+}
+
+fn resolution_ascii_hex(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn resolution_padded_address_hex(address: &str) -> String {
@@ -3095,6 +3572,11 @@ fn resolution_padded_address_hex(address: &str) -> String {
 fn resolution_left_pad_hex(value: &str, width: usize) -> String {
     assert!(value.len() <= width, "test hex value must fit padded width");
     format!("{value:0>width$}")
+}
+
+fn resolution_right_pad_hex(value: &str, width: usize) -> String {
+    assert!(value.len() <= width, "test hex value must fit padded width");
+    format!("{value:0<width$}")
 }
 
 fn assert_no_banned_v1_spellings(value: &Value) {

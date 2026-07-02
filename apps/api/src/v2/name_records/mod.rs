@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     AppState, ExecutionOutcome, ResolutionVerifiedOutcomeLookup,
-    handler_resolution_on_demand::load_or_execute_resolution_verified_outcome,
+    handler_resolution_on_demand::load_or_execute_resolution_verified_outcome_treating_partial_compact_hit_as_miss,
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
     parse_resolution_record_key, snapshot_selection_api_error,
@@ -315,7 +315,7 @@ async fn load_verified_record_lookup_with_persistence(
         return Ok(None);
     }
 
-    match load_or_execute_resolution_verified_outcome(
+    match load_or_execute_resolution_verified_outcome_treating_partial_compact_hit_as_miss(
         state,
         row,
         records,

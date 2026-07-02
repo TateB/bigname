@@ -19,6 +19,12 @@ struct ResolutionVerifiedCacheLookupPlan {
     full_selector_records: Vec<ResolutionRecordKey>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PartialCompactHitMode {
+    PreserveAsStale,
+    TreatAsMiss,
+}
+
 impl ResolutionVerifiedCacheLookupPlan {
     fn new(row: &NameCurrentRow, supported_records: Vec<ResolutionRecordKey>) -> Self {
         Self {
@@ -42,6 +48,43 @@ pub(super) async fn lookup_resolution_verified_outcome(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<ResolutionVerifiedOutcomeLookup, SnapshotSelectionError> {
+    lookup_resolution_verified_outcome_with_partial_compact_hit_mode(
+        pool,
+        row,
+        records,
+        record_inventory_row,
+        selected_snapshot,
+        PartialCompactHitMode::PreserveAsStale,
+    )
+    .await
+}
+
+pub(super) async fn lookup_resolution_verified_outcome_treating_partial_compact_hit_as_miss(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<ResolutionVerifiedOutcomeLookup, SnapshotSelectionError> {
+    lookup_resolution_verified_outcome_with_partial_compact_hit_mode(
+        pool,
+        row,
+        records,
+        record_inventory_row,
+        selected_snapshot,
+        PartialCompactHitMode::TreatAsMiss,
+    )
+    .await
+}
+
+async fn lookup_resolution_verified_outcome_with_partial_compact_hit_mode(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
+    partial_compact_hit_mode: PartialCompactHitMode,
+) -> std::result::Result<ResolutionVerifiedOutcomeLookup, SnapshotSelectionError> {
     if resolution_verified_support_boundary(row, record_inventory_row).is_none() {
         return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
     }
@@ -57,6 +100,7 @@ pub(super) async fn lookup_resolution_verified_outcome(
         record_inventory_row,
         selected_snapshot,
         &cache_lookup,
+        partial_compact_hit_mode,
     )
     .await?;
 
@@ -75,6 +119,7 @@ async fn load_resolution_verified_outcome_with_full_selector_fallback(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
     cache_lookup: &ResolutionVerifiedCacheLookupPlan,
+    partial_compact_hit_mode: PartialCompactHitMode,
 ) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
     let compact_outcome = load_resolution_verified_outcome_for_records(
         pool,
@@ -87,8 +132,15 @@ async fn load_resolution_verified_outcome_with_full_selector_fallback(
     )
     .await?;
 
-    if compact_outcome.is_some() || !cache_lookup.should_probe_full_selector_fallback() {
-        return Ok(compact_outcome);
+    if let Some(compact_outcome) = compact_outcome {
+        if !cache_lookup.should_probe_full_selector_fallback()
+            || partial_compact_hit_mode == PartialCompactHitMode::PreserveAsStale
+            || persisted_outcome_covers_records(&compact_outcome, &cache_lookup.full_selector_records)
+        {
+            return Ok(Some(compact_outcome));
+        }
+    } else if !cache_lookup.should_probe_full_selector_fallback() {
+        return Ok(None);
     }
 
     load_resolution_verified_outcome_for_records(
@@ -101,6 +153,19 @@ async fn load_resolution_verified_outcome_with_full_selector_fallback(
         "full-selector persisted verified resolution outcome",
     )
     .await
+}
+
+fn persisted_outcome_covers_records(
+    outcome: &ExecutionOutcome,
+    records: &[ResolutionRecordKey],
+) -> bool {
+    let Ok(persisted_queries) = persisted_verified_queries_by_record_key(outcome) else {
+        return true;
+    };
+
+    records
+        .iter()
+        .all(|record| persisted_queries.contains_key(&record.record_key))
 }
 
 async fn load_resolution_verified_outcome_for_records(
