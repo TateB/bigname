@@ -42,7 +42,7 @@ mod resolution_verified {
         ));
     }
 
-    pub(super) use readback::ResolutionVerifiedOutcomeLookup;
+    pub(super) use readback::{PartialCompactHits, ResolutionVerifiedOutcomeLookup};
 
     pub(super) fn build_resolution_declared_state(
         row: &NameCurrentRow,
@@ -75,6 +75,7 @@ mod resolution_verified {
         records: &[ResolutionRecordKey],
         record_inventory_row: Option<&RecordInventoryCurrentRow>,
         selected_snapshot: &SelectedSnapshot,
+        partial_compact_hits: PartialCompactHits,
     ) -> std::result::Result<readback::ResolutionVerifiedOutcomeLookup, SnapshotSelectionError>
     {
         readback::lookup_resolution_verified_outcome(
@@ -83,24 +84,7 @@ mod resolution_verified {
             records,
             record_inventory_row,
             selected_snapshot,
-        )
-        .await
-    }
-
-    pub(super) async fn lookup_resolution_verified_outcome_treating_partial_compact_hit_as_miss(
-        pool: &PgPool,
-        row: &NameCurrentRow,
-        records: &[ResolutionRecordKey],
-        record_inventory_row: Option<&RecordInventoryCurrentRow>,
-        selected_snapshot: &SelectedSnapshot,
-    ) -> std::result::Result<readback::ResolutionVerifiedOutcomeLookup, SnapshotSelectionError>
-    {
-        readback::lookup_resolution_verified_outcome_treating_partial_compact_hit_as_miss(
-            pool,
-            row,
-            records,
-            record_inventory_row,
-            selected_snapshot,
+            partial_compact_hits,
         )
         .await
     }
@@ -197,11 +181,10 @@ use self::resolution_verified::{
     build_resolution_declared_state, build_resolution_execution_cache_key,
     build_resolution_execution_explain_verified_state, build_resolution_verified_state,
     lookup_resolution_verified_outcome,
-    lookup_resolution_verified_outcome_treating_partial_compact_hit_as_miss,
     load_explicit_unsupported_record_inventory_current,
     load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current, load_supported_record_inventory_current_for_snapshot,
-    ResolutionVerifiedOutcomeLookup, resolution_execution_cache_lookup_records,
+    PartialCompactHits, ResolutionVerifiedOutcomeLookup, resolution_execution_cache_lookup_records,
     resolution_verified_support_boundary, validate_loaded_resolution_verified_outcome,
 };
 

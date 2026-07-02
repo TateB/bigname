@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppState, ExecutionOutcome, ResolutionVerifiedOutcomeLookup,
-    handler_resolution_on_demand::load_or_execute_resolution_verified_outcome_treating_partial_compact_hit_as_miss,
+    AppState, ExecutionOutcome, PartialCompactHits, ResolutionVerifiedOutcomeLookup,
+    handler_resolution_on_demand::{
+        VerifiedOutcomeExecutionOptions, load_or_execute_resolution_verified_outcome,
+    },
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
     parse_resolution_record_key, snapshot_selection_api_error,
@@ -285,6 +287,7 @@ pub(crate) async fn load_persisted_verified_record_lookup(
         records,
         record_inventory,
         selected_snapshot,
+        PartialCompactHits::Serve,
     )
     .await
     {
@@ -315,14 +318,17 @@ async fn load_verified_record_lookup_with_persistence(
         return Ok(None);
     }
 
-    match load_or_execute_resolution_verified_outcome_treating_partial_compact_hit_as_miss(
+    match load_or_execute_resolution_verified_outcome(
         state,
         row,
         records,
         record_inventory,
         selected_snapshot,
-        false,
-        persist_execution,
+        VerifiedOutcomeExecutionOptions {
+            use_latest_block_tag: false,
+            persist_execution,
+            partial_compact_hits: PartialCompactHits::TreatAsMiss,
+        },
     )
     .await
     {

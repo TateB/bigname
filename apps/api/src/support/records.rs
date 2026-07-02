@@ -1,6 +1,8 @@
 use super::*;
 
-use super::handler_resolution_on_demand::load_or_execute_resolution_verified_outcome;
+use super::handler_resolution_on_demand::{
+    VerifiedOutcomeExecutionOptions, load_or_execute_resolution_verified_outcome,
+};
 
 pub(super) struct ResolutionRecordsRead {
     pub(super) row: NameCurrentRow,
@@ -122,8 +124,11 @@ pub(super) async fn load_name_profile_records_read(
             &records,
             record_inventory_current.as_ref(),
             &selected_snapshot,
-            false,
-            true,
+            VerifiedOutcomeExecutionOptions {
+                use_latest_block_tag: false,
+                persist_execution: true,
+                partial_compact_hits: PartialCompactHits::Serve,
+            },
         )
         .await
         .map_err(snapshot_selection_api_error)?
@@ -531,8 +536,11 @@ async fn load_compact_records_verified_outcome(
         requested_records,
         record_inventory_current,
         selected_snapshot,
-        false,
-        true,
+        VerifiedOutcomeExecutionOptions {
+            use_latest_block_tag: false,
+            persist_execution: true,
+            partial_compact_hits: PartialCompactHits::Serve,
+        },
     )
     .await
     .map_err(snapshot_selection_api_error)
