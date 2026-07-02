@@ -19,8 +19,8 @@ use crate::{
 use super::{
     AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
     QueryParamAllowlist, QueryParams, SnapshotReadResource, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, api_error_to_v2_for_resource, as_of_meta, decode, decode_at_token, encode,
-    encode_at_token, resolve_v2_snapshot_for,
+    api_error_to_v2, api_error_to_v2_for_resource, decode, decode_at_token, encode,
+    encode_at_token, resolve_v2_snapshot_for, snapshot_meta,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -165,10 +165,7 @@ pub(crate) async fn get_history(
         .iter()
         .filter_map(|row| build_history_event(row, &normalized.normalized_name))
         .collect();
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,

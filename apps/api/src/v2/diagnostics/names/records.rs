@@ -17,14 +17,14 @@ use crate::{
 
 use super::{
     Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result,
-    apply_diagnostics_dictionary_names, as_of_meta, resolve_diagnostic_name,
+    apply_diagnostics_dictionary_names, resolve_diagnostic_name,
 };
 
 use crate::v2::{
     RecordAnswer, SnapshotReadResource, Source, api_error_to_v2_for_resource,
     build_indexed_name_records, build_verified_name_records, default_requested_records,
     load_ephemeral_verified_record_lookup, load_persisted_verified_record_lookup,
-    parse_raw_query_params_with_allowlist, parse_record_keys,
+    parse_raw_query_params_with_allowlist, parse_record_keys, snapshot_meta,
 };
 
 pub(crate) const DIAGNOSTIC_RECORDS_DEFAULT_COMPARISON_LIMIT: usize = 16;
@@ -143,10 +143,7 @@ pub(crate) async fn get_name_records_diagnostic(
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: Meta {
-            as_of: Some(as_of_meta(&selected_snapshot)?),
-            ..Meta::default()
-        },
+        meta: snapshot_meta(&selected_snapshot)?,
     }))
 }
 

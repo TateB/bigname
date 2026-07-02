@@ -19,9 +19,9 @@ use crate::{
 use super::{
     Envelope, MAX_PAGE_SIZE, Meta, QueryParamAllowlist, QueryParams, RequestSource, Resolver,
     SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
-    api_error_to_v2_for_resource, as_of_meta, default_requested_records,
-    name_records_inventory::RecordInventory, resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
-    validate_product_record,
+    api_error_to_v2_for_resource, default_requested_records,
+    name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
+    v2_exact_name_snapshot_scope, validate_product_record,
 };
 
 mod build;
@@ -201,11 +201,8 @@ pub(crate) async fn get_name_records(
         }
     };
 
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        source: Some(route_source),
-        ..Meta::default()
-    };
+    let mut meta = snapshot_meta(&selected_snapshot)?;
+    meta.source = Some(route_source);
 
     Ok(Json(Envelope {
         data,

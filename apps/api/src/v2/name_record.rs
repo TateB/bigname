@@ -17,7 +17,7 @@ use crate::{
 use super::{
     Envelope, Meta, QueryParamAllowlist, QueryParams, RequestSource, SnapshotReadResource,
     StrictQueryParams, V2Error, V2Result, api_error_to_v2, api_error_to_v2_for_resource,
-    as_of_meta, resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
     vocab::{RegistrationStatus, Resolver, Source, Status},
 };
 
@@ -147,11 +147,8 @@ pub(crate) async fn get_name_record(
     if route_source == Source::Verified {
         mark_unserved_verified_fields(&mut data);
     }
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        source: Some(route_source),
-        ..Meta::default()
-    };
+    let mut meta = snapshot_meta(&selected_snapshot)?;
+    meta.source = Some(route_source);
 
     Ok(Json(Envelope {
         data,

@@ -15,10 +15,10 @@ use crate::{
 };
 
 use super::{
-    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams, RegistrationStatus,
+    CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams, RegistrationStatus,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource,
-    as_of_meta, decode, encode, encode_at_token, name_record::name_registration_fields,
-    resolve_v2_snapshot_for, v2_exact_name_snapshot_scope,
+    decode, encode, encode_at_token, name_record::name_registration_fields,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -190,10 +190,7 @@ pub(crate) async fn get_subnames(
             )
         })
         .collect();
-    let meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let meta = snapshot_meta(&selected_snapshot)?;
 
     Ok(Json(Envelope {
         data,

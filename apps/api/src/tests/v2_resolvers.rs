@@ -328,6 +328,42 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
 }
 
 #[tokio::test]
+async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    let old_resolver_snapshot_token = v2_at_token(
+        "ethereum-mainnet",
+        "ethereum-mainnet",
+        102,
+        "0xname66",
+        "2026-04-17T00:00:02Z",
+    )?;
+    let old_cursor_payload = crate::v2::bound_names_cursor_payload(
+        &v2_bound_names_cursor(),
+        &v2_bound_names_cursor_binding(V2_RESOLVER_ADDRESS, &old_resolver_snapshot_token),
+    );
+    let old_cursor = crate::v2::encode(&old_cursor_payload);
+
+    let response = v2_resolver_response_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&cursor={old_cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(payload.error.message, "cursor must be a valid pagination cursor");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.seed_default_ens_snapshot_selector_position().await?;
@@ -416,6 +452,14 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
     .await?;
 
     assert_eq!(payload["data"]["nodes"], Value::Null);
+    assert!(
+        payload["meta"]["as_of"]["1"].is_object(),
+        "resolver unsupported meta must preserve as_of"
+    );
+    assert!(
+        payload["meta"]["as_of_token"].is_string(),
+        "resolver unsupported meta must preserve the snapshot token"
+    );
     assert_eq!(
         payload["meta"]["unsupported_fields"],
         json!(["nodes", "aliases", "roles", "events"])

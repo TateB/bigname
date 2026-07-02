@@ -237,7 +237,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
         success: V2SuccessFixture::PrimaryName,
         envelope: V2TopLevelEnvelope::DataMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::Present,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -419,6 +419,61 @@ async fn v2_success_responses_omit_banned_v1_dictionary_fields_family_wide() -> 
     }
 
     assert_no_conformance_violations("v2 dictionary conformance", &violations);
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_single_chain_as_of_token_replays_across_route_families() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row_with_writer_alias(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+
+    let minted = v2_conformance_get_json(&database, "/v2/names/alpha.eth").await?;
+    let token = minted["meta"]["as_of_token"]
+        .as_str()
+        .expect("name response must include meta.as_of_token");
+
+    for (label, uri) in [
+        (
+            "records",
+            format!("/v2/names/alpha.eth/records?at={token}"),
+        ),
+        (
+            "subnames",
+            format!("/v2/names/alpha.eth/subnames?at={token}"),
+        ),
+        (
+            "history",
+            format!("/v2/names/alpha.eth/history?at={token}"),
+        ),
+        (
+            "namespace-scoped search",
+            format!("/v2/search?q=alpha&namespace=ens&at={token}"),
+        ),
+        (
+            "resolver",
+            format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
+        ),
+    ] {
+        let replay = v2_conformance_get_json(&database, &uri).await?;
+        assert_eq!(
+            replay["meta"]["as_of"], minted["meta"]["as_of"],
+            "{label} must accept name-route as_of_token"
+        );
+        assert_eq!(
+            replay["meta"]["as_of_token"], minted["meta"]["as_of_token"],
+            "{label} must preserve name-route as_of_token"
+        );
+    }
+
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -673,6 +728,49 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     Ok(())
 }
 
+async fn assert_v2_as_of_token_fixpoint(
+    database: &TestDatabase,
+    route: &V2ConformanceRoute,
+    uri: &str,
+    payload: &Value,
+) -> Result<()> {
+    if !route_accepts_at(route) {
+        return Ok(());
+    }
+
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{} must include meta.as_of_token", route.label));
+    let replay_uri = uri_with_at(uri, token);
+    let replay = v2_conformance_get_json(database, &replay_uri).await?;
+
+    assert_eq!(
+        replay["meta"]["as_of"], payload["meta"]["as_of"],
+        "{} at-token replay must preserve meta.as_of",
+        route.label
+    );
+    assert_eq!(
+        replay["meta"]["as_of_token"], payload["meta"]["as_of_token"],
+        "{} at-token replay must preserve meta.as_of_token",
+        route.label
+    );
+
+    Ok(())
+}
+
+fn route_accepts_at(route: &V2ConformanceRoute) -> bool {
+    matches!(route.as_of, V2AsOfExpectation::Present)
+        && !matches!(
+            route.success,
+            V2SuccessFixture::Lookup | V2SuccessFixture::PrimaryName
+        )
+}
+
+fn uri_with_at(uri: &str, token: &str) -> String {
+    let separator = if uri.contains('?') { '&' } else { '?' };
+    format!("{uri}{separator}at={token}")
+}
+
 async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Value> {
     match route.success {
         V2SuccessFixture::Lookup => {
@@ -740,10 +838,20 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             database.cleanup().await?;
             Ok(payload)
         }
-        V2SuccessFixture::Name => v2_name_record_payload("/v2/names/Alice.eth").await,
+        V2SuccessFixture::Name => {
+            let database = TestDatabase::new_with_schemas(false, true).await?;
+            let uri = "/v2/names/Alice.eth";
+            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+            let payload = v2_conformance_get_json(&database, uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
+            database.cleanup().await?;
+            Ok(payload)
+        }
         V2SuccessFixture::NameRecords => {
-            v2_name_records_payload_with_setup(
-                "/v2/names/Alice.eth/records?keys=addr:60&include=inventory",
+            let database = TestDatabase::new_with_schemas(false, true).await?;
+            let uri = "/v2/names/Alice.eth/records?keys=addr:60&include=inventory";
+            seed_v2_alice_name_records_fixture(
+                &database,
                 |_, _, inventory| {
                     let entries = inventory
                         .entries
@@ -759,39 +867,45 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 },
                 None,
             )
-            .await
+            .await?;
+            let payload = v2_conformance_get_json(&database, uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
+            database.cleanup().await?;
+            Ok(payload)
         }
         V2SuccessFixture::Subnames => {
+            let uri = "/v2/names/Parent.eth/subnames?include=counts&page_size=3";
             let (database, payload) =
-                v2_subnames_payload("/v2/names/Parent.eth/subnames?include=counts&page_size=3")
-                    .await?;
+                v2_subnames_payload(uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::NameHistory => {
-            let (database, payload) =
-                v2_history_payload("/v2/names/History.eth/history?page_size=20").await?;
+            let uri = "/v2/names/History.eth/history?page_size=20";
+            let (database, payload) = v2_history_payload(uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::Permissions => {
-            let (database, payload) = v2_permissions_payload(&format!(
-                "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10"
-            ))
-            .await?;
+            let uri =
+                format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
+            let (database, payload) = v2_permissions_payload(&uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::AddressNames => {
-            let (database, payload) = v2_address_names_payload(&format!(
-                "/v2/addresses/{V2_ADDRESS}/names?include=role_summary"
-            ))
-            .await?;
+            let uri = format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary");
+            let (database, payload) = v2_address_names_payload(&uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::PrimaryName => {
             let database = TestDatabase::new_migrated().await?;
+            database.seed_default_ens_snapshot_selector_position().await?;
             database
                 .insert_primary_name_current_claim_row(
                     V2_PRIMARY_NAME_ADDRESS,
@@ -820,28 +934,27 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::AddressHistory => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_address_history_conformance_fixture(&database).await?;
-            let payload = v2_conformance_get_json(
-                &database,
-                &format!("/v2/addresses/{V2_ADDRESS}/history?page_size=20"),
-            )
-            .await?;
+            let uri = format!("/v2/addresses/{V2_ADDRESS}/history?page_size=20");
+            let payload = v2_conformance_get_json(&database, &uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::Search => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_address_names_fixture(&database).await?;
-            let payload =
-                v2_conformance_get_json(&database, "/v2/search?q=alpha&namespace=ens").await?;
+            let uri = "/v2/search?q=alpha&namespace=ens";
+            let payload = v2_conformance_get_json(&database, uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::Events => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_history_fixture(&database).await?;
-            let payload =
-                v2_conformance_get_json(&database, "/v2/events?name=history.eth&page_size=20")
-                    .await?;
+            let uri = "/v2/events?name=history.eth&page_size=20";
+            let payload = v2_conformance_get_json(&database, uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -857,13 +970,11 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 &[resolver_row],
             )
             .await?;
-            let payload = v2_resolver_payload_for_database(
-                &database,
-                &format!(
-                    "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
-                ),
-            )
-            .await?;
+            let uri = format!(
+                "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
+            );
+            let payload = v2_resolver_payload_for_database(&database, &uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -885,24 +996,18 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             };
             let database = TestDatabase::new_with_schemas(false, true).await?;
             seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
-            let payload = request_v2_diagnostics_json(
-                &database,
-                &format!("/v2/diagnostics/names/Alice.eth/{suffix}"),
-                StatusCode::OK,
-            )
-            .await?;
+            let uri = format!("/v2/diagnostics/names/Alice.eth/{suffix}");
+            let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::DiagnosticsRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
             seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
-            let payload = request_v2_diagnostics_json(
-                &database,
-                "/v2/diagnostics/names/Alice.eth/records",
-                StatusCode::OK,
-            )
-            .await?;
+            let uri = "/v2/diagnostics/names/Alice.eth/records";
+            let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -931,12 +1036,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             );
             upsert_execution_trace(&database.pool, &trace).await?;
             upsert_execution_outcome(&database.pool, &outcome).await?;
-            let payload = request_v2_diagnostics_json(
-                &database,
-                "/v2/diagnostics/names/alice.eth/execution?keys=addr:60",
-                StatusCode::OK,
-            )
-            .await?;
+            let uri = "/v2/diagnostics/names/alice.eth/execution?keys=addr:60";
+            let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -952,9 +1054,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             Ok(payload)
         }
         V2SuccessFixture::DiagnosticsEvents => {
-            let (database, payload) =
-                v2_diag_events_payload("/v2/diagnostics/events?name=Diag.eth&page_size=10")
-                    .await?;
+            let uri = "/v2/diagnostics/events?name=Diag.eth&page_size=10";
+            let (database, payload) = v2_diag_events_payload(uri).await?;
+            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -1017,7 +1119,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
     seed_v2_history_fixture(&database).await?;
     seed_v2_address_names_fixture(&database).await?;
     let resolver_conflict_at = v2_at_token(
-        "ethereum-mainnet",
+        "ethereum",
         "ethereum-mainnet",
         21_000_001,
         "0xmissing-conflict",
@@ -1479,12 +1581,22 @@ fn assert_v2_success_envelope(route: &V2ConformanceRoute, payload: &Value) {
         route.label
     );
     match route.as_of {
-        V2AsOfExpectation::Present => assert_as_of_shape(route, &payload["meta"]["as_of"]),
-        V2AsOfExpectation::Absent => assert!(
-            payload["meta"].get("as_of").is_none(),
-            "{} must omit meta.as_of",
-            route.label
-        ),
+        V2AsOfExpectation::Present => {
+            assert_as_of_shape(route, &payload["meta"]["as_of"]);
+            assert_as_of_token_shape(route, &payload["meta"]["as_of_token"]);
+        }
+        V2AsOfExpectation::Absent => {
+            assert!(
+                payload["meta"].get("as_of").is_none(),
+                "{} must omit meta.as_of",
+                route.label
+            );
+            assert!(
+                payload["meta"].get("as_of_token").is_none(),
+                "{} must omit meta.as_of_token",
+                route.label
+            );
+        }
     }
 
     assert_non_empty_json(&payload["data"], route.label, "$.data");
@@ -1639,6 +1751,26 @@ fn assert_as_of_shape(route: &V2ConformanceRoute, as_of: &Value) {
             route.label
         );
     }
+}
+
+fn assert_as_of_token_shape(route: &V2ConformanceRoute, as_of_token: &Value) {
+    let token = as_of_token
+        .as_str()
+        .unwrap_or_else(|| panic!("{} meta.as_of_token must be a string", route.label));
+    assert!(
+        !token.is_empty(),
+        "{} meta.as_of_token must not be empty",
+        route.label
+    );
+    assert!(
+        token.bytes().all(is_url_safe_token_byte),
+        "{} meta.as_of_token must be URL-safe",
+        route.label
+    );
+}
+
+fn is_url_safe_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
 }
 
 fn collect_banned_dictionary_fields(

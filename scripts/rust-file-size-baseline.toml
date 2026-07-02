@@ -12,7 +12,7 @@ wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
 path = "apps/api/src/v2/name_record.rs"
-loc = 646
+loc = 643
 justification = "v2 flat-record dictionary authority centralizes owner, registrant, dates, status, token_id, and record-shape helpers for lookup/profile/list-route parity; split after the parity guard stabilizes."
 
 [[files]]

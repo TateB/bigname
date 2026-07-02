@@ -15,6 +15,7 @@ mod cursor;
 mod dto;
 mod head;
 mod parse;
+mod scope;
 
 use build::{
     build_forward_detail_record, build_forward_feed_record, build_reverse_detail_record,
@@ -25,12 +26,13 @@ use cursor::{
     reverse_identity_storage_cursor,
 };
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
-use head::load_served_head_meta;
+pub(crate) use head::load_served_head_meta;
 use parse::{
     LookupProfile, ParsedAddressLookup, ParsedNameLookup, ensure_lookup_batch_limit,
     parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
     parse_name_input,
 };
+use scope::lookup_snapshot_scope;
 
 const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
 
@@ -61,7 +63,6 @@ pub(crate) async fn get_lookup(
     ensure_lookup_batch_limit(body.inputs.len())?;
     let profile = parse_lookup_profile(body.profile.as_deref())?;
     let namespace = parse_lookup_namespace(body.namespace.as_deref())?;
-    let served_head = load_served_head_meta(&state.pool).await?;
 
     let mut name_inputs = Vec::new();
     let mut address_inputs = Vec::new();
@@ -80,6 +81,12 @@ pub(crate) async fn get_lookup(
             }
         }
     }
+    let snapshot_scope =
+        lookup_snapshot_scope(&state, namespace, &name_inputs, !address_inputs.is_empty()).await?;
+    let served_head = match snapshot_scope.as_ref() {
+        Some(scope) => load_served_head_meta(&state.pool, scope).await?,
+        None => Meta::default(),
+    };
 
     let mut results = vec![None; body.inputs.len()];
     render_name_lookup_results(&state, profile, &name_inputs, &mut results).await?;
@@ -93,10 +100,7 @@ pub(crate) async fn get_lookup(
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: Meta {
-            as_of: Some(served_head),
-            ..Meta::default()
-        },
+        meta: served_head,
     }))
 }
 

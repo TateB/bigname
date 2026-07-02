@@ -27,9 +27,9 @@ use overview_items::{projected_section_items, summary_is_supported};
 
 use super::{
     Envelope, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist, QueryParams,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, as_of_meta,
-    build_name_record, contains_pipeline_vocabulary, decode, encode, encode_at_token, name_record,
-    numeric_to_slug, resolve_v2_snapshot_for,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
+    contains_pipeline_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
+    resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
     vocab::{Completeness, Status},
 };
 
@@ -197,10 +197,7 @@ pub(crate) async fn get_resolver(
             has_more,
         },
     };
-    let mut meta = Meta {
-        as_of: Some(as_of_meta(&selected_snapshot)?),
-        ..Meta::default()
-    };
+    let mut meta = snapshot_meta(&selected_snapshot)?;
     apply_resolver_support_meta(&mut meta, &row, include)?;
     let data = build_resolver_overview(row, numeric_chain_id, include, bound_names)?;
 
@@ -408,17 +405,26 @@ fn invalid_chain_id() -> V2Error {
 }
 
 fn resolver_snapshot_scope(chain_id_slug: &str) -> V2Result<SnapshotSelectionScope> {
+    let slot = snapshot_slot_for_slug(chain_id_slug).ok_or_else(|| {
+        error!(
+            service = "api",
+            chain_id = %chain_id_slug,
+            "failed to map resolver snapshot slot"
+        );
+        V2Error::internal_error("failed to build resolver snapshot scope")
+    })?;
     SnapshotSelectionScope::new(
         vec![SnapshotPositionRequirement::new(
-            chain_id_slug.to_owned(),
+            slot.to_owned(),
             chain_id_slug.to_owned(),
         )],
-        Some(chain_id_slug.to_owned()),
+        Some(slot.to_owned()),
     )
     .map_err(|error| {
         error!(
             service = "api",
             chain_id = %chain_id_slug,
+            slot = %slot,
             message = %error.message(),
             "failed to build resolver snapshot scope"
         );

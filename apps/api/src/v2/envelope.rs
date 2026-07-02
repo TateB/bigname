@@ -26,6 +26,8 @@ pub(crate) struct Meta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) as_of: Option<BTreeMap<String, AsOf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) as_of_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) completeness: Option<Completeness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_fields: Option<Vec<String>>,

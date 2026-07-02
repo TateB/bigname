@@ -1,75 +1,53 @@
-use std::collections::BTreeMap;
-
+use bigname_storage::{
+    SnapshotConsistency, SnapshotSelectionError, SnapshotSelectionErrorKind,
+    SnapshotSelectionScope, SnapshotSelectorInput, resolve_exact_name_snapshot_selection,
+};
 use sqlx::PgPool;
-use tracing::error;
 
-use crate::v2::{AsOf, V2Error, V2Result, format_timestamp, slug_to_numeric};
+use crate::v2::{Meta, V2Error, V2Result, snapshot_meta};
 
-pub(super) async fn load_served_head_meta(pool: &PgPool) -> V2Result<BTreeMap<String, AsOf>> {
-    let status = bigname_storage::load_indexing_status(pool)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                error = ?load_error,
-                "failed to load v2 lookup indexing status"
-            );
-            V2Error::internal_error("failed to load lookup served head")
-        })?;
-    let checkpoint_chain_ids = status
-        .chains
-        .iter()
-        .filter(|row| row.canonical_block.is_some() && row.canonical_timestamp.is_some())
-        .map(|row| row.chain_id.clone())
-        .collect::<Vec<_>>();
-    let hashes = bigname_storage::load_chain_checkpoint_snapshots(pool, &checkpoint_chain_ids)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                chain_count = checkpoint_chain_ids.len(),
-                error = ?load_error,
-                "failed to load v2 lookup head checkpoint snapshots"
-            );
-            V2Error::internal_error("failed to load lookup served head")
-        })?
-        .into_iter()
-        .map(|checkpoint| (checkpoint.chain_id, checkpoint.canonical_block_hash))
-        .collect::<BTreeMap<_, _>>();
-    let mut as_of = BTreeMap::new();
+pub(crate) async fn load_served_head_meta(
+    pool: &PgPool,
+    scope: &SnapshotSelectionScope,
+) -> V2Result<Meta> {
+    let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
+        .map_err(|_| V2Error::internal_error("failed to build lookup served head selector"))?;
+    let selected = match resolve_exact_name_snapshot_selection(pool, scope, &input).await {
+        Ok(selected) => selected,
+        Err(error) if served_head_absent_for_single_scope(scope, &error) => {
+            return Ok(Meta::default());
+        }
+        Err(error) if served_head_scope_conflict(&error) => {
+            return Err(V2Error::conflict(
+                "served head is unavailable for snapshot scope",
+            ));
+        }
+        Err(error) if error.kind() == SnapshotSelectionErrorKind::InvalidInput => {
+            return Err(V2Error::internal_error(
+                "failed to build lookup served head selector",
+            ));
+        }
+        Err(error) => {
+            return Err(V2Error::internal_error(format!(
+                "failed to load lookup served head: {}",
+                error.message()
+            )));
+        }
+    };
+    snapshot_meta(&selected)
+}
 
-    for row in status.chains {
-        let Some(block_number) = row.canonical_block else {
-            continue;
-        };
-        let Some(timestamp) = row.canonical_timestamp else {
-            continue;
-        };
-        let Some(block_hash) = hashes.get(&row.chain_id).cloned().flatten() else {
-            continue;
-        };
-        let chain_id = slug_to_numeric(&row.chain_id).ok_or_else(|| {
-            V2Error::internal_error(format!(
-                "indexing status row uses unmapped chain_id {}",
-                row.chain_id
-            ))
-        })?;
-        let block_number = u64::try_from(block_number).map_err(|_| {
-            V2Error::internal_error(format!(
-                "indexing status row for {} has a negative head block",
-                row.chain_id
-            ))
-        })?;
+fn served_head_absent_for_single_scope(
+    scope: &SnapshotSelectionScope,
+    error: &SnapshotSelectionError,
+) -> bool {
+    scope.required_positions().len() == 1
+        && error.kind() == SnapshotSelectionErrorKind::Conflict
+        && (error.message().contains("has no stored checkpoint row")
+            || error.message().contains("has no head checkpoint"))
+}
 
-        as_of.insert(
-            chain_id.to_string(),
-            AsOf {
-                block_number,
-                block_hash,
-                timestamp: format_timestamp(timestamp),
-            },
-        );
-    }
-
-    Ok(as_of)
+fn served_head_scope_conflict(error: &SnapshotSelectionError) -> bool {
+    error.kind() == SnapshotSelectionErrorKind::Conflict
+        || error.message().contains("mismatched hash and number")
 }

@@ -1,6 +1,7 @@
 #[tokio::test]
 async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     database
         .insert_primary_name_current_claim_row(
             V2_PRIMARY_NAME_ADDRESS,
@@ -55,7 +56,8 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
         })
     );
     assert!(omitted.get("page").is_none());
-    assert_eq!(omitted["meta"], json!({}));
+    assert_primary_name_snapshot_meta(&omitted);
+    assert!(omitted["meta"].get("source").is_none());
     assert_no_banned_v1_spellings(&omitted);
 
     assert_eq!(
@@ -68,6 +70,7 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
             }
         ])
     );
+    assert_primary_name_snapshot_meta(&indexed);
     assert_eq!(indexed["meta"]["source"], json!("indexed"));
 
     assert_eq!(
@@ -79,6 +82,7 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
             }
         ])
     );
+    assert_primary_name_snapshot_meta(&verified);
     assert_eq!(verified["meta"]["source"], json!("verified"));
 
     database.cleanup().await?;
@@ -451,4 +455,21 @@ async fn v2_primary_name_response_for_database(
         )
         .await
         .context("v2 primary-name request failed")
+}
+
+fn assert_primary_name_snapshot_meta(payload: &Value) {
+    assert!(
+        payload["meta"]["as_of"].is_object(),
+        "primary-name response must include meta.as_of"
+    );
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("primary-name response must include meta.as_of_token");
+    assert!(!token.is_empty(), "meta.as_of_token must not be empty");
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')),
+        "meta.as_of_token must be URL-safe"
+    );
 }

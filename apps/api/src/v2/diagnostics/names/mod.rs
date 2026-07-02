@@ -7,7 +7,7 @@ use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferre
 
 use super::super::{
     Envelope, Meta, QueryParams, RawQueryParams, SnapshotReadResource, V2Error, V2Result,
-    api_error_to_v2_for_resource, as_of_meta, resolve_v2_snapshot_for,
+    api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
@@ -134,10 +134,7 @@ fn diagnostic_envelope(
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: Meta {
-            as_of: Some(as_of_meta(selected_snapshot)?),
-            ..Meta::default()
-        },
+        meta: snapshot_meta(selected_snapshot)?,
     }))
 }
 

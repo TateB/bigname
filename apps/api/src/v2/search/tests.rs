@@ -467,9 +467,12 @@ async fn v2_search_union_at_replay_rejects_single_name_scope() -> Result<()> {
     );
     assert!(first["meta"]["as_of"].get("11155111").is_none());
 
-    let replay_at = search_union_at_token_from_meta_as_of(&first)?;
+    let replay_at = first["meta"]["as_of_token"]
+        .as_str()
+        .context("search response must include meta.as_of_token")?;
     let replay = search_payload(&database, &format!("/v2/search?q=alpha&at={replay_at}")).await?;
     assert_eq!(replay["meta"]["as_of"], first["meta"]["as_of"]);
+    assert_eq!(replay["meta"]["as_of_token"], first["meta"]["as_of_token"]);
     assert_eq!(replay["data"], first["data"]);
 
     let rejected =
