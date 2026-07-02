@@ -19,7 +19,7 @@ use super::super::{
 use super::{NameRecords, RecordAnswer, VerifiedRecordLookup};
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
-const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
+pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
 
 pub(crate) fn build_indexed_name_records(
     row: &NameCurrentRow,

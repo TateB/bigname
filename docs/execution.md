@@ -27,17 +27,53 @@ For Basenames on the shipped mainnet profile, the entrypoint is active `basename
 
 ### On-demand execution
 
-`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`, and `GET /v1/names/{namespace}/{name}/records` with verified selectors, are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The profile route does not accept a selector query; it executes every server-derived profile selector from declared inventory selectors, explicit gaps, and record-cache entries for the selected snapshot. If that derived set is non-empty, it is complete for the profile route. The bounded app profile set is used only when a supported declared inventory exists but has no declared selector/gap/cache records; missing, stale, or unsupported inventory does not trigger defaults. The compact records route is the selector-specific app path. Each route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
+`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`,
+`GET /v2/names/{name}?source=verified`,
+`GET /v1/names/{namespace}/{name}/records` with verified selectors, and
+`GET /v2/names/{name}/records` with `source=verified` or verified `auto`
+fallback are cache-or-live-execute reads for supported Universal Resolver
+selectors.[^v1-iur-l44][^v1-iur-l52] The profile routes do not accept a
+selector query; they execute every server-derived profile selector from
+declared inventory selectors, explicit gaps, and record-cache entries for the
+selected snapshot. If that derived set is non-empty, it is complete for the
+profile route. The bounded app profile set is used only when a supported
+declared inventory exists but has no declared selector/gap/cache records;
+missing, stale, or unsupported inventory does not trigger defaults. On the v2
+profile route, the verified outcome populates only resolver-record-backed flat
+fields; registration and identity summary fields remain indexed projection
+values. The compact records routes are the selector-specific app paths. Each
+route first looks for matching persisted execution output at the selected
+exact-name snapshot. On miss, the API performs Universal Resolver execution
+against that selected chain position, persists the trace and outcome, and
+returns the persisted outcome in the same response.
 
 Live-execution rules:
 
-- the execution target is the exact `ChainPositions` selected by the route before any verified-support check; absent `at` and `chain_positions`, this is `consistency=head` and the latest stored checkpoint for the required chain
-- full resolution and explain/audit execution never retarget to provider latest, a newer checkpoint, or a different snapshot mid-request
-- the API Ethereum RPC provider must be configured (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the selected Ethereum block; missing configuration or provider unavailability fails closed with `409 stale` and a configuration message rather than falling back to declared cache
-- unsupported selector families and unsupported verified path classes stay selector-local `status=unsupported`; on-demand execution does not widen the support boundary
+- the execution target is the exact `ChainPositions` selected by the route
+  before any verified-support check; absent `at` and `chain_positions`, this is
+  `consistency=head` and the latest stored checkpoint for the required chain
+- full resolution and explain/audit execution never retarget to provider
+  latest, a newer checkpoint, or a different snapshot mid-request
+- the API Ethereum RPC provider must be configured
+  (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the
+  selected Ethereum block; missing configuration or provider unavailability
+  fails closed rather than falling back to declared cache. `v1` routes surface
+  that as `409 stale`; `v2` product routes keep the successful envelope and
+  report in-band `status=stale` with `failure_reason` on the affected verified
+  record section.
+- unsupported selector families and unsupported verified path classes stay
+  selector-local `status=unsupported`; on-demand execution does not widen the
+  support boundary
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution` is persisted-trace readback only
 
-The compact records route `GET /v1/names/{namespace}/{name}/records` uses the same supported-selector boundary and selected stored snapshot as the full profile route. When it needs on-demand ENS verified values, it executes against that snapshot, persists the trace and outcome, and fails closed with `409 stale` when the provider cannot serve the selected block. It never targets provider `latest` independently of the selected snapshot.
+The compact records routes `GET /v1/names/{namespace}/{name}/records` and
+`GET /v2/names/{name}/records` use the same supported-selector boundary and
+selected stored snapshot as the profile routes. When either route needs
+on-demand ENS verified values, it executes against that snapshot, persists the
+trace and outcome, and fails closed when the provider cannot serve the selected
+block: `v1` returns `409 stale`, while `v2` reports in-band `status=stale` on
+the affected key or flat record. It never targets provider `latest`
+independently of the selected snapshot.
 
 ### Namespace inference
 

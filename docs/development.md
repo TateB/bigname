@@ -85,21 +85,24 @@ head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
 
 ## Live API Execution Configuration
 
-`GET /v1/profiles/names/{name}` in `mode=verified|both`, and
-`GET /v1/names/{namespace}/{name}/records` when it needs verified values, may
-execute supported ENS verified-resolution selectors on demand when matching
-persisted execution output is absent. That live execution uses the selected
-exact-name snapshot: no `at` and no `chain_positions` means `consistency=head`
-and the latest stored Ethereum checkpoint, and the API call targets that
-selected block rather than provider latest.
+`GET /v1/profiles/names/{name}` in `mode=verified|both`,
+`GET /v1/names/{namespace}/{name}/records` when it needs verified values,
+`GET /v2/names/{name}?source=verified`, and `GET /v2/names/{name}/records` in
+`source=verified|auto` may execute supported ENS verified-resolution selectors
+on demand when matching persisted execution output is absent. That live
+execution uses the selected exact-name snapshot: no `at` and no
+`chain_positions` means `consistency=head` and the latest stored Ethereum
+checkpoint, and the API call targets that selected block rather than provider
+latest.
 
 Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
 process before relying on live ENS verified resolution or the ENS/60
 primary-name on-demand reverse/forward RPC fallback. This is separate from
 `BIGNAME_INDEXER_CHAIN_RPC_URLS`, which feeds indexer intake and checkpoint
 state only. If the API Ethereum provider is not configured, supported live ENS
-verified selectors fail closed with `409 stale` and a configuration message
-instead of falling back to declared record cache. For
+verified selectors fail closed instead of falling back to declared record cache:
+v1 returns `409 stale` with a configuration message, while v2 product routes use
+their documented in-band `status=stale`/`failure_reason` envelope. For
 `GET /v1/primary-names/{address}` defaulting to `namespace=ens&coin_type=60`,
 missing provider configuration or provider failure logs a warning and suppresses
 only the route-local fallback; successful fallback misses still return

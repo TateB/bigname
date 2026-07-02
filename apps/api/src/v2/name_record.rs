@@ -1,10 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
-use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
+use axum::Json;
+use axum::extract::{Path, State};
+use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,10 +21,12 @@ use super::{
 
 #[path = "name_record/values.rs"]
 mod values;
+#[path = "name_record/verified.rs"]
+mod verified;
 
 use values::{
     json_address_at_paths, json_chain_id, json_string_at_paths, json_timestamp_at_paths,
-    json_value_present, object_field,
+    json_value_present, object_field, response_chain_id,
 };
 pub(super) use values::{string_field, value_to_string};
 
@@ -77,6 +77,10 @@ pub(crate) struct NameRecord {
     pub(crate) chain_id: Option<u64>,
     pub(crate) network: String,
     pub(crate) status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) unsupported_fields: Vec<String>,
 }
@@ -134,19 +138,19 @@ pub(crate) async fn get_name_record(
                 )
             })?;
     let chain_id = response_chain_id(&selected_snapshot);
-    let mut data = build_name_record(
-        &row,
-        record_inventory.as_ref(),
-        chain_id,
-        if route_source == Source::Verified {
-            Status::Failed
-        } else {
-            Status::Ok
-        },
-    );
-    if route_source == Source::Verified {
-        mark_unserved_verified_fields(&mut data);
-    }
+    let data = match route_source {
+        Source::Indexed => build_name_record(&row, record_inventory.as_ref(), chain_id, Status::Ok),
+        Source::Verified => {
+            verified::build_verified_name_record(
+                &state,
+                &row,
+                record_inventory.as_ref(),
+                chain_id,
+                &selected_snapshot,
+            )
+            .await?
+        }
+    };
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
@@ -176,14 +180,15 @@ pub(crate) fn build_name_record(
         .any(|field| field == "content_hash"))
     .then(|| record_content_hash(record_inventory))
     .flatten();
-    let primary_address = addresses
-        .as_ref()
-        .filter(|_| {
-            !unsupported_fields
-                .iter()
-                .any(|field| field == "primary_address")
-        })
-        .and_then(|addresses| addresses.get("60").cloned());
+    let primary_address = (!unsupported_fields
+        .iter()
+        .any(|field| field == "primary_address"))
+    .then(|| {
+        addresses
+            .as_ref()
+            .and_then(|addresses| addresses.get("60").cloned())
+    })
+    .flatten();
 
     NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
@@ -215,6 +220,8 @@ pub(crate) fn build_name_record(
         chain_id,
         network: network(row),
         status,
+        unsupported_reason: None,
+        failure_reason: None,
         unsupported_fields,
     }
 }
@@ -579,24 +586,6 @@ fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> V
     fields.into_iter().collect()
 }
 
-fn mark_unserved_verified_fields(record: &mut NameRecord) {
-    for field in [
-        "addresses",
-        "content_hash",
-        "primary_address",
-        "text_records",
-    ] {
-        if !record.unsupported_fields.iter().any(|value| value == field) {
-            record.unsupported_fields.push(field.to_owned());
-        }
-    }
-    record.addresses = None;
-    record.text_records = None;
-    record.content_hash = None;
-    record.primary_address = None;
-    record.unsupported_fields.sort();
-}
-
 fn route_source(source: RequestSource) -> V2Result<Source> {
     match source {
         RequestSource::Indexed => Ok(Source::Indexed),
@@ -605,14 +594,6 @@ fn route_source(source: RequestSource) -> V2Result<Source> {
             "source must be one of: indexed, verified",
         )),
     }
-}
-
-fn response_chain_id(selected_snapshot: &SelectedSnapshot) -> Option<u64> {
-    selected_snapshot
-        .chain_positions
-        .as_map()
-        .values()
-        .find_map(|position| super::slug_to_numeric(&position.chain_id))
 }
 
 fn network(row: &NameCurrentRow) -> String {

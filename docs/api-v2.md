@@ -80,7 +80,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
-| `failure_reason` | reason code or short reason string for `failed`, `not_found`, or `mismatch` details | route-specific failure detail fields |
+| `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control` | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
@@ -264,7 +264,8 @@ route:
 Rules:
 
 - `unsupported_reason` is required when `status=unsupported`.
-- `failure_reason` is permitted on `failed`, `not_found`, and `mismatch`.
+- `failure_reason` is permitted on `failed`, `stale`, `not_found`, and
+  `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a
   different value.
 - `completeness` is `full`, `partial`, or `unsupported`.

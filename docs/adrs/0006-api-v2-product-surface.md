@@ -274,6 +274,11 @@ Rules:
   (`GET /v2/diagnostics/names/{name}/records`), not a product-route mode —
   a third top-level member only in one mode would break the one-envelope
   guarantee. No permanently-null required fields.
+- On `GET /v2/names/{name}`, `source=verified` applies to the flat shape's
+  resolver-record-backed fields (`addresses`, `text_records`, `content_hash`,
+  and `primary_address`). Registration and identity summary fields remain the
+  indexed projection values because verified resolution executes record
+  selectors, not registration state.
 - `view` does not exist in `v2`.
 
 The flat record shape (used by `/v2/lookup` detail results, `/v2/names/{name}`,
@@ -284,11 +289,14 @@ name, display_name, namespace, namehash, chain_id, network,
 owner, manager, registrant, expires_at, registered_at, created_at,
 resolver: {chain_id, address}, primary_name, primary_address,
 addresses: {"60": "0x..."}, text_records: {...}, content_hash,
-token_id, registration_id, status, unsupported_fields
+token_id, registration_id, status, unsupported_reason, failure_reason,
+unsupported_fields
 ```
 
-`primary_address` is the reverse-record target for the relevant name — a
-partner-1 required field carried by `v1`'s `IdentityRecord` and kept here.
+`primary_address` is the relevant primary coin-type address from `addresses`
+for the row context — coin type `60` on name-profile reads and the requested
+primary-name coin type on reverse/detail reads. It is a partner-1 required
+field carried by `v1`'s `IdentityRecord` and kept here.
 
 Reverse results add `is_primary` and `relations` (the subset of
 `owner`/`manager`/`registrant` that matched). Optional fields are omitted when
@@ -418,9 +426,9 @@ Rules:
 - One result-status vocabulary everywhere: `ok`, `not_found`, `invalid_name`,
   `mismatch`, `unsupported`, `stale`, `failed`, with `unsupported_reason`
   required when `unsupported` and `failure_reason` permitted on
-  `failed`/`not_found`/`mismatch`. `mismatch` is the verification state where
-  a claimed answer verifies to a different value (claimed-vs-verified primary
-  names) — kept from `v1`, where dropping it would misreport as `not_found`
+  `failed`/`stale`/`not_found`/`mismatch`. `mismatch` is the verification state
+  where a claimed answer verifies to a different value (claimed-vs-verified
+  primary names) — kept from `v1`, where dropping it would misreport as `not_found`
   or `failed`.
 - Error messages must not name internal tables, projections, or sidecars.
 
@@ -444,8 +452,10 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
   Resolver (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
   (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)), and
   on-demand execution on the records/profile/primary-name paths — behind
-  `source=`. Implementation note: v2 `/records` now wires on-demand verified
-  execution behind `source=verified` and verified fallback from `source=auto`.
+  `source=`. Implementation note: v2 `/records` wires on-demand verified
+  execution behind `source=verified` and verified fallback from `source=auto`;
+  v2 `/names/{name}` uses the same verified execution path for its
+  resolver-record-backed flat fields.
 - Explicit unsupported semantics — as `meta.completeness`,
   `unsupported_fields`, and per-item `status`, with the full taxonomy intact on
   diagnostics routes. "Never silent omission" is unchanged.

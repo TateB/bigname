@@ -1,3 +1,4 @@
+use bigname_storage::SelectedSnapshot;
 use serde_json::Value;
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
@@ -9,6 +10,14 @@ pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
         Value::String(value) => value.parse::<u64>().ok().or_else(|| slug_to_numeric(value)),
         _ => None,
     }
+}
+
+pub(super) fn response_chain_id(selected_snapshot: &SelectedSnapshot) -> Option<u64> {
+    selected_snapshot
+        .chain_positions
+        .as_map()
+        .values()
+        .find_map(|position| slug_to_numeric(&position.chain_id))
 }
 
 pub(super) fn object_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {

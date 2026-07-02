@@ -131,11 +131,20 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
 | `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
-| `execution_*` | execution workers; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
+| `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
-The API process is read-only against storage.
+The API process is otherwise read-only against storage.
 
-Within `execution_*`, the only non-execution-worker write owner is synchronous indexer/reorg repair during chain reconciliation. That path may delete or invalidate reusable `execution_cache_outcomes` rows whose dependency set includes an orphaned block identity. It does not write traces, steps, normal outcomes, projections, API state, or manifest state.
+Within `execution_*`, the API may write traces, steps, and normal
+`execution_cache_outcomes` only for documented on-demand verified-resolution
+product routes when a selected-snapshot cache miss is live-executed and
+returned in the same response. That path uses execution persistence and does
+not write projections, API state, manifests, discovery rows, normalized events,
+identity rows, or adapter-owned facts. Synchronous indexer/reorg repair is the
+other non-execution-worker write owner during chain reconciliation. It may
+delete or invalidate reusable `execution_cache_outcomes` rows whose dependency
+set includes an orphaned block identity. It does not write traces, steps,
+normal outcomes, projections, API state, or manifest state.
 
 For identity-row repair, the storage-owned `surface_bindings` update trigger is the bounded non-projection-worker writer for `projection_invalidations`. It enqueues `name_current` and `address_names_current` keys when repair updates change `active_to` or `canonicality_state` for an identity row. The normalized-event upsert repair path has bounded stale-key invalidation exceptions: Basenames primary-claim source repair enqueues both old and repaired `primary_names_current` tuple keys when it rewrites an existing `RecordChanged(name)`/resolver claim observation from the old Basenames reverse-registrar tuple to the ENSv1 Base `L2ReverseRegistrar` tuple; ENSv1 registrar renewal resource repair enqueues old and repaired resource keys for affected resource-keyed projections when it repoints stale renewal/resource events; ENSv1 registry/registrar event-time resource repair enqueues stale and repaired resource keys, or only the non-null key when one side of the repair has no resource anchor; Basenames Base registry `AuthorityTransferred` event-time resource repair enqueues stale and repaired `permissions_current` resource keys under the same nullable-key rule; ENSv1 same-transaction registration setup repair enqueues affected `name_current` and `permissions_current` keys when it repairs a `RegistrationGranted` pre-state and orphans leaked registry-only setup control rows; ENSv1 authority-epoch registry-owner repair updates existing deterministic `AuthorityEpochChanged` after-state rows when replay adds the registry owner field; ENSv1 authority-epoch resolver-boundary repair enqueues affected `record_inventory_current` keys when it repairs deterministic `ResolverChanged` boundary rows; ENSv1 registry resolver before-state repair enqueues affected `record_inventory_current` keys when it repairs anchored `ResolverChanged` before-state rows; and ENSv1 wrapper-token before-state repair updates existing deterministic `TokenControlTransferred` before-state rows when replay replaces a stale pre-wrapper authority kind or stale previous wrapper owner with the current replay-derived value. ENSv1 reverse primary-claim resolver before-state repair has no projection key to invalidate because the repaired row is intentionally unanchored; it records only a normalized-event change. These authority repair paths record normalized-event changes so downstream projections can refresh. Label-preimage insertion is another bounded storage-owned invalidation path: new retained labelhashes enqueue `children_current` keys for known parent surfaces that have historical canonical ENSv1 or Basenames registry child edges using that labelhash, so later projection rebuilds can replace unknown-label placeholders. Read-safe parent `name_surfaces` insertion or refresh also enqueues `children_current` for retained canonical registry child edges under that parent, so child enumeration does not depend on whether the registry edge, label preimage, or parent surface arrived first. `label_preimages` rows are proof-checked by normalizing the candidate label and recomputing the keccak labelhash; once retained, the mapping is durable even if the source event or surface later becomes noncanonical. Canonicality still gates the registry child edge and exact-name surface rows that projections publish. Adapters still write identity rows and normalized events only; they do not write projection rows directly.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^bn-revreg-l12][^bn-revreg-l150]
 
@@ -326,9 +335,19 @@ Inline in Postgres for small payloads:
 
 Large gateway bodies, metadata responses, and trace attachments are not persisted to a separate object store today. Execution may retain digests and trace metadata in Postgres, but adding durable external payload storage would be a migration-bearing storage change.
 
-`execution_traces` and `execution_steps` preserve what was executed and why. Normal `execution_cache_outcomes` writes record whether a verified outcome can be reused under its request key, manifest versions, and block-hash-bearing dependency boundaries. The reorg-invalidation exception above is the only non-execution-worker write path.
+`execution_traces` and `execution_steps` preserve what was executed and why.
+Normal `execution_cache_outcomes` writes record whether a verified outcome can
+be reused under its request key, manifest versions, and block-hash-bearing
+dependency boundaries. The API on-demand route exception and the
+reorg-invalidation exception above are the only non-execution-worker write paths
+for these execution-owned rows.
 
-Exact block-anchored `raw_call_snapshots` used by verified resolution stay in the intake-owned `raw_*` family. Execution may hand off candidate snapshots only through the raw-fact boundary, only for the exact requested chain position, and only for support classes that admit them. `execution_traces`, `execution_steps`, and `execution_cache_outcomes` do not own those rows.
+Exact block-anchored `raw_call_snapshots` used by verified resolution stay in
+the intake-owned `raw_*` family. Execution persistence, including the API
+on-demand route exception, may hand off candidate snapshots only through the
+raw-fact boundary, only for the exact requested chain position, and only for
+support classes that admit them. `execution_traces`, `execution_steps`, and
+`execution_cache_outcomes` do not own those rows.
 
 Before a verified-resolution selector persists as a supported reusable outcome, execution reloads from storage the exact manifest versions for the request, the same declared topology snapshot a mixed route would serve, and any resolver-profile admission state required by participating resolver-local fact families. The frozen support class derives from those stored inputs and matches the persisted trace and cache key. If those inputs are absent or do not re-establish one frozen class, the trace remains a durable audit artifact but the selector does not persist as a supported reusable outcome.
 
@@ -358,11 +377,17 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 - Worker/backfill code owns operational writes to `backfill_*` through those helpers, including finalized catch-up chunk creation and capacity pause/failure metadata.
 - Adapters own inserts into identity and `normalized_events` tables.
 - Projection workers own materialized read models.
-- Execution workers own trace and step writes plus normal cache outcome writes.
+- Execution workers own trace and step writes plus normal cache outcome writes,
+  with the API on-demand verified-resolution product-route exception for
+  selected-snapshot cache misses.
 - Synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes/invalidations tied to orphaned block dependencies.
 - Raw-fact normalized-event replay is indexer-owned orchestration over the adapter-owned `normalized_events` boundary; selected-target replay scopes are operational scan bounds and do not change adapter ownership.
 - Normalized replay cursor and adapter-checkpoint storage is indexer-owned operational state for resuming bounded replay; it does not define canonicality, widen backfill jobs, or change adapter event ownership.
-- Intake owns durable hot raw-fact writes plus optional payload-cache metadata. Replay and inspection tooling may dereference object-backed cache or re-fetch provider payloads only through the digest-checked, fail-closed boundary.
+- Intake owns durable hot raw-fact writes, including admitted exact-block
+  `raw_call_snapshots` handed off by execution persistence, plus optional
+  payload-cache metadata. Replay and inspection tooling may dereference
+  object-backed cache or re-fetch provider payloads only through the
+  digest-checked, fail-closed boundary.
 - API code does not query raw-fact tables directly except for explicit audit endpoints.
 - Canonicality, raw-fact, stored-lineage-range, backfill-job, and execution-trace inspection tooling is worker-owned and read-only over storage audit helpers; none expose public `v1` routes.
 - Manifest drift and proxy alerting tooling is worker-owned observation over `manifest_*`, `discovery_*`, code-hash facts, proxy/implementation edges, and derived watch targets. Its live audit path writes only `manifest_alert_*`; its read-only inspection path renders those observations as operational JSON without writing `normalized_events` or mutating manifest/discovery/projection/API state.

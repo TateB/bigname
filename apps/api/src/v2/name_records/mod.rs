@@ -26,8 +26,8 @@ use super::{
 
 mod build;
 pub(crate) use build::{
-    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
-    indexed_records_requiring_verified_fallback,
+    VERIFIED_NOT_SUPPORTED_REASON, build_auto_name_records, build_indexed_name_records,
+    build_verified_name_records, indexed_records_requiring_verified_fallback,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -218,6 +218,25 @@ pub(crate) async fn load_verified_record_lookup(
     records: &[crate::ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
+    load_verified_record_lookup_for_resource(
+        state,
+        row,
+        record_inventory,
+        records,
+        selected_snapshot,
+        SnapshotReadResource::NameRecords,
+    )
+    .await
+}
+
+pub(crate) async fn load_verified_record_lookup_for_resource(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+    resource: SnapshotReadResource,
+) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_with_persistence(
         state,
         row,
@@ -225,6 +244,7 @@ pub(crate) async fn load_verified_record_lookup(
         records,
         selected_snapshot,
         true,
+        resource,
     )
     .await
 }
@@ -243,6 +263,7 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
         records,
         selected_snapshot,
         false,
+        SnapshotReadResource::NameRecords,
     )
     .await
 }
@@ -288,6 +309,7 @@ async fn load_verified_record_lookup_with_persistence(
     records: &[crate::ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
     persist_execution: bool,
+    resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
         return Ok(None);
@@ -311,7 +333,7 @@ async fn load_verified_record_lookup_with_persistence(
         )),
         Err(error) => Err(api_error_to_v2_for_resource(
             snapshot_selection_api_error(error),
-            SnapshotReadResource::NameRecords,
+            resource,
         )),
     }
 }

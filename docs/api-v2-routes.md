@@ -130,7 +130,8 @@ Field ownership:
 - Tier: product read.
 - Purpose: name profile, using the flat record shape plus registration summary.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `source`.
+  `source`. `source` accepts `indexed` or `verified`; omitting it is identical
+  to `source=indexed`. This profile route does not accept `source=auto`.
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
@@ -140,10 +141,21 @@ Field ownership:
   portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
-  `unsupported_fields` when those fields are served. On a `200` profile,
-  `status` is the flat-record result: `ok` for clean indexed reads; `failed`
-  or `stale` may appear only when `source=verified` cannot serve the verified
-  sections; `not_found` and `invalid_name` are unreachable in-record.
+  `unsupported_reason`/`failure_reason`/`unsupported_fields` when those fields
+  are served. With `source=verified`, the resolver-record-backed fields
+  `addresses`, `text_records`, `content_hash`, and `primary_address` are built
+  from the same persisted-or-on-demand verified execution path used by
+  `/v2/names/{name}/records`; indexed resolver-record values are not substituted
+  into those fields. The registration and identity summary fields
+  (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
+  `registration_status`, `name`, `display_name`, `namespace`, `namehash`,
+  `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
+  projection values because they are not resolver records. On a `200` profile,
+  `status` is the flat-record result: `ok` for clean indexed reads; `failed`,
+  `stale`, or `unsupported` may appear only when `source=verified` cannot serve
+  the verified sections, with `failure_reason` or `unsupported_reason` carrying
+  the product reason when available;
+  `not_found` and `invalid_name` are unreachable in-record.
 - Pagination behavior: none.
 - Status semantics: valid names with no profile return `404 not_found`.
   Invalid path names return `400 invalid_input`.
