@@ -139,6 +139,22 @@ Reth's read-only RocksDB provider can keep thousands of SST files open.
 It uses the host PID/IPC namespaces and bypasses the image's `tini` entrypoint
 so the indexer process owns PID 1; Reth's live MDBX read-only open can fail
 from the default `tini` child process.
+
+The Reth DB reader has an ignored live verification test for code-hash decode
+checks against the local Reth datadir, JSON-RPC `eth_getCode`, and stored
+`raw_code_hashes`. It is not a CI test because it requires the live Ethereum
+Mainnet archive node and bigname storage. The test only reads provider and
+storage data.
+
+```sh
+BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
+BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
+BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@127.0.0.1:5432/bigname \
+cargo test -p bigname-indexer --features reth-db \
+  reth_db_provider_matches_rpc_and_stored_for_live_code_hash_conflict_area \
+  -- --ignored --nocapture
+```
+
 High-volume bootstrap defaults to
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
 hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while

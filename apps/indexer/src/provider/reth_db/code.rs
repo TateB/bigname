@@ -37,7 +37,7 @@ impl RethDbReader {
 
             let code = state
                 .account_code(&parsed)?
-                .map(|bytecode| bytecode.0.bytes_ref().to_vec())
+                .map(|bytecode| bytecode.0.original_bytes().to_vec())
                 .unwrap_or_default();
             let observation = ProviderCodeObservation {
                 address: address_hex(parsed),

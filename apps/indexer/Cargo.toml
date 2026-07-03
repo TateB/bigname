@@ -27,7 +27,7 @@ tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false, features = ["std", "node"], optional = true }
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false, features = ["std", "node"], optional = true }
 
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
