@@ -1,8 +1,11 @@
 use std::hash::Hasher;
 
+use alloy_primitives::keccak256;
 use anyhow::{Result, bail};
 use serde::Serialize;
 use uuid::Uuid;
+
+const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct WatchedContract {
@@ -133,20 +136,85 @@ impl WatchedSourceSelectorPlan {
     }
 
     pub fn source_identity_hash(&self) -> String {
-        let payload = serde_json::to_string(&self.source_identity_payload_without_hash())
+        let payload = serde_json::to_string(&self.source_identity_hash_payload_without_hash())
             .expect("watched source identity payload must be serializable");
         let mut hasher = StableFnv64::default();
         hasher.write(payload.as_bytes());
         format!("fnv1a64:{:016x}", hasher.finish())
     }
 
-    fn source_identity_payload_without_hash(&self) -> serde_json::Value {
+    fn source_identity_hash_payload_without_hash(&self) -> serde_json::Value {
         serde_json::json!({
             "selector_kind": self.selector_kind.as_str(),
             "source_family": self.source_family,
             "requested_watched_targets": self.requested_watched_targets,
             "selected_targets": self.selected_targets,
         })
+    }
+
+    fn source_identity_payload_without_hash(&self) -> serde_json::Value {
+        if self.uses_compact_selected_targets_identity() {
+            return serde_json::json!({
+                "selector_kind": self.selector_kind.as_str(),
+                "source_family": self.source_family,
+                "requested_watched_targets": self.requested_watched_targets,
+                "selected_target_count": self.selected_targets.len(),
+                "selected_targets_digest_algorithm": "keccak256",
+                "selected_targets_digest": selected_targets_digest(&self.selected_targets),
+                "selected_targets_sample": selected_targets_sample(&self.selected_targets),
+                "source_identity_payload_format": "selected_targets_digest_v1",
+            });
+        }
+
+        self.source_identity_hash_payload_without_hash()
+    }
+
+    fn uses_compact_selected_targets_identity(&self) -> bool {
+        self.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain
+            && self.selected_targets.len() > COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    }
+}
+
+fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> serde_json::Value {
+    serde_json::json!({
+        "first": selected_targets.first(),
+        "last": selected_targets.last(),
+    })
+}
+
+fn selected_targets_digest(selected_targets: &[WatchedBackfillTarget]) -> String {
+    let value = serde_json::to_value(selected_targets)
+        .expect("selected target identity digest input is serializable");
+    json_digest(&canonical_json_value(value))
+}
+
+fn json_digest<T>(value: &T) -> String
+where
+    T: Serialize + ?Sized,
+{
+    let payload = serde_json::to_vec(value).expect("source identity digest input is serializable");
+    format!("keccak256:{}", keccak256(payload))
+}
+
+fn canonical_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonical_json_value).collect())
+        }
+        serde_json::Value::Object(fields) => {
+            let mut fields = fields
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json_value(value)))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in fields {
+                sorted.insert(key, value);
+            }
+            serde_json::Value::Object(sorted)
+        }
+        value => value,
     }
 }
 

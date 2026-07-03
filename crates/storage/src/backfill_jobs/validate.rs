@@ -1,5 +1,6 @@
+use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 
 use super::types::{
@@ -115,7 +116,7 @@ pub(super) fn ensure_existing_job_matches_request(
 ) -> Result<()> {
     if existing.deployment_profile != request.deployment_profile
         || existing.chain_id != request.chain_id
-        || existing.source_identity != request.source_identity
+        || !source_identity_matches_request(&existing.source_identity, &request.source_identity)
         || existing.scan_mode != request.scan_mode
         || existing.range_start_block_number != request.range_start_block_number
         || existing.range_end_block_number != request.range_end_block_number
@@ -128,6 +129,102 @@ pub(super) fn ensure_existing_job_matches_request(
     }
 
     Ok(())
+}
+
+fn source_identity_matches_request(existing: &Value, requested: &Value) -> bool {
+    existing == requested
+        || source_identity_compact_full_equivalent(existing, requested)
+        || source_identity_compact_full_equivalent(requested, existing)
+}
+
+fn source_identity_compact_full_equivalent(compact: &Value, full: &Value) -> bool {
+    if compact
+        .get("source_identity_payload_format")
+        .and_then(Value::as_str)
+        != Some("selected_targets_digest_v1")
+    {
+        return false;
+    }
+    if source_identity_hash_field(compact).is_none()
+        || source_identity_hash_field(compact) != source_identity_hash_field(full)
+    {
+        return false;
+    }
+    if compact.get("selector_kind") != full.get("selector_kind")
+        || compact.get("source_family") != full.get("source_family")
+        || compact.get("requested_watched_targets") != full.get("requested_watched_targets")
+    {
+        return false;
+    }
+
+    let Some(selected_targets) = full.get("selected_targets").and_then(Value::as_array) else {
+        return false;
+    };
+    if compact.get("selected_target_count").and_then(Value::as_u64)
+        != Some(selected_targets.len() as u64)
+    {
+        return false;
+    }
+    if compact
+        .get("selected_targets_digest_algorithm")
+        .and_then(Value::as_str)
+        != Some("keccak256")
+    {
+        return false;
+    }
+    let expected_digest = selected_targets_digest(selected_targets);
+    if compact
+        .get("selected_targets_digest")
+        .and_then(Value::as_str)
+        != Some(expected_digest.as_str())
+    {
+        return false;
+    }
+    if let Some(sample) = compact.get("selected_targets_sample") {
+        let expected = json!({
+            "first": selected_targets.first(),
+            "last": selected_targets.last(),
+        });
+        if sample != &expected {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn source_identity_hash_field(source_identity: &Value) -> Option<&str> {
+    source_identity
+        .get("source_identity_hash")
+        .and_then(Value::as_str)
+}
+
+pub(super) fn selected_targets_digest(selected_targets: &[Value]) -> String {
+    let payload = serde_json::to_vec(&canonical_json_value(Value::Array(
+        selected_targets.to_vec(),
+    )))
+    .expect("selected target identity must serialize");
+    format!("keccak256:{}", keccak256(payload))
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json_value).collect()),
+        Value::Object(fields) => {
+            let mut fields = fields
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json_value(value)))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in fields {
+                sorted.insert(key, value);
+            }
+            Value::Object(sorted)
+        }
+        value => value,
+    }
 }
 
 pub(super) fn ensure_existing_ranges_match_specs(

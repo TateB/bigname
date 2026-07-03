@@ -166,6 +166,69 @@ async fn backfill_job_create_is_idempotent_and_rejects_range_widening() -> Resul
 }
 
 #[tokio::test]
+async fn backfill_job_create_accepts_equivalent_compact_source_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let selected_targets = vec![
+        json!({
+            "source_family": "basenames_base_registry",
+            "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+            "address": "0x0000000000000000000000000000000000000001",
+            "effective_from_block": 100,
+            "effective_to_block": 120
+        }),
+        json!({
+            "source_family": "basenames_base_registry",
+            "contract_instance_id": "00000000-0000-0000-0000-000000000002",
+            "address": "0x0000000000000000000000000000000000000002",
+            "effective_from_block": 100,
+            "effective_to_block": 120
+        }),
+    ];
+    let source_identity_hash = "fnv1a64:1111111111111111";
+    let mut request = backfill_job_create("job-create-compact-source-identity");
+    request.source_identity = json!({
+        "selector_kind": "whole_active_watched_chain",
+        "source_family": null,
+        "requested_watched_targets": [],
+        "selected_targets": selected_targets,
+        "source_identity_hash": source_identity_hash,
+    });
+
+    let created = create_backfill_job(database.pool(), &request).await?;
+    let selected_targets = request
+        .source_identity
+        .get("selected_targets")
+        .and_then(serde_json::Value::as_array)
+        .expect("test source identity has selected_targets");
+    let selected_targets_digest = validate::selected_targets_digest(selected_targets);
+    let mut compact = request.clone();
+    compact.source_identity = json!({
+        "selector_kind": "whole_active_watched_chain",
+        "source_family": null,
+        "requested_watched_targets": [],
+        "selected_target_count": selected_targets.len(),
+        "selected_targets_digest_algorithm": "keccak256",
+        "selected_targets_digest": selected_targets_digest,
+        "selected_targets_sample": {
+            "first": selected_targets.first(),
+            "last": selected_targets.last(),
+        },
+        "source_identity_payload_format": "selected_targets_digest_v1",
+        "source_identity_hash": source_identity_hash,
+    });
+
+    let repeated = create_backfill_job(database.pool(), &compact).await?;
+
+    assert_eq!(repeated.job.backfill_job_id, created.job.backfill_job_id);
+    assert_eq!(
+        repeated.job.source_identity, request.source_identity,
+        "existing full source identity must be reused without rewriting"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn backfill_job_reservation_is_idempotent_and_reclaims_expired_leases() -> Result<()> {
     let database = TestDatabase::new().await?;
     let created = create_backfill_job(
