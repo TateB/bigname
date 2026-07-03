@@ -302,6 +302,38 @@ export OBSERVED_BEFORE="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
 #   --observed-from "$OBSERVED_FROM" --observed-before "$OBSERVED_BEFORE"
 ```
 
+Before the supervised Basenames Base registry-only derivation repair, apply
+checked-in migrations and wait for the concurrent `resources` provenance-index
+builds to finish. Do not run the registrar-family EXPLAIN gate or repair until
+both `resources_basenames_registry_authority_key_idx` and
+`resources_basenames_registry_logical_labelhash_idx` are present, ready, and
+valid:
+
+```sql
+WITH expected(index_name) AS (
+    VALUES
+        ('resources_basenames_registry_authority_key_idx'),
+        ('resources_basenames_registry_logical_labelhash_idx')
+)
+SELECT
+    expected.index_name,
+    pg_index.indisready,
+    pg_index.indisvalid
+FROM expected
+LEFT JOIN pg_class
+  ON pg_class.oid = to_regclass(expected.index_name)
+LEFT JOIN pg_index
+  ON pg_index.indexrelid = pg_class.oid;
+```
+
+The archived registrar-family `EXPLAIN (ANALYZE, BUFFERS)` must then show index
+scans on those two indexes for the stale before-key resource proof and the
+current registry-only counterpart lookup. A plan with repeated `resources`
+sequential scans is still a hard stop. For 10k-row preflight batches, run the
+EXPLAIN in a rolled-back transaction; a bounded `SET LOCAL work_mem = '256MB'`
+may be used to keep the materialized proof CTEs in memory, but it is not a
+substitute for the required index scans.
+
 High-volume bootstrap defaults to
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
 hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while
