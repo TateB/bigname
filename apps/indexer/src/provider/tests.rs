@@ -289,7 +289,7 @@ async fn reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_win
 
 #[cfg(feature = "reth-db")]
 #[tokio::test]
-#[ignore = "expected-red until padded raw_code_hash remediation lands; requires live Ethereum Mainnet Reth DB, JSON-RPC, and bigname storage"]
+#[ignore = "post-remediation acceptance; requires live Ethereum Mainnet Reth DB, JSON-RPC, and bigname storage"]
 async fn reth_db_provider_latest_rows_match_consensus() -> Result<()> {
     let datadir = std::env::var("BIGNAME_INDEXER_TEST_RETH_DB_DATADIR").context(
         "BIGNAME_INDEXER_TEST_RETH_DB_DATADIR must point at a local Ethereum Mainnet Reth datadir",
@@ -333,7 +333,7 @@ fn provider_registry_accepts_ethereum_only_rpc_without_base_provider() -> Result
     assert_eq!(registry.configured_chain_count(), 1);
     assert!(registry.provider_for("ethereum-mainnet").is_some());
     assert!(registry.provider_for("base-mainnet").is_none());
-    registry.ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())?;
+    registry.ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])?;
     Ok(())
 }
 
@@ -660,7 +660,7 @@ fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<
     ])?;
 
     let error = registry
-        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())
+        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])
         .expect_err("out-of-profile provider must be rejected");
 
     assert!(
@@ -1494,6 +1494,164 @@ async fn json_rpc_provider_fetches_code_observations_by_block_number() -> Result
                 "0x2a".to_owned(),
             ),
         ]
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_fetches_code_hash_proofs_by_block_hash() -> Result<()> {
+    let block_hash = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let address_one = "0x1111111111111111111111111111111111111111";
+    let address_two = "0x2222222222222222222222222222222222222222";
+    let hash_one = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let hash_two = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&requests);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let Some(batch) = body.as_array() else {
+            panic!("expected batched eth_getProof request: {body}");
+        };
+        assert_eq!(batch.len(), 2);
+        let mut responses = Vec::new();
+        for call in batch {
+            let method = call
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let params = call
+                .get("params")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let address = params
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let block = params.get(2).cloned().unwrap_or(Value::Null);
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push((method.to_owned(), address.clone(), block.clone()));
+
+            let code_hash = match (method, address.as_str()) {
+                ("eth_getProof", "0x1111111111111111111111111111111111111111") => hash_one,
+                ("eth_getProof", "0x2222222222222222222222222222222222222222") => hash_two,
+                _ => panic!("unexpected RPC request: {body}"),
+            };
+            responses.push(json!({
+                "jsonrpc": "2.0",
+                "id": call.get("id").cloned().unwrap_or(Value::Number(1.into())),
+                "result": {
+                    "address": address,
+                    "balance": "0x0",
+                    "codeHash": code_hash,
+                    "nonce": "0x0",
+                    "storageHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "accountProof": [],
+                    "storageProof": []
+                }
+            }));
+        }
+        Value::Array(responses)
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let proofs = provider
+        .fetch_code_hash_proofs_at_block_hashes(&[ProviderBlockCodeHashProofRequest {
+            block_hash: block_hash.to_owned(),
+            addresses: vec![
+                address_one.to_owned(),
+                address_two.to_owned(),
+                address_one.to_ascii_uppercase(),
+            ],
+        }])
+        .await?;
+
+    assert_eq!(
+        proofs,
+        vec![ProviderBlockCodeHashProofs {
+            block_hash: block_hash.to_ascii_lowercase(),
+            proofs: vec![
+                ProviderCodeHashProof {
+                    address: address_one.to_owned(),
+                    code_hash: hash_one.to_owned(),
+                },
+                ProviderCodeHashProof {
+                    address: address_two.to_owned(),
+                    code_hash: hash_two.to_owned(),
+                },
+                ProviderCodeHashProof {
+                    address: address_one.to_owned(),
+                    code_hash: hash_one.to_owned(),
+                },
+            ],
+        }]
+    );
+
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "eth_getProof");
+    assert_eq!(requests[0].1, address_one);
+    assert_eq!(
+        requests[0].2,
+        json!({ "blockHash": block_hash.to_ascii_lowercase() })
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_rejects_mismatched_code_hash_proof_address() -> Result<()> {
+    let block_hash = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let requested_address = "0x1111111111111111111111111111111111111111";
+    let returned_address = "0x2222222222222222222222222222222222222222";
+    let code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let Some(batch) = body.as_array() else {
+            panic!("expected batched eth_getProof request: {body}");
+        };
+        assert_eq!(batch.len(), 1);
+        let call = &batch[0];
+        Value::Array(vec![json!({
+            "jsonrpc": "2.0",
+            "id": call.get("id").cloned().unwrap_or(Value::Number(1.into())),
+            "result": {
+                "address": returned_address,
+                "balance": "0x0",
+                "codeHash": code_hash,
+                "nonce": "0x0",
+                "storageHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "accountProof": [],
+                "storageProof": []
+            }
+        })])
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let error = provider
+        .fetch_code_hash_proofs_at_block_hashes(&[ProviderBlockCodeHashProofRequest {
+            block_hash: block_hash.to_owned(),
+            addresses: vec![requested_address.to_owned()],
+        }])
+        .await
+        .expect_err("mismatched proof address must be rejected");
+
+    assert!(
+        error.to_string().contains(
+            "provider proof address 0x2222222222222222222222222222222222222222 does not match requested address 0x1111111111111111111111111111111111111111"
+        ),
+        "unexpected error: {error:#}"
     );
 
     server.abort();

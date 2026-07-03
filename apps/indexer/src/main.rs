@@ -80,6 +80,7 @@ use reconciliation::*;
 use repair::{
     EnsV1TextRecordRepairConfig, NameSurfaceNormalizationRepairConfig,
     repair_ens_v1_text_records_from_provider, repair_name_surface_normalization,
+    repair_raw_code_hashes_command,
 };
 pub(crate) use replay::{
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
@@ -418,6 +419,7 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
             );
             Ok(())
         }
+        RepairCommand::RawCodeHashes(args) => repair_raw_code_hashes_command(args).await,
     }
 }
 

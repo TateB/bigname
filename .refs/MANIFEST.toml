@@ -99,8 +99,8 @@ authoritative_for = [
 
 [refs.reth]
 repo = "https://github.com/paradigmxyz/reth"
-commit = "194ece23c3e9b03a26042ea887246d359e4fc47e"
-purpose = "Reference Ethereum execution client. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check node-level block identity, canonical state, finalized/safe tags, and RPC behavior."
+commit = "88505c7fcbfdebfd3b56d88c86b62e950043c6c4"
+purpose = "Reference Ethereum execution client. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check node-level block identity, canonical state, finalized/safe tags, RPC behavior, and the Reth DB reader dependency pinned by apps/indexer."
 authoritative_for = [
   "cross-check scope for block-hash-first intake and RPC block selection in docs/chain-intake.md",
   "comparison source for execution-client storage and canonical head behavior",

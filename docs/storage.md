@@ -10,6 +10,73 @@ Persistence boundaries for raw facts, identity, normalized events, projections, 
 - Execution traces and steps are durable audit artifacts; cache outcomes are reusable only while their dependencies remain canonical.
 - One write owner per storage family.
 
+## Corrections
+
+Raw-fact corrections are explicit, auditable events. They are not normal replay,
+do not weaken the default immutability rule, and must name the corrupted field
+set, cause, proof source, rewrite owner, acceptance checks, and ratification
+record in this section before or with the tool that applies them. A correction
+tool must be idempotent, resumable, fail closed on verification disagreement,
+and update only the ratified fields. Any wider rewrite requirement is a new
+doc-first storage task.
+
+### 2026-07-03 raw code-hash padding correction
+
+The maintainer ratified option (a), re-derive and rewrite, on 2026-07-03 for
+the padded `raw_code_hashes` corpus written by the pre-#21 Reth DB code reader.
+The audited bigname bug used the padded/analyzed bytecode view (`bytes_ref()`)
+instead of the original deployed bytecode path, while the pinned Reth RPC
+account-code path reads `.original_bytes()` for account bytecode
+`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/helpers/state.rs:L237 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/helpers/state.rs:L244 @ reth@88505c7)`.
+The corrupted rows therefore carried deterministic `code_hash` and
+`code_byte_length` values that were 1 to 19 bytes longer than the consensus
+bytecode for affected observations.
+
+The live audit measured 3,736,298 padded-corrupt rows, 94.7% of the audited
+corpus, and 208,320 already-correct rows. The corrupt writes span
+2026-05-01 through 2026-07-03 by `raw_code_hashes.observed_at`. For the affected
+rows, the live `eth_getProof` consensus `codeHash` agreed with the value
+derived from the original-bytecode reader, not with the padded stored value.
+Pinned Reth serves `eth_getProof` and populates the EIP-1186 response
+`code_hash` from the account bytecode hash
+`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L900 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L908 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L733 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L736 @ reth@88505c7)`.
+
+The correction scope is limited to `raw_code_hashes.code_hash` and
+`raw_code_hashes.code_byte_length`. It does not alter `raw_code_hash_id`,
+`chain_id`, `block_hash`, `block_number`, `contract_address`,
+`canonicality_state`, `observed_at`, any other raw-fact table, normalized
+events, projections, manifests, discovery rows, execution artifacts, or service
+configuration. The implementation owner is the indexer repair tooling invoking
+storage-owned guarded update helpers for this raw-fact family.
+
+The approved method is:
+
+1. Select the ratified observed-at window and re-derive each selected
+   `(chain_id, block_hash, contract_address)` from the v2.2.0 Reth DB reader
+   that uses `original_bytes()`.
+2. Classify correction candidates by direct comparison between the stored value
+   and the re-derived `(code_hash, code_byte_length)`, not by padding-length
+   heuristics.
+3. Refuse the run if a re-derived hash falls outside the stored variant family
+   for an address that already has multiple stored variants.
+4. Verify a substantive JSON-RPC sample before any write: at least 1% of
+   selected rows, every distinct address at least once, and all mandatory
+   out-of-family findings if any exist. The sample compares the Reth-derived
+   hash to `eth_getProof` for the same block hash and address.
+5. Rewrite only `code_hash` and `code_byte_length` in guarded batched
+   transactions. Each batch logs a correction-event line with row counts and
+   block range. A rerun skips already-correct rows.
+
+The post-run acceptance checks are node-dependent and are not CI gates. The
+supervised operations run must finish with zero RPC verification disagreements,
+zero unexpected variant rows, a dry-run census of zero remaining rows to
+correct for the ratified window, and the env-widened live verification test
+green table-wide, including `reth_db_provider_latest_rows_match_consensus`.
+
 ## Storage layers
 
 The system of record splits into six layers.

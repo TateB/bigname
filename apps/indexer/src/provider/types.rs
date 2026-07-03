@@ -26,6 +26,12 @@ pub struct ProviderBlockCodeObservationRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBlockCodeHashProofRequest {
+    pub block_hash: String,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderTransactionReceiptRequest {
     pub transaction_hash: String,
     pub block_hash: String,
@@ -51,6 +57,18 @@ pub struct ProviderBlockLogRequest {
 pub struct ProviderBlockCodeObservations {
     pub block_hash: String,
     pub observations: Vec<ProviderCodeObservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBlockCodeHashProofs {
+    pub block_hash: String,
+    pub proofs: Vec<ProviderCodeHashProof>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCodeHashProof {
+    pub address: String,
+    pub code_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

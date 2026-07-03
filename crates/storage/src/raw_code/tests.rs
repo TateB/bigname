@@ -223,3 +223,137 @@ async fn raw_code_hash_count_lookup_groups_by_block() -> Result<()> {
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn raw_code_hash_correction_updates_only_hash_and_length() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash("0x0001", CanonicalityState::Canonical)],
+    )
+    .await?;
+    let row_id = sqlx::query_scalar::<_, i64>(
+        "SELECT raw_code_hash_id FROM raw_code_hashes WHERE contract_address = '0x0001'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let before = sqlx::query_as::<_, (String, i64, String, sqlx::types::time::OffsetDateTime)>(
+        r#"
+        SELECT
+            code_hash,
+            code_byte_length,
+            canonicality_state::TEXT,
+            observed_at
+        FROM raw_code_hashes
+        WHERE raw_code_hash_id = $1
+        "#,
+    )
+    .bind(row_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    let outcome = apply_raw_code_hash_corrections(
+        database.pool(),
+        &[RawCodeHashCorrectionUpdate {
+            raw_code_hash_id: row_id,
+            stored_code_hash: "0x1234".to_owned(),
+            stored_code_byte_length: 32,
+            corrected_code_hash: "0xabcd".to_owned(),
+            corrected_code_byte_length: 17,
+        }],
+    )
+    .await?;
+
+    assert_eq!(
+        outcome,
+        RawCodeHashCorrectionBatchOutcome {
+            requested_count: 1,
+            corrected_count: 1,
+            already_correct_count: 0,
+        }
+    );
+    let after = sqlx::query_as::<_, (String, i64, String, sqlx::types::time::OffsetDateTime)>(
+        r#"
+        SELECT
+            code_hash,
+            code_byte_length,
+            canonicality_state::TEXT,
+            observed_at
+        FROM raw_code_hashes
+        WHERE raw_code_hash_id = $1
+        "#,
+    )
+    .bind(row_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(before.0, "0x1234");
+    assert_eq!(after.0, "0xabcd");
+    assert_eq!(after.1, 17);
+    assert_eq!(after.2, before.2);
+    assert_eq!(after.3, before.3);
+
+    let rerun = apply_raw_code_hash_corrections(
+        database.pool(),
+        &[RawCodeHashCorrectionUpdate {
+            raw_code_hash_id: row_id,
+            stored_code_hash: "0x1234".to_owned(),
+            stored_code_byte_length: 32,
+            corrected_code_hash: "0xabcd".to_owned(),
+            corrected_code_byte_length: 17,
+        }],
+    )
+    .await?;
+
+    assert_eq!(
+        rerun,
+        RawCodeHashCorrectionBatchOutcome {
+            requested_count: 1,
+            corrected_count: 0,
+            already_correct_count: 1,
+        }
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_code_hash_correction_refuses_conflicting_current_value() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash("0x0001", CanonicalityState::Canonical)],
+    )
+    .await?;
+    let row_id = sqlx::query_scalar::<_, i64>(
+        "SELECT raw_code_hash_id FROM raw_code_hashes WHERE contract_address = '0x0001'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query("UPDATE raw_code_hashes SET code_hash = '0xbeef' WHERE raw_code_hash_id = $1")
+        .bind(row_id)
+        .execute(database.pool())
+        .await?;
+
+    let error = apply_raw_code_hash_corrections(
+        database.pool(),
+        &[RawCodeHashCorrectionUpdate {
+            raw_code_hash_id: row_id,
+            stored_code_hash: "0x1234".to_owned(),
+            stored_code_byte_length: 32,
+            corrected_code_hash: "0xabcd".to_owned(),
+            corrected_code_byte_length: 17,
+        }],
+    )
+    .await
+    .expect_err("conflicting current value must fail closed");
+
+    assert!(
+        error.to_string().contains("1 conflicting rows"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}

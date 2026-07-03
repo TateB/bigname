@@ -17,6 +17,7 @@ mod decode;
 mod logs_receipts;
 mod ops;
 mod payload_cache;
+mod proof;
 mod request;
 mod reth_db;
 mod transaction_receipts;
@@ -27,11 +28,12 @@ pub use reth_db::RethDbProvider;
 pub use types::ProviderBlockTag;
 use types::ProviderHeadHashSnapshot;
 pub use types::{
-    ProviderBlock, ProviderBlockBundle, ProviderBlockCodeObservationRequest,
+    ProviderBlock, ProviderBlockBundle, ProviderBlockCodeHashProofRequest,
+    ProviderBlockCodeHashProofs, ProviderBlockCodeObservationRequest,
     ProviderBlockCodeObservations, ProviderBlockLogRequest, ProviderBlockSelection,
-    ProviderCodeObservation, ProviderHeadSnapshot, ProviderLog, ProviderRawPayloadCacheMetadata,
-    ProviderReceipt, ProviderResolvedBlock, ProviderTransaction, ProviderTransactionReceiptBundle,
-    ProviderTransactionReceiptRequest,
+    ProviderCodeHashProof, ProviderCodeObservation, ProviderHeadSnapshot, ProviderLog,
+    ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderResolvedBlock, ProviderTransaction,
+    ProviderTransactionReceiptBundle, ProviderTransactionReceiptRequest,
 };
 
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";

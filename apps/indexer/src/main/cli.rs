@@ -26,6 +26,11 @@ use crate::ops_catchup::{
 use crate::repair::{
     DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS, DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE,
     DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE,
+    DEFAULT_RAW_CODE_HASH_CORRECTION_PAGE_SIZE,
+    DEFAULT_RAW_CODE_HASH_CORRECTION_RPC_SAMPLE_PERCENT,
+    DEFAULT_RAW_CODE_HASH_CORRECTION_WRITE_BATCH_SIZE,
+    RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_BEFORE,
+    RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_FROM,
 };
 
 #[derive(Parser, Debug)]
@@ -422,6 +427,7 @@ pub(crate) enum ReplayCommand {
 pub(crate) enum RepairCommand {
     EnsV1TextRecords(RepairEnsV1TextRecordsArgs),
     NameSurfaceNormalization(RepairNameSurfaceNormalizationArgs),
+    RawCodeHashes(RepairRawCodeHashesArgs),
 }
 
 #[derive(Args, Debug)]
@@ -494,4 +500,48 @@ pub(crate) struct RepairNameSurfaceNormalizationArgs {
     pub(crate) apply_compatible: bool,
     #[arg(long)]
     pub(crate) record_findings: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RepairRawCodeHashesArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) chain: String,
+    #[arg(
+        long = "chain-reth-db-source",
+        env = "BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RETH_DB_SOURCE",
+        value_name = "CHAIN=DATADIR"
+    )]
+    pub(crate) chain_reth_db_source: String,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RPC_URL",
+        value_name = "CHAIN=URL"
+    )]
+    pub(crate) chain_rpc_url: String,
+    #[arg(
+        long = "observed-from",
+        default_value = RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_FROM
+    )]
+    pub(crate) observed_from: String,
+    #[arg(
+        long = "observed-before",
+        default_value = RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_BEFORE
+    )]
+    pub(crate) observed_before: String,
+    #[arg(long = "page-size", default_value_t = DEFAULT_RAW_CODE_HASH_CORRECTION_PAGE_SIZE)]
+    pub(crate) page_size: i64,
+    #[arg(
+        long = "write-batch-size",
+        default_value_t = DEFAULT_RAW_CODE_HASH_CORRECTION_WRITE_BATCH_SIZE
+    )]
+    pub(crate) write_batch_size: usize,
+    #[arg(
+        long = "rpc-sample-percent",
+        default_value_t = DEFAULT_RAW_CODE_HASH_CORRECTION_RPC_SAMPLE_PERCENT
+    )]
+    pub(crate) rpc_sample_percent: f64,
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }

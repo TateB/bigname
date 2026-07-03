@@ -15,7 +15,7 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_app_v3` | `ensdomains/ens-app-v3` | `71758582` | ENS app known resolver metadata |
 | `ponder` | `ponder-sh/ponder` | `c8f6935f` | Reference EVM indexer framework |
 | `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
-| `reth` | `paradigmxyz/reth` | `194ece23` | Reference Ethereum execution client |
+| `reth` | `paradigmxyz/reth` | `88505c7f` | Reference Ethereum execution client |
 
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 

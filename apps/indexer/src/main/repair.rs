@@ -14,6 +14,8 @@ use crate::{
 
 #[path = "repair/name_surface_normalization.rs"]
 mod name_surface_normalization;
+#[path = "repair/raw_code_hashes.rs"]
+mod raw_code_hashes;
 
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS: i64 = 5_000;
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE: i64 = 10_000;
@@ -21,6 +23,13 @@ pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE: i64 = 10_000;
 pub(crate) use name_surface_normalization::{
     DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE, NameSurfaceNormalizationRepairConfig,
     repair_name_surface_normalization,
+};
+pub(crate) use raw_code_hashes::{
+    DEFAULT_RAW_CODE_HASH_CORRECTION_PAGE_SIZE,
+    DEFAULT_RAW_CODE_HASH_CORRECTION_RPC_SAMPLE_PERCENT,
+    DEFAULT_RAW_CODE_HASH_CORRECTION_WRITE_BATCH_SIZE,
+    RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_BEFORE,
+    RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_FROM, repair_raw_code_hashes_command,
 };
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";

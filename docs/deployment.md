@@ -147,12 +147,13 @@ Mainnet archive node and bigname storage. These tests only read provider and
 storage data. The green windowed test defaults to the 688-row known-correct
 island sample and is overrideable with comma-separated block numbers in
 `BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS`. The latest-row-per-watched
-address check is expected-red until the padded `raw_code_hashes` remediation
-lands; the full-table audit is outside this harness and is also known to fail
-pending that remediation. Local observation, not an upstream Reth guarantee: on
-this host, fresh read-only verifier opens have lagged the node persistence
-horizon by roughly 1-1.5k blocks, so near-head compare blocks can fail
-spuriously.
+address check is the post-remediation acceptance gate for the supervised padded
+`raw_code_hashes` correction run; before that run, failures reflect the known
+padded corpus rather than a new reader regression. The full-table audit is
+outside this harness and must also be green after remediation. Local observation,
+not an upstream Reth guarantee: on this host, fresh read-only verifier opens have
+lagged the node persistence horizon by roughly 1-1.5k blocks, so near-head
+compare blocks can fail spuriously.
 
 ```sh
 BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS=25287255,25287268 \
@@ -164,8 +165,8 @@ cargo test -p bigname-indexer --features reth-db \
   -- --ignored --nocapture
 ```
 
-The expected-red latest-row check uses the same three live inputs and should
-only pass after the padded-row remediation:
+The post-remediation latest-row check uses the same three live inputs and must
+pass after the padded-row remediation:
 
 ```sh
 BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
@@ -175,6 +176,25 @@ cargo test -p bigname-indexer --features reth-db \
   reth_db_provider_latest_rows_match_consensus \
   -- --ignored --nocapture
 ```
+
+The supervised correction run itself is a two-step operator action. First run a
+dry-run census against the live bigname database, Reth archive datadir, and
+JSON-RPC endpoint:
+
+```sh
+BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RETH_DB_SOURCE=ethereum-mainnet=/var/lib/reth \
+BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RPC_URL=ethereum-mainnet=http://127.0.0.1:8545 \
+bigname-indexer repair raw-code-hashes \
+  --database-url postgres://bigname:bigname@127.0.0.1:5432/bigname \
+  --chain ethereum-mainnet \
+  --dry-run
+```
+
+After the dry-run census matches the ratified correction scope, rerun the same
+command without `--dry-run`. The command verifies its RPC sample before writing
+and rewrites only `raw_code_hashes.code_hash` and
+`raw_code_hashes.code_byte_length` in guarded batches. This repository change
+ships the tool and record only; it does not execute the supervised correction.
 
 High-volume bootstrap defaults to
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,

@@ -198,7 +198,11 @@ pub use raw_children::{
     upsert_raw_transactions_without_snapshots,
 };
 pub use raw_code::{
-    RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
+    RawCodeHash, RawCodeHashAddressVariant, RawCodeHashCorrectionBatchOutcome,
+    RawCodeHashCorrectionCandidate, RawCodeHashCorrectionUpdate, apply_raw_code_hash_corrections,
+    count_raw_code_hash_correction_candidates, load_raw_code_hash_address_variants,
+    load_raw_code_hash_correction_page, load_raw_code_hash_counts_by_block_hashes,
+    upsert_raw_code_hashes,
 };
 pub use raw_payload_cache::{
     RawPayloadCacheDigestVerification, RawPayloadCacheMetadata, RawPayloadCacheMetadataUpsert,
