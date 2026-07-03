@@ -20,6 +20,7 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
     let mut block_hashes = Vec::new();
     let mut transaction_hashes = Vec::new();
     let mut log_indexes = Vec::new();
+    let mut event_kinds = Vec::new();
 
     for event in events {
         let Some(existing) = existing_by_identity.get(&event.event_identity) else {
@@ -63,6 +64,7 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
         block_hashes.push(block_hash.clone());
         transaction_hashes.push(transaction_hash.clone());
         log_indexes.push(log_index);
+        event_kinds.push(event.event_kind.clone());
     }
 
     if event_identities.is_empty() {
@@ -81,7 +83,8 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 $5::TEXT[],
                 $6::TEXT[],
                 $7::TEXT[],
-                $8::BIGINT[]
+                $8::BIGINT[],
+                $9::TEXT[]
             ) AS input(
                 event_identity,
                 old_before_state,
@@ -90,27 +93,134 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 logical_name_id,
                 block_hash,
                 transaction_hash,
-                registration_log_index
+                registration_log_index,
+                event_kind
+            )
+        ),
+        verified_registration AS (
+            SELECT
+                input.*,
+                event.normalized_event_id,
+                event.namespace,
+                event.chain_id,
+                event.source_family,
+                event.resource_id,
+                event.canonicality_state
+            FROM input
+            JOIN normalized_events event
+              ON event.event_identity = input.event_identity
+             AND event.resource_id = input.registrar_resource_id
+             AND event.logical_name_id = input.logical_name_id
+             AND event.block_hash = input.block_hash
+             AND event.transaction_hash = input.transaction_hash
+             AND event.log_index = input.registration_log_index
+             AND event.event_kind = input.event_kind
+             AND event.derivation_kind = 'ens_v1_unwrapped_authority'
+              AND event.before_state IS NOT DISTINCT FROM input.old_before_state::JSONB
+              AND event.after_state->>'authority_kind' = 'registrar'
+              AND COALESCE(event.after_state->>'authority_key', '') <> ''
+              AND COALESCE(event.after_state->>'labelhash', '') <> ''
+            JOIN resources registrar_resource
+              ON registrar_resource.resource_id = event.resource_id
+             AND registrar_resource.chain_id = event.chain_id
+             AND registrar_resource.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+             AND registrar_resource.provenance->>'authority_kind' = 'registrar'
+             AND registrar_resource.provenance->>'logical_name_id' = event.logical_name_id
+             AND registrar_resource.provenance->>'authority_key' =
+                 event.after_state->>'authority_key'
+             AND lower(registrar_resource.provenance->>'labelhash') =
+                 lower(event.after_state->>'labelhash')
+            LEFT JOIN resources legacy_registry_resource
+              ON legacy_registry_resource.chain_id = event.chain_id
+             AND legacy_registry_resource.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+             AND legacy_registry_resource.provenance->>'authority_kind' = 'registry_only'
+             AND legacy_registry_resource.provenance->>'logical_name_id' =
+                 event.logical_name_id
+             AND lower(legacy_registry_resource.provenance->>'labelhash') =
+                 lower(event.after_state->>'labelhash')
+             AND COALESCE(legacy_registry_resource.provenance->>'labelhash', '') <> ''
+             AND legacy_registry_resource.provenance->>'authority_key' = concat(
+                 'registry-only:',
+                 legacy_registry_resource.chain_id,
+                 ':',
+                 legacy_registry_resource.provenance->>'labelhash'
+             )
+            LEFT JOIN resources current_registry_resource
+              ON current_registry_resource.chain_id = event.chain_id
+             AND current_registry_resource.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+             AND current_registry_resource.provenance->>'authority_kind' = 'registry_only'
+             AND current_registry_resource.provenance->>'logical_name_id' =
+                 event.logical_name_id
+             AND lower(current_registry_resource.provenance->>'labelhash') =
+                 lower(event.after_state->>'labelhash')
+             AND COALESCE(current_registry_resource.provenance->>'namehash', '') <> ''
+             AND current_registry_resource.provenance->>'authority_key' = concat(
+                 'registry-only:',
+                 current_registry_resource.chain_id,
+                 ':',
+                 current_registry_resource.provenance->>'namehash'
+             )
+            WHERE (
+                    event.namespace = 'ens'
+                AND event.chain_id = 'ethereum-mainnet'
+                AND event.source_family = 'ens_v1_registrar_l1'
+                AND input.event_kind = 'RegistrationGranted'
+                AND input.old_before_state::JSONB->>'authority_kind' = 'registry_only'
+                AND input.new_before_state::JSONB->>'authority_kind' IS NULL
+                AND COALESCE(input.new_before_state::JSONB->>'authority_key', '') = ''
+            )
+               OR (
+                    event.namespace = 'basenames'
+                AND event.chain_id = 'base-mainnet'
+                AND event.source_family = 'basenames_base_registrar'
+                AND input.event_kind = 'RegistrationGranted'
+                AND legacy_registry_resource.resource_id IS NOT NULL
+                AND input.old_before_state::JSONB->>'authority_key' =
+                    legacy_registry_resource.provenance->>'authority_key'
+                AND (
+                    (
+                        input.new_before_state::JSONB->>'authority_kind' IS NULL
+                        AND COALESCE(input.new_before_state::JSONB->>'authority_key', '') = ''
+                    )
+                    OR (
+                        input.new_before_state::JSONB->>'authority_kind' = 'registry_only'
+                        AND current_registry_resource.resource_id IS NOT NULL
+                        AND input.new_before_state::JSONB->>'authority_key' =
+                            current_registry_resource.provenance->>'authority_key'
+                    )
+                )
             )
         ),
         updated_registration AS (
             UPDATE normalized_events event
             SET
-                before_state = input.new_before_state::JSONB,
+                before_state = registration.new_before_state::JSONB,
                 observed_at = now()
-            FROM input
-            WHERE event.event_identity = input.event_identity
-              AND event.resource_id = input.registrar_resource_id
-              AND event.before_state IS NOT DISTINCT FROM input.old_before_state::JSONB
+            FROM verified_registration registration
+            WHERE event.normalized_event_id = registration.normalized_event_id
             RETURNING
                 event.event_identity,
                 event.normalized_event_id,
+                registration.namespace,
+                registration.chain_id,
                 event.logical_name_id,
                 event.resource_id,
                 event.canonicality_state,
-                input.block_hash,
-                input.transaction_hash,
-                input.registration_log_index
+                registration.block_hash,
+                registration.transaction_hash,
+                registration.registration_log_index
         ),
         stale_setup_events AS (
             SELECT
@@ -120,7 +230,8 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 stale.canonicality_state
             FROM updated_registration registration
             JOIN normalized_events stale
-              ON stale.namespace = 'ens'
+              ON stale.namespace = registration.namespace
+             AND stale.chain_id = registration.chain_id
              AND stale.derivation_kind = 'ens_v1_unwrapped_authority'
              AND stale.logical_name_id = registration.logical_name_id
              AND stale.resource_id <> registration.resource_id
@@ -129,10 +240,23 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                  'canonical'::canonicality_state,
                  'safe'::canonicality_state,
                  'finalized'::canonicality_state
-             )
+            )
             JOIN resources stale_resource
               ON stale_resource.resource_id = stale.resource_id
+             AND stale_resource.chain_id = registration.chain_id
              AND stale_resource.provenance->>'authority_kind' = 'registry_only'
+             AND (
+                    registration.namespace = 'ens'
+                 OR (
+                        registration.namespace = 'basenames'
+                    AND stale_resource.provenance->>'authority_key' = concat(
+                        'registry-only:',
+                        stale_resource.chain_id,
+                        ':',
+                        stale_resource.provenance->>'labelhash'
+                    )
+                 )
+             )
             WHERE (
                     stale.transaction_hash = registration.transaction_hash
                 AND stale.log_index IS NOT NULL
@@ -293,11 +417,25 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
     .bind(&block_hashes)
     .bind(&transaction_hashes)
     .bind(&log_indexes)
+    .bind(&event_kinds)
     .fetch_all(&mut **executor)
     .await
     .context("failed to repair ENSv1 same-transaction registration setup before_state")?;
 
-    Ok(repaired.into_iter().collect())
+    let repaired = repaired.into_iter().collect::<HashSet<_>>();
+    let rejected = event_identities
+        .iter()
+        .filter(|event_identity| !repaired.contains(event_identity.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !rejected.is_empty() {
+        anyhow::bail!(
+            "ENSv1 same-transaction registration setup before_state repair rejected invalid anchors for events: {}",
+            rejected.join(", ")
+        );
+    }
+
+    Ok(repaired)
 }
 
 pub(crate) fn ens_v1_same_tx_registration_setup_before_state_repair_allowed(
@@ -308,10 +446,21 @@ pub(crate) fn ens_v1_same_tx_registration_setup_before_state_repair_allowed(
     if !matches!(differing_fields, ["before_state"]) {
         return false;
     }
-    if existing.namespace != "ens"
-        || existing.chain_id.as_deref() != Some("ethereum-mainnet")
-        || existing.derivation_kind != "ens_v1_unwrapped_authority"
-        || existing.source_family != "ens_v1_registrar_l1"
+    let source_allowed = matches!(
+        (
+            existing.namespace.as_str(),
+            existing.chain_id.as_deref(),
+            existing.source_family.as_str(),
+        ),
+        ("ens", Some("ethereum-mainnet"), "ens_v1_registrar_l1")
+            | (
+                "basenames",
+                Some("base-mainnet"),
+                "basenames_base_registrar"
+            )
+    );
+    if existing.derivation_kind != "ens_v1_unwrapped_authority"
+        || !source_allowed
         || existing.event_kind != "RegistrationGranted"
         || existing.logical_name_id != incoming.logical_name_id
         || existing.resource_id != incoming.resource_id
@@ -323,23 +472,86 @@ pub(crate) fn ens_v1_same_tx_registration_setup_before_state_repair_allowed(
         return false;
     }
 
-    before_state_without_authority_kind(&existing.before_state)
-        == before_state_without_authority_kind(&incoming.before_state)
+    before_state_without_authority(&existing.before_state)
+        == before_state_without_authority(&incoming.before_state)
         && existing
             .before_state
             .get("authority_kind")
             .and_then(Value::as_str)
             == Some("registry_only")
-        && incoming
-            .before_state
-            .get("authority_kind")
-            .is_none_or(Value::is_null)
+        && incoming_authority_shape_allowed(
+            incoming.namespace.as_str(),
+            incoming.chain_id.as_deref(),
+            &incoming.before_state,
+        )
+        && registry_only_authority_key_shape_allowed(
+            existing.chain_id.as_deref(),
+            &existing.before_state,
+        )
+        && registry_only_authority_key_shape_allowed(
+            incoming.chain_id.as_deref(),
+            &incoming.before_state,
+        )
 }
 
-fn before_state_without_authority_kind(before_state: &Value) -> Value {
+fn before_state_without_authority(before_state: &Value) -> Value {
     let mut value = before_state.clone();
     if let Some(object) = value.as_object_mut() {
         object.remove("authority_kind");
+        object.remove("authority_key");
     }
     value
+}
+
+fn incoming_authority_shape_allowed(
+    namespace: &str,
+    chain_id: Option<&str>,
+    before_state: &Value,
+) -> bool {
+    if namespace == "basenames" && chain_id == Some("base-mainnet") {
+        let authority_kind = before_state.get("authority_kind");
+        if authority_kind.is_none_or(|value| value.is_null()) {
+            return before_state.get("authority_key").is_none_or(|value| {
+                value.is_null() || value.as_str().is_some_and(|value| value.is_empty())
+            });
+        }
+        return authority_kind.and_then(Value::as_str) == Some("registry_only")
+            && registry_only_authority_key_present(chain_id, before_state);
+    }
+
+    before_state
+        .get("authority_kind")
+        .is_none_or(|value| value.is_null())
+        && before_state.get("authority_key").is_none_or(|value| {
+            value.is_null() || value.as_str().is_some_and(|value| value.is_empty())
+        })
+}
+
+fn registry_only_authority_key_present(chain_id: Option<&str>, before_state: &Value) -> bool {
+    let (Some(chain_id), Some(authority_key)) = (
+        chain_id,
+        before_state.get("authority_key").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    !authority_key.is_empty() && authority_key.starts_with(&format!("registry-only:{chain_id}:"))
+}
+
+fn registry_only_authority_key_shape_allowed(chain_id: Option<&str>, before_state: &Value) -> bool {
+    if chain_id == Some("base-mainnet")
+        && before_state.get("authority_kind").and_then(Value::as_str) == Some("registry_only")
+    {
+        return registry_only_authority_key_present(chain_id, before_state);
+    }
+
+    let Some(authority_key) = before_state.get("authority_key") else {
+        return true;
+    };
+    if authority_key.is_null() {
+        return true;
+    }
+    let (Some(chain_id), Some(authority_key)) = (chain_id, authority_key.as_str()) else {
+        return false;
+    };
+    authority_key.starts_with(&format!("registry-only:{chain_id}:"))
 }

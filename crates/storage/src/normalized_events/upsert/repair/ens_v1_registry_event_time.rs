@@ -401,7 +401,7 @@ fn basenames_registry_boundary_derivation_change_candidate(event: &NormalizedEve
         && ((event.source_family == "basenames_base_registry"
             && (matches!(
                 event.event_kind.as_str(),
-                "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+                "AuthorityEpochChanged" | "PermissionChanged" | "SurfaceBound" | "SurfaceUnbound"
             ) || (event.event_kind == "ResolverChanged"
                 && event
                     .after_state
@@ -427,7 +427,11 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         || existing.block_number.is_none()
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
         || !registry_event_time_resource_repair_source_allowed(existing)
-        || basenames_registry_boundary_resolver_event(existing)
+        || (basenames_registry_boundary_derivation_change_candidate(existing)
+            && matches!(
+                existing.event_kind.as_str(),
+                "PermissionChanged" | "ResolverChanged"
+            ))
         || !matches!(
             existing.event_kind.as_str(),
             "ResolverChanged"
@@ -511,20 +515,6 @@ fn registry_event_time_resource_repair_source_allowed(existing: &NormalizedEvent
                 existing.event_kind.as_str(),
                 "AuthorityTransferred" | "PermissionChanged" | "ResolverChanged"
             ))
-}
-
-fn basenames_registry_boundary_resolver_event(event: &NormalizedEvent) -> bool {
-    event.namespace == "basenames"
-        && event.chain_id.as_deref() == Some("base-mainnet")
-        && event.source_family == "basenames_base_registry"
-        && event.event_kind == "ResolverChanged"
-        && event.transaction_hash.is_none()
-        && event.log_index.is_none()
-        && event
-            .after_state
-            .get("source_event")
-            .and_then(|value| value.as_str())
-            == Some("AuthorityEpochChanged")
 }
 
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_before_state_repair_allowed(

@@ -955,9 +955,8 @@ async fn seed_basenames_same_transaction_registration_setup_repair_resources(
             90,
             jsonb_build_object(
                 'authority_kind', 'registry_only',
-                'authority_key', 'registry-only:base-mainnet:0xalice_namehash',
+                'authority_key', 'registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
                 'logical_name_id', 'basenames:alice.base.eth',
-                'namehash', '0xalice_namehash',
                 'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
                 'current_registry_owner', '0x0000000000000000000000000000000000000123'
             ),
@@ -1215,6 +1214,17 @@ fn basenames_registry_boundary_resolver_identity(authority_key: &str) -> String 
     )
 }
 
+fn basenames_registry_boundary_permission_identity(authority_key: &str) -> String {
+    format!(
+        "ens_v1_unwrapped_authority:PermissionChanged:permission:{}:{}:{}:{}:{}",
+        "grant",
+        "resolver:0x0000000000000000000000000000000000000456",
+        "0x0000000000000000000000000000000000000123",
+        "0xbaseboundarypermissionblock",
+        authority_key
+    )
+}
+
 fn basenames_registrar_boundary_authority_epoch_identity(
     before_authority_key: Option<&str>,
     after_authority_key: &str,
@@ -1456,6 +1466,28 @@ fn basenames_registry_boundary_resolver_event(
         "namehash": "0xcubebucks_namehash",
         "resolver": "0x0000000000000000000000000000000000000456",
         "source_event": "AuthorityEpochChanged"
+    });
+    event
+}
+
+fn basenames_registry_boundary_permission_event(
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = basenames_registry_event_time_permission_repair_event(
+        &basenames_registry_boundary_permission_identity(authority_key),
+        resource_id,
+        authority_key,
+    );
+    event.block_hash = Some("0xbaseboundarypermissionblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseboundarypermissionblock",
+        "block_timestamp": 1700000000,
     });
     event
 }
@@ -5749,6 +5781,228 @@ async fn normalized_event_count_only_upsert_supersedes_basenames_registry_bounda
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_supersedes_basenames_registry_boundary_permission_derivation_change()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0033);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0034);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let stale_event = basenames_registry_boundary_permission_event(
+        legacy_labelhash_registry_resource_id,
+        old_authority_key,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let replayed_event = basenames_registry_boundary_permission_event(
+        namehash_registry_resource_id,
+        repaired_authority_key,
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed_event))
+            .await?;
+    assert_eq!(inserted_count, 1);
+
+    let states = sqlx::query_as::<_, (String, String, Uuid)>(
+        r#"
+        SELECT event_identity, canonicality_state::TEXT, resource_id
+        FROM normalized_events
+        WHERE event_identity = $1
+           OR event_identity = $2
+        ORDER BY event_identity
+        "#,
+    )
+    .bind(&stale_event.event_identity)
+    .bind(&replayed_event.event_identity)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(states.len(), 2);
+    for (event_identity, canonicality_state, resource_id) in states {
+        if event_identity == stale_event.event_identity {
+            assert_eq!(canonicality_state, "orphaned");
+            assert_eq!(resource_id, legacy_labelhash_registry_resource_id);
+        } else {
+            assert_eq!(event_identity, replayed_event.event_identity);
+            assert_eq!(canonicality_state, "canonical");
+            assert_eq!(resource_id, namehash_registry_resource_id);
+        }
+    }
+
+    let canonical_boundary_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE logical_name_id = 'basenames:cubebucks.base.eth'
+          AND source_family = 'basenames_base_registry'
+          AND chain_id = 'base-mainnet'
+          AND event_kind = 'PermissionChanged'
+          AND transaction_hash IS NULL
+          AND log_index IS NULL
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(canonical_boundary_count, 1);
+
+    let change_count_after_supersession = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+           OR event.event_identity = $2
+        "#,
+    )
+    .bind(&stale_event.event_identity)
+    .bind(&replayed_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed_event))
+            .await?;
+    assert_eq!(inserted_count, 0);
+    let idempotent_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+           OR event.event_identity = $2
+        "#,
+    )
+    .bind(&stale_event.event_identity)
+    .bind(&replayed_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(idempotent_change_count, change_count_after_supersession);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_permission_in_place_resource_repair()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0035);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0036);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let stale_event = basenames_registry_boundary_permission_event(
+        legacy_labelhash_registry_resource_id,
+        old_authority_key,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let mut conflicting_event = basenames_registry_boundary_permission_event(
+        namehash_registry_resource_id,
+        old_authority_key,
+    );
+    conflicting_event.event_identity = stale_event.event_identity.clone();
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&conflicting_event),
+    )
+    .await;
+
+    let stored_resource_id: Uuid =
+        sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
+            .bind(&stale_event.event_identity)
+            .fetch_one(database.pool())
+            .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames boundary PermissionChanged in-place resource repair unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stored_resource_id, legacy_labelhash_registry_resource_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_permission_supersession_with_stale_source()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0037);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0038);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let stale_event = basenames_registry_boundary_permission_event(
+        legacy_labelhash_registry_resource_id,
+        old_authority_key,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let mut conflicting_event = basenames_registry_boundary_permission_event(
+        namehash_registry_resource_id,
+        repaired_authority_key,
+    );
+    conflicting_event.after_state["grant_source"] = stale_event.after_state["grant_source"].clone();
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&conflicting_event),
+    )
+    .await;
+
+    let stale_canonicality: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames boundary PermissionChanged supersession with stale grant_source unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}")
+            .contains("Basenames registry boundary derivation-change supersession rejected"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stale_canonicality, "canonical");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_supersedes_existing_observed_basenames_registry_boundary_after_canonicality_refresh()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -7085,6 +7339,63 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_same_tx_registration_
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_ens_v1_same_tx_registration_registry_only_key_rewrite()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1731);
+    let registrar_resource_id = Uuid::from_u128(0x1741);
+    seed_ens_v1_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let mut stale_registration =
+        ens_v1_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:ethereum-mainnet:0xalice_namehash",
+        "registrant": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
+
+    let mut conflicting_registration = stale_registration.clone();
+    conflicting_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:ethereum-mainnet:0xbob_namehash",
+        "registrant": null
+    });
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&conflicting_registration),
+    )
+    .await;
+
+    let stored_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "ENS same-transaction registry_only before_state key rewrite unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stored_before_state, stale_registration.before_state);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_repairs_basenames_same_tx_registration_setup_authority_transfer_to_registrar()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -7148,6 +7459,280 @@ async fn normalized_event_count_only_upsert_repairs_basenames_same_tx_registrati
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_registration_granted_registry_only_before_state()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1743);
+    let registrar_resource_id = Uuid::from_u128(0x1744);
+    seed_basenames_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+    let current_registry_resource_id = Uuid::from_u128(0x1745);
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            NULL,
+            'base-mainnet',
+            '0xbasesametxcurrentregistryresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:base-mainnet:0xalice_namehash',
+                'logical_name_id', 'basenames:alice.base.eth',
+                'namehash', '0xalice_namehash',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(current_registry_resource_id)
+    .execute(database.pool())
+    .await?;
+
+    let stale_setup = basenames_same_transaction_registration_setup_authority_transfer_event(
+        stale_registry_resource_id,
+    );
+    let mut stale_registration =
+        basenames_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.event_identity =
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5"
+            .to_owned();
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
+        "registrant": null
+    });
+    upsert_normalized_events(
+        database.pool(),
+        &[stale_setup.clone(), stale_registration.clone()],
+    )
+    .await?;
+
+    let mut replayed_registration = stale_registration.clone();
+    replayed_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:base-mainnet:0xalice_namehash",
+        "registrant": null
+    });
+    let inserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&replayed_registration),
+    )
+    .await?;
+    assert_eq!(inserted_count, 0);
+
+    let (stored_before_state, setup_canonicality) =
+        sqlx::query_as::<_, (serde_json::Value, String)>(
+            r#"
+            SELECT registration.before_state, setup.canonicality_state::TEXT
+            FROM normalized_events registration
+            JOIN normalized_events setup
+              ON setup.event_identity = $2
+            WHERE registration.event_identity = $1
+            "#,
+        )
+        .bind(&stale_registration.event_identity)
+        .bind(&stale_setup.event_identity)
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(stored_before_state, replayed_registration.before_state);
+    assert_eq!(setup_canonicality, "orphaned");
+
+    let change_count_after_repair = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+           OR event.event_identity = $2
+        "#,
+    )
+    .bind(&stale_registration.event_identity)
+    .bind(&stale_setup.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection IN ('name_current', 'permissions_current')
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(invalidation_keys.contains(&(
+        "name_current".to_owned(),
+        "basenames:alice.base.eth".to_owned()
+    )));
+    assert!(invalidation_keys.contains(&(
+        "permissions_current".to_owned(),
+        stale_registry_resource_id.to_string()
+    )));
+    assert!(invalidation_keys.contains(&(
+        "permissions_current".to_owned(),
+        registrar_resource_id.to_string()
+    )));
+
+    let inserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&replayed_registration),
+    )
+    .await?;
+    assert_eq!(inserted_count, 0);
+    let idempotent_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+           OR event.event_identity = $2
+        "#,
+    )
+    .bind(&stale_registration.event_identity)
+    .bind(&stale_setup.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(idempotent_change_count, change_count_after_repair);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_registry_only_without_key()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1746);
+    let registrar_resource_id = Uuid::from_u128(0x1747);
+    seed_basenames_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let mut stale_registration =
+        basenames_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.event_identity =
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:missing-key"
+            .to_owned();
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
+        "registrant": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
+
+    let mut conflicting_registration = stale_registration.clone();
+    conflicting_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "registrant": null
+    });
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&conflicting_registration),
+    )
+    .await;
+
+    let stored_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames RegistrationGranted registry_only before_state without authority_key unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stored_before_state, stale_registration.before_state);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_stale_registry_only_without_key()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1748);
+    let registrar_resource_id = Uuid::from_u128(0x1749);
+    seed_basenames_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let mut stale_registration =
+        basenames_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.event_identity =
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:stale-missing-key"
+            .to_owned();
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "registrant": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
+
+    let mut replayed_registration = stale_registration.clone();
+    replayed_registration.before_state = json!({
+        "authority_kind": null,
+        "registrant": null
+    });
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&replayed_registration),
+    )
+    .await;
+
+    let stored_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames RegistrationGranted stale registry_only before_state without authority_key unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stored_before_state, stale_registration.before_state);
+
+    Ok(())
 }
 
 #[tokio::test]

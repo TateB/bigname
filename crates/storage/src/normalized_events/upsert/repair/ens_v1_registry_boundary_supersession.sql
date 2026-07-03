@@ -161,6 +161,7 @@ anchor_candidates AS (
                 AND (
                     current_event.event_kind IN (
                         'AuthorityEpochChanged',
+                        'PermissionChanged',
                         'SurfaceBound',
                         'SurfaceUnbound'
                     )
@@ -389,6 +390,185 @@ anchor_candidates AS (
                             stale_event_resource.provenance->>'authority_key'
                         AND current_event.after_state::JSONB->>'authority_key' =
                             current_event_resource.provenance->>'authority_key'
+                    )
+                    OR (
+                        current_event.event_kind = 'PermissionChanged'
+                        AND (
+                            stale.before_state - 'grant_source' - 'revocation_source'
+                        ) IS NOT DISTINCT FROM (
+                            current_event.before_state::JSONB - 'grant_source' -
+                                'revocation_source'
+                        )
+                        AND (
+                            (
+                                COALESCE(
+                                    jsonb_typeof(stale.before_state->'grant_source'),
+                                    'null'
+                                ) = 'null'
+                                AND COALESCE(
+                                    jsonb_typeof(
+                                        current_event.before_state::JSONB->'grant_source'
+                                    ),
+                                    'null'
+                                ) = 'null'
+                            )
+                            OR (
+                                stale.before_state #>> '{grant_source,kind}' =
+                                    'ens_v1_authority'
+                                AND current_event.before_state::JSONB #>>
+                                    '{grant_source,kind}' = 'ens_v1_authority'
+                                AND stale.before_state #>>
+                                    '{grant_source,authority_kind}' =
+                                    stale_event_resource.provenance->>'authority_kind'
+                                AND stale.before_state #>>
+                                    '{grant_source,authority_key}' =
+                                    stale_event_resource.provenance->>'authority_key'
+                                AND current_event.before_state::JSONB #>>
+                                    '{grant_source,authority_kind}' =
+                                    current_event_resource.provenance->>'authority_kind'
+                                AND current_event.before_state::JSONB #>>
+                                    '{grant_source,authority_key}' =
+                                    current_event_resource.provenance->>'authority_key'
+                                AND COALESCE(
+                                    stale.before_state #>>
+                                        '{grant_source,source_event_kind}',
+                                    ''
+                                ) <> ''
+                                AND stale.before_state #>>
+                                    '{grant_source,source_event_kind}' =
+                                    current_event.before_state::JSONB #>>
+                                        '{grant_source,source_event_kind}'
+                            )
+                        )
+                        AND (
+                            (
+                                COALESCE(
+                                    jsonb_typeof(stale.before_state->'revocation_source'),
+                                    'null'
+                                ) = 'null'
+                                AND COALESCE(
+                                    jsonb_typeof(
+                                        current_event.before_state::JSONB->'revocation_source'
+                                    ),
+                                    'null'
+                                ) = 'null'
+                            )
+                            OR (
+                                stale.before_state #>> '{revocation_source,kind}' =
+                                    'ens_v1_authority'
+                                AND current_event.before_state::JSONB #>>
+                                    '{revocation_source,kind}' = 'ens_v1_authority'
+                                AND stale.before_state #>>
+                                    '{revocation_source,authority_kind}' =
+                                    stale_event_resource.provenance->>'authority_kind'
+                                AND stale.before_state #>>
+                                    '{revocation_source,authority_key}' =
+                                    stale_event_resource.provenance->>'authority_key'
+                                AND current_event.before_state::JSONB #>>
+                                    '{revocation_source,authority_kind}' =
+                                    current_event_resource.provenance->>'authority_kind'
+                                AND current_event.before_state::JSONB #>>
+                                    '{revocation_source,authority_key}' =
+                                    current_event_resource.provenance->>'authority_key'
+                                AND COALESCE(
+                                    stale.before_state #>>
+                                        '{revocation_source,source_event_kind}',
+                                    ''
+                                ) <> ''
+                                AND stale.before_state #>>
+                                    '{revocation_source,source_event_kind}' =
+                                    current_event.before_state::JSONB #>>
+                                        '{revocation_source,source_event_kind}'
+                            )
+                        )
+                        AND (
+                            stale.after_state - 'grant_source' - 'revocation_source'
+                        ) IS NOT DISTINCT FROM (
+                            current_event.after_state::JSONB - 'grant_source' -
+                                'revocation_source'
+                        )
+                        AND (
+                            (
+                                COALESCE(
+                                    jsonb_typeof(stale.after_state->'grant_source'),
+                                    'null'
+                                ) = 'null'
+                                AND COALESCE(
+                                    jsonb_typeof(
+                                        current_event.after_state::JSONB->'grant_source'
+                                    ),
+                                    'null'
+                                ) = 'null'
+                            )
+                            OR (
+                                stale.after_state #>> '{grant_source,kind}' =
+                                    'ens_v1_authority'
+                                AND current_event.after_state::JSONB #>>
+                                    '{grant_source,kind}' = 'ens_v1_authority'
+                                AND stale.after_state #>>
+                                    '{grant_source,authority_kind}' =
+                                    stale_event_resource.provenance->>'authority_kind'
+                                AND stale.after_state #>>
+                                    '{grant_source,authority_key}' =
+                                    stale_event_resource.provenance->>'authority_key'
+                                AND current_event.after_state::JSONB #>>
+                                    '{grant_source,authority_kind}' =
+                                    current_event_resource.provenance->>'authority_kind'
+                                AND current_event.after_state::JSONB #>>
+                                    '{grant_source,authority_key}' =
+                                    current_event_resource.provenance->>'authority_key'
+                                AND COALESCE(
+                                    stale.after_state #>>
+                                        '{grant_source,source_event_kind}',
+                                    ''
+                                ) <> ''
+                                AND stale.after_state #>>
+                                    '{grant_source,source_event_kind}' =
+                                    current_event.after_state::JSONB #>>
+                                        '{grant_source,source_event_kind}'
+                            )
+                        )
+                        AND (
+                            (
+                                COALESCE(
+                                    jsonb_typeof(stale.after_state->'revocation_source'),
+                                    'null'
+                                ) = 'null'
+                                AND COALESCE(
+                                    jsonb_typeof(
+                                        current_event.after_state::JSONB->'revocation_source'
+                                    ),
+                                    'null'
+                                ) = 'null'
+                            )
+                            OR (
+                                stale.after_state #>> '{revocation_source,kind}' =
+                                    'ens_v1_authority'
+                                AND current_event.after_state::JSONB #>>
+                                    '{revocation_source,kind}' = 'ens_v1_authority'
+                                AND stale.after_state #>>
+                                    '{revocation_source,authority_kind}' =
+                                    stale_event_resource.provenance->>'authority_kind'
+                                AND stale.after_state #>>
+                                    '{revocation_source,authority_key}' =
+                                    stale_event_resource.provenance->>'authority_key'
+                                AND current_event.after_state::JSONB #>>
+                                    '{revocation_source,authority_kind}' =
+                                    current_event_resource.provenance->>'authority_kind'
+                                AND current_event.after_state::JSONB #>>
+                                    '{revocation_source,authority_key}' =
+                                    current_event_resource.provenance->>'authority_key'
+                                AND COALESCE(
+                                    stale.after_state #>>
+                                        '{revocation_source,source_event_kind}',
+                                    ''
+                                ) <> ''
+                                AND stale.after_state #>>
+                                    '{revocation_source,source_event_kind}' =
+                                    current_event.after_state::JSONB #>>
+                                        '{revocation_source,source_event_kind}'
+                            )
+                        )
                     )
                     OR (
                         current_event.event_kind = 'ResolverChanged'
