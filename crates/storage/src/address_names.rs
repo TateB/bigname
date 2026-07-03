@@ -24,8 +24,7 @@ pub use full_rebuild::{
     publish_address_names_current_full_rebuild, rebuild_address_names_current_identity_sidecars,
 };
 pub use page::{
-    load_address_names_current_page, load_address_names_current_page_sorted,
-    load_address_names_current_page_sorted_for_relations,
+    load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
 };
 pub use read::{
     load_address_names_current, load_address_names_current_for_relations,

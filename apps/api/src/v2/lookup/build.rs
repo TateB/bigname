@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
 use crate::v2::{
-    PRODUCT_PIPELINE_TERMS, Relation, Status, V2Error, V2Result, contains_pipeline_vocabulary,
+    PRODUCT_PIPELINE_TERMS, Relation, Status, V2Error, V2Result, contains_boundary_vocabulary,
     name_record,
 };
 
@@ -344,7 +344,7 @@ fn product_lookup_reason(reason: &str) -> V2Result<String> {
         "projection_read_failed" => Ok("read_failed".to_owned()),
         "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
         "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
-        _ if lookup_reason_contains_pipeline_vocabulary(reason) => {
+        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
             tracing::error!(%reason, "rejected lookup reason containing pipeline vocabulary");
             Err(V2Error::internal_error(
                 "failed to map lookup reason vocabulary",
@@ -352,10 +352,6 @@ fn product_lookup_reason(reason: &str) -> V2Result<String> {
         }
         _ => Ok(reason.to_owned()),
     }
-}
-
-fn lookup_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
-    contains_pipeline_vocabulary(reason, PRODUCT_PIPELINE_TERMS)
 }
 
 fn identity_network(namespace: &str, chain_positions: &Value) -> String {

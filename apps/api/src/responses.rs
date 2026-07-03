@@ -8,6 +8,8 @@ include!("responses/collections.rs");
 
 include!("responses/projections.rs");
 
+use crate::v2::format_timestamp;
+
 pub(crate) mod responses {
     pub(crate) use super::{
         build_name_authority_control_explain_declared_state, build_name_coverage_declared_state,

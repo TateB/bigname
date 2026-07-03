@@ -34,7 +34,7 @@ pub async fn load_address_names_current_page(
     let sorted_cursor = cursor.map(address_names_current_sorted_cursor_from_legacy);
     let relations = relation.into_iter().collect::<Vec<_>>();
     let relations = (!relations.is_empty()).then_some(relations.as_slice());
-    let page = load_address_names_current_page_impl(
+    let page = load_address_names_current_page_sorted_for_relations(
         pool,
         address,
         namespace,
@@ -60,50 +60,9 @@ pub async fn load_address_names_current_page(
     })
 }
 
-/// Load a bounded page of grouped current address-name entries with v2 read controls.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_address_names_current_page_sorted(
-    pool: &PgPool,
-    address: &str,
-    namespace: Option<&str>,
-    relation: Option<AddressNameRelation>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-    cursor: Option<&AddressNamesCurrentSortedCursor>,
-    page_size: u64,
-) -> Result<AddressNamesCurrentSortedPage> {
-    let relations = relation.into_iter().collect::<Vec<_>>();
-    let relations = (!relations.is_empty()).then_some(relations.as_slice());
-    load_address_names_current_page_sorted_for_relations(
-        pool, address, namespace, relations, dedupe_by, q, sort, order, cursor, page_size,
-    )
-    .await
-}
-
 /// Load a bounded page of grouped current address-name entries with v2 set-valued relation controls.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_names_current_page_sorted_for_relations(
-    pool: &PgPool,
-    address: &str,
-    namespace: Option<&str>,
-    relations: Option<&[AddressNameRelation]>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-    cursor: Option<&AddressNamesCurrentSortedCursor>,
-    page_size: u64,
-) -> Result<AddressNamesCurrentSortedPage> {
-    load_address_names_current_page_impl(
-        pool, address, namespace, relations, dedupe_by, q, sort, order, cursor, page_size,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn load_address_names_current_page_impl(
     pool: &PgPool,
     address: &str,
     namespace: Option<&str>,

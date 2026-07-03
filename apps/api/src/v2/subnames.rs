@@ -14,11 +14,12 @@ use crate::{
     normalize_inferred_route_name,
 };
 
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams, RegistrationStatus,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource,
-    decode, encode, encode_at_token, name_record::name_registration_fields,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, decode, encode,
+    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
+    v2_exact_name_snapshot_scope,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -274,10 +275,10 @@ pub(crate) fn subname_storage_cursor(
     snapshot_token: &str,
 ) -> V2Result<ChildrenCurrentKeysetCursor> {
     if payload.sort != SUBNAMES_SORT {
-        return Err(invalid_subname_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(snapshot_token) {
-        return Err(invalid_subname_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 2
         || payload
@@ -288,32 +289,24 @@ pub(crate) fn subname_storage_cursor(
         || payload.filters.get(PARENT_FILTER_KEY).map(String::as_str)
             != Some(parent_logical_name_id)
     {
-        return Err(invalid_subname_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 2 {
-        return Err(invalid_subname_cursor());
+        return Err(invalid_cursor_error());
     }
 
-    let canonical_display_name = cursor_value(payload, DISPLAY_NAME_CURSOR_KEY)?;
-    let child_logical_name_id = cursor_value(payload, CHILD_LOGICAL_NAME_ID_CURSOR_KEY)?;
+    let canonical_display_name =
+        cursor_value(payload, DISPLAY_NAME_CURSOR_KEY, invalid_cursor_error)?;
+    let child_logical_name_id = cursor_value(
+        payload,
+        CHILD_LOGICAL_NAME_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?;
 
     Ok(ChildrenCurrentKeysetCursor {
         canonical_display_name,
         child_logical_name_id,
     })
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_subname_cursor)
-}
-
-fn invalid_subname_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 fn subnames_include_counts(include: &[String]) -> V2Result<bool> {

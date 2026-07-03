@@ -81,15 +81,6 @@ pub(crate) fn snapshot_meta(selected: &SelectedSnapshot) -> V2Result<Meta> {
     })
 }
 
-pub(crate) async fn resolve_v2_snapshot(
-    pool: &PgPool,
-    scope: &SnapshotSelectionScope,
-    at: Option<&AtSelector>,
-    finality: Finality,
-) -> V2Result<SelectedSnapshot> {
-    resolve_v2_snapshot_for(pool, scope, at, finality, SnapshotReadResource::Resource).await
-}
-
 pub(crate) async fn resolve_v2_snapshot_for(
     pool: &PgPool,
     scope: &SnapshotSelectionScope,

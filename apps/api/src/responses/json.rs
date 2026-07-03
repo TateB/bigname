@@ -150,19 +150,6 @@ fn compact_meta_object(
     meta
 }
 
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
-}
-
 fn empty_object() -> JsonValue {
     JsonValue::Object(Default::default())
 }

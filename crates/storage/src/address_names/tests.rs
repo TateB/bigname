@@ -659,7 +659,7 @@ async fn assert_sorted_page_order(
     order: AddressNamesCurrentOrder,
     expected: &[&str],
 ) -> Result<()> {
-    let page = load_address_names_current_page_sorted(
+    let page = load_address_names_current_page_sorted_for_relations(
         pool,
         address,
         Some("ens"),
@@ -697,7 +697,7 @@ async fn assert_sorted_keyset_pages(
     let mut page_count = 0;
 
     loop {
-        let page = load_address_names_current_page_sorted(
+        let page = load_address_names_current_page_sorted_for_relations(
             pool,
             address,
             Some("ens"),
@@ -2189,7 +2189,7 @@ async fn address_names_current_sorted_page_filters_q_prefix() -> Result<()> {
     )
     .await?;
 
-    let wildcard_literal_page = load_address_names_current_page_sorted(
+    let wildcard_literal_page = load_address_names_current_page_sorted_for_relations(
         database.pool(),
         address,
         Some("ens"),
@@ -2208,7 +2208,7 @@ async fn address_names_current_sorted_page_filters_q_prefix() -> Result<()> {
     );
     assert_eq!(wildcard_literal_page.summary.grouped_entry_count, 1);
 
-    let prefix_page = load_address_names_current_page_sorted(
+    let prefix_page = load_address_names_current_page_sorted_for_relations(
         database.pool(),
         address,
         Some("ens"),
@@ -2447,7 +2447,7 @@ async fn address_names_current_sorted_page_keysets_desc_expiry_across_null_bound
 
     loop {
         let start = seen_names.len();
-        let page = load_address_names_current_page_sorted(
+        let page = load_address_names_current_page_sorted_for_relations(
             database.pool(),
             address,
             Some("ens"),
@@ -2539,7 +2539,7 @@ async fn address_names_current_sorted_name_default_matches_legacy_page() -> Resu
         2,
     )
     .await?;
-    let sorted_page = load_address_names_current_page_sorted(
+    let sorted_page = load_address_names_current_page_sorted_for_relations(
         database.pool(),
         address,
         Some("ens"),

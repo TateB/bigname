@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, QueryParamAllowlist, QueryParams, RequestSource, SnapshotReadResource,
-    StrictQueryParams, V2Error, V2Result, api_error_to_v2, api_error_to_v2_for_resource,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    Envelope, Meta, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams,
+    V2Error, V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
     vocab::{RegistrationStatus, Resolver, Source, Status},
 };
 

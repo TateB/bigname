@@ -20,8 +20,8 @@ use crate::{
 };
 
 use super::{
-    Envelope, MAX_PAGE_SIZE, Meta, QueryParamAllowlist, QueryParams, RequestSource, Resolver,
-    SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
+    Envelope, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver, SnapshotReadResource,
+    Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
     api_error_to_v2_for_resource, default_requested_records,
     name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope, validate_product_record,

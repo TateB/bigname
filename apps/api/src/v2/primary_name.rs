@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     Envelope, Meta, PRODUCT_PIPELINE_TERMS, RawQueryParams, Source, Status, V2Error, V2Result,
-    api_error_to_v2, contains_pipeline_vocabulary, load_served_head_meta,
+    api_error_to_v2, contains_boundary_vocabulary, load_served_head_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
@@ -445,7 +445,7 @@ fn product_primary_name_reason(reason: &str) -> V2Result<String> {
         "projection_read_failed" => Ok("read_failed".to_owned()),
         "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
         "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
-        _ if primary_name_reason_contains_pipeline_vocabulary(reason) => {
+        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
             tracing::error!(%reason, "rejected primary-name reason containing pipeline vocabulary");
             Err(V2Error::internal_error(
                 "failed to map primary-name reason vocabulary",
@@ -453,10 +453,6 @@ fn product_primary_name_reason(reason: &str) -> V2Result<String> {
         }
         _ => Ok(reason.to_owned()),
     }
-}
-
-fn primary_name_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
-    contains_pipeline_vocabulary(reason, PRODUCT_PIPELINE_TERMS)
 }
 
 fn primary_name_from_value(value: &Value) -> Option<String> {

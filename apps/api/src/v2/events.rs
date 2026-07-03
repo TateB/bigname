@@ -10,11 +10,12 @@ use sqlx::types::Uuid;
 
 use crate::{AppState, normalize_inferred_route_name};
 
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
+    CursorPayload, Envelope, HistoryEventType, Page, QueryParamAllowlist, QueryParams,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token,
-    format_timestamp, history_event_type, relation_to_storage, resolve_v2_snapshot_for,
-    snapshot_meta, v2_exact_name_snapshot_scope,
+    format_timestamp, history_event_type, resolve_v2_snapshot_for, snapshot_meta,
+    v2_exact_name_snapshot_scope,
 };
 
 const EVENTS_SORT: &str = "chain_position_desc";
@@ -23,7 +24,6 @@ const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const TYPE_FILTER_KEY: &str = "type";
-const RELATION_FILTER_KEY: &str = "relation";
 const FROM_BLOCK_FILTER_KEY: &str = "from_block";
 const TO_BLOCK_FILTER_KEY: &str = "to_block";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
@@ -113,7 +113,7 @@ pub(crate) async fn get_events(
             .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
             .is_some()
         {
-            invalid_events_cursor()
+            invalid_cursor_error()
         } else {
             V2Error::internal_error("failed to load events")
         }
@@ -186,22 +186,26 @@ pub(crate) fn events_storage_cursor(
     snapshot_token: &str,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != EVENTS_SORT {
-        return Err(invalid_events_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(snapshot_token) {
-        return Err(invalid_events_cursor());
+        return Err(invalid_cursor_error());
     }
     if &payload.filters != expected_filters {
-        return Err(invalid_events_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 2 {
-        return Err(invalid_events_cursor());
+        return Err(invalid_cursor_error());
     }
 
-    let normalized_event_id = cursor_value(payload, NORMALIZED_EVENT_ID_CURSOR_KEY)?
-        .parse::<i64>()
-        .map_err(|_| invalid_events_cursor())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY)?;
+    let normalized_event_id = cursor_value(
+        payload,
+        NORMALIZED_EVENT_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?
+    .parse::<i64>()
+    .map_err(|_| invalid_cursor_error())?;
+    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
 
     Ok(HistoryCursor {
         normalized_event_id,
@@ -223,18 +227,6 @@ pub(crate) fn parse_events_filter(
     params: &QueryParams,
     namespace: &str,
 ) -> V2Result<ParsedEventsFilter> {
-    if params.relation.is_some() && params.address.is_none() {
-        return Err(V2Error::invalid_input("relation requires address"));
-    }
-    let relation = params
-        .relation
-        .as_ref()
-        .map(|relation| {
-            relation
-                .single()
-                .ok_or_else(|| V2Error::invalid_input("relation must be singular for events"))
-        })
-        .transpose()?;
     if matches!(
         (params.from_block, params.to_block),
         (Some(from_block), Some(to_block)) if from_block > to_block
@@ -289,9 +281,6 @@ pub(crate) fn parse_events_filter(
     if let Some(event_type) = params.event_type {
         cursor_filters.insert(TYPE_FILTER_KEY.to_owned(), event_type.as_str().to_owned());
     }
-    if let Some(relation) = relation {
-        cursor_filters.insert(RELATION_FILTER_KEY.to_owned(), relation.as_str().to_owned());
-    }
     if let Some(from_block) = params.from_block {
         cursor_filters.insert(FROM_BLOCK_FILTER_KEY.to_owned(), from_block.to_string());
     }
@@ -309,7 +298,7 @@ pub(crate) fn parse_events_filter(
                 .as_ref()
                 .map(|address| EventHistoryAddressFilter {
                     address: address.clone(),
-                    relation: relation.map(relation_to_storage),
+                    relation: None,
                 }),
             event_kinds,
             from_block: params.from_block,
@@ -325,19 +314,6 @@ fn event_name(row: &StorageHistoryEvent) -> Option<String> {
         .and_then(|logical_name_id| logical_name_id.split_once(':').map(|(_, name)| name.trim()))
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_events_cursor)
-}
-
-fn invalid_events_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 #[cfg(test)]
@@ -503,16 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn events_filter_rejects_relation_without_address_and_invalid_block_range() {
-        let params = QueryParams::try_from(RawQueryParams {
-            relation: Some("owner".to_owned()),
-            ..RawQueryParams::default()
-        })
-        .expect("relation parses globally");
-        let error =
-            parse_events_filter(&params, "ens").expect_err("relation requires address for events");
-        assert_eq!(error.code(), ErrorCode::InvalidInput);
-
+    fn events_filter_rejects_invalid_block_range() {
         let params = QueryParams::try_from(RawQueryParams {
             from_block: Some("20".to_owned()),
             to_block: Some("10".to_owned()),
@@ -531,7 +498,6 @@ mod tests {
             name: Some(" Alice.base.eth ".to_owned()),
             registration_id: Some(REGISTRATION_ID.to_owned()),
             address: Some(ADDRESS.to_owned()),
-            relation: Some("manager".to_owned()),
             from_block: Some("10".to_owned()),
             to_block: Some("20".to_owned()),
             ..RawQueryParams::default()
@@ -548,7 +514,6 @@ mod tests {
                 ("name".to_owned(), "basenames:alice.base.eth".to_owned()),
                 ("namespace".to_owned(), "basenames".to_owned()),
                 ("registration_id".to_owned(), REGISTRATION_ID.to_owned()),
-                ("relation".to_owned(), "manager".to_owned()),
                 ("to_block".to_owned(), "20".to_owned()),
                 ("type".to_owned(), "permission".to_owned()),
             ])
@@ -575,7 +540,7 @@ mod tests {
                 .as_ref()
                 .expect("address filter must exist")
                 .relation,
-            Some(bigname_storage::AddressNameRelation::EffectiveController)
+            None
         );
     }
 }

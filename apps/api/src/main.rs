@@ -33,10 +33,7 @@ use clap::Parser;
 use serde_json::{Map as JsonMap, json};
 use sqlx::{
     PgPool, Row,
-    types::{
-        JsonValue, Uuid,
-        time::{OffsetDateTime, UtcOffset},
-    },
+    types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;

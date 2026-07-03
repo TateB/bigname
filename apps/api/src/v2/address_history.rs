@@ -9,6 +9,7 @@ use bigname_storage::{HistoryCursor, HistorySummaryMode};
 use crate::AppState;
 
 use super::address_names::relation_set_to_storage;
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
     CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, RelationSet,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event,
@@ -100,7 +101,7 @@ pub(crate) async fn get_address_history(
             .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
             .is_some()
         {
-            invalid_address_history_cursor()
+            invalid_cursor_error()
         } else {
             V2Error::internal_error("failed to load address history")
         }
@@ -162,22 +163,26 @@ pub(crate) fn address_history_storage_cursor(
     binding: &AddressHistoryCursorBinding<'_>,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != ADDRESS_HISTORY_SORT {
-        return Err(invalid_address_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_address_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters != address_history_cursor_filters(binding) {
-        return Err(invalid_address_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 2 {
-        return Err(invalid_address_history_cursor());
+        return Err(invalid_cursor_error());
     }
 
-    let normalized_event_id = cursor_value(payload, NORMALIZED_EVENT_ID_CURSOR_KEY)?
-        .parse::<i64>()
-        .map_err(|_| invalid_address_history_cursor())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY)?;
+    let normalized_event_id = cursor_value(
+        payload,
+        NORMALIZED_EVENT_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?
+    .parse::<i64>()
+    .map_err(|_| invalid_cursor_error())?;
+    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
 
     Ok(HistoryCursor {
         normalized_event_id,
@@ -203,19 +208,6 @@ fn address_history_cursor_filters(
         filters.insert(RELATION_FILTER_KEY.to_owned(), relation.canonical_value());
     }
     filters
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_address_history_cursor)
-}
-
-fn invalid_address_history_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 #[cfg(test)]

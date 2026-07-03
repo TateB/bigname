@@ -26,9 +26,9 @@ mod overview_items;
 use overview_items::{projected_section_items, summary_is_supported};
 
 use super::{
-    Envelope, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist, QueryParams,
+    Envelope, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
-    contains_pipeline_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
+    contains_boundary_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
     resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
     vocab::{Completeness, Status},
 };
@@ -459,7 +459,7 @@ fn product_resolver_reason(reason: &str) -> V2Result<String> {
         "resolver_binding_enumeration_not_projected" => {
             Ok("binding_enumeration_not_supported".to_owned())
         }
-        _ if resolver_reason_contains_pipeline_vocabulary(reason) => {
+        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
             error!(%reason, "rejected resolver reason containing pipeline vocabulary");
             Err(V2Error::internal_error(
                 "failed to map resolver reason vocabulary",
@@ -467,10 +467,6 @@ fn product_resolver_reason(reason: &str) -> V2Result<String> {
         }
         _ => Ok(reason.to_owned()),
     }
-}
-
-fn resolver_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
-    contains_pipeline_vocabulary(reason, PRODUCT_PIPELINE_TERMS)
 }
 
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {

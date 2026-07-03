@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 mod address_history;
 mod address_names;
 mod chains;
@@ -30,38 +28,32 @@ mod subnames;
 mod vocab;
 
 pub(crate) use address_history::get_address_history;
-pub(crate) use address_names::{
-    AddressName, AddressNameGrant, AddressNamesCursorBinding, address_names_cursor_payload,
-    address_names_storage_cursor, build_address_name, build_address_name_role_summary,
-    dedupe_to_storage, get_address_names, order_to_storage, relation_to_storage, sort_to_storage,
-};
+pub(crate) use address_names::{AddressNameGrant, get_address_names};
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug};
-pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
-pub(crate) use diag_events::{DiagnosticEvent, build_diagnostic_event, get_diagnostic_events};
+pub(crate) use cursor::{Payload as CursorPayload, decode, encode};
+pub(crate) use diag_events::get_diagnostic_events;
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
 pub(crate) use diagnostics::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_execution_diagnostic, get_name_records_diagnostic,
 };
-pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
-pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};
+pub(crate) use envelope::{Envelope, Meta, Page};
+#[cfg(test)]
+pub(crate) use error::ErrorCode;
+pub(crate) use error::{V2Error, V2Result};
 pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
 pub(crate) use history::{
-    HistoryEvent, build_history_event, format_timestamp, get_history, history_cursor_payload,
-    history_event_type, history_storage_cursor, history_storage_scope,
+    format_timestamp, get_history, history_event_type, history_storage_scope,
     v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 pub(crate) use lookup::{get_lookup, load_served_head_meta};
-pub(crate) use name_record::{
-    NameRecord, build_name_record, classify_registration_status, get_name_record,
-};
+pub(crate) use name_record::{NameRecord, build_name_record, get_name_record};
 pub(crate) use name_records::{
-    NameRecords, RecordAnswer, VerifiedRecordLookup, build_auto_name_records,
-    build_indexed_name_records, build_verified_name_records, get_name_records,
-    indexed_records_requiring_verified_fallback, load_ephemeral_verified_record_lookup,
-    load_persisted_verified_record_lookup, load_verified_record_lookup, parse_record_keys,
+    RecordAnswer, build_indexed_name_records, build_verified_name_records, get_name_records,
+    load_ephemeral_verified_record_lookup, load_persisted_verified_record_lookup,
+    parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use namespaces::get_namespace;
@@ -70,37 +62,32 @@ pub(crate) use params::{
     SortOrder, parse_relation_set_param,
 };
 pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
-pub(crate) use permissions::{PermissionLineage, PermissionRow, get_permissions};
-pub(crate) use primary_name::{
-    PrimaryName, PrimaryNameAnswer, PrimaryNameQueryParams, PrimaryNameSourceSelection,
-    PrimaryNameVerification, build_primary_name, get_primary_name,
-};
+pub(crate) use permissions::get_permissions;
+pub(crate) use primary_name::get_primary_name;
+pub(crate) use resolvers::get_resolver;
+#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use resolvers::{
-    BoundNames, BoundNamesCursorBinding, ResolverOverview, bound_names_cursor_payload,
-    bound_names_storage_cursor, build_bound_name_record, build_resolver_overview, get_resolver,
-    resolver_overview_include,
+    BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
+    build_resolver_overview, resolver_overview_include,
 };
-pub(crate) use search::{
-    SearchCursorBinding, SearchMatch, SearchName, build_search_name, get_search,
-    search_cursor_payload, search_storage_cursor,
-};
+pub(crate) use search::get_search;
 pub(crate) use snapshots::{
-    SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
-    consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
-    resolve_v2_snapshot_for, sanitized_snapshot_internal_error, snapshot_meta,
+    SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, decode_at_token,
+    encode_at_token, resolve_v2_snapshot_for, sanitized_snapshot_internal_error, snapshot_meta,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{
     NoQueryParams, QueryParamAllowlist, StrictQueryParams, parse_raw_query_params_with_allowlist,
 };
-pub(crate) use subnames::{
-    Subname, build_subname, get_subnames, subname_cursor_payload, subname_storage_cursor,
-};
+pub(crate) use subnames::get_subnames;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
     OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet, Resolver, Source,
-    Status, contains_boundary_vocabulary, contains_pipeline_vocabulary,
-    matched_pipeline_vocabulary_terms,
+    Status, contains_boundary_vocabulary,
 };
 
 use axum::Router;

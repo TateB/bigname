@@ -2029,7 +2029,7 @@ fn is_enumish_product_value_key(key: &str) -> bool {
 }
 
 fn matched_pipeline_terms(candidate: &str) -> Vec<&'static str> {
-    crate::v2::matched_pipeline_vocabulary_terms(candidate, crate::v2::PRODUCT_PIPELINE_TERMS)
+    crate::v2::matched_boundary_vocabulary_terms(candidate, crate::v2::PRODUCT_PIPELINE_TERMS)
 }
 
 fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {

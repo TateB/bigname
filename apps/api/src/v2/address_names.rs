@@ -11,8 +11,9 @@ use bigname_storage::{
     PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
+use super::cursor::invalid_cursor_error;
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
     Relation, RelationSet, SnapshotReadResource, SortOrder, StrictQueryParams, V2Error, V2Result,
@@ -21,10 +22,14 @@ use super::{
     v2_exact_name_snapshot_scope,
 };
 
+#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use self::cursor::{
-    ADDRESS_FILTER_KEY, AddressNamesCursorBinding, ORDER_FILTER_KEY, SORT_KIND_CURSOR_KEY,
-    SORT_KIND_NAME, SORT_KIND_TIMESTAMP_NULL, SORT_KIND_TIMESTAMP_VALUE, SORT_VALUE_CURSOR_KEY,
-    address_names_cursor_payload, address_names_storage_cursor,
+    ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, SORT_KIND_CURSOR_KEY, SORT_KIND_NAME,
+    SORT_KIND_TIMESTAMP_NULL, SORT_KIND_TIMESTAMP_VALUE, SORT_VALUE_CURSOR_KEY,
+};
+pub(crate) use self::cursor::{
+    AddressNamesCursorBinding, address_names_cursor_payload, address_names_storage_cursor,
 };
 
 mod cursor;
@@ -157,7 +162,7 @@ pub(crate) async fn get_address_names(
                 .to_string()
                 .contains("page cursor does not match a grouped entry")
         {
-            return V2Error::invalid_input("cursor must be a valid pagination cursor");
+            return invalid_cursor_error();
         }
         V2Error::internal_error(format!(
             "failed to load address names for {normalized_address}"

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::time::OffsetDateTime;
 
 use super::chain_position::{ChainPosition, ChainPositions, SnapshotSelectionScope};
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
@@ -372,17 +372,4 @@ fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     let day_of_year = (153 * month_prime + 2) / 5 + i64::from(day) - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
-}
-
-pub(super) fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

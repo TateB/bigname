@@ -27,6 +27,7 @@ mod resolution_support;
 mod resolver;
 mod snapshot_selection;
 pub mod sql_row;
+mod time;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -48,8 +49,7 @@ pub use address_names::{
     insert_address_names_current_full_rebuild_rows, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
-    load_address_names_current_page, load_address_names_current_page_sorted,
-    load_address_names_current_page_sorted_for_relations,
+    load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
     publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
     rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
     upsert_address_names_current_rows,

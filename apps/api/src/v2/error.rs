@@ -92,11 +92,13 @@ impl V2Error {
         Self::new(ErrorCode::InternalError, message)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_details(mut self, details: Map<String, Value>) -> Self {
         self.details = details;
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn code(&self) -> ErrorCode {
         self.code
     }

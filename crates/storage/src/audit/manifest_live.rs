@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::evm_primitives::{
     normalize_evm_address, normalize_evm_b256, normalize_optional_evm_address,
 };
+use crate::time::format_timestamp;
 
 use super::types::{
     MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE, MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND,
@@ -312,17 +313,4 @@ fn render_live_proxy_implementation_candidate(row: sqlx::postgres::PgRow) -> Res
         },
         "remediation": Value::Null,
     }))
-}
-
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(sqlx::types::time::UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

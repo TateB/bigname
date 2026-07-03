@@ -1,6 +1,9 @@
 use bigname_storage::{NameCurrentListCursor, NameCurrentListCursorValue};
 
-use crate::v2::{CursorPayload, V2Error, V2Result};
+use crate::v2::{
+    CursorPayload, V2Result,
+    cursor::{cursor_value, invalid_cursor_error},
+};
 
 const CHAIN_ID_FILTER_KEY: &str = "chain_id";
 const RESOLVER_FILTER_KEY: &str = "resolver";
@@ -57,10 +60,10 @@ pub(crate) fn bound_names_storage_cursor(
     let expected_chain_id = binding.chain_id.to_string();
     let expected_namespace = option_filter(binding.namespace);
     if payload.sort != binding.sort {
-        return Err(invalid_bound_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_bound_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 3
         || payload.filters.get(CHAIN_ID_FILTER_KEY).map(String::as_str)
@@ -73,20 +76,21 @@ pub(crate) fn bound_names_storage_cursor(
             .map(String::as_str)
             != Some(expected_namespace.as_str())
     {
-        return Err(invalid_bound_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 4 {
-        return Err(invalid_bound_names_cursor());
+        return Err(invalid_cursor_error());
     }
 
     Ok(NameCurrentListCursor {
-        sort_value: NameCurrentListCursorValue::Name(cursor_nonempty_value(
+        sort_value: NameCurrentListCursorValue::Name(cursor_value(
             payload,
             SORT_VALUE_CURSOR_KEY,
+            invalid_cursor_error,
         )?),
-        namespace: cursor_nonempty_value(payload, CURSOR_NAMESPACE_KEY)?,
-        normalized_name: cursor_nonempty_value(payload, NORMALIZED_NAME_CURSOR_KEY)?,
-        namehash: cursor_nonempty_value(payload, NAMEHASH_CURSOR_KEY)?,
+        namespace: cursor_value(payload, CURSOR_NAMESPACE_KEY, invalid_cursor_error)?,
+        normalized_name: cursor_value(payload, NORMALIZED_NAME_CURSOR_KEY, invalid_cursor_error)?,
+        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY, invalid_cursor_error)?,
     })
 }
 
@@ -95,19 +99,6 @@ fn cursor_sort_value(cursor: &NameCurrentListCursor) -> String {
         NameCurrentListCursorValue::Name(value) => value.clone(),
         NameCurrentListCursorValue::Timestamp(_) => String::new(),
     }
-}
-
-fn cursor_nonempty_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_bound_names_cursor)
-}
-
-fn invalid_bound_names_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 fn option_filter(value: Option<&str>) -> String {

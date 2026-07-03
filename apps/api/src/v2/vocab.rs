@@ -181,14 +181,6 @@ impl RelationSet {
         &self.relations
     }
 
-    pub(crate) fn contains(&self, relation: Relation) -> bool {
-        self.relations.contains(&relation)
-    }
-
-    pub(crate) fn single(&self) -> Option<Relation> {
-        (self.relations.len() == 1).then_some(self.relations[0])
-    }
-
     pub(crate) fn canonical_value(&self) -> String {
         self.relations
             .iter()
@@ -328,10 +320,7 @@ pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
 ];
 
 pub(crate) fn contains_boundary_vocabulary(candidate: &str, terms: &[&str]) -> bool {
-    let normalized_candidate = normalize_pipeline_candidate(candidate);
-    terms
-        .iter()
-        .any(|term| pipeline_term_matches(&normalized_candidate, term))
+    !matched_boundary_vocabulary_terms(candidate, terms).is_empty()
 }
 
 pub(crate) fn matched_boundary_vocabulary_terms<'a>(
@@ -344,17 +333,6 @@ pub(crate) fn matched_boundary_vocabulary_terms<'a>(
         .copied()
         .filter(|term| pipeline_term_matches(&normalized_candidate, term))
         .collect()
-}
-
-pub(crate) fn contains_pipeline_vocabulary(candidate: &str, terms: &[&str]) -> bool {
-    contains_boundary_vocabulary(candidate, terms)
-}
-
-pub(crate) fn matched_pipeline_vocabulary_terms<'a>(
-    candidate: &str,
-    terms: &'a [&'a str],
-) -> Vec<&'a str> {
-    matched_boundary_vocabulary_terms(candidate, terms)
 }
 
 fn pipeline_term_matches(normalized_candidate: &str, term: &str) -> bool {
@@ -529,22 +507,22 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_vocabulary_matching_uses_underscore_boundaries_and_plural_suffixes() {
+    fn boundary_vocabulary_matching_uses_underscore_boundaries_and_plural_suffixes() {
         const TERMS: &[&str] = &["coverage", "raw_fact", "normalized_events"];
 
         assert_eq!(
-            matched_pipeline_vocabulary_terms("insufficient_coverage", TERMS),
+            matched_boundary_vocabulary_terms("insufficient_coverage", TERMS),
             vec!["coverage"]
         );
-        assert!(contains_pipeline_vocabulary("coverage_gap", TERMS));
-        assert!(contains_pipeline_vocabulary("coverages", TERMS));
-        assert!(contains_pipeline_vocabulary("raw facts", TERMS));
-        assert!(contains_pipeline_vocabulary("normalized_event", TERMS));
-        assert!(contains_pipeline_vocabulary(
+        assert!(contains_boundary_vocabulary("coverage_gap", TERMS));
+        assert!(contains_boundary_vocabulary("coverages", TERMS));
+        assert!(contains_boundary_vocabulary("raw facts", TERMS));
+        assert!(contains_boundary_vocabulary("normalized_event", TERMS));
+        assert!(contains_boundary_vocabulary(
             "identity_sidecar_missing",
             PRODUCT_PIPELINE_TERMS
         ));
-        assert!(!contains_pipeline_vocabulary("discoverage", TERMS));
-        assert!(!contains_pipeline_vocabulary("rawfactory", TERMS));
+        assert!(!contains_boundary_vocabulary("discoverage", TERMS));
+        assert!(!contains_boundary_vocabulary("rawfactory", TERMS));
     }
 }

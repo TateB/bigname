@@ -4,9 +4,8 @@ use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
-use super::parsing::{
-    decode_chain_positions_value, format_timestamp, parse_explicit_chain_positions_json,
-};
+use super::parsing::{decode_chain_positions_value, parse_explicit_chain_positions_json};
+use crate::time::format_timestamp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotPositionRequirement {

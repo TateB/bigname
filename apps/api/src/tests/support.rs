@@ -113,6 +113,9 @@ mod execution {
     }
 }
 
+// The API test build path-includes the worker module, but only exercises the
+// primary-name helpers reachable through API fixtures.
+#[allow(dead_code)]
 #[path = "../../../worker/src/primary_name.rs"]
 mod worker_primary_name;
 

@@ -1,8 +1,8 @@
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde_json::Value;
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::time::OffsetDateTime;
 
-use crate::v2::chains::slug_to_numeric;
+use crate::v2::{chains::slug_to_numeric, format_timestamp};
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
     match value {
@@ -108,17 +108,4 @@ pub(super) fn json_value_present(value: &Value) -> bool {
 fn format_unix_timestamp(timestamp: i64) -> Option<String> {
     let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
     Some(format_timestamp(value))
-}
-
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

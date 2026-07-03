@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bigname_storage::{ReverseIdentityCursor, ReverseIdentityRecordRow};
 
-use crate::v2::{CursorPayload, Relation, RelationSet, V2Error, V2Result};
+use crate::v2::{CursorPayload, RelationSet, V2Error, V2Result};
 
 const SORT: &str = "primary_relation_name_namespace_namehash_asc";
 const NONE_FILTER_VALUE: &str = "any";
@@ -172,7 +172,7 @@ fn invalid_lookup_cursor() -> V2Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::{decode, encode};
+    use crate::v2::{Relation, decode, encode};
     use sqlx::types::{Uuid, time::OffsetDateTime};
 
     #[test]

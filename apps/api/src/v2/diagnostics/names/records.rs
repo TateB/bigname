@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, QueryParams, RawQueryParams, V2Error, V2Result,
-    apply_diagnostics_dictionary_names, resolve_diagnostic_name,
+    Envelope, QueryParams, RawQueryParams, V2Error, V2Result, apply_diagnostics_dictionary_names,
+    resolve_diagnostic_name,
 };
 
 use crate::v2::{

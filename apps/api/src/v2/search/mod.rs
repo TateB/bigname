@@ -15,10 +15,11 @@ use tracing::error;
 use crate::{AppState, PUBLIC_NAMESPACES};
 
 use super::chains::deployment_profile_for_slug;
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
-    RegistrationStatus, SnapshotReadResource, V2Error, V2Result, as_of_meta, decode, encode,
-    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
+    AtSelector, CursorPayload, Envelope, Finality, Page, QueryParams, RawQueryParams,
+    RegistrationStatus, SnapshotReadResource, V2Error, V2Result, decode, encode, encode_at_token,
+    name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope,
 };
 
@@ -253,26 +254,27 @@ pub(crate) fn search_storage_cursor(
     binding: &SearchCursorBinding<'_>,
 ) -> V2Result<NameCurrentListCursor> {
     if payload.sort != SEARCH_SORT {
-        return Err(invalid_search_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_search_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters != cursor_filters(binding) {
-        return Err(invalid_search_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 4 {
-        return Err(invalid_search_cursor());
+        return Err(invalid_cursor_error());
     }
 
     Ok(NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Name(cursor_value(
             payload,
             DISPLAY_NAME_CURSOR_KEY,
+            invalid_cursor_error,
         )?),
-        namespace: cursor_value(payload, NAMESPACE_FILTER_KEY)?,
-        normalized_name: cursor_value(payload, NORMALIZED_NAME_CURSOR_KEY)?,
-        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY)?,
+        namespace: cursor_value(payload, NAMESPACE_FILTER_KEY, invalid_cursor_error)?,
+        normalized_name: cursor_value(payload, NORMALIZED_NAME_CURSOR_KEY, invalid_cursor_error)?,
+        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY, invalid_cursor_error)?,
     })
 }
 
@@ -405,19 +407,6 @@ fn validate_namespace(namespace: &str) -> V2Result<()> {
     } else {
         Err(V2Error::invalid_input("namespace is invalid"))
     }
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_search_cursor)
-}
-
-fn invalid_search_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 #[cfg(test)]

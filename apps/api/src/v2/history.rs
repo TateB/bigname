@@ -16,11 +16,12 @@ use crate::{
     map_internal_api_error, normalize_inferred_route_name,
 };
 
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
-    QueryParamAllowlist, QueryParams, SnapshotReadResource, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, api_error_to_v2_for_resource, decode, decode_at_token, encode,
-    encode_at_token, resolve_v2_snapshot_for, snapshot_meta,
+    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Page, QueryParamAllowlist,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
+    api_error_to_v2_for_resource, decode, decode_at_token, encode, encode_at_token,
+    resolve_v2_snapshot_for, snapshot_meta,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -141,7 +142,7 @@ pub(crate) async fn get_history(
             .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
             .is_some()
         {
-            V2Error::invalid_input("cursor must be a valid pagination cursor")
+            invalid_cursor_error()
         } else {
             V2Error::internal_error(format!(
                 "failed to load history for {}/{}",
@@ -255,10 +256,10 @@ pub(crate) fn history_storage_cursor(
     snapshot_token: &str,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != HISTORY_SORT {
-        return Err(invalid_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(snapshot_token) {
-        return Err(invalid_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 3
         || payload
@@ -269,16 +270,20 @@ pub(crate) fn history_storage_cursor(
         || payload.filters.get(NAME_FILTER_KEY).map(String::as_str) != Some(parent_logical_name_id)
         || payload.filters.get(SCOPE_FILTER_KEY).map(String::as_str) != Some(scope.as_str())
     {
-        return Err(invalid_history_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 2 {
-        return Err(invalid_history_cursor());
+        return Err(invalid_cursor_error());
     }
 
-    let normalized_event_id = cursor_value(payload, NORMALIZED_EVENT_ID_CURSOR_KEY)?
-        .parse::<i64>()
-        .map_err(|_| invalid_history_cursor())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY)?;
+    let normalized_event_id = cursor_value(
+        payload,
+        NORMALIZED_EVENT_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?
+    .parse::<i64>()
+    .map_err(|_| invalid_cursor_error())?;
+    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
 
     Ok(HistoryCursor {
         normalized_event_id,
@@ -343,19 +348,6 @@ fn v2_snapshot_scope_at_selector(at: &AtSelector) -> V2Result<Option<String>> {
             Ok(Some(chain_positions.to_value().to_string()))
         }
     }
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_history_cursor)
-}
-
-fn invalid_history_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {

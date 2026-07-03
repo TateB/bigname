@@ -7,7 +7,7 @@ use tracing::error;
 use crate::{ResolutionRecordKey, build_resolution_verified_state};
 
 use super::super::{
-    PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_pipeline_vocabulary,
+    PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,
     name_record::{
         record_addresses, record_content_hash, record_text_records, record_value_string, resolver,
         string_field, value_to_string,
@@ -482,7 +482,7 @@ fn product_record_reason(reason: &str) -> V2Result<String> {
         "record_family_not_supported_in_phase6_projection" => {
             Ok("record_family_not_supported".to_owned())
         }
-        _ if record_reason_contains_pipeline_vocabulary(reason) => {
+        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
             error!(%reason, "rejected record reason containing pipeline vocabulary");
             Err(V2Error::internal_error(
                 "failed to map product record reason vocabulary",
@@ -490,10 +490,6 @@ fn product_record_reason(reason: &str) -> V2Result<String> {
         }
         _ => Ok(reason.to_owned()),
     }
-}
-
-fn record_reason_contains_pipeline_vocabulary(reason: &str) -> bool {
-    contains_pipeline_vocabulary(reason, PRODUCT_PIPELINE_TERMS)
 }
 
 #[cfg(test)]

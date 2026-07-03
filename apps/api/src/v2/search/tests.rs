@@ -544,51 +544,6 @@ fn sepolia_snapshot_token() -> String {
     })
 }
 
-fn search_union_at_token_from_meta_as_of(payload: &Value) -> Result<String> {
-    Ok(encode_at_token(&SelectedSnapshot {
-        chain_positions: ChainPositions::new(BTreeMap::from([
-            snapshot_position_from_meta_as_of(payload, "1", "ethereum", "ethereum-mainnet")?,
-            snapshot_position_from_meta_as_of(payload, "8453", "base", "base-mainnet")?,
-        ])),
-        consistency: SnapshotConsistency::Head,
-    }))
-}
-
-fn snapshot_position_from_meta_as_of(
-    payload: &Value,
-    numeric_chain_id: &str,
-    slot: &str,
-    chain_id: &str,
-) -> Result<(String, ChainPosition)> {
-    let as_of = payload
-        .pointer(&format!("/meta/as_of/{numeric_chain_id}"))
-        .with_context(|| format!("response must include meta.as_of[{numeric_chain_id}]"))?;
-    let block_number = as_of
-        .get("block_number")
-        .and_then(Value::as_i64)
-        .context("meta.as_of block_number must be an i64")?;
-    let block_hash = as_of
-        .get("block_hash")
-        .and_then(Value::as_str)
-        .context("meta.as_of block_hash must be a string")?;
-    let timestamp = as_of
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .context("meta.as_of timestamp must be a string")?;
-
-    Ok((
-        slot.to_owned(),
-        ChainPosition {
-            slot: slot.to_owned(),
-            chain_id: chain_id.to_owned(),
-            block_number,
-            block_hash: block_hash.to_owned(),
-            timestamp: bigname_storage::parse_rfc3339_utc_timestamp(timestamp)
-                .map_err(|error| anyhow::anyhow!("{error}"))?,
-        },
-    ))
-}
-
 fn snapshot_position(
     slot: &str,
     chain_id: &str,

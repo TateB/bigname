@@ -8,6 +8,7 @@ use sqlx::types::Uuid;
 
 use crate::{AppState, normalize_inferred_route_name};
 
+use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token,
@@ -349,40 +350,27 @@ fn permissions_storage_cursor(
     snapshot_token: &str,
 ) -> V2Result<PermissionsCurrentAccountResourceCursor> {
     if payload.sort != PERMISSIONS_SORT {
-        return Err(invalid_permissions_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(snapshot_token) {
-        return Err(invalid_permissions_cursor());
+        return Err(invalid_cursor_error());
     }
     if &payload.filters != expected_filters {
-        return Err(invalid_permissions_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 3 {
-        return Err(invalid_permissions_cursor());
+        return Err(invalid_cursor_error());
     }
 
-    let resource_id = cursor_value(payload, RESOURCE_ID_CURSOR_KEY)?
+    let resource_id = cursor_value(payload, RESOURCE_ID_CURSOR_KEY, invalid_cursor_error)?
         .parse::<Uuid>()
-        .map_err(|_| invalid_permissions_cursor())?;
+        .map_err(|_| invalid_cursor_error())?;
 
     Ok(PermissionsCurrentAccountResourceCursor {
-        subject: cursor_value(payload, SUBJECT_CURSOR_KEY)?,
+        subject: cursor_value(payload, SUBJECT_CURSOR_KEY, invalid_cursor_error)?,
         resource_id,
-        scope: cursor_value(payload, SCOPE_CURSOR_KEY)?,
+        scope: cursor_value(payload, SCOPE_CURSOR_KEY, invalid_cursor_error)?,
     })
-}
-
-fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_permissions_cursor)
-}
-
-fn invalid_permissions_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {

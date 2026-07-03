@@ -9,9 +9,9 @@ use super::chain_position::{
 };
 use super::consistency::SnapshotConsistency;
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
-use super::parsing::format_timestamp;
 use crate::checkpoints::{ChainCheckpoint, CheckpointBlockRef, load_chain_checkpoint};
 use crate::lineage::{CanonicalityState, load_chain_lineage_block};
+use crate::time::format_timestamp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SnapshotAt {

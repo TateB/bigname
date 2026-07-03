@@ -47,7 +47,20 @@ pub(crate) fn decode(cursor: &str) -> V2Result<Payload> {
     Ok(payload)
 }
 
-fn invalid_cursor_error() -> V2Error {
+pub(crate) fn cursor_value(
+    payload: &Payload,
+    key: &str,
+    invalid_cursor_error: impl Fn() -> V2Error,
+) -> V2Result<String> {
+    payload
+        .last_item
+        .get(key)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(invalid_cursor_error)
+}
+
+pub(crate) fn invalid_cursor_error() -> V2Error {
     V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 

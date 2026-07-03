@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 
 use bigname_storage::{AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue};
-use sqlx::types::{
-    Uuid,
-    time::{OffsetDateTime, UtcOffset},
-};
+use sqlx::types::Uuid;
 
 use crate::v2::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, RelationSet, SortOrder, V2Error, V2Result,
+    AddressNamesDedupe, AddressNamesSort, CursorPayload, RelationSet, SortOrder, V2Result,
+    cursor::{cursor_value, invalid_cursor_error},
+    format_timestamp,
 };
 
 pub(crate) const ADDRESS_FILTER_KEY: &str = "address";
@@ -73,10 +72,10 @@ pub(crate) fn address_names_storage_cursor(
     binding: &AddressNamesCursorBinding<'_>,
 ) -> V2Result<AddressNamesCurrentSortedCursor> {
     if payload.sort != binding.sort.as_str() {
-        return Err(invalid_address_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_address_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 6
         || payload.filters.get(ADDRESS_FILTER_KEY).map(String::as_str) != Some(binding.address)
@@ -93,16 +92,20 @@ pub(crate) fn address_names_storage_cursor(
             != Some(option_filter(binding.q).as_str())
         || payload.filters.get(ORDER_FILTER_KEY).map(String::as_str) != Some(binding.order.as_str())
     {
-        return Err(invalid_address_names_cursor());
+        return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 4 {
-        return Err(invalid_address_names_cursor());
+        return Err(invalid_cursor_error());
     }
 
     let sort_value = cursor_sort_value(payload, binding.sort)?;
-    let logical_name_id = cursor_nonempty_value(payload, LOGICAL_NAME_ID_CURSOR_KEY)?;
-    let resource_id = Uuid::parse_str(&cursor_nonempty_value(payload, RESOURCE_ID_CURSOR_KEY)?)
-        .map_err(|_| invalid_address_names_cursor())?;
+    let logical_name_id = cursor_value(payload, LOGICAL_NAME_ID_CURSOR_KEY, invalid_cursor_error)?;
+    let resource_id = Uuid::parse_str(&cursor_value(
+        payload,
+        RESOURCE_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?)
+    .map_err(|_| invalid_cursor_error())?;
 
     Ok(AddressNamesCurrentSortedCursor {
         sort_value,
@@ -143,12 +146,12 @@ fn cursor_sort_value(
     payload: &CursorPayload,
     sort: AddressNamesSort,
 ) -> V2Result<AddressNamesCurrentSortedCursorValue> {
-    let sort_kind = cursor_nonempty_value(payload, SORT_KIND_CURSOR_KEY)?;
+    let sort_kind = cursor_value(payload, SORT_KIND_CURSOR_KEY, invalid_cursor_error)?;
     let sort_value = payload
         .last_item
         .get(SORT_VALUE_CURSOR_KEY)
         .cloned()
-        .ok_or_else(invalid_address_names_cursor)?;
+        .ok_or_else(invalid_cursor_error)?;
 
     match (sort, sort_kind.as_str()) {
         (AddressNamesSort::Name, SORT_KIND_NAME) if !sort_value.trim().is_empty() => {
@@ -163,24 +166,11 @@ fn cursor_sort_value(
             SORT_KIND_TIMESTAMP_VALUE,
         ) if !sort_value.trim().is_empty() => {
             let value = bigname_storage::parse_rfc3339_utc_timestamp(&sort_value)
-                .map_err(|_| invalid_address_names_cursor())?;
+                .map_err(|_| invalid_cursor_error())?;
             Ok(AddressNamesCurrentSortedCursorValue::Timestamp(Some(value)))
         }
-        _ => Err(invalid_address_names_cursor()),
+        _ => Err(invalid_cursor_error()),
     }
-}
-
-fn cursor_nonempty_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
-    payload
-        .last_item
-        .get(key)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(invalid_address_names_cursor)
-}
-
-fn invalid_address_names_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 fn option_filter(value: Option<&str>) -> String {
@@ -191,17 +181,4 @@ fn relation_filter_value(value: Option<&RelationSet>) -> String {
     value
         .map(RelationSet::canonical_value)
         .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned())
-}
-
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }
