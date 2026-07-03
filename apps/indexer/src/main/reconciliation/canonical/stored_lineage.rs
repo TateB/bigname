@@ -1,8 +1,7 @@
 use anyhow::Result;
 use bigname_storage::{
-    CanonicalityState, ChainLineageBlock, CheckpointBlockRef,
-    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
-    load_chain_lineage_canonical_child_path,
+    CanonicalityState, ChainLineageBlock, CheckpointBlockRef, chain_lineage_contains_ancestor,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
 };
 
 use crate::provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot};
@@ -105,12 +104,10 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         .expect("non-empty stored lineage promotion path");
     let target_is_anchor = target.block_hash == stored_anchor.block_hash;
     if !target_is_anchor
-        && !chain_lineage_contains_canonical_ancestor_position(
+        && !chain_lineage_contains_ancestor(
             pool,
             chain,
             &stored_anchor.block_hash,
-            stored_anchor.block_number,
-            target.block_number,
             &target.block_hash,
         )
         .await?

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use bigname_manifests::{WatchedContract, load_watched_contracts_by_source_family_and_addresses};
 
-use super::{CompletedBackfillCoverage, source_identity::CoverageTarget};
+use super::{CompletedBackfillCoverage, CoverageRequirement, source_identity::CoverageTarget};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct GenericScanWatchedTargets {
@@ -30,7 +30,7 @@ impl GenericScanWatchedTargets {
 pub(super) async fn load_generic_scan_watched_targets(
     pool: &sqlx::PgPool,
     chain: &str,
-    selected_addresses: &[String],
+    requirements: &[CoverageRequirement],
     coverages: &[CompletedBackfillCoverage],
 ) -> Result<GenericScanWatchedTargets> {
     let generic_scan_source_families = coverages
@@ -41,22 +41,28 @@ pub(super) async fn load_generic_scan_watched_targets(
         return Ok(GenericScanWatchedTargets::default());
     }
 
-    let generic_candidate_addresses = selected_addresses
-        .iter()
-        .filter(|address| {
-            coverages.iter().any(|coverage| {
-                !coverage.generic_scan_source_families.is_empty()
-                    && !coverage.intervals_by_address.contains_key(*address)
-            })
-        })
-        .map(|address| (chain.to_owned(), address.clone()))
-        .collect::<Vec<_>>();
-    if generic_candidate_addresses.is_empty() {
-        return Ok(GenericScanWatchedTargets::default());
-    }
-
     let mut intervals_by_family_address = BTreeMap::<(String, String), Vec<(i64, i64)>>::new();
     for source_family in generic_scan_source_families {
+        let generic_candidate_addresses = requirements
+            .iter()
+            .filter(|requirement| {
+                requirement.source_family.as_deref() == Some(source_family.as_str())
+                    && coverages.iter().any(|coverage| {
+                        coverage
+                            .generic_scan_source_families
+                            .contains(&source_family)
+                            && !coverage
+                                .intervals_by_family_address
+                                .contains_key(&(source_family.clone(), requirement.address.clone()))
+                    })
+            })
+            .map(|requirement| (chain.to_owned(), requirement.address.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if generic_candidate_addresses.is_empty() {
+            continue;
+        }
         let watched_contracts = load_watched_contracts_by_source_family_and_addresses(
             pool,
             &source_family,

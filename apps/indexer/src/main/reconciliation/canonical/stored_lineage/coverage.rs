@@ -1,6 +1,6 @@
 mod completed_backfill;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use anyhow::Result;
 use bigname_manifests::{
@@ -10,9 +10,9 @@ use bigname_manifests::{
 use bigname_storage::ChainLineageBlock;
 use sqlx::Row;
 
-use crate::provider::RAW_PAYLOAD_KIND_FULL_BLOCK;
-
-use completed_backfill::{CompletedBackfillCoverageEvidence, completed_backfill_range_coverage};
+use completed_backfill::{
+    CompletedBackfillCoverageEvidence, CoverageRequirement, completed_backfill_range_coverage,
+};
 
 pub(super) async fn stored_path_has_required_raw_fact_coverage(
     pool: &sqlx::PgPool,
@@ -27,19 +27,20 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     let selected_addresses = selected_raw_payload_addresses
         .iter()
         .map(|address| address.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
-    let selected_addresses = log_producing_selected_addresses(pool, chain, &selected_addresses)
-        .await
-        .map_err(|error| error.to_string())?;
+    let coverage_requirements =
+        log_producing_coverage_requirements(pool, chain, &selected_addresses)
+            .await
+            .map_err(|error| error.to_string())?;
+    let selected_addresses = log_producing_addresses(&coverage_requirements);
     let block_hashes = path
         .iter()
         .map(|block| block.block_hash.clone())
         .collect::<Vec<_>>();
-    let retained_payload_hashes = retained_full_block_payload_hashes(pool, chain, &block_hashes)
-        .await
-        .map_err(|error| error.to_string())?;
     let completed_coverage =
-        completed_backfill_range_coverage(pool, chain, path, &selected_addresses)
+        completed_backfill_range_coverage(pool, chain, path, &coverage_requirements)
             .await
             .map_err(|error| error.to_string())?;
     let same_height_fork_numbers = same_height_fork_lineage_numbers(pool, chain, path)
@@ -47,13 +48,12 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
         .map_err(|error| error.to_string())?;
     if let Some(uncovered_block) = first_uncovered_path_block(
         path,
-        &retained_payload_hashes,
         &completed_coverage,
         &same_height_fork_numbers,
-        &selected_addresses,
+        &coverage_requirements,
     ) {
         return Err(format!(
-            "stored lineage path over blocks {}..={} has lineage-only block {} ({}) without unambiguous completed backfill range coverage for the current watched address set and without retained full-block payload evidence; rerun hash-pinned backfill for that selected range, or use RPC-backed full-payload retention when same-height fork lineage makes numeric completed-range coverage ambiguous",
+            "stored lineage path over blocks {}..={} has lineage-only block {} ({}) without unambiguous completed backfill range coverage for the current watched source-family/address set; rerun hash-pinned backfill for that selected range before retrying",
             path_start_number(path),
             path_end_number(path),
             uncovered_block.block_number,
@@ -173,13 +173,12 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     .bind(chain)
     .bind(&block_hashes)
     .bind(&selected_addresses)
-    .bind(covered_block_hashes(
-        path,
-        &retained_payload_hashes,
-        &completed_coverage,
-        &same_height_fork_numbers,
-        &selected_addresses,
-    ))
+        .bind(covered_block_hashes(
+            path,
+            &completed_coverage,
+            &same_height_fork_numbers,
+            &coverage_requirements,
+        ))
     .fetch_one(pool)
     .await
     .map_err(|error| error.to_string())?;
@@ -199,7 +198,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
 
     if missing_coverage != 0 {
         return Err(format!(
-            "stored lineage selected-log blocks over {}..={} lack completed backfill range coverage or retained full-block payload evidence; rerun hash-pinned backfill for the current watched address set before retrying",
+            "stored lineage selected-log blocks over {}..={} lack completed backfill range coverage; rerun hash-pinned backfill for the current watched source-family/address set before retrying",
             path_start_number(path),
             path_end_number(path)
         ));
@@ -215,11 +214,11 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     Ok(())
 }
 
-async fn log_producing_selected_addresses(
+async fn log_producing_coverage_requirements(
     pool: &sqlx::PgPool,
     chain: &str,
     selected_addresses: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<CoverageRequirement>> {
     if selected_addresses.is_empty() {
         return Ok(Vec::new());
     }
@@ -230,7 +229,10 @@ async fn log_producing_selected_addresses(
         .collect::<Vec<_>>();
     let watched_contracts = load_watched_contracts_by_addresses(pool, &targets).await?;
     if watched_contracts.is_empty() {
-        return Ok(selected_addresses.to_vec());
+        return Ok(selected_addresses
+            .iter()
+            .map(|address| unknown_coverage_requirement(address))
+            .collect());
     }
 
     let source_families = watched_contracts
@@ -247,64 +249,60 @@ async fn log_producing_selected_addresses(
             .map(|event| event.source_family)
             .collect::<BTreeSet<_>>();
 
-    let mut source_families_by_address = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut requirements = Vec::<CoverageRequirement>::new();
+    let mut watched_addresses = BTreeSet::<String>::new();
     for contract in watched_contracts {
-        source_families_by_address
-            .entry(contract.address.to_ascii_lowercase())
-            .or_default()
-            .insert(contract.source_family);
+        let address = contract.address.to_ascii_lowercase();
+        watched_addresses.insert(address.clone());
+        if source_families_with_topics.contains(&contract.source_family) {
+            requirements.push(CoverageRequirement {
+                source_family: Some(contract.source_family),
+                address,
+                effective_from_block: contract.active_from_block_number.unwrap_or(0),
+                effective_to_block: contract.active_to_block_number.unwrap_or(i64::MAX),
+            });
+        }
     }
+    for address in selected_addresses {
+        if !watched_addresses.contains(address) {
+            requirements.push(unknown_coverage_requirement(address));
+        }
+    }
+    requirements.sort_by(|left, right| {
+        (
+            left.source_family.as_deref(),
+            left.address.as_str(),
+            left.effective_from_block,
+            left.effective_to_block,
+        )
+            .cmp(&(
+                right.source_family.as_deref(),
+                right.address.as_str(),
+                right.effective_from_block,
+                right.effective_to_block,
+            ))
+    });
+    requirements.dedup();
 
-    Ok(selected_addresses
-        .iter()
-        .filter(|address| {
-            source_families_by_address
-                .get(*address)
-                .is_none_or(|families| {
-                    families
-                        .iter()
-                        .any(|family| source_families_with_topics.contains(family))
-                })
-        })
-        .cloned()
-        .collect())
+    Ok(requirements)
 }
 
-async fn retained_full_block_payload_hashes(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-) -> Result<Vec<String>> {
-    if block_hashes.is_empty() {
-        return Ok(Vec::new());
+fn unknown_coverage_requirement(address: &str) -> CoverageRequirement {
+    CoverageRequirement {
+        source_family: None,
+        address: address.to_ascii_lowercase(),
+        effective_from_block: 0,
+        effective_to_block: i64::MAX,
     }
+}
 
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT block_hash
-        FROM raw_payload_cache_metadata
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
-          AND payload_kind = $3
-          AND retained_digest IS NOT NULL
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
-    .bind(chain)
-    .bind(block_hashes)
-    .bind(RAW_PAYLOAD_KIND_FULL_BLOCK)
-    .fetch_all(pool)
-    .await?;
-
-    let mut hashes = Vec::with_capacity(rows.len());
-    for row in rows {
-        hashes.push(row.try_get("block_hash")?);
-    }
-    Ok(hashes)
+fn log_producing_addresses(requirements: &[CoverageRequirement]) -> Vec<String> {
+    requirements
+        .iter()
+        .map(|requirement| requirement.address.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 async fn same_height_fork_lineage_numbers(
@@ -331,6 +329,7 @@ async fn same_height_fork_lineage_numbers(
         WHERE chain_id = $1
           AND block_number = ANY($2::BIGINT[])
           AND NOT (block_hash = ANY($3::TEXT[]))
+          AND canonicality_state <> 'orphaned'::canonicality_state
         "#,
     )
     .bind(chain)
@@ -348,36 +347,30 @@ async fn same_height_fork_lineage_numbers(
 
 fn first_uncovered_path_block<'a>(
     path: &'a [ChainLineageBlock],
-    retained_payload_hashes: &[String],
     completed_coverage: &CompletedBackfillCoverageEvidence,
     same_height_fork_numbers: &BTreeSet<i64>,
-    selected_addresses: &[String],
+    coverage_requirements: &[CoverageRequirement],
 ) -> Option<&'a ChainLineageBlock> {
     path.iter().find(|block| {
-        !retained_payload_hashes
-            .iter()
-            .any(|hash| hash.eq_ignore_ascii_case(&block.block_hash))
-            && (same_height_fork_numbers.contains(&block.block_number)
-                || !completed_coverage.covers_block(block.block_number, selected_addresses))
+        same_height_fork_numbers.contains(&block.block_number)
+            || !completed_coverage.covers_block(block.block_number, coverage_requirements)
     })
 }
 
 fn covered_block_hashes(
     path: &[ChainLineageBlock],
-    retained_payload_hashes: &[String],
     completed_coverage: &CompletedBackfillCoverageEvidence,
     same_height_fork_numbers: &BTreeSet<i64>,
-    selected_addresses: &[String],
+    coverage_requirements: &[CoverageRequirement],
 ) -> Vec<String> {
-    let mut hashes = retained_payload_hashes.to_vec();
-    hashes.extend(
-        path.iter()
-            .filter(|block| {
-                !same_height_fork_numbers.contains(&block.block_number)
-                    && completed_coverage.covers_block(block.block_number, selected_addresses)
-            })
-            .map(|block| block.block_hash.clone()),
-    );
+    let mut hashes = path
+        .iter()
+        .filter(|block| {
+            !same_height_fork_numbers.contains(&block.block_number)
+                && completed_coverage.covers_block(block.block_number, coverage_requirements)
+        })
+        .map(|block| block.block_hash.clone())
+        .collect::<Vec<_>>();
     hashes.sort();
     hashes.dedup();
     hashes

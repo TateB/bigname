@@ -387,11 +387,11 @@ before calling the normal checkpoint-advance path. The live canonical `latest`
 head is not required to be stored, and normally is not stored during an
 over-limit catch-up.
 
-For every promoted block, evidence must come from either a completed backfill
-range whose persisted source identity proves the current watched address set for
-that block, or from retained full-block RPC payload metadata. Full source
-identities prove this through `source_identity.selected_targets` and their
-`effective_from_block` / `effective_to_block` intervals. Compact source
+For every promoted block, evidence must come from a completed backfill range
+whose persisted source identity proves the current log-producing watched
+`(source_family, address)` set active for that block. Full source identities
+prove this through `source_identity.selected_targets` and each target's
+`effective_from_block` / `effective_to_block` interval. Compact source
 identities prove it only when the stored `selected_targets_digest_v1` count,
 keccak digest (including the legacy source-family producer digest shape),
 first/last sample, selector kind, source family, and requested target set match
@@ -399,19 +399,22 @@ the current persisted watch-plan preimage for that job range. ENSv1 resolver
 families are special: backfills record `generic_topic_scans` because resolver
 logs are scanned by topic across all emitters instead of enumerating every
 resolver address in `selected_targets`. A completed generic resolver topic scan
-covers watched resolver-family emitters for its block range, while explicitly
-selected log-producing non-generic targets must still be proven by
-`selected_targets` or the matching compact digest. Manifest source families that
-have no active ABI event topics, such as execution-only transport entrypoints,
-do not impose historical selected-log coverage for checkpoint promotion. This is
-why Reth-db backfills can promote after completion even though they do not write
-`raw_payload_cache_metadata` rows; RPC-backed retained payload runs can still
-satisfy the fallback. Completed backfill coverage
-distinguishes "selected no logs in this block" from "this block was never
-fetched" only when the stored path is not ambiguous with another same-height
-lineage row; if a same-height fork row is still present, the block needs
-retained payload evidence or a rerun after reorg repair/orphaning. Lineage-only
-rows from checkpoint ancestor fills or crashed/incomplete backfills are refused.
+covers active watched resolver-family emitters for its block range. Base
+Basenames registry Coinbase SQL scan-all jobs similarly cover
+`basenames_base_registry` by source-family event-signature scan-all identity.
+Explicitly selected log-producing non-generic targets must still be proven by
+the same `(source_family, address)` tuple in `selected_targets` or the matching
+compact digest; one source family's completed coverage never credits another
+family at the same address. Manifest source families that have no active ABI
+event topics, such as execution-only transport entrypoints, do not impose
+historical selected-log coverage for checkpoint promotion. This is why Reth-db
+backfills can promote after completion even though they do not write
+`raw_payload_cache_metadata` rows; retained payload metadata alone is not
+historic promotion evidence. Completed backfill coverage distinguishes
+"selected no logs in this block" from "this block was never fetched" only when
+the stored path is not ambiguous with another non-orphan same-height lineage
+row; orphaned repair residue does not make a block ambiguous. Lineage-only rows
+from checkpoint ancestor fills or crashed/incomplete backfills are refused.
 Event-silent reverse-resolver indexing is a live-tip concern: ordinary live
 reconciliation retains direct-call transaction and receipt facts from full-block
 payloads for the built-in Ethereum Mainnet event-silent reverse resolver set and
@@ -435,15 +438,16 @@ Actionable refusal classes:
 - Incomplete lineage path or duplicate canonical children: rerun hash-pinned
   backfill for the missing range; if duplicate canonical rows remain at one
   height, repair/orphan the losing lineage before retrying.
-- Lineage-only block without completed range coverage or retained payloads:
+- Lineage-only block without completed range coverage:
   rerun hash-pinned backfill for the current log-producing watched address set
   and let the range complete, ensure the job's full or compact source identity
   matches the current watch-plan target intervals for the promoted range, ensure
-  generic resolver jobs include `generic_topic_scans`, or restore retained RPC
-  payload metadata for that range.
-- Same-height fork ambiguity: provide retained full-block RPC payload metadata
-  for the promoted block; numeric completed-range coverage alone cannot
-  disambiguate old-fork no-log evidence from winning-branch no-log evidence.
+  generic resolver jobs include `generic_topic_scans`, and ensure Base
+  Basenames registry Coinbase SQL jobs use the scan-all event-signature
+  identity.
+- Same-height non-orphan fork ambiguity: repair/orphan the losing lineage row,
+  then retry. Numeric completed-range coverage is accepted only when the stored
+  promoted path has no competing non-orphan row at the same height.
 - Selected-log companion rows missing: rerun the selected hash-pinned backfill so
   raw code, transaction, and receipt rows are persisted with the selected logs.
 - Missing event-silent current resolver state after catch-up: let ordinary live

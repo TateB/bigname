@@ -14,6 +14,11 @@ use crate::{
     ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
 };
 
+use super::basenames_scan_all::{
+    FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES, SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+    basenames_registry_scan_all_identity_matches_plan,
+};
+
 const FORMAT_GENERIC_RESOLVER_EVENT_TOPICS: &str = "generic_resolver_event_topics_v1";
 const FORMAT_SELECTED_TARGETS_DIGEST: &str = "selected_targets_digest_v1";
 const FORMAT_SELECTED_TARGETS_WITH_GENERIC_TOPIC_SCANS: &str =
@@ -109,6 +114,27 @@ async fn generic_scan_coverage_targets_for_source_identity(
     else {
         return Ok(None);
     };
+    if source_identity
+        .get("source_identity_payload_format")
+        .and_then(Value::as_str)
+        == Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES)
+    {
+        if !basenames_registry_scan_all_identity_matches_plan(
+            pool,
+            chain,
+            source_identity,
+            &source_plan,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
+        return Ok(Some(CoverageSourceIdentity {
+            targets: Vec::new(),
+            generic_scan_source_families,
+        }));
+    }
+
     let expected_source_identity = backfill_job_source_identity_payload(&source_plan)?;
     if !generic_source_identity_matches_expected(
         source_identity,
@@ -186,6 +212,7 @@ fn generic_source_identity_matches_expected(
         .get("source_identity_payload_format")
         .and_then(Value::as_str)
     {
+        Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES) => Ok(false),
         Some(FORMAT_GENERIC_RESOLVER_EVENT_TOPICS) => {
             Ok(source_identity.get("selected_targets").is_none())
         }
@@ -322,6 +349,16 @@ fn canonical_json_value(value: Value) -> Value {
 
 fn generic_scan_source_families(source_identity: &Value) -> BTreeSet<String> {
     let mut source_families = BTreeSet::new();
+    if source_identity
+        .get("source_identity_payload_format")
+        .and_then(Value::as_str)
+        == Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES)
+        && source_identity.get("source_family").and_then(Value::as_str)
+            == Some(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY)
+    {
+        source_families.insert(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned());
+    }
+
     if source_identity
         .get("source_identity_payload_format")
         .and_then(Value::as_str)
