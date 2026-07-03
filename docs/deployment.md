@@ -155,11 +155,13 @@ not an upstream Reth guarantee: on this host, fresh read-only verifier opens hav
 lagged the node persistence horizon by roughly 1-1.5k blocks, so near-head
 compare blocks can fail spuriously.
 
-Before running the raw code-hash correction, widen this host's archive Reth
-historical proof window enough for the audited corpus depth. The corpus reaches
-roughly 470,000 blocks behind head, so set `--rpc.eth-proof-window` to at least
-500,000; pinned Reth exposes that argument and caps it at `MAX_ETH_PROOF_WINDOW`
-1,209,600 blocks
+The raw code-hash correction's mandatory per-run RPC oracle is `eth_getCode` by
+block hash, which the tool uses to compare both bytecode hash and byte length
+against the Reth DB re-derived value. Keep this host's archive Reth historical
+proof window widened for the optional `eth_getProof` spot-check when the node
+can serve it. The corpus reaches roughly 470,000 blocks behind head, so set
+`--rpc.eth-proof-window` to at least 500,000; pinned Reth exposes that argument
+and caps it at `MAX_ETH_PROOF_WINDOW` 1,209,600 blocks
 `(upstream: .refs/reth/crates/node/core/src/args/rpc_server.rs:L601 @ reth@88505c7)`
 `(upstream: .refs/reth/crates/node/core/src/args/rpc_server.rs:L603 @ reth@88505c7)`
 `(upstream: .refs/reth/crates/rpc/rpc-server-types/src/constants.rs:L69 @ reth@88505c7)`.
@@ -178,6 +180,15 @@ Then restart the Reth service:
 cd /home/ubuntu/eth-archive-node
 docker compose up -d reth
 ```
+
+Local observation, not an upstream Reth guarantee: even with
+`--rpc.eth-proof-window=500000`, deep `eth_getProof` calls on this node have
+taken roughly 120-240 seconds or more per call while Reth computes historical
+state roots, with long-lived MDBX reads and `historical_sp` warnings in the
+node logs. A 1% proof sample is therefore infeasible here. The correction tool
+records whether the small proof spot-check verified, timed out, or hit a
+provider-serving error; timeout or provider-serving failure is non-fatal after
+the mandatory `eth_getCode` sample succeeds.
 
 Run the ignored cargo live-verification tests from a one-off Rust container
 attached to the `bigname_default` Docker network so `postgres` resolves to the
@@ -272,12 +283,14 @@ docker run --rm \
 After the dry-run census matches the ratified correction scope, rerun the same
 `docker run` command without `--dry-run`. The command logs the census and
 per-address breakdown before the RPC-verification and out-of-family gates,
-verifies its RPC sample before writing, skips rows whose block hash is orphaned
-or absent from retained lineage, and rewrites only `raw_code_hashes.code_hash`
-and `raw_code_hashes.code_byte_length` in guarded batches. The dry-run census
-after the write must show zero remaining correctable non-orphan rows and report
-the expected `orphaned_skipped` bucket. This repository change ships the tool
-and record only; it does not execute the supervised correction.
+verifies its mandatory `eth_getCode` RPC sample before writing, records the
+best-effort `eth_getProof` spot-check status, skips rows whose block hash is
+orphaned or absent from retained lineage, and rewrites only
+`raw_code_hashes.code_hash` and `raw_code_hashes.code_byte_length` in guarded
+batches. The dry-run census after the write must show zero remaining
+correctable non-orphan rows and report the expected `orphaned_skipped` bucket.
+This repository change ships the tool and record only; it does not execute the
+supervised correction.
 
 For the tail pass, wait until the previous `OBSERVED_BEFORE` is safely behind
 the Reth reader horizon, then repeat the dry-run/write sequence with:

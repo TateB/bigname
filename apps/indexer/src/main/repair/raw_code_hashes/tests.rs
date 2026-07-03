@@ -23,6 +23,27 @@ fn derived_with_len(code_hash: &str, code_byte_length: i64) -> DerivedCodeHash {
     }
 }
 
+fn verified_update(
+    raw_code_hash_id: i64,
+    address: &str,
+    block_number: i64,
+) -> VerifiedCorrectionUpdate {
+    VerifiedCorrectionUpdate {
+        update: RawCodeHashCorrectionUpdate {
+            raw_code_hash_id,
+            stored_code_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            stored_code_byte_length: 32,
+            corrected_code_hash:
+                "0x2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            corrected_code_byte_length: 30,
+        },
+        block_hash: format!("0x{raw_code_hash_id:064x}"),
+        block_number,
+        contract_address: address.to_owned(),
+    }
+}
+
 #[test]
 fn classification_samples_at_least_one_percent_and_each_address() -> Result<()> {
     let variants = BTreeMap::new();
@@ -153,10 +174,52 @@ fn classification_retains_verified_update_plan_for_write() -> Result<()> {
                     "0x2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
                 corrected_code_byte_length: 31,
             },
+            block_hash: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                .to_owned(),
             block_number: 1,
+            contract_address: "0x0000000000000000000000000000000000000001".to_owned(),
         }]
     );
     Ok(())
+}
+
+#[test]
+fn proof_spot_check_samples_use_most_recent_correctable_row_per_address() {
+    let address_one = "0x0000000000000000000000000000000000000001";
+    let address_two = "0x0000000000000000000000000000000000000002";
+    let updates = vec![
+        verified_update(1, address_one, 10),
+        verified_update(2, address_one, 30),
+        verified_update(3, address_two, 20),
+    ];
+
+    let samples = proof_spot_check_samples(&updates);
+
+    assert_eq!(
+        samples,
+        vec![
+            CorrectionSampleRow {
+                raw_code_hash_id: 2,
+                block_hash: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                    .to_owned(),
+                block_number: 30,
+                contract_address: address_one.to_owned(),
+                rederived_code_hash:
+                    "0x2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+                rederived_code_byte_length: 30,
+            },
+            CorrectionSampleRow {
+                raw_code_hash_id: 3,
+                block_hash: "0x0000000000000000000000000000000000000000000000000000000000000003"
+                    .to_owned(),
+                block_number: 20,
+                contract_address: address_two.to_owned(),
+                rederived_code_hash:
+                    "0x2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+                rederived_code_byte_length: 30,
+            },
+        ]
+    );
 }
 
 #[test]

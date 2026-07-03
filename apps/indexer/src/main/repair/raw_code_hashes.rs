@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use bigname_storage::{
@@ -24,7 +27,10 @@ mod tests;
 mod verification;
 
 use args::{parse_single_chain_source, parse_timestamp_arg};
-use verification::{derive_code_hashes, verify_rpc_sample};
+use verification::{
+    PROOF_SPOT_CHECK_TIMEOUT_SECS, derive_code_hashes, verify_rpc_code_sample,
+    verify_rpc_proof_spot_check,
+};
 
 pub(crate) const DEFAULT_RAW_CODE_HASH_CORRECTION_PAGE_SIZE: i64 = 10_000;
 pub(crate) const DEFAULT_RAW_CODE_HASH_CORRECTION_WRITE_BATCH_SIZE: usize = 5_000;
@@ -52,6 +58,9 @@ pub(crate) struct RawCodeHashCorrectionOutcome {
     pub(crate) to_correct_count: i64,
     pub(crate) orphaned_skipped_count: i64,
     pub(crate) rpc_sample_count: i64,
+    pub(crate) proof_spot_check_attempted_count: i64,
+    pub(crate) proof_spot_check_verified_count: i64,
+    pub(crate) proof_spot_check_timed_out: bool,
     pub(crate) corrected_count: i64,
     pub(crate) already_correct_during_write_count: i64,
 }
@@ -76,12 +85,15 @@ pub(super) struct CorrectionSampleRow {
     pub(super) block_number: i64,
     pub(super) contract_address: String,
     pub(super) rederived_code_hash: String,
+    pub(super) rederived_code_byte_length: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifiedCorrectionUpdate {
     update: RawCodeHashCorrectionUpdate,
+    block_hash: String,
     block_number: i64,
+    contract_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,7 +184,9 @@ impl<'a> ClassificationAccumulator<'a> {
                     corrected_code_hash: derived.code_hash.clone(),
                     corrected_code_byte_length: derived.code_byte_length,
                 },
+                block_hash: row.block_hash.clone(),
                 block_number: row.block_number,
+                contract_address: row.contract_address.clone(),
             });
         }
         Ok(())
@@ -200,6 +214,7 @@ impl<'a> ClassificationAccumulator<'a> {
                 block_number: row.block_number,
                 contract_address: row.contract_address.clone(),
                 rederived_code_hash: derived.code_hash.clone(),
+                rederived_code_byte_length: derived.code_byte_length,
             });
         }
     }
@@ -258,7 +273,10 @@ pub(crate) async fn repair_raw_code_hashes_command(args: RepairRawCodeHashesArgs
 
     let pool = bigname_storage::connect(&args.database).await?;
     let reth = ChainProvider::RethDb(RethDbProvider::new(&args.chain, &reth_datadir)?);
-    let rpc = JsonRpcProvider::new(&rpc_url)?;
+    let rpc = JsonRpcProvider::new_with_request_timeout(
+        &rpc_url,
+        Duration::from_secs(PROOF_SPOT_CHECK_TIMEOUT_SECS),
+    )?;
     let dry_run = args.dry_run;
     let outcome = repair_raw_code_hashes(
         &pool,
@@ -285,6 +303,9 @@ pub(crate) async fn repair_raw_code_hashes_command(args: RepairRawCodeHashesArgs
         already_correct_count = outcome.already_correct_count,
         to_correct_count = outcome.to_correct_count,
         rpc_sample_count = outcome.rpc_sample_count,
+        proof_spot_check_attempted_count = outcome.proof_spot_check_attempted_count,
+        proof_spot_check_verified_count = outcome.proof_spot_check_verified_count,
+        proof_spot_check_timed_out = outcome.proof_spot_check_timed_out,
         orphaned_skipped_count = outcome.orphaned_skipped_count,
         corrected_count = outcome.corrected_count,
         already_correct_during_write_count = outcome.already_correct_during_write_count,
@@ -342,7 +363,10 @@ async fn repair_raw_code_hashes(
     );
 
     log_census(&config, &classification, orphaned_skipped_count);
-    verify_rpc_sample(rpc, &classification.samples).await?;
+    verify_rpc_code_sample(rpc, &classification.samples).await?;
+    let proof_spot_check =
+        verify_rpc_proof_spot_check(rpc, &proof_spot_check_samples(&classification.updates))
+            .await?;
     if classification.unexpected_variant_count > 0 {
         bail!(
             "raw code-hash correction found {} rows whose re-derived hash falls outside the stored address variant family after RPC verification: {:?}",
@@ -360,6 +384,11 @@ async fn repair_raw_code_hashes(
         orphaned_skipped_count,
         rpc_sample_count: i64::try_from(classification.samples.len())
             .context("RPC sample count overflowed i64")?,
+        proof_spot_check_attempted_count: i64::try_from(proof_spot_check.attempted_count)
+            .context("proof spot-check attempted count overflowed i64")?,
+        proof_spot_check_verified_count: i64::try_from(proof_spot_check.verified_count)
+            .context("proof spot-check verified count overflowed i64")?,
+        proof_spot_check_timed_out: proof_spot_check.timed_out,
         corrected_count: 0,
         already_correct_during_write_count: 0,
     };
@@ -410,6 +439,32 @@ async fn classify_rows(
         }
     }
     Ok(())
+}
+
+fn proof_spot_check_samples(updates: &[VerifiedCorrectionUpdate]) -> Vec<CorrectionSampleRow> {
+    let mut latest_by_address = BTreeMap::<String, &VerifiedCorrectionUpdate>::new();
+    for update in updates {
+        latest_by_address
+            .entry(update.contract_address.clone())
+            .and_modify(|current| {
+                if update.block_number > current.block_number {
+                    *current = update;
+                }
+            })
+            .or_insert(update);
+    }
+
+    latest_by_address
+        .into_values()
+        .map(|update| CorrectionSampleRow {
+            raw_code_hash_id: update.update.raw_code_hash_id,
+            block_hash: update.block_hash.clone(),
+            block_number: update.block_number,
+            contract_address: update.contract_address.clone(),
+            rederived_code_hash: update.update.corrected_code_hash.clone(),
+            rederived_code_byte_length: update.update.corrected_code_byte_length,
+        })
+        .collect()
 }
 
 async fn apply_corrections(

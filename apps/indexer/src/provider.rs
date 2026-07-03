@@ -257,6 +257,13 @@ impl JsonRpcProvider {
         Self::new_with_receipt_fallback(endpoint, None)
     }
 
+    pub(crate) fn new_with_request_timeout(
+        endpoint: &str,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        Self::new_with_receipt_fallback_and_timeout(endpoint, None, request_timeout)
+    }
+
     pub fn new_for_chain(chain: &str, endpoint: &str) -> Result<Self> {
         Self::new_with_receipt_fallback(endpoint, receipt_fallback_endpoint_for_chain(chain)?)
     }
@@ -265,6 +272,21 @@ impl JsonRpcProvider {
         endpoint: &str,
         receipt_fallback_endpoint: Option<Url>,
     ) -> Result<Self> {
+        Self::new_with_receipt_fallback_and_timeout(
+            endpoint,
+            receipt_fallback_endpoint,
+            JSON_RPC_PROVIDER_REQUEST_TIMEOUT,
+        )
+    }
+
+    fn new_with_receipt_fallback_and_timeout(
+        endpoint: &str,
+        receipt_fallback_endpoint: Option<Url>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        if request_timeout.is_zero() {
+            bail!("JSON-RPC request timeout must be positive");
+        }
         let endpoint = Url::parse(endpoint)
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
         if !matches!(endpoint.scheme(), "http" | "https") {
@@ -273,7 +295,7 @@ impl JsonRpcProvider {
 
         let client = reqwest::Client::builder()
             .connect_timeout(JSON_RPC_PROVIDER_CONNECT_TIMEOUT)
-            .timeout(JSON_RPC_PROVIDER_REQUEST_TIMEOUT)
+            .timeout(request_timeout)
             .build()
             .context("failed to build JSON-RPC HTTP client")?;
 

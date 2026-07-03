@@ -35,11 +35,12 @@ bytecode for affected observations.
 
 The live audit measured 3,736,298 padded-corrupt rows, 94.7% of the audited
 corpus, and 208,320 already-correct rows. The corrupt writes span
-2026-05-01 through 2026-07-03 by `raw_code_hashes.observed_at`. For the affected
-rows, the live `eth_getProof` consensus `codeHash` agreed with the value
-derived from the original-bytecode reader, not with the padded stored value.
-Pinned Reth serves `eth_getProof` and populates the EIP-1186 response
-`code_hash` from the account bytecode hash
+2026-05-01 through 2026-07-03 by `raw_code_hashes.observed_at`. The state-root
+consensus anchor for the audit was a live `eth_getProof` sample on the immutable
+registry contracts: the EIP-1186 `codeHash` agreed with the value derived from
+the original-bytecode reader, not with the padded stored value. Pinned Reth
+serves `eth_getProof` and populates the EIP-1186 response `code_hash` from the
+account bytecode hash
 `(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L900 @ reth@88505c7)`
 `(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L908 @ reth@88505c7)`
 `(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L733 @ reth@88505c7)`
@@ -74,8 +75,13 @@ The approved method is:
    for an address that already has multiple stored variants.
 5. Verify a substantive JSON-RPC sample before any write: at least 1% of
    selected rows, every distinct address at least once, and all mandatory
-   out-of-family findings if any exist. The sample compares the Reth-derived
-   hash to `eth_getProof` for the same block hash and address.
+   out-of-family findings if any exist. The mandatory per-run sample uses
+   `eth_getCode` by block hash and compares both bytecode hash and byte length
+   to the Reth-derived value. The tool also attempts a small best-effort
+   `eth_getProof` spot-check for state-root anchoring on the most recent
+   correctable row per address; node timeout or provider-serving failure is
+   logged as non-fatal after the mandatory `eth_getCode` sample, while a
+   completed proof disagreement remains a verification disagreement.
 6. Rewrite only `code_hash` and `code_byte_length` in guarded batched
    transactions. Each batch logs a correction-event line with row counts and
    block range, and enforces that corrected, already-correct, conflicting, and
@@ -86,8 +92,9 @@ The post-run acceptance checks are node-dependent and are not CI gates. The
 supervised operations run must finish with zero RPC verification disagreements,
 zero unexpected variant rows, a dry-run census of zero remaining correctable
 non-orphan rows for the ratified window, the audited 432 `orphaned_skipped`
-rows reported, and the env-widened live verification test green table-wide,
-including `reth_db_provider_latest_rows_match_consensus`.
+rows reported, recorded `eth_getProof` spot-check status, and the env-widened
+live verification test green table-wide, including
+`reth_db_provider_latest_rows_match_consensus`.
 
 ## Storage layers
 
