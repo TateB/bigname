@@ -212,6 +212,7 @@ pub(crate) fn canonical_raw_state(status: CanonicalReconciliationStatus) -> Cano
         | CanonicalReconciliationStatus::Unchanged
         | CanonicalReconciliationStatus::Appended
         | CanonicalReconciliationStatus::GapBackfilled
+        | CanonicalReconciliationStatus::StoredLineagePromoted
         | CanonicalReconciliationStatus::ReorgReconciled => CanonicalityState::Canonical,
     }
 }

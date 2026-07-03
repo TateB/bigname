@@ -7,7 +7,10 @@ mod upserts;
 mod validation;
 
 pub use orphaning::mark_chain_lineage_range_orphaned;
-pub use reads::{chain_lineage_contains_ancestor, load_chain_lineage_block};
+pub use reads::{
+    chain_lineage_contains_ancestor, chain_lineage_contains_canonical_ancestor_position,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+};
 pub use types::{CanonicalityState, ChainLineageBlock};
 pub use upserts::{
     upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
@@ -16,10 +19,7 @@ pub use upserts::{
 };
 
 pub(crate) use canonicality::promote_chain_lineage_path;
-pub(crate) use reads::{
-    chain_lineage_contains_ancestor_internal, chain_lineage_contains_canonical_ancestor_position,
-    ensure_chain_lineage_block,
-};
+pub(crate) use reads::{chain_lineage_contains_ancestor_internal, ensure_chain_lineage_block};
 
 #[cfg(test)]
 mod tests;

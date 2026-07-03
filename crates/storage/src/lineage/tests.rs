@@ -447,3 +447,51 @@ async fn ancestry_proof_rejects_orphaned_path_rows() -> Result<()> {
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn canonical_child_path_stops_on_multiple_canonical_children() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let base_timestamp = timestamp(1_717_171_717);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            block(
+                "eth-mainnet",
+                "0x001",
+                None,
+                1,
+                base_timestamp,
+                CanonicalityState::Canonical,
+            ),
+            block(
+                "eth-mainnet",
+                "0x002a",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_729),
+                CanonicalityState::Canonical,
+            ),
+            block(
+                "eth-mainnet",
+                "0x002b",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_730),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let path =
+        load_chain_lineage_canonical_child_path(database.pool(), "eth-mainnet", "0x001", 1, 1)
+            .await?;
+
+    assert!(
+        path.is_empty(),
+        "duplicate canonical children must make stored path promotion skip instead of error"
+    );
+
+    database.cleanup().await
+}

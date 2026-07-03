@@ -248,7 +248,7 @@ where
 /// ancestry. During a mid-reorg window where two rows at the candidate height
 /// are still canonical-marked, uniqueness fails and the caller skips the
 /// candidate conservatively.
-pub(crate) async fn chain_lineage_contains_canonical_ancestor_position<'e, E>(
+pub async fn chain_lineage_contains_canonical_ancestor_position<'e, E>(
     executor: E,
     chain_id: &str,
     descendant_hash: &str,
@@ -311,6 +311,77 @@ where
     })?;
 
     Ok(contains)
+}
+
+pub async fn load_chain_lineage_canonical_child_path(
+    pool: &PgPool,
+    chain_id: &str,
+    from_hash: &str,
+    from_number: i64,
+    max_blocks: usize,
+) -> Result<Vec<ChainLineageBlock>> {
+    let mut path = Vec::with_capacity(max_blocks);
+    let mut cursor_hash = from_hash.to_owned();
+    let mut cursor_number = from_number;
+
+    for _ in 0..max_blocks {
+        let next_number = cursor_number
+            .checked_add(1)
+            .context("stored lineage child block number overflowed while walking path")?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                lineage.chain_id,
+                lineage.block_hash,
+                lineage.parent_hash,
+                lineage.block_number,
+                lineage.block_timestamp,
+                audit.logs_bloom,
+                audit.transactions_root,
+                audit.receipts_root,
+                audit.state_root,
+                lineage.canonicality_state::TEXT AS canonicality_state
+            FROM chain_lineage AS lineage
+            LEFT JOIN chain_header_audit AS audit
+              ON audit.chain_id = lineage.chain_id
+             AND audit.block_hash = lineage.block_hash
+            WHERE lineage.chain_id = $1
+              AND lineage.parent_hash = $2
+              AND lineage.block_number = $3
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY lineage.block_hash
+            LIMIT 2
+            "#,
+        )
+        .bind(chain_id)
+        .bind(&cursor_hash)
+        .bind(next_number)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load stored canonical lineage child for chain {chain_id} parent {cursor_hash} at block {next_number}"
+            )
+        })?;
+
+        if rows.is_empty() {
+            break;
+        }
+        if rows.len() > 1 {
+            break;
+        }
+
+        let block = decode_lineage_block(rows.into_iter().next().expect("checked above"))?;
+        cursor_hash = block.block_hash.clone();
+        cursor_number = block.block_number;
+        path.push(block);
+    }
+
+    Ok(path)
 }
 
 pub(crate) async fn load_lineage_snapshots_for_hashes<'e, E>(

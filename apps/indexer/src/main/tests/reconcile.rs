@@ -702,6 +702,18 @@ async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk
         CanonicalityState::Canonical,
     )
     .await?;
+    for block in blocks.iter().skip(1) {
+        if block.block_number == current.block_number + 10 {
+            continue;
+        }
+        insert_chain_lineage_for_block(
+            database.pool(),
+            chain,
+            block,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
     let (provider, server) = bundle_provider(blocks).await?;
     let checkpoint = ChainCheckpoint {
         chain_id: chain.to_owned(),
@@ -720,6 +732,8 @@ async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk
         &checkpoint,
         &latest,
         HeaderAuditMode::Minimal,
+        &[],
+        false,
     )
     .await
     .expect_err("live reconciliation must reject unbounded contiguous gaps");
@@ -737,10 +751,11 @@ async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk
 }
 
 #[tokio::test]
-async fn reconcile_canonical_head_recovers_large_gap_from_stored_lineage() -> Result<()> {
+async fn reconcile_fetched_heads_promotes_large_gap_from_dense_stored_lineage_in_batches()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "base-mainnet";
-    let gap_end_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 2;
+    let gap_end_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS * 2 + 7;
     let mut blocks = Vec::new();
     let mut parent_hash = None::<String>;
     for block_number in 1..=gap_end_block {
@@ -766,43 +781,297 @@ async fn reconcile_canonical_head_recovers_large_gap_from_stored_lineage() -> Re
         )
         .await?;
     }
-    let (provider, server) = bundle_provider(blocks).await?;
-    let checkpoint = ChainCheckpoint {
-        chain_id: chain.to_owned(),
-        canonical_block_hash: Some(current.block_hash.clone()),
-        canonical_block_number: Some(current.block_number),
-        safe_block_hash: None,
-        safe_block_number: None,
-        finalized_block_hash: None,
-        finalized_block_number: None,
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    let selected_log_blocks = blocks
+        .iter()
+        .filter(|block| {
+            matches!(
+                block.block_number - current.block_number,
+                10 | 512 | crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    insert_selected_raw_log_inputs(
+        database.pool(),
+        chain,
+        &selected_log_blocks,
+        selected_address,
+        true,
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
     };
 
-    let reconciliation = reconcile_canonical_head(
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
         database.pool(),
+        &task,
         &provider,
-        chain,
-        &checkpoint,
-        &latest,
+        &ProviderHeadSnapshot {
+            canonical: latest.clone(),
+            safe: None,
+            finalized: None,
+        },
+        false,
         HeaderAuditMode::Minimal,
+        &[],
     )
     .await
-    .expect("stored lineage must allow large-gap checkpoint recovery");
+    .expect("dense stored lineage must promote a checkpoint batch")
+    .expect("stored lineage promotion must advance the checkpoint");
+
+    let promoted_block_number =
+        current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let promoted_block = blocks
+        .iter()
+        .find(|block| block.block_number == promoted_block_number)
+        .expect("promoted batch target block must exist");
 
     assert_eq!(
-        reconciliation.status,
-        CanonicalReconciliationStatus::GapBackfilled
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
     );
+    assert_eq!(outcome.fetched_parent_count, 0);
+    assert_eq!(task.checkpoint.canonical_block_number, Some(promoted_block_number));
     assert_eq!(
-        reconciliation.canonical,
-        Some(bigname_storage::CheckpointBlockRef {
-            block_hash: latest.block_hash.clone(),
-            block_number: latest.block_number,
-        })
+        task.checkpoint.canonical_block_hash.as_deref(),
+        Some(promoted_block.block_hash.as_str())
     );
-    assert_eq!(reconciliation.fetched_parent_count, 0);
+    assert!(promoted_block_number < latest.block_number);
+
+    let persisted_checkpoint = bigname_storage::load_chain_checkpoint(database.pool(), chain)
+        .await?
+        .expect("promoted checkpoint row must exist");
+    assert_eq!(persisted_checkpoint, task.checkpoint);
 
     server.abort();
     database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_stored_lineage_promotion_without_retained_payloads()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let gap_end_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 3;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=gap_end_block {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    for block in &blocks {
+        insert_chain_lineage_for_block(
+            database.pool(),
+            chain,
+            block,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_selected_raw_log_inputs(
+        database.pool(),
+        chain,
+        &[blocks[10].clone()],
+        selected_address,
+        false,
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: None,
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await
+    .expect_err("stored lineage promotion must refuse missing retained raw payload evidence");
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds live gap fill limit"),
+        "unexpected missing-payload refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+async fn insert_retained_full_block_payloads<'a>(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    blocks: impl IntoIterator<Item = &'a ProviderBlock>,
+) -> Result<()> {
+    let upserts = blocks
+        .into_iter()
+        .map(|block| bigname_storage::RawPayloadCacheMetadataUpsert {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            payload_kind: provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+            digest_algorithm: Some("keccak256".to_owned()),
+            retained_digest: Some(format!("0x{:064x}", block.block_number)),
+            block_number: Some(block.block_number),
+            payload_size_bytes: 1,
+            content_type: Some(provider::JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(provider::JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: json!({
+                "source": "test",
+                "method": "eth_getBlockByHash",
+                "fetch_mode": "stored_lineage_promotion"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::upsert_raw_payload_cache_metadata(pool, &upserts).await?;
+    Ok(())
+}
+
+async fn insert_selected_raw_log_inputs(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    blocks: &[crate::provider::ProviderBlock],
+    selected_address: &str,
+    retain_full_payloads: bool,
+) -> Result<()> {
+    let selected_address = selected_address.to_ascii_lowercase();
+    let mut transactions = Vec::new();
+    let mut receipts = Vec::new();
+    let mut logs = Vec::new();
+    let mut code_hashes = Vec::new();
+    for block in blocks {
+        let transaction_hash = format!("0x{:064x}", block.block_number + 10_000);
+        transactions.push(bigname_storage::RawTransaction {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash.clone(),
+            transaction_index: 0,
+            from_address: selected_address.clone(),
+            to_address: Some(selected_address.clone()),
+            canonicality_state: CanonicalityState::Canonical,
+        });
+        receipts.push(bigname_storage::RawReceipt {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash.clone(),
+            transaction_index: 0,
+            contract_address: None,
+            status: Some(true),
+            gas_used: Some(21_000),
+            cumulative_gas_used: Some(21_000),
+            logs_bloom: None,
+            canonicality_state: CanonicalityState::Canonical,
+        });
+        logs.push(bigname_storage::RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash,
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: selected_address.clone(),
+            topics: vec![format!("0x{:064x}", 1)],
+            data: vec![1],
+            canonicality_state: CanonicalityState::Canonical,
+        });
+        code_hashes.push(bigname_storage::RawCodeHash {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            contract_address: selected_address.clone(),
+            code_hash: format!("0x{:064x}", block.block_number + 20_000),
+            code_byte_length: 1,
+            canonicality_state: CanonicalityState::Canonical,
+        });
+    }
+
+    bigname_storage::upsert_raw_transactions(pool, &transactions).await?;
+    bigname_storage::upsert_raw_receipts(pool, &receipts).await?;
+    bigname_storage::upsert_raw_logs(pool, &logs).await?;
+    bigname_storage::upsert_raw_code_hashes(pool, &code_hashes).await?;
+    if retain_full_payloads {
+        insert_retained_full_block_payloads(pool, chain, blocks.iter()).await?;
+    }
+
     Ok(())
 }
 

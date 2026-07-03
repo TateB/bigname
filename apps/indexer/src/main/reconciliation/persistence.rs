@@ -339,6 +339,9 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
 ) -> Result<()> {
+    if canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted {
+        return Ok(());
+    }
     if task.addresses.is_empty() {
         return Ok(());
     }

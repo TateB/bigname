@@ -12,10 +12,11 @@ use anyhow::Context;
 use alloy_primitives::keccak256;
 use bigname_manifests::load_discovery_admission_state;
 use bigname_storage::{
-    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NameSurface, Resource,
-    SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url, load_execution_outcome,
-    load_execution_trace, upsert_execution_outcome, upsert_execution_trace, upsert_name_surfaces,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    ChainCheckpoint, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
+    NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+    load_execution_outcome, load_execution_trace, upsert_execution_outcome,
+    upsert_execution_trace, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -1489,6 +1490,48 @@ async fn insert_chain_lineage_for_block(
         &[provider_block_to_lineage(chain, block, canonicality_state)],
     )
     .await?;
+
+    Ok(())
+}
+
+async fn insert_chain_checkpoint(pool: &PgPool, checkpoint: &ChainCheckpoint) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number,
+            safe_block_hash,
+            safe_block_number,
+            finalized_block_hash,
+            finalized_block_number
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (chain_id) DO UPDATE
+        SET
+            canonical_block_hash = EXCLUDED.canonical_block_hash,
+            canonical_block_number = EXCLUDED.canonical_block_number,
+            safe_block_hash = EXCLUDED.safe_block_hash,
+            safe_block_number = EXCLUDED.safe_block_number,
+            finalized_block_hash = EXCLUDED.finalized_block_hash,
+            finalized_block_number = EXCLUDED.finalized_block_number
+        "#,
+    )
+    .bind(&checkpoint.chain_id)
+    .bind(&checkpoint.canonical_block_hash)
+    .bind(checkpoint.canonical_block_number)
+    .bind(&checkpoint.safe_block_hash)
+    .bind(checkpoint.safe_block_number)
+    .bind(&checkpoint.finalized_block_hash)
+    .bind(checkpoint.finalized_block_number)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to insert chain checkpoint for {}",
+            checkpoint.chain_id
+        )
+    })?;
 
     Ok(())
 }

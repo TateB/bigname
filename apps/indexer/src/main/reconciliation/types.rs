@@ -36,6 +36,7 @@ pub(crate) enum CanonicalReconciliationStatus {
     Unchanged,
     Appended,
     GapBackfilled,
+    StoredLineagePromoted,
     ReorgReconciled,
     AwaitingAncestor,
 }
@@ -47,6 +48,7 @@ impl CanonicalReconciliationStatus {
             Self::Unchanged => "unchanged",
             Self::Appended => "appended",
             Self::GapBackfilled => "gap_backfilled",
+            Self::StoredLineagePromoted => "stored_lineage_promoted",
             Self::ReorgReconciled => "reorg_reconciled",
             Self::AwaitingAncestor => "awaiting_ancestor",
         }
@@ -75,6 +77,10 @@ impl HeadChangeSet {
         self,
         canonical_status: CanonicalReconciliationStatus,
     ) -> bool {
+        if canonical_status == CanonicalReconciliationStatus::StoredLineagePromoted {
+            return false;
+        }
+
         canonical_status != CanonicalReconciliationStatus::Unchanged
             || self.safe_head_changed
             || self.finalized_head_changed
