@@ -9,9 +9,9 @@ use bigname_manifests::{
     WatchedSourceSelectorPlan, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
 use bigname_storage::{
-    BackfillLifecycleStatus, CanonicalityState, RawCodeHash, load_backfill_job,
-    load_backfill_ranges, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
-    upsert_raw_code_hashes,
+    BackfillJobCreate, BackfillLifecycleStatus, BackfillRangeSpec, CanonicalityState, RawCodeHash,
+    create_backfill_job, load_backfill_job, load_backfill_ranges, load_chain_lineage_block,
+    mark_chain_lineage_range_orphaned, upsert_raw_code_hashes,
 };
 
 use crate::provider::{ProviderLog, ProviderResolvedBlock};
@@ -138,6 +138,137 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
     );
 
     Ok(())
+}
+
+#[test]
+fn large_whole_active_backfill_source_identity_uses_compact_digest() -> Result<()> {
+    let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets,
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+
+    let payload = backfill::backfill_job_source_identity_payload(&source_plan)?;
+    assert_eq!(
+        payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_digest_v1")
+    );
+    assert!(payload.get("selected_targets").is_none());
+    assert_eq!(
+        payload.get("selected_target_count").and_then(Value::as_u64),
+        Some(source_plan.selected_targets.len() as u64)
+    );
+    assert!(
+        payload
+            .get("selected_targets_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest.starts_with("keccak256:0x"))
+    );
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&source_plan)?,
+        payload
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn whole_active_compact_source_identity_reuses_legacy_full_backfill_job() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: selected_targets.clone(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let legacy_selected_targets = selected_targets
+        .iter()
+        .map(|target| {
+            json!({
+                "effective_to_block": target.effective_to_block,
+                "effective_from_block": target.effective_from_block,
+                "address": target.address,
+                "contract_instance_id": target.contract_instance_id,
+                "source_family": target.source_family,
+            })
+        })
+        .collect::<Vec<_>>();
+    let legacy_full_identity = json!({
+        "selector_kind": source_plan.selector_kind.as_str(),
+        "source_family": source_plan.source_family.clone(),
+        "requested_watched_targets": source_plan.requested_watched_targets.clone(),
+        "selected_targets": legacy_selected_targets,
+        "source_identity_hash": source_plan.source_identity_hash(),
+    });
+    let compact_identity = backfill::backfill_job_source_identity_payload(&source_plan)?;
+    assert_eq!(
+        compact_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_digest_v1")
+    );
+
+    let request = BackfillJobCreate {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "base-mainnet".to_owned(),
+        source_identity: legacy_full_identity.clone(),
+        scan_mode: "coinbase_sql".to_owned(),
+        range_start_block_number: 100,
+        range_end_block_number: 120,
+        idempotency_key: "whole-active-legacy-full-identity".to_owned(),
+        ranges: vec![BackfillRangeSpec {
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+        }],
+    };
+
+    let created = create_backfill_job(database.pool(), &request).await?;
+    let mut compact_request = request.clone();
+    compact_request.source_identity = compact_identity;
+    let repeated = create_backfill_job(database.pool(), &compact_request).await?;
+
+    assert_eq!(repeated.job.backfill_job_id, created.job.backfill_job_id);
+    assert_eq!(repeated.job.source_identity, legacy_full_identity);
+
+    database.cleanup().await
 }
 
 #[test]

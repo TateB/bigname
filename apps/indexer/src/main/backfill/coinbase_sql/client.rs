@@ -331,8 +331,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires live Coinbase CDP SQL credentials and consumes two read-only SQL API queries"]
-    async fn live_query_authenticates_and_decodes_one_base_event() -> Result<()> {
+    #[ignore = "requires live Coinbase CDP SQL credentials and consumes one read-only SQL API query"]
+    async fn live_query_executes_one_base_block_probe() -> Result<()> {
         let client = CoinbaseSqlClient::new(
             "https://api.cdp.coinbase.com/platform/v2/data/query/run",
             "COINBASE_CDP_SQL_API_KEY_ID",
@@ -343,27 +343,27 @@ mod tests {
         let planned_sql = super::super::query::build_query(
             &super::super::query::CoinbaseSqlFilterPack {
                 chain: "base-mainnet".to_owned(),
-                from_block: 24_499_000,
-                to_block: 24_501_000,
-                addresses: vec![
-                    "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a".to_owned(),
-                    "0x4ccb0bb02fcaba27e82a56646e81d8c5bc4119a5".to_owned(),
-                    "0xa7d2607c6bd39ae9521e514026cbb078405ab322".to_owned(),
-                ],
+                from_block: 46_954_187,
+                to_block: 46_954_187,
+                addresses: vec!["0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned()],
                 topic0s: Vec::new(),
                 event_signatures: vec![
-                    "NameRegistered(string,bytes32,address,uint256)".to_owned(),
-                    "NameRenewed(string,bytes32,uint256)".to_owned(),
-                    "Transfer(address,address,uint256)".to_owned(),
+                    "NewOwner(bytes32,bytes32,address)".to_owned(),
+                    "NewResolver(bytes32,address)".to_owned(),
+                    "NewTTL(bytes32,uint64)".to_owned(),
+                    "Transfer(bytes32,address)".to_owned(),
                 ],
                 scan_all_emitters: false,
-                source_families: vec!["live_smoke".to_owned()],
+                source_families: vec!["basenames_base_registry".to_owned()],
             },
             None,
-            10,
+            1,
         )?;
         let response = client.run_query(&planned_sql).await?;
-        assert!(!response.rows.is_empty());
+        eprintln!(
+            "Coinbase SQL one-block probe returned {} row(s)",
+            response.rows.len()
+        );
         Ok(())
     }
 

@@ -107,7 +107,7 @@ decoded_log_rows AS (
     l.log_index AS log_index,
     l.address AS emitting_address,
     l.event_signature AS event_signature,
-    l.parameters AS parameters,
+    toJSONString(l.parameters) AS parameters,
     l.topics AS topics,
     {log_action_expr} AS action
   FROM {network}.events l
@@ -162,7 +162,7 @@ encoded_log_rows AS (
     l.log_index AS log_index,
     l.address AS emitting_address,
     NULL AS event_signature,
-    NULL AS parameters,
+    CAST(NULL AS Nullable(String)) AS parameters,
     l.topics AS topics,
     {log_action_expr} AS action
   FROM {network}.encoded_logs l
@@ -181,7 +181,7 @@ encoded_log_sums AS (
     l.log_index AS log_index,
     l.emitting_address AS emitting_address,
     NULL AS event_signature,
-    NULL AS parameters,
+    CAST(NULL AS Nullable(String)) AS parameters,
     l.topics AS topics,
     sum(l.action) AS action_sum
   FROM encoded_log_rows l

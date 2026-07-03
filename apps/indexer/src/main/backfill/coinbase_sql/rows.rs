@@ -351,6 +351,14 @@ fn optional_object(
     match value {
         Value::Null => Ok(None),
         Value::Object(value) => Ok(Some(value.clone())),
+        Value::String(value) if value.trim().is_empty() => Ok(None),
+        Value::String(value) => match serde_json::from_str::<Value>(value)
+            .with_context(|| format!("Coinbase SQL field {field} must be a JSON object string"))?
+        {
+            Value::Null => Ok(None),
+            Value::Object(value) => Ok(Some(value)),
+            other => bail!("Coinbase SQL field {field} must be an object, got {other}"),
+        },
         other => bail!("Coinbase SQL field {field} must be an object, got {other}"),
     }
 }

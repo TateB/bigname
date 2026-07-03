@@ -102,6 +102,32 @@ fn target_checkpoint_ignores_incompatible_source_identity() -> Result<()> {
 }
 
 #[test]
+fn segment_checkpoint_matches_legacy_full_identity_with_compact_expected() -> Result<()> {
+    let target_id = "00000000-0000-0000-0000-000000000001";
+    let target_ids = BTreeSet::from([target_id.to_owned()]);
+    let legacy_source_identity =
+        checkpoint_source_identity(1, 30, &[target_id], SOURCE_IDENTITY_HASH);
+    let expected_source_identity =
+        compact_selected_targets_source_identity(&legacy_source_identity)?;
+    let rows = vec![checkpoint_row_with_source_identity(
+        1,
+        10,
+        legacy_source_identity,
+    )];
+
+    assert_eq!(
+        contiguous_bootstrap_segment_checkpoint(
+            rows,
+            BackfillBlockRange::new(1, 30)?,
+            &expected_source_identity,
+            &target_ids,
+        )?,
+        Some(10)
+    );
+    Ok(())
+}
+
+#[test]
 fn segment_checkpoint_matches_generic_resolver_scan_identity() -> Result<()> {
     let registry_id = "00000000-0000-0000-0000-000000000001";
     let resolver_id = "00000000-0000-0000-0000-000000000002";
@@ -275,6 +301,32 @@ fn checkpoint_source_identity_with_address(
             }))
             .collect::<Vec<_>>()
     })
+}
+
+fn compact_selected_targets_source_identity(source_identity: &Value) -> Result<Value> {
+    let selected_targets = source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)
+        .expect("legacy source identity has selected targets");
+    let selected_targets_digest = format!(
+        "keccak256:{}",
+        alloy_primitives::keccak256(serde_json::to_vec(selected_targets)?)
+    );
+
+    Ok(json!({
+        "selector_kind": source_identity.get("selector_kind"),
+        "source_family": source_identity.get("source_family"),
+        "source_identity_hash": source_identity.get("source_identity_hash"),
+        "requested_watched_targets": source_identity.get("requested_watched_targets"),
+        "selected_target_count": selected_targets.len(),
+        "selected_targets_digest_algorithm": "keccak256",
+        "selected_targets_digest": selected_targets_digest,
+        "selected_targets_sample": {
+            "first": selected_targets.first(),
+            "last": selected_targets.last(),
+        },
+        "source_identity_payload_format": "selected_targets_digest_v1"
+    }))
 }
 
 fn checkpoint_generic_resolver_source_identity(

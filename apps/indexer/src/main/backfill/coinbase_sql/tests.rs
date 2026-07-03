@@ -196,8 +196,9 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     assert!(sql.contains("t.transaction_index AS transaction_index"));
     assert!(sql.contains("l.log_index AS log_index"));
     assert!(sql.contains("l.event_signature AS event_signature"));
-    assert!(sql.contains("l.parameters AS parameters"));
+    assert!(sql.contains("toJSONString(l.parameters) AS parameters"));
     assert!(sql.contains("any(l.parameters) AS parameters"));
+    assert!(sql.contains("CAST(NULL AS Nullable(String)) AS parameters"));
     assert!(sql.contains("l.address IN ('0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222')"));
     assert!(sql.contains("l.event_signature IN ('NameRegistered(string,bytes32,address,uint256)', 'Transfer(address,address,uint256)')"));
     assert!(sql.contains("toString(action) IN ('1', 'added')"));
@@ -915,6 +916,38 @@ fn basenames_decoded_parameters_synthesize_raw_log_data() -> Result<()> {
             "name": "alice",
             "expires": "123"
         },
+        "topics": [
+            "0x0667086d08417333ce63f40d5bc2ef6fd330e25aaaf317b7c489541f8fe600fa",
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "0x0000000000000000000000002222222222222222222222222222222222222222"
+        ]
+    }))?;
+
+    assert!(!row.requires_validation_provider_data);
+    assert_eq!(
+        row.data,
+        concat!(
+            "0x",
+            "0000000000000000000000000000000000000000000000000000000000000040",
+            "000000000000000000000000000000000000000000000000000000000000007b",
+            "0000000000000000000000000000000000000000000000000000000000000005",
+            "616c696365000000000000000000000000000000000000000000000000000000"
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn decoded_parameters_json_string_synthesize_raw_log_data() -> Result<()> {
+    let row = CoinbaseSqlLogRow::from_value(json!({
+        "block_number": 10,
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transaction_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "transaction_index": 1,
+        "log_index": 2,
+        "emitting_address": "0x1111111111111111111111111111111111111111",
+        "event_signature": "NameRegistered(string,bytes32,address,uint256)",
+        "parameters": "{\"name\":\"alice\",\"expires\":\"123\"}",
         "topics": [
             "0x0667086d08417333ce63f40d5bc2ef6fd330e25aaaf317b7c489541f8fe600fa",
             "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

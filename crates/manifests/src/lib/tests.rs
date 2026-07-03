@@ -773,6 +773,80 @@ fn source_family_selector_filters_targets_and_builds_chain_plan() -> Result<()> 
 }
 
 #[test]
+fn large_whole_active_source_identity_uses_compact_selected_target_digest() -> Result<()> {
+    let selected_targets = (0..10_001)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets,
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+
+    let payload = plan.source_identity_payload();
+
+    assert_eq!(
+        payload
+            .get("source_identity_payload_format")
+            .and_then(serde_json::Value::as_str),
+        Some("selected_targets_digest_v1")
+    );
+    assert!(payload.get("selected_targets").is_none());
+    assert_eq!(
+        payload
+            .get("selected_target_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(plan.selected_targets.len() as u64)
+    );
+    assert!(
+        payload
+            .get("selected_targets_digest")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|digest| digest.starts_with("keccak256:0x"))
+    );
+    assert!(
+        payload
+            .get("source_identity_hash")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|digest| digest.starts_with("fnv1a64:"))
+    );
+    assert_eq!(plan.source_identity_payload(), payload);
+
+    let mut drifted_plan = plan.clone();
+    drifted_plan
+        .selected_targets
+        .last_mut()
+        .expect("test plan has selected targets")
+        .effective_to_block += 1;
+    let drifted_payload = drifted_plan.source_identity_payload();
+    assert_ne!(
+        drifted_payload.get("selected_targets_digest"),
+        payload.get("selected_targets_digest")
+    );
+    assert_ne!(
+        drifted_payload.get("source_identity_hash"),
+        payload.get("source_identity_hash")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn watched_selector_dynamic_resolver_backfill() -> Result<()> {
     let ens_resolver_a = Uuid::from_u128(30);
     let ens_resolver_b = Uuid::from_u128(10);
