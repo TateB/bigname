@@ -48,7 +48,6 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     latest_head: &ProviderBlock,
     stored_anchor_candidates: &[ProviderBlock],
     selected_raw_payload_addresses: &[String],
-    requires_event_silent_payloads: bool,
 ) -> Result<StoredLineagePromotion> {
     if latest_head.block_number <= current_canonical_number {
         return Ok(StoredLineagePromotion::NotApplicable);
@@ -93,7 +92,6 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         chain,
         &path,
         selected_raw_payload_addresses,
-        requires_event_silent_payloads,
     )
     .await
     {

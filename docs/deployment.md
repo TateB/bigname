@@ -400,18 +400,28 @@ families are special: backfills record `generic_topic_scans` because resolver
 logs are scanned by topic across all emitters instead of enumerating every
 resolver address in `selected_targets`. A completed generic resolver topic scan
 covers watched resolver-family emitters for its block range, while explicitly
-selected non-generic targets must still be proven by `selected_targets` or the
-matching compact digest. This is why Reth-db backfills can promote after completion even
-though they do not write `raw_payload_cache_metadata` rows; RPC-backed retained
-payload runs can still satisfy the fallback. Completed backfill coverage
+selected log-producing non-generic targets must still be proven by
+`selected_targets` or the matching compact digest. Manifest source families that
+have no active ABI event topics, such as execution-only transport entrypoints,
+do not impose historical selected-log coverage for checkpoint promotion. This is
+why Reth-db backfills can promote after completion even though they do not write
+`raw_payload_cache_metadata` rows; RPC-backed retained payload runs can still
+satisfy the fallback. Completed backfill coverage
 distinguishes "selected no logs in this block" from "this block was never
 fetched" only when the stored path is not ambiguous with another same-height
 lineage row; if a same-height fork row is still present, the block needs
 retained payload evidence or a rerun after reorg repair/orphaning. Lineage-only
 rows from checkpoint ancestor fills or crashed/incomplete backfills are refused.
-If event-silent reverse-resolver indexing is enabled, completed log backfill
-coverage is not enough: promotion still requires retained full-block payloads
-for the promoted blocks because no-log evidence cannot prove direct-call state.
+Event-silent reverse-resolver indexing is a live-tip concern: ordinary live
+reconciliation retains direct-call transaction and receipt facts from full-block
+payloads for the built-in Ethereum Mainnet event-silent reverse resolver set and
+any configured extra addresses. Those durable observations trigger later
+projection-owned hydration of the resolver's current state. Historic
+stored-lineage checkpoint promotion does not require retained full-block
+payloads for that latest-only resolver state and does not reconstruct per-block
+event-silent reverse-resolver data. Once the checkpoint reaches live
+reconciliation again, current-tip payload fetches resume and event-silent
+reverse-resolver observations are recorded from live block payloads.
 
 Actionable refusal classes:
 
@@ -426,19 +436,23 @@ Actionable refusal classes:
   backfill for the missing range; if duplicate canonical rows remain at one
   height, repair/orphan the losing lineage before retrying.
 - Lineage-only block without completed range coverage or retained payloads:
-  rerun hash-pinned backfill for the current watched address set and let the
-  range complete, ensure the job's full or compact source identity matches the
-  current watch-plan target intervals for the promoted range, ensure generic
-  resolver jobs include `generic_topic_scans`, or restore retained RPC payload
-  metadata for that range.
+  rerun hash-pinned backfill for the current log-producing watched address set
+  and let the range complete, ensure the job's full or compact source identity
+  matches the current watch-plan target intervals for the promoted range, ensure
+  generic resolver jobs include `generic_topic_scans`, or restore retained RPC
+  payload metadata for that range.
 - Same-height fork ambiguity: provide retained full-block RPC payload metadata
   for the promoted block; numeric completed-range coverage alone cannot
   disambiguate old-fork no-log evidence from winning-branch no-log evidence.
 - Selected-log companion rows missing: rerun the selected hash-pinned backfill so
   raw code, transaction, and receipt rows are persisted with the selected logs.
-- Event-silent payload refusal: rerun an RPC-backed full-payload-retaining
-  backfill for the promoted range, or disable event-silent reverse-resolver
-  indexing until the checkpoint has caught up.
+- Missing event-silent current resolver state after catch-up: let ordinary live
+  reconciliation process the current tip so direct-call observations are
+  retained for the built-in Ethereum Mainnet event-silent reverse resolver set.
+  Configure `BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES` only for
+  deployment-specific extra resolver addresses. Do not rerun historic promotion
+  ranges solely to retain full-block payloads for event-silent reverse-resolver
+  data; that data is latest-only by design.
 
 Manual Base historical backfills can select Coinbase CDP SQL with
 `BIGNAME_INDEXER_BACKFILL_SOURCE=coinbase-sql` or allow Base-only automatic

@@ -1,8 +1,12 @@
 mod completed_backfill;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
+use bigname_manifests::{
+    load_active_manifest_abi_events_by_chain_and_source_families,
+    load_watched_contracts_by_addresses,
+};
 use bigname_storage::ChainLineageBlock;
 use sqlx::Row;
 
@@ -15,32 +19,18 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     chain: &str,
     path: &[ChainLineageBlock],
     selected_raw_payload_addresses: &[String],
-    requires_event_silent_payloads: bool,
 ) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Ok(());
-    }
-    if requires_event_silent_payloads {
-        return stored_path_has_retained_full_block_payloads(pool, chain, path)
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|has_payloads| {
-                if has_payloads {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "stored lineage promotion requires retained full-block payloads for event-silent reverse-resolver coverage over blocks {}..={}; rerun RPC-backed hash-pinned backfill with full payload retention for that range or temporarily disable event-silent reverse-resolver indexing before retrying",
-                        path_start_number(path),
-                        path_end_number(path)
-                    ))
-                }
-            });
     }
 
     let selected_addresses = selected_raw_payload_addresses
         .iter()
         .map(|address| address.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    let selected_addresses = log_producing_selected_addresses(pool, chain, &selected_addresses)
+        .await
+        .map_err(|error| error.to_string())?;
     let block_hashes = path
         .iter()
         .map(|block| block.block_hash.clone())
@@ -225,43 +215,59 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     Ok(())
 }
 
-async fn stored_path_has_retained_full_block_payloads(
+async fn log_producing_selected_addresses(
     pool: &sqlx::PgPool,
     chain: &str,
-    path: &[ChainLineageBlock],
-) -> Result<bool> {
-    if path.is_empty() {
-        return Ok(true);
+    selected_addresses: &[String],
+) -> Result<Vec<String>> {
+    if selected_addresses.is_empty() {
+        return Ok(Vec::new());
     }
-    let block_hashes = path
-        .iter()
-        .map(|block| block.block_hash.clone())
-        .collect::<Vec<_>>();
-    let row = sqlx::query(
-        r#"
-        SELECT COUNT(DISTINCT block_hash)::BIGINT AS retained_block_count
-        FROM raw_payload_cache_metadata
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
-          AND payload_kind = $3
-          AND retained_digest IS NOT NULL
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
-    .bind(chain)
-    .bind(&block_hashes)
-    .bind(RAW_PAYLOAD_KIND_FULL_BLOCK)
-    .fetch_one(pool)
-    .await?;
-    let retained_block_count: i64 = row.try_get("retained_block_count")?;
 
-    Ok(usize::try_from(retained_block_count)
-        .map(|count| count == block_hashes.len())
-        .unwrap_or(false))
+    let targets = selected_addresses
+        .iter()
+        .map(|address| (chain.to_owned(), address.clone()))
+        .collect::<Vec<_>>();
+    let watched_contracts = load_watched_contracts_by_addresses(pool, &targets).await?;
+    if watched_contracts.is_empty() {
+        return Ok(selected_addresses.to_vec());
+    }
+
+    let source_families = watched_contracts
+        .iter()
+        .map(|contract| contract.source_family.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source_families_with_topics =
+        load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, &source_families)
+            .await?
+            .into_iter()
+            .filter(|event| event.topic0.is_some())
+            .map(|event| event.source_family)
+            .collect::<BTreeSet<_>>();
+
+    let mut source_families_by_address = BTreeMap::<String, BTreeSet<String>>::new();
+    for contract in watched_contracts {
+        source_families_by_address
+            .entry(contract.address.to_ascii_lowercase())
+            .or_default()
+            .insert(contract.source_family);
+    }
+
+    Ok(selected_addresses
+        .iter()
+        .filter(|address| {
+            source_families_by_address
+                .get(*address)
+                .is_none_or(|families| {
+                    families
+                        .iter()
+                        .any(|family| source_families_with_topics.contains(family))
+                })
+        })
+        .cloned()
+        .collect())
 }
 
 async fn retained_full_block_payload_hashes(

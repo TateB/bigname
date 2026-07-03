@@ -214,7 +214,6 @@ async fn reconcile_fetched_heads_with_gap_policy(
         header_audit_mode,
         &stored_promotion_anchors,
         &task.addresses,
-        !event_silent_reverse_resolver_addresses.is_empty(),
     )
     .await?;
     let provider_head_change_set = head_change_set(task, heads, &canonical);
@@ -346,7 +345,6 @@ pub(crate) async fn reconcile_canonical_head(
     header_audit_mode: HeaderAuditMode,
     stored_lineage_promotion_anchors: &[ProviderBlock],
     selected_raw_payload_addresses: &[String],
-    requires_event_silent_payloads: bool,
 ) -> Result<CanonicalReconciliation> {
     let latest_hash = latest_head.block_hash.as_str();
     let current_canonical_hash = checkpoint.canonical_block_hash.as_deref();
@@ -419,7 +417,6 @@ pub(crate) async fn reconcile_canonical_head(
             latest_head,
             stored_lineage_promotion_anchors,
             selected_raw_payload_addresses,
-            requires_event_silent_payloads,
         )
         .await?
         {

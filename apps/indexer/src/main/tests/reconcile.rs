@@ -310,6 +310,122 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_live_tip_event_silent_retains_full_payload_and_call_observation()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let event_silent_address = "0x0000000000000000000000000000000000000002";
+    let current = provider_block(
+        "0x0101010101010101010101010101010101010101010101010101010101010101",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        41,
+    );
+    let latest = provider_block(
+        "0x0202020202020202020202020202020202020202020202020202020202020202",
+        Some(&current.block_hash),
+        42,
+    );
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: latest.clone(),
+        logs: vec![],
+    }])
+    .await?;
+
+    let (_task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest.clone(),
+            safe: None,
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[event_silent_address.to_owned()],
+    )
+    .await?
+    .expect("live append must advance with event-silent enabled");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_payload_cache_metadata WHERE payload_kind = $1"
+        )
+        .bind(provider::RAW_PAYLOAD_KIND_FULL_BLOCK)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "live event-silent reconciliation must retain full-block payload metadata at the tip"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "event-silent direct-call capture must not depend on selected logs"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_transactions")
+            .fetch_one(database.pool())
+            .await?,
+        1,
+        "event-silent live-tip capture must retain the direct-call transaction"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_receipts")
+            .fetch_one(database.pool())
+            .await?,
+        1,
+        "event-silent live-tip capture must retain the direct-call receipt"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT resolver_address FROM event_silent_resolver_call_observations"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        event_silent_address.to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_block_code_row()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -734,7 +850,6 @@ async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk
         HeaderAuditMode::Minimal,
         &[],
         &[],
-        false,
     )
     .await
     .expect_err("live reconciliation must reject unbounded contiguous gaps");
@@ -920,7 +1035,7 @@ async fn reconcile_fetched_heads_promotes_large_gap_from_stored_safe_lineage_wit
 }
 
 #[tokio::test]
-async fn reconcile_fetched_heads_promotes_from_stored_frontier_below_provider_safe_with_generic_scan_coverage()
+async fn reconcile_fetched_heads_promotes_from_stored_frontier_below_provider_safe_with_generic_scan_coverage_and_event_silent_enabled()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
@@ -1084,7 +1199,7 @@ async fn reconcile_fetched_heads_promotes_from_stored_frontier_below_provider_sa
         },
         false,
         HeaderAuditMode::Minimal,
-        &[],
+        &["0x0000000000000000000000000000000000000002".to_owned()],
     )
     .await
     .expect("generic scan coverage and stored safe ancestry must prove the stored lineage path")
@@ -1109,6 +1224,207 @@ async fn reconcile_fetched_heads_promotes_from_stored_frontier_below_provider_sa
         .await?,
         0,
         "provider safe ancestors above the stored frontier must not be pre-stored"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_payload_cache_metadata")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "historic stored-lineage promotion must not require or write full-block payload metadata for event-silent latest-only resolver state"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM event_silent_resolver_call_observations"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "historic stored-lineage promotion must not synthesize per-block event-silent resolver state"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_event_silent_catchup_promotes_then_live_tip_observes_current_call()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let event_silent_address = "0x0000000000000000000000000000000000000002";
+    let no_topic_address = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31";
+    let no_topic_manifest_id = 12_510;
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        no_topic_manifest_id,
+        "basenames",
+        chain,
+        "basenames_execution",
+        Uuid::from_u128(12_510),
+        no_topic_address,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET manifest_payload = jsonb_set(manifest_payload, '{abi,events}', '[]'::jsonb)
+        WHERE manifest_id = $1
+        "#,
+    )
+    .bind(no_topic_manifest_id)
+    .execute(database.pool())
+    .await?;
+    let current_block_number = 1;
+    let stored_safe_block_number =
+        current_block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let live_latest_block_number = stored_safe_block_number + 1;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .iter()
+        .find(|block| block.block_number == current_block_number)
+        .expect("test chain must include the current checkpoint block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    let latest = blocks
+        .iter()
+        .find(|block| block.block_number == live_latest_block_number)
+        .expect("test chain must include the live latest block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        &[],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![no_topic_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, promotion_outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest.clone(),
+            safe: Some(stored_safe.clone()),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[event_silent_address.to_owned()],
+    )
+    .await?
+    .expect("historic promotion must advance with event-silent enabled");
+
+    assert_eq!(
+        promotion_outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(stored_safe_block_number)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_payload_cache_metadata")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "historic promotion must not fetch full payloads for latest-only event-silent state"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM event_silent_resolver_call_observations"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "historic promotion must not synthesize event-silent direct-call observations"
+    );
+
+    let (_task, live_outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[event_silent_address.to_owned()],
+    )
+    .await?
+    .expect("ordinary live reconciliation must resume after historic promotion");
+
+    assert_eq!(
+        live_outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_payload_cache_metadata WHERE payload_kind = $1"
+        )
+        .bind(provider::RAW_PAYLOAD_KIND_FULL_BLOCK)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "live-tip reconciliation must still retain the current full payload"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM event_silent_resolver_call_observations"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "live-tip reconciliation must still record current event-silent direct-call observations"
     );
 
     server.abort();
@@ -1185,7 +1501,6 @@ async fn reconcile_fetched_heads_promotes_stored_anchor_at_parent_fetch_depth_li
         HeaderAuditMode::Minimal,
         std::slice::from_ref(&safe),
         &[],
-        false,
     )
     .await?;
 
@@ -1252,7 +1567,6 @@ async fn reconcile_fetched_heads_refuses_without_fetching_past_parent_depth_limi
         HeaderAuditMode::Minimal,
         std::slice::from_ref(&safe),
         &[],
-        false,
     )
     .await
     .expect_err("missing stored anchor inside the parent-fetch bound must refuse");
