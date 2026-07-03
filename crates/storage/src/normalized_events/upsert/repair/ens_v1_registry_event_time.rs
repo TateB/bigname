@@ -275,6 +275,7 @@ pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_even
     let mut after_states = Vec::new();
     let mut manifest_versions = Vec::new();
     let mut source_manifest_ids = Vec::new();
+    let mut source_families = Vec::new();
 
     for event in events {
         if !basenames_registry_boundary_derivation_change_candidate(event) {
@@ -309,6 +310,7 @@ pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_even
         )?);
         manifest_versions.push(event.manifest_version);
         source_manifest_ids.push(event.source_manifest_id);
+        source_families.push(event.source_family.clone());
     }
 
     if event_identities.is_empty() {
@@ -328,6 +330,7 @@ pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_even
             .bind(&after_states)
             .bind(&manifest_versions)
             .bind(&source_manifest_ids)
+            .bind(&source_families)
             .fetch_all(&mut **executor)
             .await
             .context("failed to supersede Basenames registry boundary derivation-change events")?;
@@ -381,7 +384,6 @@ pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_even
 fn basenames_registry_boundary_derivation_change_candidate(event: &NormalizedEvent) -> bool {
     let base_boundary_event = event.namespace == "basenames"
         && event.chain_id.as_deref() == Some("base-mainnet")
-        && event.source_family == "basenames_base_registry"
         && event.derivation_kind == "ens_v1_unwrapped_authority"
         && event.transaction_hash.is_none()
         && event.log_index.is_none()
@@ -396,15 +398,18 @@ fn basenames_registry_boundary_derivation_change_candidate(event: &NormalizedEve
             == Some("raw_block");
 
     base_boundary_event
-        && (matches!(
-            event.event_kind.as_str(),
-            "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
-        ) || (event.event_kind == "ResolverChanged"
-            && event
-                .after_state
-                .get("source_event")
-                .and_then(|value| value.as_str())
-                == Some("AuthorityEpochChanged")))
+        && ((event.source_family == "basenames_base_registry"
+            && (matches!(
+                event.event_kind.as_str(),
+                "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+            ) || (event.event_kind == "ResolverChanged"
+                && event
+                    .after_state
+                    .get("source_event")
+                    .and_then(|value| value.as_str())
+                    == Some("AuthorityEpochChanged"))))
+            || (event.source_family == "basenames_base_registrar"
+                && event.event_kind == "AuthorityEpochChanged"))
 }
 
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed(
