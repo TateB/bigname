@@ -109,6 +109,18 @@ fn segment_checkpoint_matches_legacy_full_identity_with_compact_expected() -> Re
         checkpoint_source_identity(1, 30, &[target_id], SOURCE_IDENTITY_HASH);
     let expected_source_identity =
         compact_selected_targets_source_identity(&legacy_source_identity)?;
+    let selected_targets = legacy_source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)
+        .expect("legacy source identity has selected targets");
+    let expected_digest = selected_targets_digest(selected_targets)?;
+    assert_eq!(
+        expected_source_identity
+            .get("selected_targets_digest")
+            .and_then(Value::as_str),
+        Some(expected_digest.as_str()),
+        "bootstrap compact identity must use the same canonical keccak digest shape as storage backfill validation"
+    );
     let rows = vec![checkpoint_row_with_source_identity(
         1,
         10,
@@ -308,10 +320,7 @@ fn compact_selected_targets_source_identity(source_identity: &Value) -> Result<V
         .get("selected_targets")
         .and_then(Value::as_array)
         .expect("legacy source identity has selected targets");
-    let selected_targets_digest = format!(
-        "keccak256:{}",
-        alloy_primitives::keccak256(serde_json::to_vec(selected_targets)?)
-    );
+    let selected_targets_digest = selected_targets_digest(selected_targets)?;
 
     Ok(json!({
         "selector_kind": source_identity.get("selector_kind"),
@@ -327,6 +336,35 @@ fn compact_selected_targets_source_identity(source_identity: &Value) -> Result<V
         },
         "source_identity_payload_format": "selected_targets_digest_v1"
     }))
+}
+
+fn selected_targets_digest(selected_targets: &[Value]) -> Result<String> {
+    Ok(format!(
+        "keccak256:{}",
+        alloy_primitives::keccak256(serde_json::to_vec(&canonical_json_value(Value::Array(
+            selected_targets.to_vec(),
+        )))?)
+    ))
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json_value).collect()),
+        Value::Object(fields) => {
+            let mut fields = fields
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json_value(value)))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in fields {
+                sorted.insert(key, value);
+            }
+            Value::Object(sorted)
+        }
+        value => value,
+    }
 }
 
 fn checkpoint_generic_resolver_source_identity(

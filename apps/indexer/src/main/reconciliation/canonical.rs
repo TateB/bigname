@@ -39,7 +39,10 @@ mod stored_lineage;
 use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
 use contiguous_gap::reconcile_contiguous_checkpoint_gap;
 use orphaning::orphan_reorg_losing_branch_payloads;
-use stored_lineage::reconcile_large_checkpoint_gap_from_stored_lineage;
+use stored_lineage::{
+    StoredLineagePromotion, reconcile_large_checkpoint_gap_from_stored_lineage,
+    stored_lineage_promotion_anchors,
+};
 
 const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
 // Live polling fails closed before it tries to ingest a large catch-up range.
@@ -201,6 +204,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
+    let stored_promotion_anchors = stored_lineage_promotion_anchors(heads);
     let canonical = reconcile_canonical_head(
         pool,
         provider,
@@ -208,6 +212,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         &task.checkpoint,
         &heads.canonical,
         header_audit_mode,
+        &stored_promotion_anchors,
         &task.addresses,
         !event_silent_reverse_resolver_addresses.is_empty(),
     )
@@ -339,6 +344,7 @@ pub(crate) async fn reconcile_canonical_head(
     checkpoint: &ChainCheckpoint,
     latest_head: &ProviderBlock,
     header_audit_mode: HeaderAuditMode,
+    stored_lineage_promotion_anchors: &[ProviderBlock],
     selected_raw_payload_addresses: &[String],
     requires_event_silent_payloads: bool,
 ) -> Result<CanonicalReconciliation> {
@@ -404,18 +410,26 @@ pub(crate) async fn reconcile_canonical_head(
         {
             return Ok(reconciliation);
         }
-        if let Some(reconciliation) = reconcile_large_checkpoint_gap_from_stored_lineage(
+        match reconcile_large_checkpoint_gap_from_stored_lineage(
             pool,
             chain,
             current_canonical_hash,
             current_canonical_number,
             latest_head,
+            stored_lineage_promotion_anchors,
             selected_raw_payload_addresses,
             requires_event_silent_payloads,
         )
         .await?
         {
-            return Ok(reconciliation);
+            StoredLineagePromotion::Promoted(reconciliation) => return Ok(reconciliation),
+            StoredLineagePromotion::Refused(reason) => {
+                let live_gap_blocks = latest_head.block_number - current_canonical_number;
+                if live_gap_blocks > MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS {
+                    bail!("{reason}");
+                }
+            }
+            StoredLineagePromotion::NotApplicable => {}
         }
         let live_gap_blocks = latest_head.block_number - current_canonical_number;
         if live_gap_blocks > MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS {

@@ -867,6 +867,7 @@ async fn reorg_common_ancestor_must_be_on_current_canonical_branch() -> Result<(
         &new_head,
         HeaderAuditMode::Minimal,
         &[],
+        &[],
         false,
     )
     .await?;
@@ -955,6 +956,7 @@ async fn awaiting_ancestor_raw_persistence_preserves_walked_orphaned_lineage() -
         },
         &new_head,
         HeaderAuditMode::Minimal,
+        &[],
         &[],
         false,
     )

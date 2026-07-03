@@ -333,12 +333,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live Coinbase CDP SQL credentials and consumes one read-only SQL API query"]
     async fn live_query_executes_one_base_block_probe() -> Result<()> {
-        let client = CoinbaseSqlClient::new(
-            "https://api.cdp.coinbase.com/platform/v2/data/query/run",
-            "COINBASE_CDP_SQL_API_KEY_ID",
-            "COINBASE_CDP_SQL_API_KEY_SECRET",
-            &test_config(),
-        )?;
+        let client = live_coinbase_sql_client()?;
 
         let planned_sql = super::super::query::build_query(
             &super::super::query::CoinbaseSqlFilterPack {
@@ -365,6 +360,81 @@ mod tests {
             response.rows.len()
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Coinbase CDP SQL credentials and an explicit real-row assertion opt-in"]
+    async fn live_query_decodes_real_cdp_parameters_row_when_enabled() -> Result<()> {
+        if std::env::var("BIGNAME_INDEXER_TEST_COINBASE_SQL_ASSERT_REAL_ROW")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            eprintln!(
+                "skipping real Coinbase SQL row assertion; set BIGNAME_INDEXER_TEST_COINBASE_SQL_ASSERT_REAL_ROW=1 to enable"
+            );
+            return Ok(());
+        }
+
+        let block_number = std::env::var("BIGNAME_INDEXER_TEST_COINBASE_SQL_ROW_BLOCK")
+            .ok()
+            .map(|value| value.parse::<i64>())
+            .transpose()
+            .context("BIGNAME_INDEXER_TEST_COINBASE_SQL_ROW_BLOCK must be an i64")?
+            .unwrap_or(46_954_187);
+        let address = std::env::var("BIGNAME_INDEXER_TEST_COINBASE_SQL_ROW_ADDRESS")
+            .unwrap_or_else(|_| "0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned());
+        let event_signatures =
+            std::env::var("BIGNAME_INDEXER_TEST_COINBASE_SQL_ROW_EVENT_SIGNATURES")
+                .unwrap_or_else(|_| {
+                    [
+                        "NewOwner(bytes32,bytes32,address)",
+                        "NewResolver(bytes32,address)",
+                        "NewTTL(bytes32,uint64)",
+                    ]
+                    .join(",")
+                })
+                .split(',')
+                .map(str::trim)
+                .filter(|signature| !signature.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+
+        let client = live_coinbase_sql_client()?;
+        let planned_sql = super::super::query::build_query(
+            &super::super::query::CoinbaseSqlFilterPack {
+                chain: "base-mainnet".to_owned(),
+                from_block: block_number,
+                to_block: block_number,
+                addresses: vec![address],
+                topic0s: Vec::new(),
+                event_signatures,
+                scan_all_emitters: false,
+                source_families: vec!["basenames_base_registry".to_owned()],
+            },
+            None,
+            10,
+        )?;
+        let response = client.run_query(&planned_sql).await?;
+        let decoded = response
+            .rows
+            .iter()
+            .find(|row| row.event_signature.is_some() && !row.requires_validation_provider_data);
+        assert!(
+            decoded.is_some(),
+            "expected at least one real Coinbase SQL decoded event row with string parameters at block {block_number}; got {} row(s)",
+            response.rows.len()
+        );
+        Ok(())
+    }
+
+    fn live_coinbase_sql_client() -> Result<CoinbaseSqlClient> {
+        CoinbaseSqlClient::new(
+            "https://api.cdp.coinbase.com/platform/v2/data/query/run",
+            "COINBASE_CDP_SQL_API_KEY_ID",
+            "COINBASE_CDP_SQL_API_KEY_SECRET",
+            &test_config(),
+        )
     }
 
     fn test_config() -> CoinbaseSqlBackfillConfig {

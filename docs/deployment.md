@@ -345,7 +345,11 @@ and rollout gates.
 Bootstrap backfill identity is tied to the selected deployment profile, chain,
 finite range, and source identity, not the manifest root path used by a given
 host. Moving an unchanged manifest corpus between directories must not make the
-indexer reread historical ranges.
+indexer reread historical ranges. Large whole-active source identities store a
+compact selected-target digest instead of every target in `source_identity`.
+Rollback to a binary that predates compact/full source-identity matching can no
+longer prove those compact jobs are the same historical job; finish or fail the
+compact jobs, or roll forward again, before relying on resumable job reuse.
 
 Automatic bootstrap partitions large job segments into child range leases for
 internal workers. `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS=0` selects an
@@ -367,6 +371,58 @@ each materialized push with
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
 as a fallback.
+
+Live checkpoint promotion can advance over a gap larger than the live fill limit
+only when a previous bounded backfill has already stored enough evidence. The
+indexer anchors the walk on the provider `safe` head, falling back to
+`finalized`, and only if that safe/finalized block is already present in
+`chain_lineage` with canonical/safe/finalized state. It then promotes at most one
+configured chunk per poll through the stored canonical child path and validates
+each promoted step before calling the normal checkpoint-advance path. The live
+canonical `latest` head is not required to be stored, and normally is not stored
+during an over-limit catch-up.
+
+For every promoted block, evidence must come from either a completed backfill
+range whose persisted source identity proves the current watched address set for
+that block, or from retained full-block RPC payload metadata. Full source
+identities prove this through `source_identity.selected_targets` and their
+`effective_from_block` / `effective_to_block` intervals. Compact source
+identities prove it only when the stored `selected_targets_digest_v1` count,
+keccak digest (including the legacy source-family producer digest shape),
+first/last sample, selector kind, source family, and requested target set match
+the current persisted watch-plan preimage for that job range. This is why
+Reth-db backfills can promote after completion even
+though they do not write `raw_payload_cache_metadata` rows; RPC-backed retained
+payload runs can still satisfy the fallback. Completed backfill coverage
+distinguishes "selected no logs in this block" from "this block was never
+fetched" only when the stored path is not ambiguous with another same-height
+lineage row; if a same-height fork row is still present, the block needs
+retained payload evidence or a rerun after reorg repair/orphaning. Lineage-only
+rows from checkpoint ancestor fills or crashed/incomplete backfills are refused.
+If event-silent reverse-resolver indexing is enabled, completed log backfill
+coverage is not enough: promotion still requires retained full-block payloads
+for the promoted blocks because no-log evidence cannot prove direct-call state.
+
+Actionable refusal classes:
+
+- Missing stored safe/finalized anchor: run hash-pinned backfill through the
+  provider safe or finalized head for that chain, then retry live reconciliation.
+- Incomplete lineage path or duplicate canonical children: rerun hash-pinned
+  backfill for the missing range; if duplicate canonical rows remain at one
+  height, repair/orphan the losing lineage before retrying.
+- Lineage-only block without completed range coverage or retained payloads:
+  rerun hash-pinned backfill for the current watched address set and let the
+  range complete, ensure the job's full or compact source identity matches the
+  current watch-plan target intervals for the promoted range, or restore
+  retained RPC payload metadata for that range.
+- Same-height fork ambiguity: provide retained full-block RPC payload metadata
+  for the promoted block; numeric completed-range coverage alone cannot
+  disambiguate old-fork no-log evidence from winning-branch no-log evidence.
+- Selected-log companion rows missing: rerun the selected hash-pinned backfill so
+  raw code, transaction, and receipt rows are persisted with the selected logs.
+- Event-silent payload refusal: rerun an RPC-backed full-payload-retaining
+  backfill for the promoted range, or disable event-silent reverse-resolver
+  indexing until the checkpoint has caught up.
 
 Manual Base historical backfills can select Coinbase CDP SQL with
 `BIGNAME_INDEXER_BACKFILL_SOURCE=coinbase-sql` or allow Base-only automatic
