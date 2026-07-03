@@ -7396,6 +7396,65 @@ async fn normalized_event_count_only_upsert_rejects_ens_v1_same_tx_registration_
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_ens_v1_same_tx_registration_empty_registry_only_key()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1732);
+    let registrar_resource_id = Uuid::from_u128(0x1742);
+    seed_ens_v1_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let mut stale_registration =
+        ens_v1_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.event_identity =
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xsametxregistrationblock:0xsametxregistrationtx:5:empty-key"
+            .to_owned();
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "",
+        "registrant": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
+
+    let mut replayed_registration = stale_registration.clone();
+    replayed_registration.before_state = json!({
+        "authority_kind": null,
+        "registrant": null
+    });
+    let result = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&replayed_registration),
+    )
+    .await;
+
+    let stored_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "ENS same-transaction empty registry_only key unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stored_before_state, stale_registration.before_state);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_repairs_basenames_same_tx_registration_setup_authority_transfer_to_registrar()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -7473,39 +7532,6 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registration_grant
         registrar_resource_id,
     )
     .await?;
-    let current_registry_resource_id = Uuid::from_u128(0x1745);
-    sqlx::query(
-        r#"
-        INSERT INTO resources (
-            resource_id,
-            token_lineage_id,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state
-        )
-        VALUES (
-            $1,
-            NULL,
-            'base-mainnet',
-            '0xbasesametxcurrentregistryresource',
-            90,
-            jsonb_build_object(
-                'authority_kind', 'registry_only',
-                'authority_key', 'registry-only:base-mainnet:0xalice_namehash',
-                'logical_name_id', 'basenames:alice.base.eth',
-                'namehash', '0xalice_namehash',
-                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
-                'current_registry_owner', '0x0000000000000000000000000000000000000123'
-            ),
-            'canonical'::canonicality_state
-        )
-        "#,
-    )
-    .bind(current_registry_resource_id)
-    .execute(database.pool())
-    .await?;
 
     let stale_setup = basenames_same_transaction_registration_setup_authority_transfer_event(
         stale_registry_resource_id,
@@ -7517,7 +7543,6 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registration_grant
             .to_owned();
     stale_registration.before_state = json!({
         "authority_kind": "registry_only",
-        "authority_key": "registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
         "registrant": null
     });
     upsert_normalized_events(
@@ -7528,8 +7553,7 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registration_grant
 
     let mut replayed_registration = stale_registration.clone();
     replayed_registration.before_state = json!({
-        "authority_kind": "registry_only",
-        "authority_key": "registry-only:base-mainnet:0xalice_namehash",
+        "authority_kind": null,
         "registrant": null
     });
     let inserted_count = upsert_normalized_events_count_only(
@@ -7619,7 +7643,7 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registration_grant
 }
 
 #[tokio::test]
-async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_registry_only_without_key()
+async fn normalized_event_count_only_upsert_repairs_basenames_registration_granted_keyless_before_state_without_setup_rows()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let stale_registry_resource_id = Uuid::from_u128(0x1746);
@@ -7634,11 +7658,90 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
     let mut stale_registration =
         basenames_same_transaction_registration_grant_event(registrar_resource_id);
     stale_registration.event_identity =
-        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:missing-key"
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbaseblock46927167:0xf2d20000000000000000000000000000000000000000000000000000000086f2:767"
+            .to_owned();
+    stale_registration.block_number = Some(46_927_167);
+    stale_registration.block_hash = Some("0xbaseblock46927167".to_owned());
+    stale_registration.transaction_hash =
+        Some("0xf2d20000000000000000000000000000000000000000000000000000000086f2".to_owned());
+    stale_registration.log_index = Some(767);
+    stale_registration.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 46_927_167,
+        "block_hash": "0xbaseblock46927167",
+        "transaction_hash": "0xf2d20000000000000000000000000000000000000000000000000000000086f2",
+        "transaction_index": 767,
+        "log_index": 767,
+    });
+    stale_registration.before_state = json!({
+        "authority_kind": "registry_only",
+        "registrant": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
+
+    let mut replayed_registration = stale_registration.clone();
+    replayed_registration.before_state = json!({
+        "authority_kind": null,
+        "registrant": null
+    });
+    let inserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&replayed_registration),
+    )
+    .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored_before_state, replayed_registration.before_state);
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection IN ('name_current', 'permissions_current')
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(invalidation_keys.contains(&(
+        "name_current".to_owned(),
+        "basenames:alice.base.eth".to_owned()
+    )));
+    assert!(invalidation_keys.contains(&(
+        "permissions_current".to_owned(),
+        registrar_resource_id.to_string()
+    )));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_replayed_registry_only_before_state()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1748);
+    let registrar_resource_id = Uuid::from_u128(0x1749);
+    seed_basenames_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let mut stale_registration =
+        basenames_same_transaction_registration_grant_event(registrar_resource_id);
+    stale_registration.event_identity =
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:replayed-registry-only"
             .to_owned();
     stale_registration.before_state = json!({
         "authority_kind": "registry_only",
-        "authority_key": "registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
         "registrant": null
     });
     upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
@@ -7646,6 +7749,7 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
     let mut conflicting_registration = stale_registration.clone();
     conflicting_registration.before_state = json!({
         "authority_kind": "registry_only",
+        "authority_key": "registry-only:base-mainnet:0xalice_namehash",
         "registrant": null
     });
     let result = upsert_normalized_events_count_only(
@@ -7664,7 +7768,7 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
 
     let error = match result {
         Ok(inserted_count) => panic!(
-            "Basenames RegistrationGranted registry_only before_state without authority_key unexpectedly succeeded: {inserted_count}"
+            "Basenames RegistrationGranted replayed registry_only before_state unexpectedly succeeded: {inserted_count}"
         ),
         Err(error) => error,
     };
@@ -7678,11 +7782,11 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
 }
 
 #[tokio::test]
-async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_stale_registry_only_without_key()
+async fn normalized_event_count_only_upsert_rejects_basenames_registration_granted_keyful_stale_before_state()
 -> Result<()> {
     let database = TestDatabase::new().await?;
-    let stale_registry_resource_id = Uuid::from_u128(0x1748);
-    let registrar_resource_id = Uuid::from_u128(0x1749);
+    let stale_registry_resource_id = Uuid::from_u128(0x174a);
+    let registrar_resource_id = Uuid::from_u128(0x174b);
     seed_basenames_same_transaction_registration_setup_repair_resources(
         database.pool(),
         stale_registry_resource_id,
@@ -7693,22 +7797,23 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
     let mut stale_registration =
         basenames_same_transaction_registration_grant_event(registrar_resource_id);
     stale_registration.event_identity =
-        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:stale-missing-key"
+        "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xbasesametxregistrationblock:0xbasesametxregistrationtx:5:keyful-stale"
             .to_owned();
     stale_registration.before_state = json!({
         "authority_kind": "registry_only",
+        "authority_key": "registry-only:base-mainnet:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
         "registrant": null
     });
     upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_registration)).await?;
 
-    let mut replayed_registration = stale_registration.clone();
-    replayed_registration.before_state = json!({
+    let mut conflicting_registration = stale_registration.clone();
+    conflicting_registration.before_state = json!({
         "authority_kind": null,
         "registrant": null
     });
     let result = upsert_normalized_events_count_only(
         database.pool(),
-        std::slice::from_ref(&replayed_registration),
+        std::slice::from_ref(&conflicting_registration),
     )
     .await;
 
@@ -7722,7 +7827,7 @@ async fn normalized_event_count_only_upsert_rejects_basenames_registration_grant
 
     let error = match result {
         Ok(inserted_count) => panic!(
-            "Basenames RegistrationGranted stale registry_only before_state without authority_key unexpectedly succeeded: {inserted_count}"
+            "Basenames RegistrationGranted keyful stale before_state unexpectedly succeeded: {inserted_count}"
         ),
         Err(error) => error,
     };

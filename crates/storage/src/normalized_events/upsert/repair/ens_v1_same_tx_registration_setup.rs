@@ -134,44 +134,6 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                  event.after_state->>'authority_key'
              AND lower(registrar_resource.provenance->>'labelhash') =
                  lower(event.after_state->>'labelhash')
-            LEFT JOIN resources legacy_registry_resource
-              ON legacy_registry_resource.chain_id = event.chain_id
-             AND legacy_registry_resource.canonicality_state IN (
-                 'canonical'::canonicality_state,
-                 'safe'::canonicality_state,
-                 'finalized'::canonicality_state
-             )
-             AND legacy_registry_resource.provenance->>'authority_kind' = 'registry_only'
-             AND legacy_registry_resource.provenance->>'logical_name_id' =
-                 event.logical_name_id
-             AND lower(legacy_registry_resource.provenance->>'labelhash') =
-                 lower(event.after_state->>'labelhash')
-             AND COALESCE(legacy_registry_resource.provenance->>'labelhash', '') <> ''
-             AND legacy_registry_resource.provenance->>'authority_key' = concat(
-                 'registry-only:',
-                 legacy_registry_resource.chain_id,
-                 ':',
-                 legacy_registry_resource.provenance->>'labelhash'
-             )
-            LEFT JOIN resources current_registry_resource
-              ON current_registry_resource.chain_id = event.chain_id
-             AND current_registry_resource.canonicality_state IN (
-                 'canonical'::canonicality_state,
-                 'safe'::canonicality_state,
-                 'finalized'::canonicality_state
-             )
-             AND current_registry_resource.provenance->>'authority_kind' = 'registry_only'
-             AND current_registry_resource.provenance->>'logical_name_id' =
-                 event.logical_name_id
-             AND lower(current_registry_resource.provenance->>'labelhash') =
-                 lower(event.after_state->>'labelhash')
-             AND COALESCE(current_registry_resource.provenance->>'namehash', '') <> ''
-             AND current_registry_resource.provenance->>'authority_key' = concat(
-                 'registry-only:',
-                 current_registry_resource.chain_id,
-                 ':',
-                 current_registry_resource.provenance->>'namehash'
-             )
             WHERE (
                     event.namespace = 'ens'
                 AND event.chain_id = 'ethereum-mainnet'
@@ -186,21 +148,10 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 AND event.chain_id = 'base-mainnet'
                 AND event.source_family = 'basenames_base_registrar'
                 AND input.event_kind = 'RegistrationGranted'
-                AND legacy_registry_resource.resource_id IS NOT NULL
-                AND input.old_before_state::JSONB->>'authority_key' =
-                    legacy_registry_resource.provenance->>'authority_key'
-                AND (
-                    (
-                        input.new_before_state::JSONB->>'authority_kind' IS NULL
-                        AND COALESCE(input.new_before_state::JSONB->>'authority_key', '') = ''
-                    )
-                    OR (
-                        input.new_before_state::JSONB->>'authority_kind' = 'registry_only'
-                        AND current_registry_resource.resource_id IS NOT NULL
-                        AND input.new_before_state::JSONB->>'authority_key' =
-                            current_registry_resource.provenance->>'authority_key'
-                    )
-                )
+                AND input.old_before_state::JSONB->>'authority_kind' = 'registry_only'
+                AND COALESCE(input.old_before_state::JSONB->>'authority_key', '') = ''
+                AND input.new_before_state::JSONB->>'authority_kind' IS NULL
+                AND COALESCE(input.new_before_state::JSONB->>'authority_key', '') = ''
             )
         ),
         updated_registration AS (
@@ -479,12 +430,9 @@ pub(crate) fn ens_v1_same_tx_registration_setup_before_state_repair_allowed(
             .get("authority_kind")
             .and_then(Value::as_str)
             == Some("registry_only")
-        && incoming_authority_shape_allowed(
-            incoming.namespace.as_str(),
-            incoming.chain_id.as_deref(),
-            &incoming.before_state,
-        )
-        && registry_only_authority_key_shape_allowed(
+        && incoming_authority_shape_allowed(&incoming.before_state)
+        && existing_registry_only_authority_shape_allowed(
+            existing.namespace.as_str(),
             existing.chain_id.as_deref(),
             &existing.before_state,
         )
@@ -503,22 +451,7 @@ fn before_state_without_authority(before_state: &Value) -> Value {
     value
 }
 
-fn incoming_authority_shape_allowed(
-    namespace: &str,
-    chain_id: Option<&str>,
-    before_state: &Value,
-) -> bool {
-    if namespace == "basenames" && chain_id == Some("base-mainnet") {
-        let authority_kind = before_state.get("authority_kind");
-        if authority_kind.is_none_or(|value| value.is_null()) {
-            return before_state.get("authority_key").is_none_or(|value| {
-                value.is_null() || value.as_str().is_some_and(|value| value.is_empty())
-            });
-        }
-        return authority_kind.and_then(Value::as_str) == Some("registry_only")
-            && registry_only_authority_key_present(chain_id, before_state);
-    }
-
+fn incoming_authority_shape_allowed(before_state: &Value) -> bool {
     before_state
         .get("authority_kind")
         .is_none_or(|value| value.is_null())
@@ -527,23 +460,21 @@ fn incoming_authority_shape_allowed(
         })
 }
 
-fn registry_only_authority_key_present(chain_id: Option<&str>, before_state: &Value) -> bool {
-    let (Some(chain_id), Some(authority_key)) = (
-        chain_id,
-        before_state.get("authority_key").and_then(Value::as_str),
-    ) else {
-        return false;
-    };
-    !authority_key.is_empty() && authority_key.starts_with(&format!("registry-only:{chain_id}:"))
+fn existing_registry_only_authority_shape_allowed(
+    namespace: &str,
+    chain_id: Option<&str>,
+    before_state: &Value,
+) -> bool {
+    if namespace == "basenames" && chain_id == Some("base-mainnet") {
+        return before_state.get("authority_key").is_none_or(|value| {
+            value.is_null() || value.as_str().is_some_and(|value| value.is_empty())
+        });
+    }
+
+    registry_only_authority_key_shape_allowed(chain_id, before_state)
 }
 
 fn registry_only_authority_key_shape_allowed(chain_id: Option<&str>, before_state: &Value) -> bool {
-    if chain_id == Some("base-mainnet")
-        && before_state.get("authority_kind").and_then(Value::as_str) == Some("registry_only")
-    {
-        return registry_only_authority_key_present(chain_id, before_state);
-    }
-
     let Some(authority_key) = before_state.get("authority_key") else {
         return true;
     };
