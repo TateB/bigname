@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppState, load_name_current_for_selected_snapshot, map_internal_api_error,
-    normalize_inferred_route_name, snapshot_selection_api_error,
+    AppState, V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field,
+    load_name_current_for_selected_snapshot, map_internal_api_error, normalize_inferred_route_name,
+    record_addresses_from_entries, record_content_hash_from_entries,
+    record_text_records_from_entries, record_unsupported_fields, record_value_string_from_entry,
+    snapshot_selection_api_error,
 };
 
 use super::{
@@ -26,11 +29,14 @@ mod values;
 mod verified;
 
 use inventory::load_name_record_inventory;
-use values::{
-    json_address_at_paths, json_chain_id, json_string_at_paths, json_timestamp_at_paths,
-    json_value_present, network, object_field, response_chain_id,
+pub(super) use values::{
+    chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
+    value_to_string,
 };
-pub(super) use values::{string_field, value_to_string};
+use values::{
+    json_address_at_paths, json_chain_id, json_timestamp_at_paths, json_value_present, network,
+    object_field, response_chain_id,
+};
 
 pub(crate) struct NameRecordQueryParams;
 
@@ -497,105 +503,43 @@ pub(super) fn resolver(summary: &Value) -> Option<Resolver> {
 pub(super) fn record_addresses(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> BTreeMap<String, String> {
-    success_record_entries(record_inventory, "addr")
-        .filter_map(|entry| {
-            let coin_type = string_field(entry.get("selector_key")).or_else(|| {
-                entry
-                    .get("value")
-                    .and_then(|value| string_field(value.get("coin_type")))
-            })?;
-            let coin_type = bigname_storage::canonical_addr_coin_type(&coin_type)?;
-            let value = record_value_string(entry)?;
-            Some((coin_type, value))
-        })
-        .collect()
+    record_addresses_from_entries(
+        record_inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 pub(super) fn record_text_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> BTreeMap<String, String> {
-    let mut records = BTreeMap::new();
-    for entry in success_record_entries(record_inventory, "text") {
-        let Some(key) = string_field(entry.get("selector_key")).or_else(|| {
-            entry
-                .get("value")
-                .and_then(|value| string_field(value.get("key")))
-        }) else {
-            continue;
-        };
-        if let Some(value) = record_value_string(entry) {
-            records.insert(key, value);
-        }
-    }
-    for entry in success_record_entries(record_inventory, "avatar") {
-        if let Some(value) = record_value_string(entry) {
-            records.insert("avatar".to_owned(), value);
-        }
-    }
-    records
+    record_text_records_from_entries(
+        record_inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 pub(super) fn record_content_hash(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> Option<String> {
-    success_record_entries(record_inventory, "contenthash").find_map(record_value_string)
-}
-
-pub(super) fn success_record_entries<'a>(
-    record_inventory: Option<&'a RecordInventoryCurrentRow>,
-    record_family: &'static str,
-) -> impl Iterator<Item = &'a Value> {
-    record_inventory
-        .and_then(|inventory| inventory.entries.as_array())
-        .into_iter()
-        .flatten()
-        .filter(move |entry| {
-            string_field(entry.get("record_family")).as_deref() == Some(record_family)
-                && string_field(entry.get("status")).as_deref() == Some("success")
-        })
+    record_content_hash_from_entries(
+        record_inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 pub(super) fn record_value_string(entry: &Value) -> Option<String> {
-    let value = entry.get("value")?;
-    value
-        .get("value")
-        .and_then(value_to_string)
-        .or_else(|| value_to_string(value))
+    record_value_string_from_entry(entry, direct_json_field)
 }
 
 fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> Vec<String> {
-    let mut fields = BTreeSet::new();
-    let Some(record_inventory) = record_inventory else {
-        fields.insert("addresses".to_owned());
-        fields.insert("primary_address".to_owned());
-        fields.insert("text_records".to_owned());
-        fields.insert("content_hash".to_owned());
-        return fields.into_iter().collect();
-    };
-
-    for family in record_inventory
-        .unsupported_families
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|family| string_field(family.get("record_family")))
-    {
-        match family.as_str() {
-            "addr" => {
-                fields.insert("addresses".to_owned());
-                fields.insert("primary_address".to_owned());
-            }
-            "text" | "avatar" => {
-                fields.insert("text_records".to_owned());
-            }
-            "contenthash" => {
-                fields.insert("content_hash".to_owned());
-            }
-            _ => {}
-        }
-    }
-
-    fields.into_iter().collect()
+    record_unsupported_fields(
+        record_inventory.is_some(),
+        record_inventory.map(|inventory| &inventory.unsupported_families),
+        direct_json_field,
+        V2_RECORD_UNSUPPORTED_FIELD_NAMES,
+    )
+    .into_iter()
+    .collect()
 }
 
 fn route_source(source: RequestSource) -> V2Result<Source> {

@@ -87,7 +87,7 @@ pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
     AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
     OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet, Resolver, Source,
-    Status, contains_boundary_vocabulary,
+    Status, contains_boundary_vocabulary, shared_product_reason,
 };
 
 use axum::Router;

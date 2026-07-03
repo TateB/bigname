@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::{V2Error, V2Result};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Status {
@@ -77,6 +79,19 @@ pub(crate) enum HistoryEventType {
 }
 
 impl HistoryEventType {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Registration,
+        Self::Renewal,
+        Self::Release,
+        Self::Expiry,
+        Self::Transfer,
+        Self::Authority,
+        Self::Resolver,
+        Self::Record,
+        Self::PrimaryName,
+        Self::Permission,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Registration => "registration",
@@ -321,6 +336,38 @@ pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
 
 pub(crate) fn contains_boundary_vocabulary(candidate: &str, terms: &[&str]) -> bool {
     !matched_boundary_vocabulary_terms(candidate, terms).is_empty()
+}
+
+const SHARED_PRODUCT_REASON_MAP: &[(&str, &str)] = &[
+    ("projection_read_failed", "read_failed"),
+    (
+        "ensv2_exact_name_profile_shadow",
+        "exact_name_profile_not_supported",
+    ),
+    (
+        "mixed_ensv1_ensv2_exact_name_corpus",
+        "mixed_exact_name_corpus",
+    ),
+];
+
+pub(crate) fn shared_product_reason(
+    reason: &str,
+    pipeline_rejection_log: &'static str,
+    pipeline_rejection_error: &'static str,
+) -> V2Result<String> {
+    if let Some((_, product_reason)) = SHARED_PRODUCT_REASON_MAP
+        .iter()
+        .find(|(storage_reason, _)| *storage_reason == reason)
+    {
+        return Ok((*product_reason).to_owned());
+    }
+
+    if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) {
+        tracing::error!(%reason, "{}", pipeline_rejection_log);
+        return Err(V2Error::internal_error(pipeline_rejection_error));
+    }
+
+    Ok(reason.to_owned())
 }
 
 pub(crate) fn matched_boundary_vocabulary_terms<'a>(

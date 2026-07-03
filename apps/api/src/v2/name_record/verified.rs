@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
 
-use crate::{AppState, ResolutionRecordKey};
+use crate::{AppState, PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey};
 
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
@@ -12,15 +12,6 @@ use super::super::{
     },
 };
 use super::{NameRecord, build_name_record, string_field};
-
-const PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
-    "addr:60",
-    "avatar",
-    "contenthash",
-    "text:description",
-    "text:url",
-    "text:email",
-];
 
 pub(super) struct VerifiedNameRecord {
     pub(super) record: NameRecord,

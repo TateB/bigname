@@ -2,7 +2,11 @@ use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
-use crate::v2::{chains::slug_to_numeric, format_timestamp};
+use crate::{
+    direct_json_field, record_json_path, record_json_string_at_paths,
+    record_network_from_chain_positions,
+    v2::{chains::slug_to_numeric, format_timestamp},
+};
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
     match value {
@@ -21,26 +25,23 @@ pub(super) fn response_chain_id(selected_snapshot: &SelectedSnapshot) -> Option<
 }
 
 pub(super) fn network(row: &NameCurrentRow) -> String {
-    match row.namespace.as_str() {
-        "basenames" if has_chain_position(&row.chain_positions, "base-sepolia") => {
-            "base-sepolia".to_owned()
-        }
-        "basenames" => "base".to_owned(),
-        "ens" if has_chain_position(&row.chain_positions, "ethereum-sepolia") => {
-            "ethereum-sepolia".to_owned()
-        }
-        "ens" => "ethereum".to_owned(),
-        namespace => namespace.to_owned(),
-    }
+    network_from_parts(&row.namespace, &row.chain_positions)
 }
 
-fn has_chain_position(chain_positions: &Value, chain_id: &str) -> bool {
+pub(in crate::v2) fn network_from_parts(namespace: &str, chain_positions: &Value) -> String {
+    record_network_from_chain_positions(namespace, chain_positions, direct_json_field)
+}
+
+pub(in crate::v2) fn chain_id_from_positions(chain_positions: &Value) -> Option<u64> {
     chain_positions
         .as_object()
         .into_iter()
         .flatten()
-        .any(|(slot, value)| {
-            slot == chain_id || string_field(value.get("chain_id")).as_deref() == Some(chain_id)
+        .find_map(|(_, value)| {
+            value
+                .get("chain_id")
+                .and_then(value_to_string)
+                .and_then(|value| slug_to_numeric(&value))
         })
 }
 
@@ -48,11 +49,8 @@ pub(super) fn object_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value>
     value.get(key).filter(|value| value.is_object())
 }
 
-pub(super) fn json_string_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
-    paths
-        .iter()
-        .find_map(|path| json_path(value, path).and_then(value_to_string))
-        .filter(|value| !value.trim().is_empty())
+pub(in crate::v2) fn json_string_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
+    record_json_string_at_paths(value, paths, direct_json_field)
 }
 
 pub(super) fn json_address_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
@@ -61,7 +59,7 @@ pub(super) fn json_address_at_paths(value: &Value, paths: &[&[&str]]) -> Option<
 
 pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
     for path in paths {
-        let Some(value) = json_path(value, path) else {
+        let Some(value) = record_json_path(value, path, direct_json_field) else {
             continue;
         };
         match value {
@@ -75,13 +73,6 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
         }
     }
     None
-}
-
-fn json_path<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    for key in path {
-        value = value.get(*key)?;
-    }
-    Some(value)
 }
 
 pub(in crate::v2) fn string_field(value: Option<&Value>) -> Option<String> {

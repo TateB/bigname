@@ -11,11 +11,6 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
-path = "apps/api/src/v2/name_record.rs"
-loc = 612
-justification = "v2 flat-record dictionary authority centralizes owner, registrant, dates, status, token_id, and record-shape helpers for lookup/profile/list-route parity; split after the parity guard stabilizes."
-
-[[files]]
 path = "apps/indexer/src/main/backfill/fetching/historical.rs"
 loc = 805
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

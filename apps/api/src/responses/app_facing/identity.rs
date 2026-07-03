@@ -116,64 +116,19 @@ pub(crate) fn build_indexing_status_response(
 fn identity_coin_type_addresses(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> BTreeMap<String, String> {
-    identity_success_record_entries(inventory, "addr")
-        .filter_map(|entry| {
-            let coin_type = string_field(provenance_field(entry, "selector_key")).or_else(|| {
-                provenance_field(entry, "value")
-                    .and_then(|value| provenance_field(value, "coin_type"))
-                    .and_then(value_to_string)
-            })?;
-            let coin_type = bigname_storage::canonical_addr_coin_type(&coin_type)?;
-            let value = identity_record_value_string(entry)?;
-            Some((coin_type, value))
-        })
-        .collect()
+    record_addresses_from_entries(
+        inventory.map(|inventory| &inventory.entries),
+        provenance_field,
+    )
 }
 
 fn identity_text_records(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> BTreeMap<String, String> {
-    let mut records = BTreeMap::new();
-    for entry in identity_success_record_entries(inventory, "text") {
-        let Some(key) = string_field(provenance_field(entry, "selector_key")).or_else(|| {
-            provenance_field(entry, "value")
-                .and_then(|value| provenance_field(value, "key"))
-                .and_then(value_to_string)
-        }) else {
-            continue;
-        };
-        if let Some(value) = identity_record_value_string(entry) {
-            records.insert(key, value);
-        }
-    }
-    for entry in identity_success_record_entries(inventory, "avatar") {
-        if let Some(value) = identity_record_value_string(entry) {
-            records.insert("avatar".to_owned(), value);
-        }
-    }
-    records
-}
-
-fn identity_success_record_entries<'a>(
-    inventory: Option<&'a bigname_storage::IdentityRecordInventoryRow>,
-    record_family: &'static str,
-) -> impl Iterator<Item = &'a JsonValue> {
-    inventory
-        .and_then(|inventory| inventory.entries.as_array())
-        .into_iter()
-        .flatten()
-        .filter(move |entry| {
-            string_field(provenance_field(entry, "record_family")).as_deref()
-                == Some(record_family)
-                && string_field(provenance_field(entry, "status")).as_deref() == Some("success")
-        })
-}
-
-fn identity_record_value_string(entry: &JsonValue) -> Option<String> {
-    let value = provenance_field(entry, "value")?;
-    provenance_field(value, "value")
-        .and_then(value_to_string)
-        .or_else(|| value_to_string(value))
+    record_text_records_from_entries(
+        inventory.map(|inventory| &inventory.entries),
+        provenance_field,
+    )
 }
 
 fn identity_labelhash_token_id(row: &bigname_storage::IdentityNameCurrentRow) -> Option<String> {
@@ -198,33 +153,15 @@ fn identity_supports_labelhash_token_id(row: &bigname_storage::IdentityNameCurre
 fn identity_unsupported_fields(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
-    let Some(inventory) = record.record_inventory_current.as_ref() else {
-        fields.insert("coin_type_addresses".to_owned());
-        fields.insert("primary_address".to_owned());
-        fields.insert("text_records".to_owned());
-        return fields;
-    };
-
-    for family in inventory
-        .unsupported_families
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|family| string_field(provenance_field(family, "record_family")))
-    {
-        match family.as_str() {
-            "addr" => {
-                fields.insert("coin_type_addresses".to_owned());
-                fields.insert("primary_address".to_owned());
-            }
-            "text" | "avatar" => {
-                fields.insert("text_records".to_owned());
-            }
-            _ => {}
-        }
-    }
-    fields
+    record_unsupported_fields(
+        record.record_inventory_current.is_some(),
+        record
+            .record_inventory_current
+            .as_ref()
+            .map(|inventory| &inventory.unsupported_families),
+        provenance_field,
+        V1_IDENTITY_RECORD_UNSUPPORTED_FIELD_NAMES,
+    )
 }
 
 fn identity_relation_subject(
@@ -245,10 +182,7 @@ fn identity_relation_subject(
 }
 
 fn identity_json_string(value: &JsonValue, paths: &[&[&str]]) -> Option<String> {
-    paths
-        .iter()
-        .find_map(|path| json_path(value, path).and_then(value_to_string))
-        .filter(|value| !value.trim().is_empty())
+    record_json_string_at_paths(value, paths, provenance_field)
 }
 
 fn identity_json_address(value: &JsonValue, paths: &[&[&str]]) -> Option<String> {
@@ -257,7 +191,7 @@ fn identity_json_address(value: &JsonValue, paths: &[&[&str]]) -> Option<String>
 
 fn identity_json_timestamp(value: &JsonValue, paths: &[&[&str]]) -> Option<i64> {
     for path in paths {
-        let Some(value) = json_path(value, path) else {
+        let Some(value) = record_json_path(value, path, provenance_field) else {
             continue;
         };
         if let Some(value) = value.as_i64() {
@@ -276,40 +210,12 @@ fn identity_json_timestamp(value: &JsonValue, paths: &[&[&str]]) -> Option<i64> 
     None
 }
 
-fn json_path<'a>(mut value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
-    for key in path {
-        value = provenance_field(value, key)?;
-    }
-    Some(value)
-}
-
 fn identity_network(row: &bigname_storage::IdentityNameCurrentRow) -> String {
     identity_network_from_parts(&row.namespace, &row.chain_positions)
 }
 
 fn identity_network_from_parts(namespace: &str, chain_positions: &JsonValue) -> String {
-    match namespace {
-        "basenames" if identity_has_chain_position(chain_positions, "base-sepolia") => {
-            "base-sepolia".to_owned()
-        }
-        "basenames" => "base".to_owned(),
-        "ens" if identity_has_chain_position(chain_positions, "ethereum-sepolia") => {
-            "ethereum-sepolia".to_owned()
-        }
-        "ens" => "ethereum".to_owned(),
-        namespace => namespace.to_owned(),
-    }
-}
-
-fn identity_has_chain_position(chain_positions: &JsonValue, chain_id: &str) -> bool {
-    chain_positions
-        .as_object()
-        .into_iter()
-        .flatten()
-        .any(|(slot, value)| {
-            slot == chain_id
-                || string_field(provenance_field(value, "chain_id")).as_deref() == Some(chain_id)
-        })
+    record_network_from_chain_positions(namespace, chain_positions, provenance_field)
 }
 
 fn identity_record_status(row: &bigname_storage::IdentityNameCurrentRow) -> String {

@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, PRODUCT_PIPELINE_TERMS, RawQueryParams, Source, Status, V2Error, V2Result,
-    api_error_to_v2, contains_boundary_vocabulary, load_served_head_meta,
+    Envelope, Meta, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
+    load_served_head_meta, shared_product_reason,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
@@ -347,14 +347,14 @@ fn verified_answer_from_value(
     let mut answer = PrimaryNameAnswer::new(Source::Verified, status);
     answer.name = primary_name_from_value(verified_primary_name);
     answer.unsupported_reason = primary_name_unsupported_reason(
-        string_field(verified_primary_name.get("unsupported_reason")).as_deref(),
+        str_field(verified_primary_name.get("unsupported_reason")).as_deref(),
         status,
     )?;
-    answer.failure_reason = string_field(verified_primary_name.get("failure_reason"))
+    answer.failure_reason = str_field(verified_primary_name.get("failure_reason"))
         .map(|reason| product_primary_name_reason(&reason))
         .transpose()?;
     if status == Status::InvalidName {
-        answer.raw_claim_name = string_field(verified_primary_name.get("raw_claim_name"))
+        answer.raw_claim_name = str_field(verified_primary_name.get("raw_claim_name"))
             .or_else(|| raw_claim_name(lookup_state));
     }
     Ok(answer)
@@ -441,18 +441,11 @@ fn primary_name_unsupported_reason(
 }
 
 fn product_primary_name_reason(reason: &str) -> V2Result<String> {
-    match reason {
-        "projection_read_failed" => Ok("read_failed".to_owned()),
-        "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
-        "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
-        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
-            tracing::error!(%reason, "rejected primary-name reason containing pipeline vocabulary");
-            Err(V2Error::internal_error(
-                "failed to map primary-name reason vocabulary",
-            ))
-        }
-        _ => Ok(reason.to_owned()),
-    }
+    shared_product_reason(
+        reason,
+        "rejected primary-name reason containing pipeline vocabulary",
+        "failed to map primary-name reason vocabulary",
+    )
 }
 
 fn primary_name_from_value(value: &Value) -> Option<String> {
@@ -467,7 +460,7 @@ fn primary_name_from_value(value: &Value) -> Option<String> {
     }
 }
 
-fn string_field(value: Option<&Value>) -> Option<String> {
+fn str_field(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
 }
 

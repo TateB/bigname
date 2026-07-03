@@ -8,6 +8,8 @@ mod support_primary_name_lookup;
 mod support_primary_name_readback;
 #[path = "support/query_parsing.rs"]
 mod support_query_parsing;
+#[path = "support/record_json.rs"]
+mod support_record_json;
 #[path = "support/records.rs"]
 mod support_records;
 #[path = "support/service.rs"]
@@ -20,6 +22,7 @@ use support_history::*;
 use support_primary_name_lookup::*;
 use support_primary_name_readback::*;
 use support_query_parsing::*;
+use support_record_json::*;
 use support_records::*;
 use support_service::*;
 use support_snapshots::*;

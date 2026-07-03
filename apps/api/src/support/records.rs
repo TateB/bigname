@@ -151,7 +151,7 @@ fn profile_default_record_keys() -> Vec<ResolutionRecordKey> {
     profile_record_keys_from_names(PROFILE_FALLBACK_RECORD_KEYS.iter().copied())
 }
 
-const PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
+pub(crate) const PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
     "addr:60",
     "avatar",
     "contenthash",

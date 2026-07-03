@@ -186,17 +186,17 @@ fn build_chain_position(row: &StorageHistoryEvent) -> Value {
 
 fn build_coverage(coverage: &Value) -> Value {
     json!({
-        "status": string_field(coverage.get("status")).unwrap_or_else(|| "unsupported".to_owned()),
-        "exhaustiveness": string_field(coverage.get("exhaustiveness"))
+        "status": str_field(coverage.get("status")).unwrap_or_else(|| "unsupported".to_owned()),
+        "exhaustiveness": str_field(coverage.get("exhaustiveness"))
             .unwrap_or_else(|| "not_applicable".to_owned()),
         "source_classes_considered": coverage
             .get("source_classes_considered")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
-        "enumeration_basis": string_field(coverage.get("enumeration_basis"))
+        "enumeration_basis": str_field(coverage.get("enumeration_basis"))
             .unwrap_or_else(|| "exact_name".to_owned()),
-        "unsupported_reason": string_field(coverage.get("unsupported_reason")),
+        "unsupported_reason": str_field(coverage.get("unsupported_reason")),
     })
 }
 
@@ -208,7 +208,7 @@ fn ensure_object(value: &Value) -> Value {
     }
 }
 
-fn string_field(value: Option<&Value>) -> Option<String> {
+fn str_field(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
 }
 

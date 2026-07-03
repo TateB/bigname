@@ -200,21 +200,10 @@ pub(crate) fn build_history_event(
 }
 
 pub(crate) fn history_event_type(event_kind: &str) -> Option<HistoryEventType> {
-    match event_kind {
-        "RegistrationGranted" | "LabelRegistered" => Some(HistoryEventType::Registration),
-        "RegistrationRenewed" => Some(HistoryEventType::Renewal),
-        "RegistrationReleased" => Some(HistoryEventType::Release),
-        "ExpiryChanged" => Some(HistoryEventType::Expiry),
-        "TokenControlTransferred" => Some(HistoryEventType::Transfer),
-        "AuthorityTransferred" | "AuthorityEpochChanged" => Some(HistoryEventType::Authority),
-        "ResolverChanged" => Some(HistoryEventType::Resolver),
-        "RecordChanged" | "RecordVersionChanged" => Some(HistoryEventType::Record),
-        "ReverseChanged" => Some(HistoryEventType::PrimaryName),
-        "PermissionChanged" | "PermissionScopeChanged" | "RolesChanged" | "EACRolesChanged" => {
-            Some(HistoryEventType::Permission)
-        }
-        _ => None,
-    }
+    HistoryEventType::ALL
+        .iter()
+        .copied()
+        .find(|event_type| event_type.storage_event_kinds().contains(&event_kind))
 }
 
 pub(crate) fn history_cursor_payload(

@@ -1,11 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde_json::Value;
 
 use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
-use crate::v2::{
-    PRODUCT_PIPELINE_TERMS, Relation, Status, V2Error, V2Result, contains_boundary_vocabulary,
-    name_record,
+use crate::{
+    V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, record_addresses_from_entries,
+    record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
+    v2::{
+        Relation, Status, V2Result,
+        name_record::{
+            self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
+        },
+        shared_product_reason,
+    },
 };
 
 const MISSING_UNSUPPORTED_REASON: &str = "unsupported_reason_missing";
@@ -41,7 +48,7 @@ pub(super) fn build_forward_feed_record(
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.row.chain_positions),
-        network: identity_network(&record.row.namespace, &record.row.chain_positions),
+        network: network_from_parts(&record.row.namespace, &record.row.chain_positions),
         is_primary: None,
         relations: Vec::new(),
         status,
@@ -87,7 +94,7 @@ pub(super) fn build_reverse_feed_record(
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.name_record.row.chain_positions),
-        network: identity_network(
+        network: network_from_parts(
             &record.name_record.row.namespace,
             &record.name_record.row.chain_positions,
         ),
@@ -163,16 +170,16 @@ fn build_detail_record(
         addresses,
         text_records,
         content_hash,
-        primary_name: identity_json_string(
+        primary_name: json_string_at_paths(
             &record.row.declared_summary,
             &[
-                &["primary_name"],
-                &["primary_name", "name"],
-                &["primary", "name"],
+                &["primary_name"][..],
+                &["primary_name", "name"][..],
+                &["primary", "name"][..],
             ],
         ),
         chain_id: chain_id_from_positions(&record.row.chain_positions),
-        network: identity_network(&record.row.namespace, &record.row.chain_positions),
+        network: network_from_parts(&record.row.namespace, &record.row.chain_positions),
         is_primary,
         relations,
         status,
@@ -184,107 +191,43 @@ fn build_detail_record(
 
 fn identity_addresses(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
-) -> BTreeMap<String, String> {
-    identity_success_record_entries(inventory, "addr")
-        .filter_map(|entry| {
-            let coin_type = string_field(entry.get("selector_key")).or_else(|| {
-                entry
-                    .get("value")
-                    .and_then(|value| string_field(value.get("coin_type")))
-            })?;
-            let coin_type = bigname_storage::canonical_addr_coin_type(&coin_type)?;
-            let value = identity_record_value_string(entry)?;
-            Some((coin_type, value))
-        })
-        .collect()
+) -> std::collections::BTreeMap<String, String> {
+    record_addresses_from_entries(
+        inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 fn identity_text_records(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
-) -> BTreeMap<String, String> {
-    let mut records = BTreeMap::new();
-    for entry in identity_success_record_entries(inventory, "text") {
-        let Some(key) = string_field(entry.get("selector_key")).or_else(|| {
-            entry
-                .get("value")
-                .and_then(|value| string_field(value.get("key")))
-        }) else {
-            continue;
-        };
-        if let Some(value) = identity_record_value_string(entry) {
-            records.insert(key, value);
-        }
-    }
-    for entry in identity_success_record_entries(inventory, "avatar") {
-        if let Some(value) = identity_record_value_string(entry) {
-            records.insert("avatar".to_owned(), value);
-        }
-    }
-    records
+) -> std::collections::BTreeMap<String, String> {
+    record_text_records_from_entries(
+        inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 fn identity_content_hash(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> Option<String> {
-    identity_success_record_entries(inventory, "contenthash").find_map(identity_record_value_string)
-}
-
-fn identity_success_record_entries<'a>(
-    inventory: Option<&'a bigname_storage::IdentityRecordInventoryRow>,
-    record_family: &'static str,
-) -> impl Iterator<Item = &'a Value> {
-    inventory
-        .and_then(|inventory| inventory.entries.as_array())
-        .into_iter()
-        .flatten()
-        .filter(move |entry| {
-            string_field(entry.get("record_family")).as_deref() == Some(record_family)
-                && string_field(entry.get("status")).as_deref() == Some("success")
-        })
-}
-
-fn identity_record_value_string(entry: &Value) -> Option<String> {
-    let value = entry.get("value")?;
-    value
-        .get("value")
-        .and_then(value_to_string)
-        .or_else(|| value_to_string(value))
+    record_content_hash_from_entries(
+        inventory.map(|inventory| &inventory.entries),
+        direct_json_field,
+    )
 }
 
 fn identity_unsupported_fields(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
-    let Some(inventory) = record.record_inventory_current.as_ref() else {
-        fields.insert("addresses".to_owned());
-        fields.insert("primary_address".to_owned());
-        fields.insert("text_records".to_owned());
-        fields.insert("content_hash".to_owned());
-        return fields;
-    };
-
-    for family in inventory
-        .unsupported_families
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|family| string_field(family.get("record_family")))
-    {
-        match family.as_str() {
-            "addr" => {
-                fields.insert("addresses".to_owned());
-                fields.insert("primary_address".to_owned());
-            }
-            "text" | "avatar" => {
-                fields.insert("text_records".to_owned());
-            }
-            "contenthash" => {
-                fields.insert("content_hash".to_owned());
-            }
-            _ => {}
-        }
-    }
-    fields
+    record_unsupported_fields(
+        record.record_inventory_current.is_some(),
+        record
+            .record_inventory_current
+            .as_ref()
+            .map(|inventory| &inventory.unsupported_families),
+        direct_json_field,
+        V2_RECORD_UNSUPPORTED_FIELD_NAMES,
+    )
 }
 
 pub(super) fn lookup_relations(
@@ -340,80 +283,9 @@ fn identity_record_failure_reason(coverage: &Value, status: Status) -> V2Result<
 }
 
 fn product_lookup_reason(reason: &str) -> V2Result<String> {
-    match reason {
-        "projection_read_failed" => Ok("read_failed".to_owned()),
-        "ensv2_exact_name_profile_shadow" => Ok("exact_name_profile_not_supported".to_owned()),
-        "mixed_ensv1_ensv2_exact_name_corpus" => Ok("mixed_exact_name_corpus".to_owned()),
-        _ if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) => {
-            tracing::error!(%reason, "rejected lookup reason containing pipeline vocabulary");
-            Err(V2Error::internal_error(
-                "failed to map lookup reason vocabulary",
-            ))
-        }
-        _ => Ok(reason.to_owned()),
-    }
-}
-
-fn identity_network(namespace: &str, chain_positions: &Value) -> String {
-    match namespace {
-        "basenames" if has_chain_position(chain_positions, "base-sepolia") => {
-            "base-sepolia".to_owned()
-        }
-        "basenames" => "base".to_owned(),
-        "ens" if has_chain_position(chain_positions, "ethereum-sepolia") => {
-            "ethereum-sepolia".to_owned()
-        }
-        "ens" => "ethereum".to_owned(),
-        namespace => namespace.to_owned(),
-    }
-}
-
-fn chain_id_from_positions(chain_positions: &Value) -> Option<u64> {
-    chain_positions
-        .as_object()
-        .into_iter()
-        .flatten()
-        .find_map(|(_, value)| {
-            value
-                .get("chain_id")
-                .and_then(value_to_string)
-                .and_then(|value| crate::v2::slug_to_numeric(&value))
-        })
-}
-
-fn has_chain_position(chain_positions: &Value, chain_id: &str) -> bool {
-    chain_positions
-        .as_object()
-        .into_iter()
-        .flatten()
-        .any(|(slot, value)| {
-            slot == chain_id || string_field(value.get("chain_id")).as_deref() == Some(chain_id)
-        })
-}
-
-fn identity_json_string(value: &Value, paths: &[&[&str]]) -> Option<String> {
-    paths
-        .iter()
-        .find_map(|path| json_path(value, path).and_then(value_to_string))
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn json_path<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    for key in path {
-        value = value.get(*key)?;
-    }
-    Some(value)
-}
-
-fn string_field(value: Option<&Value>) -> Option<String> {
-    value.and_then(value_to_string)
-}
-
-fn value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
+    shared_product_reason(
+        reason,
+        "rejected lookup reason containing pipeline vocabulary",
+        "failed to map lookup reason vocabulary",
+    )
 }
