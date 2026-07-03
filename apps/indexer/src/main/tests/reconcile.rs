@@ -920,6 +920,502 @@ async fn reconcile_fetched_heads_promotes_large_gap_from_stored_safe_lineage_wit
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_promotes_from_stored_frontier_below_provider_safe_with_generic_scan_coverage()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    let resolver_address = "0x00000000000000000000000000000000000000aa";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_010,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_010),
+        selected_address,
+    )
+    .await?;
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_011,
+        "ens",
+        chain,
+        crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        Uuid::from_u128(10_011),
+        resolver_address,
+    )
+    .await?;
+
+    let stored_frontier_block_number =
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 7;
+    let provider_safe_block_number = stored_frontier_block_number + 80;
+    let live_latest_block_number = provider_safe_block_number + 25;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=live_latest_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_frontier = blocks
+        .iter()
+        .find(|block| block.block_number == stored_frontier_block_number)
+        .expect("test chain must include the stored frontier")
+        .clone();
+    let provider_safe = blocks
+        .iter()
+        .find(|block| block.block_number == provider_safe_block_number)
+        .expect("test chain must include the provider safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_frontier_block_number {
+            continue;
+        }
+        insert_chain_lineage_for_block(database.pool(), chain, block, CanonicalityState::Canonical)
+            .await?;
+    }
+
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        chain,
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        current.block_number + 1,
+        stored_frontier_block_number,
+    )
+    .await?;
+    let source_identity = crate::backfill::backfill_job_source_identity_payload(&source_plan)?;
+    assert_eq!(
+        source_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_with_generic_topic_scans_v1")
+    );
+    assert!(
+        source_identity
+            .get("generic_topic_scans")
+            .and_then(Value::as_array)
+            .is_some_and(|scans| scans.iter().any(|scan| {
+                scan.get("source_family").and_then(Value::as_str)
+                    == Some(crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            })),
+        "generic resolver topic scan must be recorded in source identity: {source_identity}"
+    );
+    assert!(
+        !source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|target| {
+                target
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .is_some_and(|address| address.eq_ignore_ascii_case(resolver_address))
+            }),
+        "resolver address must be covered only by generic scan credit: {source_identity}"
+    );
+    insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_frontier_block_number,
+        source_identity,
+        "generic-scan-completed",
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let provider_fixture_blocks = blocks
+        .iter()
+        .filter(|block| {
+            block.block_number >= stored_frontier_block_number
+                || block.block_number == latest.block_number
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let (provider, server) = bundle_provider(provider_fixture_blocks).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned(), resolver_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 2,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(provider_safe.clone()),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await
+    .expect("generic scan coverage and stored safe ancestry must prove the stored lineage path")
+    .expect("stored lineage promotion must advance the checkpoint");
+
+    let promoted_block_number =
+        current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(task.checkpoint.canonical_block_number, Some(promoted_block_number));
+    assert!(promoted_block_number < stored_frontier.block_number);
+    assert!(stored_frontier.block_number < provider_safe.block_number);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM chain_lineage WHERE chain_id = $1 AND block_number > $2"
+        )
+        .bind(chain)
+        .bind(stored_frontier_block_number)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "provider safe ancestors above the stored frontier must not be pre-stored"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_stored_anchor_at_parent_fetch_depth_limit() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let current_block_number = 1;
+    let stored_anchor_block_number = current_block_number + 1;
+    let parent_fetch_depth = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS * 4;
+    let safe_block_number = stored_anchor_block_number + parent_fetch_depth;
+    let blocks = linear_provider_blocks(safe_block_number);
+    let current = blocks
+        .iter()
+        .find(|block| block.block_number == current_block_number)
+        .expect("test chain must include current block")
+        .clone();
+    let stored_anchor = blocks
+        .iter()
+        .find(|block| block.block_number == stored_anchor_block_number)
+        .expect("test chain must include stored anchor")
+        .clone();
+    let safe = blocks
+        .last()
+        .expect("test chain must include safe block")
+        .clone();
+
+    insert_chain_lineage_for_block(database.pool(), chain, &current, CanonicalityState::Canonical)
+        .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &stored_anchor,
+        CanonicalityState::Safe,
+    )
+    .await?;
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        stored_anchor_block_number,
+        stored_anchor_block_number,
+        &[],
+    )
+    .await?;
+
+    let provider_blocks = blocks
+        .iter()
+        .filter(|block| block.block_number >= stored_anchor_block_number)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (provider, server) = bundle_provider(provider_blocks).await?;
+    let checkpoint = ChainCheckpoint {
+        chain_id: chain.to_owned(),
+        canonical_block_hash: Some(current.block_hash.clone()),
+        canonical_block_number: Some(current.block_number),
+        safe_block_hash: None,
+        safe_block_number: None,
+        finalized_block_hash: None,
+        finalized_block_number: None,
+    };
+
+    let outcome = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        chain,
+        &checkpoint,
+        &safe,
+        HeaderAuditMode::Minimal,
+        std::slice::from_ref(&safe),
+        &[],
+        false,
+    )
+    .await?;
+
+    assert_eq!(
+        outcome.status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        outcome.canonical.expect("promotion must return a checkpoint").block_number,
+        stored_anchor_block_number
+    );
+    assert_eq!(outcome.fetched_parent_count, 0);
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_without_fetching_past_parent_depth_limit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let current_block_number = 1;
+    let boundary_block_number = current_block_number + 1;
+    let parent_fetch_depth = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS * 4;
+    let safe_block_number = boundary_block_number + parent_fetch_depth;
+    let blocks = linear_provider_blocks(safe_block_number);
+    let current = blocks
+        .iter()
+        .find(|block| block.block_number == current_block_number)
+        .expect("test chain must include current block")
+        .clone();
+    let safe = blocks
+        .last()
+        .expect("test chain must include safe block")
+        .clone();
+
+    insert_chain_lineage_for_block(database.pool(), chain, &current, CanonicalityState::Canonical)
+        .await?;
+
+    let provider_blocks = blocks
+        .iter()
+        .filter(|block| block.block_number >= boundary_block_number)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (provider, server) = bundle_provider(provider_blocks).await?;
+    let checkpoint = ChainCheckpoint {
+        chain_id: chain.to_owned(),
+        canonical_block_hash: Some(current.block_hash.clone()),
+        canonical_block_number: Some(current.block_number),
+        safe_block_hash: None,
+        safe_block_number: None,
+        finalized_block_hash: None,
+        finalized_block_number: None,
+    };
+
+    let error = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        chain,
+        &checkpoint,
+        &safe,
+        HeaderAuditMode::Minimal,
+        std::slice::from_ref(&safe),
+        &[],
+        false,
+    )
+    .await
+    .expect_err("missing stored anchor inside the parent-fetch bound must refuse");
+    assert!(
+        format!("{error:#}").contains("within 4096 parent fetches"),
+        "unexpected anchor-depth refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_generic_scan_coverage_with_drifted_source_identity()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    let resolver_address = "0x00000000000000000000000000000000000000aa";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_020,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_020),
+        selected_address,
+    )
+    .await?;
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_021,
+        "ens",
+        chain,
+        crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        Uuid::from_u128(10_021),
+        resolver_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=live_latest_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        chain,
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        current.block_number + 1,
+        stored_safe_block_number,
+    )
+    .await?;
+    let mut source_identity = crate::backfill::backfill_job_source_identity_payload(&source_plan)?;
+    source_identity["generic_topic_scans"][0]["unexpected"] = json!(true);
+    assert!(
+        source_identity
+            .get("generic_topic_scans")
+            .and_then(Value::as_array)
+            .is_some_and(|scans| scans.iter().any(|scan| {
+                scan.get("source_family").and_then(Value::as_str)
+                    == Some(crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            })),
+        "drifted identity still declares a recognizable generic resolver scan: {source_identity}"
+    );
+    insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        source_identity,
+        "drifted-generic-scan",
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned(), resolver_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 2,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await
+    .expect_err("drifted generic-scan identity must not prove completed coverage");
+    assert!(
+        format!("{error:#}").contains("lineage-only block 2"),
+        "unexpected drifted generic-scan refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_promotes_large_gap_from_stored_safe_lineage_with_compact_completed_backfill_coverage()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1045,6 +1541,150 @@ async fn reconcile_fetched_heads_promotes_large_gap_from_stored_safe_lineage_wit
         task.checkpoint.canonical_block_number,
         Some(current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
     );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_from_finalized_anchor_when_safe_ancestry_fetch_fails()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_003,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_003),
+        selected_address,
+    )
+    .await?;
+    let stored_finalized_block_number =
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 7;
+    let provider_safe_block_number = stored_finalized_block_number + 50;
+    let live_latest_block_number = provider_safe_block_number + 25;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=live_latest_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let provider_safe = blocks
+        .iter()
+        .find(|block| block.block_number == provider_safe_block_number)
+        .expect("test chain must include the provider safe block")
+        .clone();
+    let stored_finalized = blocks
+        .iter()
+        .find(|block| block.block_number == stored_finalized_block_number)
+        .expect("test chain must include the stored finalized block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_finalized_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_finalized_block_number {
+            CanonicalityState::Finalized
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_finalized_block_number,
+        &[selected_address],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let safe_parent_hash = provider_safe
+        .parent_hash
+        .clone()
+        .expect("test provider safe block must have a parent");
+    let (provider, server) = bundle_provider(vec![
+        latest.clone(),
+        provider_safe.clone(),
+        stored_finalized.clone(),
+    ])
+    .await?;
+    let provider = HashFailingProvider {
+        inner: &provider,
+        failing_hash: safe_parent_hash,
+    };
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(provider_safe),
+            finalized: Some(stored_finalized),
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await
+    .expect("safe anchor fetch failure must not prevent finalized anchor promotion")
+    .expect("stored finalized lineage promotion must advance the checkpoint");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
+    );
+    assert!(task.checkpoint.safe_block_number.is_none());
+    assert!(task.checkpoint.finalized_block_number.is_none());
 
     server.abort();
     database.cleanup().await?;
@@ -1781,6 +2421,172 @@ async fn reconcile_fetched_heads_refuses_incomplete_backfill_crash_residue_witho
     Ok(())
 }
 
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_generic_scan_range_after_explicit_resolver_range()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let resolver_address = "0x00000000000000000000000000000000000000aa";
+    let resolver_contract_instance_id = Uuid::from_u128(10_004);
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_004,
+        "ens",
+        chain,
+        crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=live_latest_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let explicit_range_end = current.block_number + 20;
+    let explicit_resolver_identity = source_identity_with_selected_targets(vec![json!({
+        "source_family": crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "contract_instance_id": resolver_contract_instance_id,
+        "address": resolver_address,
+        "effective_from_block": current.block_number + 1,
+        "effective_to_block": explicit_range_end
+    })]);
+    insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        explicit_range_end,
+        explicit_resolver_identity,
+        "explicit-resolver-before-generic",
+    )
+    .await?;
+
+    let generic_source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        chain,
+        WatchedSourceSelector::SourceFamily(
+            crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+        ),
+        explicit_range_end + 1,
+        stored_safe_block_number,
+    )
+    .await?;
+    let generic_resolver_identity =
+        crate::backfill::backfill_job_source_identity_payload(&generic_source_plan)?;
+    assert_eq!(
+        generic_resolver_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("generic_resolver_event_topics_v1")
+    );
+    assert!(
+        generic_resolver_identity.get("selected_targets").is_none(),
+        "generic resolver source-family identity must not enumerate resolver addresses"
+    );
+    insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        explicit_range_end + 1,
+        stored_safe_block_number,
+        generic_resolver_identity,
+        "generic-resolver-after-explicit",
+    )
+    .await?;
+
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![resolver_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await
+    .expect("generic scan coverage must still count after an earlier explicit resolver range")
+    .expect("stored lineage promotion must advance the checkpoint");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn insert_completed_backfill_range_coverage(
     pool: &sqlx::PgPool,
     chain: &str,
@@ -1951,6 +2757,18 @@ fn source_identity_with_selected_targets(selected_targets: Vec<Value>) -> Value 
         "source_identity_hash": "test:full-selected-targets",
         "selected_targets": selected_targets
     })
+}
+
+fn linear_provider_blocks(last_block_number: i64) -> Vec<ProviderBlock> {
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=last_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    blocks
 }
 
 fn compact_selected_targets_source_identity_for_test(
@@ -5458,6 +6276,118 @@ async fn reconcile_fetched_heads_backfills_basenames_unwrapped_authority_identit
     server.abort();
     database.cleanup().await?;
     Ok(())
+}
+
+struct HashFailingProvider<'a> {
+    inner: &'a JsonRpcProvider,
+    failing_hash: String,
+}
+
+impl crate::provider::ChainProviderOps for HashFailingProvider<'_> {
+    async fn fetch_chain_heads(&self) -> Result<ProviderHeadSnapshot> {
+        self.inner.fetch_chain_heads().await
+    }
+
+    async fn fetch_block_hashes_by_numbers(
+        &self,
+        block_numbers: &[i64],
+    ) -> Result<Vec<crate::provider::ProviderResolvedBlock>> {
+        self.inner.fetch_block_hashes_by_numbers(block_numbers).await
+    }
+
+    async fn fetch_block_by_hash(&self, block_hash: &str) -> Result<ProviderBlock> {
+        if block_hash.eq_ignore_ascii_case(&self.failing_hash) {
+            anyhow::bail!("test provider intentionally cannot serve block hash {block_hash}");
+        }
+        self.inner.fetch_block_by_hash(block_hash).await
+    }
+
+    async fn fetch_block_headers_by_hashes(
+        &self,
+        resolved_blocks: &[crate::provider::ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlock>> {
+        self.inner
+            .fetch_block_headers_by_hashes(resolved_blocks)
+            .await
+    }
+
+    async fn fetch_block_bundles_by_hashes(
+        &self,
+        resolved_blocks: &[crate::provider::ProviderResolvedBlock],
+    ) -> Result<Vec<crate::provider::ProviderBlockBundle>> {
+        self.inner
+            .fetch_block_bundles_by_hashes(resolved_blocks)
+            .await
+    }
+
+    async fn fetch_block_bundles_without_logs_by_hashes(
+        &self,
+        resolved_blocks: &[crate::provider::ProviderResolvedBlock],
+    ) -> Result<Vec<crate::provider::ProviderBlockBundle>> {
+        self.inner
+            .fetch_block_bundles_without_logs_by_hashes(resolved_blocks)
+            .await
+    }
+
+    async fn fetch_block_bundle_by_hash(
+        &self,
+        block_hash: &str,
+    ) -> Result<crate::provider::ProviderBlockBundle> {
+        self.inner.fetch_block_bundle_by_hash(block_hash).await
+    }
+
+    async fn fetch_logs_by_block_range(
+        &self,
+        resolved_blocks: &[crate::provider::ProviderResolvedBlock],
+        addresses: &[String],
+    ) -> Result<std::collections::BTreeMap<i64, Vec<crate::provider::ProviderLog>>> {
+        self.inner
+            .fetch_logs_by_block_range(resolved_blocks, addresses)
+            .await
+    }
+
+    async fn fetch_logs_by_block_range_for_topic0s_and_addresses(
+        &self,
+        resolved_blocks: &[crate::provider::ProviderResolvedBlock],
+        topic0s: &[String],
+        addresses: &[String],
+    ) -> Result<std::collections::BTreeMap<i64, Vec<crate::provider::ProviderLog>>> {
+        self.inner
+            .fetch_logs_by_block_range_for_topic0s_and_addresses(
+                resolved_blocks,
+                topic0s,
+                addresses,
+            )
+            .await
+    }
+
+    async fn fetch_transaction_receipt_pairs_by_hashes(
+        &self,
+        requests: &[crate::provider::ProviderTransactionReceiptRequest],
+    ) -> Result<Vec<crate::provider::ProviderTransactionReceiptBundle>> {
+        self.inner
+            .fetch_transaction_receipt_pairs_by_hashes(requests)
+            .await
+    }
+
+    async fn fetch_code_observations_at_block(
+        &self,
+        addresses: &[String],
+        block: crate::provider::ProviderBlockSelection,
+    ) -> Result<Vec<crate::provider::ProviderCodeObservation>> {
+        self.inner
+            .fetch_code_observations_at_block(addresses, block)
+            .await
+    }
+
+    async fn fetch_code_observations_at_block_hashes(
+        &self,
+        requests: &[crate::provider::ProviderBlockCodeObservationRequest],
+    ) -> Result<Vec<crate::provider::ProviderBlockCodeObservations>> {
+        self.inner
+            .fetch_code_observations_at_block_hashes(requests)
+            .await
+    }
 }
 
 fn rpc_current_name_wrapped_log_payload(block: &ProviderBlock) -> Value {

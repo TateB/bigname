@@ -5,7 +5,7 @@ use bigname_storage::{
     load_chain_lineage_canonical_child_path,
 };
 
-use crate::provider::{ProviderBlock, ProviderHeadSnapshot};
+use crate::provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot};
 
 use super::super::{
     lineage::lineage_block_to_provider,
@@ -17,6 +17,9 @@ use super::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS;
 mod coverage;
 
 use coverage::stored_path_has_required_raw_fact_coverage;
+
+const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =
+    (MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS as usize) * 4;
 
 pub(super) enum StoredLineagePromotion {
     Promoted(CanonicalReconciliation),
@@ -38,6 +41,7 @@ pub(super) fn stored_lineage_promotion_anchors(heads: &ProviderHeadSnapshot) -> 
 
 pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     pool: &sqlx::PgPool,
+    provider: &(impl ChainProviderOps + ?Sized),
     chain: &str,
     current_canonical_hash: &str,
     current_canonical_number: i64,
@@ -56,6 +60,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
 
     let Some((stored_anchor, provider_anchor)) = select_stored_promotion_anchor(
         pool,
+        provider,
         chain,
         current_canonical_number,
         stored_anchor_candidates,
@@ -63,7 +68,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     .await?
     else {
         return Ok(StoredLineagePromotion::Refused(format!(
-            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored-lineage checkpoint promotion requires the provider safe or finalized head to already exist in chain_lineage with canonical/safe/finalized state; run hash-pinned backfill through the provider safe/finalized head, then retry live reconciliation"
+            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored-lineage checkpoint promotion requires a canonical/safe/finalized chain_lineage ancestor at or below the provider safe/finalized head within {MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH} parent fetches; run hash-pinned backfill through a stored safe/finalized ancestor, then retry live reconciliation"
         )));
     };
     let anchor_gap_blocks = stored_anchor.block_number - current_canonical_number;
@@ -140,6 +145,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
 
 async fn select_stored_promotion_anchor(
     pool: &sqlx::PgPool,
+    provider: &(impl ChainProviderOps + ?Sized),
     chain: &str,
     current_canonical_number: i64,
     candidates: &[ProviderBlock],
@@ -148,14 +154,31 @@ async fn select_stored_promotion_anchor(
         if candidate.block_number <= current_canonical_number {
             continue;
         }
-        let Some(stored) = load_chain_lineage_block(pool, chain, &candidate.block_hash).await?
-        else {
-            continue;
-        };
-        if stored_lineage_matches_provider_block(&stored, candidate)
-            && stored_anchor_is_canonical(stored.canonicality_state)
-        {
-            return Ok(Some((stored, candidate.clone())));
+        let mut cursor = candidate.clone();
+        for parent_fetch_depth in 0..=MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH {
+            if cursor.block_number <= current_canonical_number {
+                break;
+            }
+            if let Some(stored) = load_chain_lineage_block(pool, chain, &cursor.block_hash).await?
+                && stored_lineage_matches_provider_block(&stored, &cursor)
+                && stored_anchor_is_canonical(stored.canonicality_state)
+            {
+                return Ok(Some((stored, candidate.clone())));
+            }
+            if parent_fetch_depth == MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH {
+                break;
+            }
+
+            let Some(parent_hash) = cursor.parent_hash.clone() else {
+                break;
+            };
+            let Ok(parent) = provider.fetch_block_by_hash(&parent_hash).await else {
+                break;
+            };
+            if parent.block_hash != parent_hash || parent.block_number >= cursor.block_number {
+                break;
+            }
+            cursor = parent;
         }
     }
 

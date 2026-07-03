@@ -8,7 +8,7 @@ use sqlx::Row;
 
 use crate::provider::RAW_PAYLOAD_KIND_FULL_BLOCK;
 
-use completed_backfill::{CompletedBackfillCoverage, completed_backfill_range_coverage};
+use completed_backfill::{CompletedBackfillCoverageEvidence, completed_backfill_range_coverage};
 
 pub(super) async fn stored_path_has_required_raw_fact_coverage(
     pool: &sqlx::PgPool,
@@ -343,7 +343,7 @@ async fn same_height_fork_lineage_numbers(
 fn first_uncovered_path_block<'a>(
     path: &'a [ChainLineageBlock],
     retained_payload_hashes: &[String],
-    completed_coverage: &[CompletedBackfillCoverage],
+    completed_coverage: &CompletedBackfillCoverageEvidence,
     same_height_fork_numbers: &BTreeSet<i64>,
     selected_addresses: &[String],
 ) -> Option<&'a ChainLineageBlock> {
@@ -351,17 +351,15 @@ fn first_uncovered_path_block<'a>(
         !retained_payload_hashes
             .iter()
             .any(|hash| hash.eq_ignore_ascii_case(&block.block_hash))
-            && !completed_coverage.iter().any(|coverage| {
-                !same_height_fork_numbers.contains(&block.block_number)
-                    && coverage.covers_block(block.block_number, selected_addresses)
-            })
+            && (same_height_fork_numbers.contains(&block.block_number)
+                || !completed_coverage.covers_block(block.block_number, selected_addresses))
     })
 }
 
 fn covered_block_hashes(
     path: &[ChainLineageBlock],
     retained_payload_hashes: &[String],
-    completed_coverage: &[CompletedBackfillCoverage],
+    completed_coverage: &CompletedBackfillCoverageEvidence,
     same_height_fork_numbers: &BTreeSet<i64>,
     selected_addresses: &[String],
 ) -> Vec<String> {
@@ -369,10 +367,8 @@ fn covered_block_hashes(
     hashes.extend(
         path.iter()
             .filter(|block| {
-                completed_coverage.iter().any(|coverage| {
-                    !same_height_fork_numbers.contains(&block.block_number)
-                        && coverage.covers_block(block.block_number, selected_addresses)
-                })
+                !same_height_fork_numbers.contains(&block.block_number)
+                    && completed_coverage.covers_block(block.block_number, selected_addresses)
             })
             .map(|block| block.block_hash.clone()),
     );

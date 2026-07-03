@@ -375,12 +375,17 @@ as a fallback.
 Live checkpoint promotion can advance over a gap larger than the live fill limit
 only when a previous bounded backfill has already stored enough evidence. The
 indexer anchors the walk on the provider `safe` head, falling back to
-`finalized`, and only if that safe/finalized block is already present in
-`chain_lineage` with canonical/safe/finalized state. It then promotes at most one
-configured chunk per poll through the stored canonical child path and validates
-each promoted step before calling the normal checkpoint-advance path. The live
-canonical `latest` head is not required to be stored, and normally is not stored
-during an over-limit catch-up.
+`finalized`, then walks that safe/finalized ancestry down to the highest stored
+`chain_lineage` block with canonical/safe/finalized state, within the bounded
+stored-anchor parent-fetch depth of `4096` blocks
+(`MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS * 4`). The stored anchor may be below the
+provider safe/finalized head when Reth-db lineage is behind the node frontier;
+promotion still remains bounded to a block at or below the safe/finalized-
+validated stored ancestor. It then promotes at most one configured chunk per
+poll through the stored canonical child path and validates each promoted step
+before calling the normal checkpoint-advance path. The live canonical `latest`
+head is not required to be stored, and normally is not stored during an
+over-limit catch-up.
 
 For every promoted block, evidence must come from either a completed backfill
 range whose persisted source identity proves the current watched address set for
@@ -390,8 +395,13 @@ identities prove this through `source_identity.selected_targets` and their
 identities prove it only when the stored `selected_targets_digest_v1` count,
 keccak digest (including the legacy source-family producer digest shape),
 first/last sample, selector kind, source family, and requested target set match
-the current persisted watch-plan preimage for that job range. This is why
-Reth-db backfills can promote after completion even
+the current persisted watch-plan preimage for that job range. ENSv1 resolver
+families are special: backfills record `generic_topic_scans` because resolver
+logs are scanned by topic across all emitters instead of enumerating every
+resolver address in `selected_targets`. A completed generic resolver topic scan
+covers watched resolver-family emitters for its block range, while explicitly
+selected non-generic targets must still be proven by `selected_targets` or the
+matching compact digest. This is why Reth-db backfills can promote after completion even
 though they do not write `raw_payload_cache_metadata` rows; RPC-backed retained
 payload runs can still satisfy the fallback. Completed backfill coverage
 distinguishes "selected no logs in this block" from "this block was never
@@ -406,15 +416,21 @@ for the promoted blocks because no-log evidence cannot prove direct-call state.
 Actionable refusal classes:
 
 - Missing stored safe/finalized anchor: run hash-pinned backfill through the
-  provider safe or finalized head for that chain, then retry live reconciliation.
+  provider safe/finalized ancestry for that chain, then retry live
+  reconciliation. The provider safe/finalized head itself does not need to be in
+  `chain_lineage`; a stored canonical/safe/finalized ancestor below it is enough
+  only when it is reachable within the bounded `4096`-block stored-anchor
+  parent walk. If the frontier is farther below safe/finalized, run another
+  hash-pinned catch-up chunk so the stored frontier enters that window.
 - Incomplete lineage path or duplicate canonical children: rerun hash-pinned
   backfill for the missing range; if duplicate canonical rows remain at one
   height, repair/orphan the losing lineage before retrying.
 - Lineage-only block without completed range coverage or retained payloads:
   rerun hash-pinned backfill for the current watched address set and let the
   range complete, ensure the job's full or compact source identity matches the
-  current watch-plan target intervals for the promoted range, or restore
-  retained RPC payload metadata for that range.
+  current watch-plan target intervals for the promoted range, ensure generic
+  resolver jobs include `generic_topic_scans`, or restore retained RPC payload
+  metadata for that range.
 - Same-height fork ambiguity: provide retained full-block RPC payload metadata
   for the promoted block; numeric completed-range coverage alone cannot
   disambiguate old-fork no-log evidence from winning-branch no-log evidence.

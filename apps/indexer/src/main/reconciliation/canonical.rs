@@ -412,6 +412,7 @@ pub(crate) async fn reconcile_canonical_head(
         }
         match reconcile_large_checkpoint_gap_from_stored_lineage(
             pool,
+            provider,
             chain,
             current_canonical_hash,
             current_canonical_number,
