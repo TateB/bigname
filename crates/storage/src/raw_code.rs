@@ -14,8 +14,8 @@ mod correction;
 pub use correction::{
     RawCodeHashAddressVariant, RawCodeHashCorrectionBatchOutcome, RawCodeHashCorrectionCandidate,
     RawCodeHashCorrectionUpdate, apply_raw_code_hash_corrections,
-    count_raw_code_hash_correction_candidates, load_raw_code_hash_address_variants,
-    load_raw_code_hash_correction_page,
+    count_raw_code_hash_correction_candidates, count_raw_code_hash_correction_orphaned_skips,
+    load_raw_code_hash_address_variants, load_raw_code_hash_correction_page,
 };
 
 /// Persisted exact code-hash observation anchored to one observed block hash.

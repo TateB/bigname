@@ -45,6 +45,12 @@ Pinned Reth serves `eth_getProof` and populates the EIP-1186 response
 `(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L733 @ reth@88505c7)`
 `(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L736 @ reth@88505c7)`.
 
+The ratified correction selection excludes 432 rows whose `block_hash` is
+orphaned or absent from retained `chain_lineage` for the window. Those rows
+retain their padded values as unverifiable historical observations of orphaned
+blocks. No future canonical upsert touches those `(chain_id, block_hash,
+contract_address)` keys, and deletion of those rows was not ratified.
+
 The correction scope is limited to `raw_code_hashes.code_hash` and
 `raw_code_hashes.code_byte_length`. It does not alter `raw_code_hash_id`,
 `chain_id`, `block_hash`, `block_number`, `contract_address`,
@@ -55,27 +61,33 @@ storage-owned guarded update helpers for this raw-fact family.
 
 The approved method is:
 
-1. Select the ratified observed-at window and re-derive each selected
-   `(chain_id, block_hash, contract_address)` from the v2.2.0 Reth DB reader
-   that uses `original_bytes()`.
-2. Classify correction candidates by direct comparison between the stored value
+1. Select the ratified observed-at window, excluding rows whose block hash has
+   no non-orphaned `chain_lineage` row. The tool reports the excluded rows in
+   the `orphaned_skipped` bucket instead of attempting to prove them against a
+   node state that no longer exists.
+2. Re-derive each selected `(chain_id, block_hash, contract_address)` from the
+   v2.2.0 Reth DB reader that uses `original_bytes()`.
+3. Classify correction candidates by direct comparison between the stored value
    and the re-derived `(code_hash, code_byte_length)`, not by padding-length
    heuristics.
-3. Refuse the run if a re-derived hash falls outside the stored variant family
+4. Refuse the run if a re-derived hash falls outside the stored variant family
    for an address that already has multiple stored variants.
-4. Verify a substantive JSON-RPC sample before any write: at least 1% of
+5. Verify a substantive JSON-RPC sample before any write: at least 1% of
    selected rows, every distinct address at least once, and all mandatory
    out-of-family findings if any exist. The sample compares the Reth-derived
    hash to `eth_getProof` for the same block hash and address.
-5. Rewrite only `code_hash` and `code_byte_length` in guarded batched
+6. Rewrite only `code_hash` and `code_byte_length` in guarded batched
    transactions. Each batch logs a correction-event line with row counts and
-   block range. A rerun skips already-correct rows.
+   block range, and enforces that corrected, already-correct, conflicting, and
+   orphaned-skipped rows account for the requested batch. A rerun skips
+   already-correct rows.
 
 The post-run acceptance checks are node-dependent and are not CI gates. The
 supervised operations run must finish with zero RPC verification disagreements,
-zero unexpected variant rows, a dry-run census of zero remaining rows to
-correct for the ratified window, and the env-widened live verification test
-green table-wide, including `reth_db_provider_latest_rows_match_consensus`.
+zero unexpected variant rows, a dry-run census of zero remaining correctable
+non-orphan rows for the ratified window, the audited 432 `orphaned_skipped`
+rows reported, and the env-widened live verification test green table-wide,
+including `reth_db_provider_latest_rows_match_consensus`.
 
 ## Storage layers
 

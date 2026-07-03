@@ -333,7 +333,7 @@ fn provider_registry_accepts_ethereum_only_rpc_without_base_provider() -> Result
     assert_eq!(registry.configured_chain_count(), 1);
     assert!(registry.provider_for("ethereum-mainnet").is_some());
     assert!(registry.provider_for("base-mainnet").is_none());
-    registry.ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])?;
+    registry.ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())?;
     Ok(())
 }
 
@@ -660,7 +660,7 @@ fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<
     ])?;
 
     let error = registry
-        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])
+        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())
         .expect_err("out-of-profile provider must be rejected");
 
     assert!(

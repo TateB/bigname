@@ -155,46 +155,139 @@ not an upstream Reth guarantee: on this host, fresh read-only verifier opens hav
 lagged the node persistence horizon by roughly 1-1.5k blocks, so near-head
 compare blocks can fail spuriously.
 
+Before running the raw code-hash correction, widen this host's archive Reth
+historical proof window enough for the audited corpus depth. The corpus reaches
+roughly 470,000 blocks behind head, so set `--rpc.eth-proof-window` to at least
+500,000; pinned Reth exposes that argument and caps it at `MAX_ETH_PROOF_WINDOW`
+1,209,600 blocks
+`(upstream: .refs/reth/crates/node/core/src/args/rpc_server.rs:L601 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/node/core/src/args/rpc_server.rs:L603 @ reth@88505c7)`
+`(upstream: .refs/reth/crates/rpc/rpc-server-types/src/constants.rs:L69 @ reth@88505c7)`.
+Edit `/home/ubuntu/eth-archive-node/docker-compose.yml` under
+`services.reth.command`:
+
+```yaml
+      - --http.api=eth,net,web3,txpool,debug,trace
+      - --rpc.eth-proof-window=500000
+      - --ws
+```
+
+Then restart the Reth service:
+
 ```sh
-BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS=25287255,25287268 \
-BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
-BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
-BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@127.0.0.1:5432/bigname \
-cargo test -p bigname-indexer --features reth-db \
-  reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_window \
-  -- --ignored --nocapture
+cd /home/ubuntu/eth-archive-node
+docker compose up -d reth
+```
+
+Run the ignored cargo live-verification tests from a one-off Rust container
+attached to the `bigname_default` Docker network so `postgres` resolves to the
+PostgreSQL service and `host.docker.internal` reaches the host-published Reth
+RPC port. The live Reth datadir on this host is
+`/home/ubuntu/eth-archive-node/data/reth`; it is mounted at `/reth-data` because
+the Reth reader may need writable MDBX/RocksDB coordination files even for
+read-only verification.
+
+```sh
+docker run --rm \
+  --network bigname_default \
+  --add-host host.docker.internal:host-gateway \
+  -v /home/ubuntu/bigname-worktrees/ws-code-hash-fix:/workspace:ro \
+  -v /home/ubuntu/eth-archive-node/data/reth:/reth-data:rw \
+  -w /workspace \
+  rust:1.93.1-bookworm \
+  bash -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends clang libclang-dev &&
+    export CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/bigname-target &&
+    export BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS=25287255,25287268 &&
+    export BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/reth-data &&
+    export BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://host.docker.internal:8545 &&
+    export BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@postgres:5432/bigname &&
+    cargo test -p bigname-indexer --features reth-db \
+      reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_window \
+      -- --ignored --nocapture
+  '
 ```
 
 The post-remediation latest-row check uses the same three live inputs and must
 pass after the padded-row remediation:
 
 ```sh
-BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
-BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
-BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@127.0.0.1:5432/bigname \
-cargo test -p bigname-indexer --features reth-db \
-  reth_db_provider_latest_rows_match_consensus \
-  -- --ignored --nocapture
+docker run --rm \
+  --network bigname_default \
+  --add-host host.docker.internal:host-gateway \
+  -v /home/ubuntu/bigname-worktrees/ws-code-hash-fix:/workspace:ro \
+  -v /home/ubuntu/eth-archive-node/data/reth:/reth-data:rw \
+  -w /workspace \
+  rust:1.93.1-bookworm \
+  bash -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends clang libclang-dev &&
+    export CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/bigname-target &&
+    export BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/reth-data &&
+    export BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://host.docker.internal:8545 &&
+    export BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@postgres:5432/bigname &&
+    cargo test -p bigname-indexer --features reth-db \
+      reth_db_provider_latest_rows_match_consensus \
+      -- --ignored --nocapture
+  '
 ```
 
-The supervised correction run itself is a two-step operator action. First run a
-dry-run census against the live bigname database, Reth archive datadir, and
-JSON-RPC endpoint:
+The supervised correction run itself is a two-step operator action and must run
+with the indexer stopped; otherwise live intake can race the audited window.
+Expect roughly 1 GB of additional RAM and hours-scale wall time on the current
+corpus. Use an `--observed-before` value at least two hours behind now because
+the Reth DB reader can lag the node persistence horizon; after the main pass,
+run a later tail pass from that first upper bound to a fresh two-hours-behind
+upper bound.
 
 ```sh
-BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RETH_DB_SOURCE=ethereum-mainnet=/var/lib/reth \
-BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RPC_URL=ethereum-mainnet=http://127.0.0.1:8545 \
-bigname-indexer repair raw-code-hashes \
-  --database-url postgres://bigname:bigname@127.0.0.1:5432/bigname \
+cd /home/ubuntu/bigname
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  stop indexer
+
+export OBSERVED_BEFORE="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+export BIGNAME_IMAGE="${BIGNAME_IMAGE:-ghcr.io/tateb/bigname:latest}"
+
+docker run --rm \
+  --network bigname_default \
+  --add-host host.docker.internal:host-gateway \
+  --user 0:0 \
+  --pid host \
+  --ipc host \
+  --ulimit nofile=1048576:1048576 \
+  -v /home/ubuntu/eth-archive-node/data/reth:/reth-data:rw \
+  -e BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RETH_DB_SOURCE=ethereum-mainnet=/reth-data \
+  -e BIGNAME_INDEXER_RAW_CODE_HASH_CORRECTION_RPC_URL=ethereum-mainnet=http://host.docker.internal:8545 \
+  "$BIGNAME_IMAGE" \
+  bigname-indexer repair raw-code-hashes \
+  --database-url postgres://bigname:bigname@postgres:5432/bigname \
   --chain ethereum-mainnet \
+  --observed-before "$OBSERVED_BEFORE" \
   --dry-run
 ```
 
 After the dry-run census matches the ratified correction scope, rerun the same
-command without `--dry-run`. The command verifies its RPC sample before writing
-and rewrites only `raw_code_hashes.code_hash` and
-`raw_code_hashes.code_byte_length` in guarded batches. This repository change
-ships the tool and record only; it does not execute the supervised correction.
+`docker run` command without `--dry-run`. The command logs the census and
+per-address breakdown before the RPC-verification and out-of-family gates,
+verifies its RPC sample before writing, skips rows whose block hash is orphaned
+or absent from retained lineage, and rewrites only `raw_code_hashes.code_hash`
+and `raw_code_hashes.code_byte_length` in guarded batches. The dry-run census
+after the write must show zero remaining correctable non-orphan rows and report
+the expected `orphaned_skipped` bucket. This repository change ships the tool
+and record only; it does not execute the supervised correction.
+
+For the tail pass, wait until the previous `OBSERVED_BEFORE` is safely behind
+the Reth reader horizon, then repeat the dry-run/write sequence with:
+
+```sh
+export OBSERVED_FROM="$OBSERVED_BEFORE"
+export OBSERVED_BEFORE="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+# add these arguments to the same docker run command:
+#   --observed-from "$OBSERVED_FROM" --observed-before "$OBSERVED_BEFORE"
+```
 
 High-volume bootstrap defaults to
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
@@ -208,7 +301,7 @@ discovery-emitter adapter sync stay outside the live tailer. Operators may set
 chunk immediately for small ranges and enable broad runtime refreshes.
 
 ```sh
-BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
+BIGNAME_INDEXER_RETH_DATADIR_HOST=/home/ubuntu/eth-archive-node/data/reth \
 BIGNAME_INDEXER_RETH_DATADIR_CONTAINER=/reth-data \
 BIGNAME_INDEXER_CHAIN_RPC_URLS=base-mainnet=http://host.docker.internal:9545 \
 BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=ethereum-mainnet=/reth-data \

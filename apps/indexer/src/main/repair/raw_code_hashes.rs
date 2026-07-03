@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
 use bigname_storage::{
-    RawCodeHashAddressVariant, RawCodeHashCorrectionCandidate, RawCodeHashCorrectionUpdate,
-    apply_raw_code_hash_corrections, count_raw_code_hash_correction_candidates,
+    RawCodeHashAddressVariant, RawCodeHashCorrectionBatchOutcome, RawCodeHashCorrectionCandidate,
+    RawCodeHashCorrectionUpdate, apply_raw_code_hash_corrections,
+    count_raw_code_hash_correction_candidates, count_raw_code_hash_correction_orphaned_skips,
     load_raw_code_hash_address_variants, load_raw_code_hash_correction_page,
 };
 use sqlx::{PgPool, types::time::OffsetDateTime};
@@ -49,6 +50,7 @@ pub(crate) struct RawCodeHashCorrectionOutcome {
     pub(crate) address_count: i64,
     pub(crate) already_correct_count: i64,
     pub(crate) to_correct_count: i64,
+    pub(crate) orphaned_skipped_count: i64,
     pub(crate) rpc_sample_count: i64,
     pub(crate) corrected_count: i64,
     pub(crate) already_correct_during_write_count: i64,
@@ -126,7 +128,20 @@ impl<'a> ClassificationAccumulator<'a> {
         })
     }
 
-    fn observe(&mut self, row: &RawCodeHashCorrectionCandidate, derived: &DerivedCodeHash) {
+    fn observe(
+        &mut self,
+        row: &RawCodeHashCorrectionCandidate,
+        derived: &DerivedCodeHash,
+    ) -> Result<()> {
+        if derived.code_byte_length == 0 && row.code_byte_length > 0 {
+            bail!(
+                "raw code-hash correction re-derived empty code for non-empty stored row {} at {} contract {}; refusing without per-row proof",
+                row.raw_code_hash_id,
+                row.block_hash,
+                row.contract_address
+            );
+        }
+
         let address_census = self
             .outcome
             .address_census
@@ -160,6 +175,7 @@ impl<'a> ClassificationAccumulator<'a> {
                 block_number: row.block_number,
             });
         }
+        Ok(())
     }
 
     fn finish(self) -> ClassificationOutcome {
@@ -269,6 +285,7 @@ pub(crate) async fn repair_raw_code_hashes_command(args: RepairRawCodeHashesArgs
         already_correct_count = outcome.already_correct_count,
         to_correct_count = outcome.to_correct_count,
         rpc_sample_count = outcome.rpc_sample_count,
+        orphaned_skipped_count = outcome.orphaned_skipped_count,
         corrected_count = outcome.corrected_count,
         already_correct_during_write_count = outcome.already_correct_during_write_count,
         "raw code-hash correction completed"
@@ -286,6 +303,13 @@ async fn repair_raw_code_hashes(
     validate_config(&config)?;
 
     let selected_count = count_raw_code_hash_correction_candidates(
+        pool,
+        &config.chain,
+        config.observed_from,
+        config.observed_before,
+    )
+    .await?;
+    let orphaned_skipped_count = count_raw_code_hash_correction_orphaned_skips(
         pool,
         &config.chain,
         config.observed_from,
@@ -317,6 +341,7 @@ async fn repair_raw_code_hashes(
         classification.to_correct_count
     );
 
+    log_census(&config, &classification, orphaned_skipped_count);
     verify_rpc_sample(rpc, &classification.samples).await?;
     if classification.unexpected_variant_count > 0 {
         bail!(
@@ -325,7 +350,6 @@ async fn repair_raw_code_hashes(
             classification.unexpected_variant_examples
         );
     }
-    log_census(&config, &classification);
 
     let mut outcome = RawCodeHashCorrectionOutcome {
         scanned_count: classification.scanned_count,
@@ -333,6 +357,7 @@ async fn repair_raw_code_hashes(
             .context("address census count overflowed i64")?,
         already_correct_count: classification.already_correct_count,
         to_correct_count: classification.to_correct_count,
+        orphaned_skipped_count,
         rpc_sample_count: i64::try_from(classification.samples.len())
             .context("RPC sample count overflowed i64")?,
         corrected_count: 0,
@@ -381,7 +406,7 @@ async fn classify_rows(
                     row.contract_address, row.block_hash
                 )
             })?;
-            accumulator.observe(row, derived);
+            accumulator.observe(row, derived)?;
         }
     }
     Ok(())
@@ -410,6 +435,8 @@ async fn apply_corrections(
             .map(|verified| verified.update.clone())
             .collect::<Vec<_>>();
         let batch = apply_raw_code_hash_corrections(pool, &updates).await?;
+        let orphaned_skipped_count = 0_i64;
+        ensure_batch_accounted(&batch, orphaned_skipped_count)?;
         outcome.corrected_count += batch.corrected_count;
         outcome.already_correct_during_write_count += batch.already_correct_count;
         batch_index += 1;
@@ -422,6 +449,8 @@ async fn apply_corrections(
             requested_count = batch.requested_count,
             corrected_count = batch.corrected_count,
             already_correct_count = batch.already_correct_count,
+            conflicting_count = batch.conflicting_count,
+            orphaned_skipped_count,
             min_block,
             max_block,
             "raw code-hash correction batch completed"
@@ -430,7 +459,31 @@ async fn apply_corrections(
     Ok(())
 }
 
-fn log_census(config: &RawCodeHashCorrectionConfig, classification: &ClassificationOutcome) {
+fn ensure_batch_accounted(
+    batch: &RawCodeHashCorrectionBatchOutcome,
+    orphaned_skipped_count: i64,
+) -> Result<()> {
+    let accounted_count = batch.corrected_count
+        + batch.already_correct_count
+        + batch.conflicting_count
+        + orphaned_skipped_count;
+    ensure!(
+        accounted_count == batch.requested_count,
+        "raw code-hash correction batch accounting drift: requested {}, corrected {}, already-correct {}, conflicting {}, orphaned-skipped {}",
+        batch.requested_count,
+        batch.corrected_count,
+        batch.already_correct_count,
+        batch.conflicting_count,
+        orphaned_skipped_count
+    );
+    Ok(())
+}
+
+fn log_census(
+    config: &RawCodeHashCorrectionConfig,
+    classification: &ClassificationOutcome,
+    orphaned_skipped_count: i64,
+) {
     info!(
         service = "indexer",
         command = "repair raw-code-hashes",
@@ -440,22 +493,22 @@ fn log_census(config: &RawCodeHashCorrectionConfig, classification: &Classificat
         address_count = classification.address_census.len(),
         already_correct_count = classification.already_correct_count,
         to_correct_count = classification.to_correct_count,
+        orphaned_skipped_count,
         rpc_sample_count = classification.samples.len(),
         "raw code-hash correction census completed"
     );
 
-    if config.dry_run {
-        for (address, census) in &classification.address_census {
-            info!(
-                service = "indexer",
-                command = "repair raw-code-hashes",
-                address = %address,
-                scanned_count = census.scanned_count,
-                already_correct_count = census.already_correct_count,
-                to_correct_count = census.to_correct_count,
-                "raw code-hash correction dry-run address census"
-            );
-        }
+    for (address, census) in &classification.address_census {
+        info!(
+            service = "indexer",
+            command = "repair raw-code-hashes",
+            dry_run = config.dry_run,
+            address = %address,
+            scanned_count = census.scanned_count,
+            already_correct_count = census.already_correct_count,
+            to_correct_count = census.to_correct_count,
+            "raw code-hash correction address census"
+        );
     }
 }
 

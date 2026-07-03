@@ -13,9 +13,13 @@ fn row(raw_code_hash_id: i64, address: &str, code_hash: &str) -> RawCodeHashCorr
 }
 
 fn derived(code_hash: &str) -> DerivedCodeHash {
+    derived_with_len(code_hash, 31)
+}
+
+fn derived_with_len(code_hash: &str, code_byte_length: i64) -> DerivedCodeHash {
     DerivedCodeHash {
         code_hash: code_hash.to_owned(),
-        code_byte_length: 31,
+        code_byte_length,
     }
 }
 
@@ -36,7 +40,7 @@ fn classification_samples_at_least_one_percent_and_each_address() -> Result<()> 
                 "0x1111111111111111111111111111111111111111111111111111111111111111",
             ),
             &derived("0x2222222222222222222222222222222222222222222222222222222222222222"),
-        );
+        )?;
     }
 
     let outcome = accumulator.finish();
@@ -73,7 +77,7 @@ fn classification_flags_hash_outside_multi_variant_family() -> Result<()> {
             "0x1111111111111111111111111111111111111111111111111111111111111111",
         ),
         &derived("0x3333333333333333333333333333333333333333333333333333333333333333"),
-    );
+    )?;
 
     let outcome = accumulator.finish();
     assert_eq!(outcome.unexpected_variant_count, 1);
@@ -103,7 +107,7 @@ fn classification_samples_every_out_of_family_variant_row() -> Result<()> {
             "0x1111111111111111111111111111111111111111111111111111111111111111",
         ),
         &derived("0x2222222222222222222222222222222222222222222222222222222222222222"),
-    );
+    )?;
     accumulator.observe(
         &row(
             2,
@@ -111,7 +115,7 @@ fn classification_samples_every_out_of_family_variant_row() -> Result<()> {
             "0x1111111111111111111111111111111111111111111111111111111111111111",
         ),
         &derived("0x3333333333333333333333333333333333333333333333333333333333333333"),
-    );
+    )?;
 
     let outcome = accumulator.finish();
     assert!(
@@ -134,7 +138,7 @@ fn classification_retains_verified_update_plan_for_write() -> Result<()> {
             "0x1111111111111111111111111111111111111111111111111111111111111111",
         ),
         &derived("0x2222222222222222222222222222222222222222222222222222222222222222"),
-    );
+    )?;
 
     let outcome = accumulator.finish();
     assert_eq!(
@@ -153,4 +157,49 @@ fn classification_retains_verified_update_plan_for_write() -> Result<()> {
         }]
     );
     Ok(())
+}
+
+#[test]
+fn classification_refuses_empty_derived_code_for_non_empty_stored_row() -> Result<()> {
+    let variants = BTreeMap::new();
+    let mut accumulator = ClassificationAccumulator::new(&variants, 1.0)?;
+
+    let error = accumulator
+        .observe(
+            &row(
+                1,
+                "0x0000000000000000000000000000000000000001",
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+            &derived_with_len(
+                "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+                0,
+            ),
+        )
+        .expect_err("empty re-derived code for non-empty stored row must fail");
+
+    assert!(
+        error.to_string().contains("re-derived empty code"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn batch_accounting_rejects_drift() {
+    let error = ensure_batch_accounted(
+        &RawCodeHashCorrectionBatchOutcome {
+            requested_count: 2,
+            corrected_count: 1,
+            already_correct_count: 0,
+            conflicting_count: 0,
+        },
+        0,
+    )
+    .expect_err("unaccounted batch row must fail");
+
+    assert!(
+        error.to_string().contains("batch accounting drift"),
+        "unexpected error: {error:#}"
+    );
 }

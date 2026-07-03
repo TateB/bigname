@@ -9,10 +9,11 @@ use anyhow::{Context, Result};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
+    types::time::OffsetDateTime,
 };
 
 use super::*;
-use crate::default_database_url;
+use crate::{ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -96,6 +97,25 @@ fn raw_code_hash(address: &str, state: CanonicalityState) -> RawCodeHash {
         contract_address: address.to_owned(),
         code_hash: "0x1234".to_owned(),
         code_byte_length: 32,
+        canonicality_state: state,
+    }
+}
+
+fn lineage_block(
+    block_hash: &str,
+    block_number: i64,
+    state: CanonicalityState,
+) -> ChainLineageBlock {
+    ChainLineageBlock {
+        chain_id: "eth-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        parent_hash: None,
+        block_number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
         canonicality_state: state,
     }
 }
@@ -225,6 +245,87 @@ async fn raw_code_hash_count_lookup_groups_by_block() -> Result<()> {
 }
 
 #[tokio::test]
+async fn raw_code_hash_correction_selection_skips_orphaned_and_missing_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            RawCodeHash {
+                block_hash: "0xaaa1".to_owned(),
+                block_number: 101,
+                contract_address: "0x0001".to_owned(),
+                ..raw_code_hash("0x0001", CanonicalityState::Canonical)
+            },
+            RawCodeHash {
+                block_hash: "0xaaa2".to_owned(),
+                block_number: 102,
+                contract_address: "0x0002".to_owned(),
+                ..raw_code_hash("0x0002", CanonicalityState::Canonical)
+            },
+            RawCodeHash {
+                block_hash: "0xaaa3".to_owned(),
+                block_number: 103,
+                contract_address: "0x0003".to_owned(),
+                ..raw_code_hash("0x0003", CanonicalityState::Canonical)
+            },
+        ],
+    )
+    .await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0xaaa1", 101, CanonicalityState::Canonical),
+            lineage_block("0xaaa2", 102, CanonicalityState::Orphaned),
+        ],
+    )
+    .await?;
+
+    let observed_from = OffsetDateTime::UNIX_EPOCH;
+    let observed_before = OffsetDateTime::from_unix_timestamp(4_102_444_800)
+        .context("failed to construct raw code-hash correction test upper bound")?;
+    let candidate_count = count_raw_code_hash_correction_candidates(
+        database.pool(),
+        "eth-mainnet",
+        observed_from,
+        observed_before,
+    )
+    .await?;
+    let skipped_count = count_raw_code_hash_correction_orphaned_skips(
+        database.pool(),
+        "eth-mainnet",
+        observed_from,
+        observed_before,
+    )
+    .await?;
+    let page = load_raw_code_hash_correction_page(
+        database.pool(),
+        "eth-mainnet",
+        observed_from,
+        observed_before,
+        0,
+        10,
+    )
+    .await?;
+    let variants = load_raw_code_hash_address_variants(
+        database.pool(),
+        "eth-mainnet",
+        observed_from,
+        observed_before,
+    )
+    .await?;
+
+    assert_eq!(candidate_count, 1);
+    assert_eq!(skipped_count, 2);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].block_hash, "0xaaa1");
+    assert_eq!(variants.len(), 1);
+    assert!(variants.contains_key("0x0001"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn raw_code_hash_correction_updates_only_hash_and_length() -> Result<()> {
     let database = TestDatabase::new().await?;
 
@@ -271,6 +372,7 @@ async fn raw_code_hash_correction_updates_only_hash_and_length() -> Result<()> {
             requested_count: 1,
             corrected_count: 1,
             already_correct_count: 0,
+            conflicting_count: 0,
         }
     );
     let after = sqlx::query_as::<_, (String, i64, String, sqlx::types::time::OffsetDateTime)>(
@@ -312,6 +414,7 @@ async fn raw_code_hash_correction_updates_only_hash_and_length() -> Result<()> {
             requested_count: 1,
             corrected_count: 0,
             already_correct_count: 1,
+            conflicting_count: 0,
         }
     );
 
