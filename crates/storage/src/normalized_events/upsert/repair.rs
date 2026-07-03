@@ -43,6 +43,7 @@ pub(super) use ens_v1_registry_event_time::{
     ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed,
     repair_ens_v1_unwrapped_authority_registry_event_time_before_states,
     repair_ens_v1_unwrapped_authority_registry_event_time_resource_ids,
+    supersede_basenames_registry_boundary_derivation_change_events,
 };
 pub(super) use ens_v1_registry_event_time_null_resource::{
     ens_v1_unwrapped_authority_registry_event_time_null_resource_id_repair_allowed,

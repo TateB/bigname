@@ -24,7 +24,7 @@ use batch::{
 };
 use repair::{
     normalized_event_identity_repair_allowed, repair_after_state_conflicts,
-    repair_resource_id_conflicts,
+    repair_resource_id_conflicts, supersede_basenames_registry_boundary_derivation_change_events,
 };
 use sanitize::jsonb_safe_normalized_event;
 pub use sanitize::serialize_jsonb_value;
@@ -87,6 +87,8 @@ pub async fn upsert_normalized_events_with_summary(
     let mut after_state_repaired_count = 0usize;
     let mut resource_id_repair_ms = 0u128;
     let mut resource_id_repaired_count = 0usize;
+    let mut boundary_supersession_ms = 0u128;
+    let mut boundary_superseded_count = 0usize;
     let mut label_preimage_ms = 0u128;
     let mut label_preimage_count = 0usize;
     let mut output_snapshot_ms = 0u128;
@@ -173,6 +175,12 @@ pub async fn upsert_normalized_events_with_summary(
         }
         conflict_update_ms += conflict_update_started.elapsed().as_millis();
 
+        let boundary_supersession_started = Instant::now();
+        boundary_superseded_count +=
+            supersede_basenames_registry_boundary_derivation_change_events(&mut transaction, chunk)
+                .await?;
+        boundary_supersession_ms += boundary_supersession_started.elapsed().as_millis();
+
         let label_preimage_started = Instant::now();
         let changed_labelhashes =
             upsert_label_preimages_from_normalized_events(&mut transaction, chunk).await?;
@@ -221,6 +229,8 @@ pub async fn upsert_normalized_events_with_summary(
         after_state_repaired_count,
         resource_id_repair_ms,
         resource_id_repaired_count,
+        boundary_supersession_ms,
+        boundary_superseded_count,
         label_preimage_ms,
         label_preimage_count,
         output_snapshot_ms,
@@ -259,6 +269,8 @@ pub async fn upsert_normalized_events_count_only(
     let mut after_state_repaired_count = 0usize;
     let mut resource_id_repair_ms = 0u128;
     let mut resource_id_repaired_count = 0usize;
+    let mut boundary_supersession_ms = 0u128;
+    let mut boundary_superseded_count = 0usize;
     let mut label_preimage_ms = 0u128;
     let mut label_preimage_count = 0usize;
     let mut commit_ms = 0u128;
@@ -352,6 +364,15 @@ pub async fn upsert_normalized_events_count_only(
         }
         conflict_update_ms += conflict_update_started.elapsed().as_millis();
 
+        let boundary_supersession_started = Instant::now();
+        boundary_superseded_count +=
+            supersede_basenames_registry_boundary_derivation_change_events(
+                &mut transaction,
+                &chunk,
+            )
+            .await?;
+        boundary_supersession_ms += boundary_supersession_started.elapsed().as_millis();
+
         let label_preimage_started = Instant::now();
         let changed_labelhashes =
             upsert_label_preimages_from_normalized_events(&mut transaction, &chunk).await?;
@@ -385,6 +406,8 @@ pub async fn upsert_normalized_events_count_only(
         after_state_repaired_count,
         resource_id_repair_ms,
         resource_id_repaired_count,
+        boundary_supersession_ms,
+        boundary_superseded_count,
         label_preimage_ms,
         label_preimage_count,
         commit_ms,

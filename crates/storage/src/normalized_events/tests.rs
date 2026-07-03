@@ -1041,6 +1041,58 @@ fn basenames_registry_event_time_resolver_repair_event(
     event
 }
 
+fn basenames_registry_boundary_authority_epoch_identity(
+    before_authority_key: Option<&str>,
+    after_authority_key: Option<&str>,
+) -> String {
+    format!(
+        "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:{}:{}:{}:{}:{}",
+        "0xbaseboundaryepochblock",
+        "basenames:cubebucks.base.eth",
+        1_700_000_000_i64,
+        before_authority_key.unwrap_or("none"),
+        after_authority_key.unwrap_or("none")
+    )
+}
+
+fn basenames_registry_boundary_surface_binding_id(authority_key: &str, active_from: i64) -> Uuid {
+    let digest =
+        alloy_primitives::keccak256(format!("binding:{authority_key}:{active_from}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_slice()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn basenames_registry_boundary_surface_bound_identity(authority_key: &str) -> String {
+    let surface_binding_id =
+        basenames_registry_boundary_surface_binding_id(authority_key, 1_700_000_000);
+    format!(
+        "ens_v1_unwrapped_authority:SurfaceBound:surface-bound:{}:{}:{}",
+        "0xbaseboundaryboundblock", "basenames:cubebucks.base.eth", surface_binding_id
+    )
+}
+
+fn basenames_registry_boundary_surface_unbound_identity(authority_key: &str) -> String {
+    let surface_binding_id =
+        basenames_registry_boundary_surface_binding_id(authority_key, 1_700_000_000);
+    format!(
+        "ens_v1_unwrapped_authority:SurfaceUnbound:surface-unbound:{}:{}:{}",
+        "0xbaseboundaryunboundblock", "basenames:cubebucks.base.eth", surface_binding_id
+    )
+}
+
+fn basenames_registry_boundary_resolver_identity(authority_key: &str) -> String {
+    format!(
+        "ens_v1_unwrapped_authority:ResolverChanged:resolver-boundary:{}:{}:{}:{}",
+        "0xbaseboundaryresolverblock",
+        "basenames:cubebucks.base.eth",
+        1_700_000_000_i64,
+        authority_key
+    )
+}
+
 fn basenames_registry_event_time_permission_repair_event(
     event_identity: &str,
     resource_id: Uuid,
@@ -1114,6 +1166,37 @@ fn basenames_registry_event_time_authority_epoch_repair_event(
     event
 }
 
+fn basenames_registry_boundary_authority_epoch_event(
+    resource_id: Uuid,
+    before_authority_key: Option<&str>,
+    after_authority_key: Option<&str>,
+    include_registry_owner: bool,
+) -> NormalizedEvent {
+    let mut event = basenames_registry_event_time_authority_epoch_repair_event(
+        &basenames_registry_boundary_authority_epoch_identity(
+            before_authority_key,
+            after_authority_key,
+        ),
+        resource_id,
+        after_authority_key.unwrap_or(""),
+        include_registry_owner,
+    );
+    event.block_hash = Some("0xbaseboundaryepochblock".to_owned());
+    event.raw_fact_ref["block_hash"] = json!("0xbaseboundaryepochblock");
+    event.before_state = json!({
+        "authority_kind": before_authority_key.map(|_| "registry_only"),
+        "authority_key": before_authority_key
+    });
+    event.after_state = json!({
+        "authority_kind": after_authority_key.map(|_| "registry_only"),
+        "authority_key": after_authority_key
+    });
+    if include_registry_owner {
+        event.after_state["registry_owner"] = json!("0x0000000000000000000000000000000000000abc");
+    }
+    event
+}
+
 fn basenames_registry_event_time_surface_bound_repair_event(
     event_identity: &str,
     resource_id: Uuid,
@@ -1144,6 +1227,20 @@ fn basenames_registry_event_time_surface_bound_repair_event(
         "authority_key": authority_key,
         "binding_kind": "declared_registry_path"
     });
+    event
+}
+
+fn basenames_registry_boundary_surface_bound_event(
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = basenames_registry_event_time_surface_bound_repair_event(
+        &basenames_registry_boundary_surface_bound_identity(authority_key),
+        resource_id,
+        authority_key,
+    );
+    event.block_hash = Some("0xbaseboundaryboundblock".to_owned());
+    event.raw_fact_ref["block_hash"] = json!("0xbaseboundaryboundblock");
     event
 }
 
@@ -1182,6 +1279,47 @@ fn basenames_registry_event_time_surface_unbound_repair_event(
         "active_to": 1700000060,
         "authority_kind": "registry_only",
         "authority_key": authority_key
+    });
+    event
+}
+
+fn basenames_registry_boundary_surface_unbound_event(
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = basenames_registry_event_time_surface_unbound_repair_event(
+        &basenames_registry_boundary_surface_unbound_identity(authority_key),
+        resource_id,
+        authority_key,
+    );
+    event.block_hash = Some("0xbaseboundaryunboundblock".to_owned());
+    event.raw_fact_ref["block_hash"] = json!("0xbaseboundaryunboundblock");
+    event
+}
+
+fn basenames_registry_boundary_resolver_event(
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = basenames_registry_event_time_resolver_repair_event(
+        &basenames_registry_boundary_resolver_identity(authority_key),
+        resource_id,
+    );
+    event.block_hash = Some("0xbaseboundaryresolverblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseboundaryresolverblock",
+        "block_timestamp": 1700000000,
+    });
+    event.before_state = json!({"resolver": null});
+    event.after_state = json!({
+        "namehash": "0xcubebucks_namehash",
+        "resolver": "0x0000000000000000000000000000000000000456",
+        "source_event": "AuthorityEpochChanged"
     });
     event
 }
@@ -5056,7 +5194,7 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
 }
 
 #[tokio::test]
-async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_time_derivation_change_class()
+async fn normalized_event_count_only_upsert_repairs_basenames_registry_observation_derivation_change_class()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let legacy_labelhash_registry_resource_id =
@@ -5077,12 +5215,6 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
         "ens-v1-unwrapped-authority:base-registry-event-time:permission-derivation-class";
     let resolver_identity =
         "ens-v1-unwrapped-authority:base-registry-event-time:resolver-derivation-class";
-    let authority_epoch_identity =
-        "ens-v1-unwrapped-authority:base-registry-event-time:authority-epoch-derivation-class";
-    let surface_bound_identity =
-        "ens-v1-unwrapped-authority:base-registry-event-time:surface-bound-derivation-class";
-    let surface_unbound_identity =
-        "ens-v1-unwrapped-authority:base-registry-event-time:surface-unbound-derivation-class";
 
     let stale_events = vec![
         basenames_registry_event_time_authority_transfer_repair_event(
@@ -5097,22 +5229,6 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
         basenames_registry_event_time_resolver_repair_event(
             resolver_identity,
             legacy_labelhash_registry_resource_id,
-        ),
-        basenames_registry_event_time_authority_epoch_repair_event(
-            authority_epoch_identity,
-            legacy_labelhash_registry_resource_id,
-            old_authority_key,
-            false,
-        ),
-        basenames_registry_event_time_surface_bound_repair_event(
-            surface_bound_identity,
-            legacy_labelhash_registry_resource_id,
-            old_authority_key,
-        ),
-        basenames_registry_event_time_surface_unbound_repair_event(
-            surface_unbound_identity,
-            legacy_labelhash_registry_resource_id,
-            old_authority_key,
         ),
     ];
     upsert_normalized_events(database.pool(), &stale_events).await?;
@@ -5130,22 +5246,6 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
         basenames_registry_event_time_resolver_repair_event(
             resolver_identity,
             namehash_registry_resource_id,
-        ),
-        basenames_registry_event_time_authority_epoch_repair_event(
-            authority_epoch_identity,
-            namehash_registry_resource_id,
-            repaired_authority_key,
-            true,
-        ),
-        basenames_registry_event_time_surface_bound_repair_event(
-            surface_bound_identity,
-            namehash_registry_resource_id,
-            repaired_authority_key,
-        ),
-        basenames_registry_event_time_surface_unbound_repair_event(
-            surface_unbound_identity,
-            namehash_registry_resource_id,
-            repaired_authority_key,
         ),
     ];
     let event_identities = repaired_events
@@ -5293,6 +5393,442 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
     .await?;
     assert_eq!(idempotent_change_count, after_change_count);
     assert_eq!(idempotent_invalidations, invalidations);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_supersedes_basenames_registry_boundary_derivation_change_class()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0031);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0032);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let stale_events = vec![
+        basenames_registry_boundary_authority_epoch_event(
+            legacy_labelhash_registry_resource_id,
+            None,
+            Some(old_authority_key),
+            false,
+        ),
+        basenames_registry_boundary_surface_bound_event(
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+        basenames_registry_boundary_surface_unbound_event(
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+        basenames_registry_boundary_resolver_event(
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+    ];
+    upsert_normalized_events(database.pool(), &stale_events).await?;
+
+    let replayed_events = vec![
+        basenames_registry_boundary_authority_epoch_event(
+            namehash_registry_resource_id,
+            None,
+            Some(repaired_authority_key),
+            true,
+        ),
+        basenames_registry_boundary_surface_bound_event(
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+        basenames_registry_boundary_surface_unbound_event(
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+        basenames_registry_boundary_resolver_event(
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+    ];
+    let stale_event_identities = stale_events
+        .iter()
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
+    let replayed_event_identities = replayed_events
+        .iter()
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), &replayed_events).await?;
+    assert_eq!(inserted_count, replayed_events.len());
+
+    let stored_states = sqlx::query_as::<_, (String, String, Uuid)>(
+        r#"
+        SELECT event_identity, canonicality_state::TEXT, resource_id
+        FROM normalized_events
+        WHERE event_identity = ANY($1)
+           OR event_identity = ANY($2)
+        ORDER BY event_identity
+        "#,
+    )
+    .bind(&stale_event_identities)
+    .bind(&replayed_event_identities)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        stored_states.len(),
+        stale_events.len() + replayed_events.len()
+    );
+    for (event_identity, canonicality_state, resource_id) in stored_states {
+        if stale_event_identities.contains(&event_identity) {
+            assert_eq!(canonicality_state, "orphaned");
+            assert_eq!(resource_id, legacy_labelhash_registry_resource_id);
+        } else {
+            assert!(replayed_event_identities.contains(&event_identity));
+            assert_eq!(canonicality_state, "canonical");
+            assert_eq!(resource_id, namehash_registry_resource_id);
+        }
+    }
+
+    let canonical_boundary_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE logical_name_id = 'basenames:cubebucks.base.eth'
+          AND source_family = 'basenames_base_registry'
+          AND chain_id = 'base-mainnet'
+          AND event_kind IN (
+              'AuthorityEpochChanged',
+              'SurfaceBound',
+              'SurfaceUnbound',
+              'ResolverChanged'
+          )
+          AND transaction_hash IS NULL
+          AND log_index IS NULL
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(canonical_boundary_count, replayed_events.len() as i64);
+
+    let stale_canonicality_updates = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+          AND change.change_kind = 'canonicality_update'
+          AND change.canonicality_state = 'orphaned'
+        "#,
+    )
+    .bind(&stale_event_identities)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stale_canonicality_updates, stale_events.len() as i64);
+
+    let change_count_after_supersession = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+           OR event.event_identity = ANY($2)
+        "#,
+    )
+    .bind(&stale_event_identities)
+    .bind(&replayed_event_identities)
+    .fetch_one(database.pool())
+    .await?;
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), &replayed_events).await?;
+    assert_eq!(inserted_count, 0);
+    let idempotent_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+           OR event.event_identity = ANY($2)
+        "#,
+    )
+    .bind(&stale_event_identities)
+    .bind(&replayed_event_identities)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(idempotent_change_count, change_count_after_supersession);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_supersedes_existing_observed_basenames_registry_boundary_after_canonicality_refresh()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0041);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0042);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let stale_event = basenames_registry_boundary_authority_epoch_event(
+        legacy_labelhash_registry_resource_id,
+        None,
+        Some(old_authority_key),
+        false,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let mut observed_current = basenames_registry_boundary_authority_epoch_event(
+        namehash_registry_resource_id,
+        None,
+        Some(repaired_authority_key),
+        true,
+    );
+    observed_current.canonicality_state = CanonicalityState::Observed;
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&observed_current)).await?;
+
+    let mut canonical_current = observed_current.clone();
+    canonical_current.canonicality_state = CanonicalityState::Canonical;
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), &[canonical_current.clone()]).await?;
+    assert_eq!(inserted_count, 0);
+
+    let states = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT event_identity, canonicality_state::TEXT
+        FROM normalized_events
+        WHERE event_identity = $1
+           OR event_identity = $2
+        ORDER BY event_identity
+        "#,
+    )
+    .bind(&stale_event.event_identity)
+    .bind(&canonical_current.event_identity)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(states.len(), 2);
+    for (event_identity, canonicality_state) in states {
+        if event_identity == stale_event.event_identity {
+            assert_eq!(canonicality_state, "orphaned");
+        } else {
+            assert_eq!(event_identity, canonical_current.event_identity);
+            assert_eq!(canonicality_state, "canonical");
+        }
+    }
+
+    let stale_orphaned_changes = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+          AND change.change_kind = 'canonicality_update'
+          AND change.canonicality_state = 'orphaned'
+        "#,
+    )
+    .bind(&stale_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stale_orphaned_changes, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_manifest_metadata_mismatch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0051);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0052);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let mut stale_event = basenames_registry_boundary_authority_epoch_event(
+        legacy_labelhash_registry_resource_id,
+        None,
+        Some(old_authority_key),
+        false,
+    );
+    stale_event.manifest_version = 2;
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let replayed_event = basenames_registry_boundary_authority_epoch_event(
+        namehash_registry_resource_id,
+        None,
+        Some(repaired_authority_key),
+        true,
+    );
+    let error =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed_event))
+            .await
+            .expect_err("Basenames boundary supersession must reject manifest metadata drift");
+    assert!(
+        error.to_string().contains(
+            "Basenames registry boundary derivation-change supersession rejected manifest metadata mismatches"
+        ),
+        "unexpected error: {error:#}"
+    );
+
+    let stale_state = sqlx::query_scalar::<_, String>(
+        "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stale_state, "canonical");
+
+    let current_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&replayed_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(current_exists, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_state_mismatch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0061);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0062);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let mut stale_event = basenames_registry_boundary_surface_bound_event(
+        legacy_labelhash_registry_resource_id,
+        old_authority_key,
+    );
+    stale_event.after_state["authority_key"] = json!(null);
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    let replayed_event = basenames_registry_boundary_surface_bound_event(
+        namehash_registry_resource_id,
+        repaired_authority_key,
+    );
+    let error =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed_event))
+            .await
+            .expect_err("Basenames boundary supersession must reject unverified state drift");
+    assert!(
+        error
+            .to_string()
+            .contains("Basenames registry boundary derivation-change supersession rejected state verification mismatches"),
+        "unexpected error: {error:#}"
+    );
+
+    let stale_state = sqlx::query_scalar::<_, String>(
+        "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stale_state, "canonical");
+
+    let current_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&replayed_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(current_exists, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_resource_provenance_mismatch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0071);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0072);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let stale_event = basenames_registry_boundary_surface_bound_event(
+        legacy_labelhash_registry_resource_id,
+        old_authority_key,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale_event)).await?;
+
+    sqlx::query(
+        "UPDATE resources SET provenance = provenance - 'labelhash' WHERE resource_id = $1",
+    )
+    .bind(legacy_labelhash_registry_resource_id)
+    .execute(database.pool())
+    .await?;
+
+    let replayed_event = basenames_registry_boundary_surface_bound_event(
+        namehash_registry_resource_id,
+        repaired_authority_key,
+    );
+    let error =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed_event))
+            .await
+            .expect_err("Basenames boundary supersession must reject invalid resource provenance");
+    assert!(
+        error.to_string().contains(
+            "Basenames registry boundary derivation-change supersession rejected resource/provenance mismatches"
+        ),
+        "unexpected error: {error:#}"
+    );
+
+    let stale_state = sqlx::query_scalar::<_, String>(
+        "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stale_state, "canonical");
+
+    let current_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&replayed_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(current_exists, 0);
 
     database.cleanup().await
 }

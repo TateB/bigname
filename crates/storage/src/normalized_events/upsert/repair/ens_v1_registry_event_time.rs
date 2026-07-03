@@ -260,6 +260,153 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_before
     Ok(repaired)
 }
 
+pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_events(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    events: &[NormalizedEvent],
+) -> Result<usize> {
+    let mut event_identities = Vec::new();
+    let mut resource_ids = Vec::new();
+    let mut logical_name_ids = Vec::new();
+    let mut block_numbers = Vec::new();
+    let mut block_hashes = Vec::new();
+    let mut event_kinds = Vec::new();
+    let mut raw_fact_refs = Vec::new();
+    let mut before_states = Vec::new();
+    let mut after_states = Vec::new();
+    let mut manifest_versions = Vec::new();
+    let mut source_manifest_ids = Vec::new();
+
+    for event in events {
+        if !basenames_registry_boundary_derivation_change_candidate(event) {
+            continue;
+        }
+        let (Some(resource_id), Some(logical_name_id), Some(block_number), Some(block_hash)) = (
+            event.resource_id,
+            event.logical_name_id.as_ref(),
+            event.block_number,
+            event.block_hash.as_ref(),
+        ) else {
+            continue;
+        };
+
+        event_identities.push(event.event_identity.clone());
+        resource_ids.push(resource_id);
+        logical_name_ids.push(logical_name_id.clone());
+        block_numbers.push(block_number);
+        block_hashes.push(block_hash.clone());
+        event_kinds.push(event.event_kind.clone());
+        raw_fact_refs.push(serialize_jsonb_value(
+            &event.raw_fact_ref,
+            "failed to serialize Basenames registry boundary supersession raw_fact_ref",
+        )?);
+        before_states.push(serialize_jsonb_value(
+            &event.before_state,
+            "failed to serialize Basenames registry boundary supersession before_state",
+        )?);
+        after_states.push(serialize_jsonb_value(
+            &event.after_state,
+            "failed to serialize Basenames registry boundary supersession after_state",
+        )?);
+        manifest_versions.push(event.manifest_version);
+        source_manifest_ids.push(event.source_manifest_id);
+    }
+
+    if event_identities.is_empty() {
+        return Ok(0);
+    }
+
+    let repair_results =
+        sqlx::query_scalar::<_, String>(include_str!("ens_v1_registry_boundary_supersession.sql"))
+            .bind(&event_identities)
+            .bind(&resource_ids)
+            .bind(&logical_name_ids)
+            .bind(&block_numbers)
+            .bind(&block_hashes)
+            .bind(&event_kinds)
+            .bind(&raw_fact_refs)
+            .bind(&before_states)
+            .bind(&after_states)
+            .bind(&manifest_versions)
+            .bind(&source_manifest_ids)
+            .fetch_all(&mut **executor)
+            .await
+            .context("failed to supersede Basenames registry boundary derivation-change events")?;
+
+    let mut superseded = 0usize;
+    let mut manifest_rejected = Vec::new();
+    let mut resource_rejected = Vec::new();
+    let mut state_rejected = Vec::new();
+    for result in repair_results {
+        if result.strip_prefix("superseded:").is_some() {
+            superseded += 1;
+        } else if let Some(rejection) = result.strip_prefix("manifest_mismatch:") {
+            manifest_rejected.push(rejection.to_owned());
+        } else if let Some(rejection) = result.strip_prefix("resource_mismatch:") {
+            resource_rejected.push(rejection.to_owned());
+        } else if let Some(rejection) = result.strip_prefix("state_mismatch:") {
+            state_rejected.push(rejection.to_owned());
+        } else {
+            bail!("unexpected Basenames registry boundary supersession result: {result}");
+        }
+    }
+    let mut rejection_summaries = Vec::new();
+    if !manifest_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "manifest metadata mismatches: {}",
+            manifest_rejected.join(", ")
+        ));
+    }
+    if !resource_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "resource/provenance mismatches: {}",
+            resource_rejected.join(", ")
+        ));
+    }
+    if !state_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "state verification mismatches: {}",
+            state_rejected.join(", ")
+        ));
+    }
+    if !rejection_summaries.is_empty() {
+        bail!(
+            "Basenames registry boundary derivation-change supersession rejected {}",
+            rejection_summaries.join("; ")
+        );
+    }
+
+    Ok(superseded)
+}
+
+fn basenames_registry_boundary_derivation_change_candidate(event: &NormalizedEvent) -> bool {
+    let base_boundary_event = event.namespace == "basenames"
+        && event.chain_id.as_deref() == Some("base-mainnet")
+        && event.source_family == "basenames_base_registry"
+        && event.derivation_kind == "ens_v1_unwrapped_authority"
+        && event.transaction_hash.is_none()
+        && event.log_index.is_none()
+        && event.logical_name_id.is_some()
+        && event.resource_id.is_some()
+        && event.block_number.is_some()
+        && event.block_hash.is_some()
+        && event
+            .raw_fact_ref
+            .get("kind")
+            .and_then(|value| value.as_str())
+            == Some("raw_block");
+
+    base_boundary_event
+        && (matches!(
+            event.event_kind.as_str(),
+            "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+        ) || (event.event_kind == "ResolverChanged"
+            && event
+                .after_state
+                .get("source_event")
+                .and_then(|value| value.as_str())
+                == Some("AuthorityEpochChanged")))
+}
+
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed(
     existing: &NormalizedEvent,
     incoming: &NormalizedEvent,
@@ -275,6 +422,7 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         || existing.block_number.is_none()
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
         || !registry_event_time_resource_repair_source_allowed(existing)
+        || basenames_registry_boundary_resolver_event(existing)
         || !matches!(
             existing.event_kind.as_str(),
             "ResolverChanged"
@@ -356,13 +504,22 @@ fn registry_event_time_resource_repair_source_allowed(existing: &NormalizedEvent
             && existing.source_family == "basenames_base_registry"
             && matches!(
                 existing.event_kind.as_str(),
-                "AuthorityTransferred"
-                    | "PermissionChanged"
-                    | "ResolverChanged"
-                    | "AuthorityEpochChanged"
-                    | "SurfaceBound"
-                    | "SurfaceUnbound"
+                "AuthorityTransferred" | "PermissionChanged" | "ResolverChanged"
             ))
+}
+
+fn basenames_registry_boundary_resolver_event(event: &NormalizedEvent) -> bool {
+    event.namespace == "basenames"
+        && event.chain_id.as_deref() == Some("base-mainnet")
+        && event.source_family == "basenames_base_registry"
+        && event.event_kind == "ResolverChanged"
+        && event.transaction_hash.is_none()
+        && event.log_index.is_none()
+        && event
+            .after_state
+            .get("source_event")
+            .and_then(|value| value.as_str())
+            == Some("AuthorityEpochChanged")
 }
 
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_before_state_repair_allowed(
