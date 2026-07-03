@@ -213,7 +213,12 @@
             )
               AND (
                  (
-                     input.old_before_state::JSONB IS NOT DISTINCT FROM
+                     input.event_kind NOT IN (
+                         'AuthorityEpochChanged',
+                         'SurfaceBound',
+                         'SurfaceUnbound'
+                     )
+                     AND input.old_before_state::JSONB IS NOT DISTINCT FROM
                          input.new_before_state::JSONB
                      AND input.old_after_state::JSONB IS NOT DISTINCT FROM
                          input.new_after_state::JSONB
@@ -429,6 +434,137 @@
                                  )
                              )
                          )
+                     )
+                 )
+                 OR (
+                     input.event_kind = 'AuthorityEpochChanged'
+                     AND new_resource.resource_id IS NOT NULL
+                     AND (
+                         input.old_before_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                         OR input.old_after_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                     )
+                     AND (
+                         input.new_before_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                         OR input.new_after_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                     )
+                     AND (
+                         input.old_before_state::JSONB ->> 'authority_kind' IS DISTINCT FROM
+                             'registry_only'
+                         OR input.old_before_state::JSONB ->> 'authority_key' =
+                             old_resource.provenance->>'authority_key'
+                     )
+                     AND (
+                         input.new_before_state::JSONB ->> 'authority_kind' IS DISTINCT FROM
+                             'registry_only'
+                         OR input.new_before_state::JSONB ->> 'authority_key' =
+                             new_resource.provenance->>'authority_key'
+                     )
+                     AND (
+                         input.old_after_state::JSONB ->> 'authority_kind' IS DISTINCT FROM
+                             'registry_only'
+                         OR input.old_after_state::JSONB ->> 'authority_key' =
+                             old_resource.provenance->>'authority_key'
+                     )
+                     AND (
+                         input.new_after_state::JSONB ->> 'authority_kind' IS DISTINCT FROM
+                             'registry_only'
+                         OR input.new_after_state::JSONB ->> 'authority_key' =
+                             new_resource.provenance->>'authority_key'
+                     )
+                     AND (
+                         input.old_before_state::JSONB IS NOT DISTINCT FROM
+                             input.new_before_state::JSONB
+                         OR (
+                             input.old_before_state::JSONB - 'authority_key' =
+                                 input.new_before_state::JSONB - 'authority_key'
+                             AND input.old_before_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND input.new_before_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND COALESCE(
+                                 input.old_before_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                             AND COALESCE(
+                                 input.new_before_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                         )
+                     )
+                     AND (
+                         input.old_after_state::JSONB IS NOT DISTINCT FROM
+                             input.new_after_state::JSONB
+                         OR (
+                             input.old_after_state::JSONB - 'authority_key' =
+                                 input.new_after_state::JSONB - 'authority_key'
+                             AND input.old_after_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND input.new_after_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND COALESCE(
+                                 input.old_after_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                             AND COALESCE(
+                                 input.new_after_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                         )
+                         OR (
+                             input.old_after_state::JSONB - 'authority_key' =
+                                 input.new_after_state::JSONB - 'authority_key' - 'registry_owner'
+                             AND input.old_after_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND input.new_after_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND NOT (input.old_after_state::JSONB ? 'registry_owner')
+                             AND input.new_after_state::JSONB ->> 'registry_owner' ~
+                                 '^0x[0-9a-f]{40}$'
+                             AND COALESCE(
+                                 input.old_after_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                             AND COALESCE(
+                                 input.new_after_state::JSONB ->> 'authority_key',
+                                 ''
+                             ) <> ''
+                         )
+                     )
+                 )
+                 OR (
+                     input.event_kind IN ('SurfaceBound', 'SurfaceUnbound')
+                     AND new_resource.resource_id IS NOT NULL
+                     AND (
+                         input.old_before_state::JSONB IS NOT DISTINCT FROM
+                             input.new_before_state::JSONB
+                         OR (
+                             input.old_before_state::JSONB - 'authority_key' =
+                                 input.new_before_state::JSONB - 'authority_key'
+                             AND input.old_before_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND input.new_before_state::JSONB ->> 'authority_kind' =
+                                 'registry_only'
+                             AND input.old_before_state::JSONB ->> 'authority_key' =
+                                 old_resource.provenance->>'authority_key'
+                             AND input.new_before_state::JSONB ->> 'authority_key' =
+                                 new_resource.provenance->>'authority_key'
+                         )
+                     )
+                     AND (
+                         input.old_after_state::JSONB - 'authority_key' =
+                             input.new_after_state::JSONB - 'authority_key'
+                         AND input.old_after_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                         AND input.new_after_state::JSONB ->> 'authority_kind' =
+                             'registry_only'
+                         AND input.old_after_state::JSONB ->> 'authority_key' =
+                             old_resource.provenance->>'authority_key'
+                         AND input.new_after_state::JSONB ->> 'authority_key' =
+                             new_resource.provenance->>'authority_key'
                      )
                  )
                  OR (

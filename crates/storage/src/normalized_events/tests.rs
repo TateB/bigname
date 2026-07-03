@@ -1017,6 +1017,175 @@ fn basenames_registry_event_time_authority_transfer_repair_event(
     event
 }
 
+fn basenames_registry_event_time_resolver_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event = ens_v1_registry_event_time_repair_event(event_identity, resource_id);
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.source_family = "basenames_base_registry".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_hash = Some("0xbaseregistryresolverblock".to_owned());
+    event.transaction_hash = Some("0xbaseregistryresolvertx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseregistryresolverblock",
+        "transaction_hash": "0xbaseregistryresolvertx",
+        "transaction_index": 5,
+        "log_index": 2,
+    });
+    event.after_state["namehash"] = json!("0xcubebucks_namehash");
+    event
+}
+
+fn basenames_registry_event_time_permission_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = ens_v1_registry_event_time_permission_repair_event(
+        resource_id,
+        "registry_only",
+        authority_key,
+    );
+    event.event_identity = event_identity.to_owned();
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.source_family = "basenames_base_registry".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_hash = Some("0xbaseregistrypermissionblock".to_owned());
+    event.transaction_hash = Some("0xbaseregistrypermissiontx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseregistrypermissionblock",
+        "transaction_hash": "0xbaseregistrypermissiontx",
+        "transaction_index": 23,
+        "log_index": 14,
+    });
+    event.before_state["scope"]["chain_id"] = json!("base-mainnet");
+    event.after_state["scope"]["chain_id"] = json!("base-mainnet");
+    event
+}
+
+fn basenames_registry_event_time_authority_epoch_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+    authority_key: &str,
+    include_registry_owner: bool,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        event_identity,
+        "AuthorityEpochChanged",
+        CanonicalityState::Canonical,
+    );
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "basenames_base_registry".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xbaseauthorityepochblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseauthorityepochblock",
+        "block_timestamp": 1700000000,
+    });
+    event.before_state = json!({
+        "authority_kind": null,
+        "authority_key": null
+    });
+    event.after_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": authority_key
+    });
+    if include_registry_owner {
+        event.after_state["registry_owner"] = json!("0x0000000000000000000000000000000000000abc");
+    }
+    event
+}
+
+fn basenames_registry_event_time_surface_bound_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = normalized_event(event_identity, "SurfaceBound", CanonicalityState::Canonical);
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "basenames_base_registry".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xbasesurfaceboundblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbasesurfaceboundblock",
+        "block_timestamp": 1700000000,
+    });
+    event.before_state = json!({});
+    event.after_state = json!({
+        "active_from": 1700000000,
+        "authority_kind": "registry_only",
+        "authority_key": authority_key,
+        "binding_kind": "declared_registry_path"
+    });
+    event
+}
+
+fn basenames_registry_event_time_surface_unbound_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        event_identity,
+        "SurfaceUnbound",
+        CanonicalityState::Canonical,
+    );
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "basenames_base_registry".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xbasesurfaceunboundblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbasesurfaceunboundblock",
+        "block_timestamp": 1700000060,
+    });
+    event.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": authority_key
+    });
+    event.after_state = json!({
+        "active_to": 1700000060,
+        "authority_kind": "registry_only",
+        "authority_key": authority_key
+    });
+    event
+}
+
 fn ens_v1_registry_event_time_record_version_repair_event(
     event_identity: &str,
     resource_id: Uuid,
@@ -4882,6 +5051,248 @@ async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_tim
             ),
         ]
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_time_derivation_change_class()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0021);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0022);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let old_authority_key = "registry-only:base-mainnet:0xcubebucks_labelhash";
+    let repaired_authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let authority_transfer_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-derivation-class";
+    let permission_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:permission-derivation-class";
+    let resolver_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:resolver-derivation-class";
+    let authority_epoch_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-epoch-derivation-class";
+    let surface_bound_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:surface-bound-derivation-class";
+    let surface_unbound_identity =
+        "ens-v1-unwrapped-authority:base-registry-event-time:surface-unbound-derivation-class";
+
+    let stale_events = vec![
+        basenames_registry_event_time_authority_transfer_repair_event(
+            authority_transfer_identity,
+            legacy_labelhash_registry_resource_id,
+        ),
+        basenames_registry_event_time_permission_repair_event(
+            permission_identity,
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+        basenames_registry_event_time_resolver_repair_event(
+            resolver_identity,
+            legacy_labelhash_registry_resource_id,
+        ),
+        basenames_registry_event_time_authority_epoch_repair_event(
+            authority_epoch_identity,
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+            false,
+        ),
+        basenames_registry_event_time_surface_bound_repair_event(
+            surface_bound_identity,
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+        basenames_registry_event_time_surface_unbound_repair_event(
+            surface_unbound_identity,
+            legacy_labelhash_registry_resource_id,
+            old_authority_key,
+        ),
+    ];
+    upsert_normalized_events(database.pool(), &stale_events).await?;
+
+    let repaired_events = vec![
+        basenames_registry_event_time_authority_transfer_repair_event(
+            authority_transfer_identity,
+            namehash_registry_resource_id,
+        ),
+        basenames_registry_event_time_permission_repair_event(
+            permission_identity,
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+        basenames_registry_event_time_resolver_repair_event(
+            resolver_identity,
+            namehash_registry_resource_id,
+        ),
+        basenames_registry_event_time_authority_epoch_repair_event(
+            authority_epoch_identity,
+            namehash_registry_resource_id,
+            repaired_authority_key,
+            true,
+        ),
+        basenames_registry_event_time_surface_bound_repair_event(
+            surface_bound_identity,
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+        basenames_registry_event_time_surface_unbound_repair_event(
+            surface_unbound_identity,
+            namehash_registry_resource_id,
+            repaired_authority_key,
+        ),
+    ];
+    let event_identities = repaired_events
+        .iter()
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
+    let before_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+        "#,
+    )
+    .bind(&event_identities)
+    .fetch_one(database.pool())
+    .await?;
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), &repaired_events).await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_events = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Uuid,
+            serde_json::Value,
+            serde_json::Value,
+            String,
+        ),
+    >(
+        r#"
+        SELECT
+            event_identity,
+            event_kind,
+            resource_id,
+            before_state,
+            after_state,
+            canonicality_state::TEXT
+        FROM normalized_events
+        WHERE event_identity = ANY($1)
+        ORDER BY event_identity
+        "#,
+    )
+    .bind(&event_identities)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(stored_events.len(), repaired_events.len());
+    let expected_events = repaired_events
+        .iter()
+        .map(|event| (event.event_identity.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    for (event_identity, event_kind, resource_id, before_state, after_state, canonicality_state) in
+        stored_events
+    {
+        let expected = expected_events
+            .get(event_identity.as_str())
+            .with_context(|| format!("missing expected event {event_identity}"))?;
+        assert_eq!(event_kind, expected.event_kind);
+        assert_eq!(resource_id, namehash_registry_resource_id);
+        assert_eq!(before_state, expected.before_state);
+        assert_eq!(after_state, expected.after_state);
+        assert_eq!(canonicality_state, "canonical");
+    }
+
+    let after_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+        "#,
+    )
+    .bind(&event_identities)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        after_change_count,
+        before_change_count + repaired_events.len() as i64
+    );
+
+    let invalidations = sqlx::query_as::<_, (String, String, i64)>(
+        r#"
+        SELECT projection, projection_key, generation
+        FROM projection_invalidations
+        WHERE projection IN ('permissions_current', 'record_inventory_current')
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidations
+            .iter()
+            .map(|(projection, projection_key, _)| (projection.clone(), projection_key.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "permissions_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+            (
+                "record_inventory_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "record_inventory_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), &repaired_events).await?;
+    assert_eq!(inserted_count, 0);
+    let idempotent_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = ANY($1)
+        "#,
+    )
+    .bind(&event_identities)
+    .fetch_one(database.pool())
+    .await?;
+    let idempotent_invalidations = sqlx::query_as::<_, (String, String, i64)>(
+        r#"
+        SELECT projection, projection_key, generation
+        FROM projection_invalidations
+        WHERE projection IN ('permissions_current', 'record_inventory_current')
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(idempotent_change_count, after_change_count);
+    assert_eq!(idempotent_invalidations, invalidations);
 
     database.cleanup().await
 }

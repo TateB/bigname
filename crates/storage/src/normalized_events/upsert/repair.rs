@@ -15,6 +15,8 @@ mod ens_v1_authority_epoch_resolver_boundary;
 mod ens_v1_registry_event_time;
 #[path = "repair/ens_v1_registry_event_time_null_resource.rs"]
 mod ens_v1_registry_event_time_null_resource;
+#[path = "repair/ens_v1_registry_event_time_state.rs"]
+mod ens_v1_registry_event_time_state;
 #[path = "repair/ens_v1_registry_resolver_before_state.rs"]
 mod ens_v1_registry_resolver_before_state;
 #[path = "repair/ens_v1_registry_resolver_observation_key.rs"]
