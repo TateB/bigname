@@ -140,18 +140,39 @@ It uses the host PID/IPC namespaces and bypasses the image's `tini` entrypoint
 so the indexer process owns PID 1; Reth's live MDBX read-only open can fail
 from the default `tini` child process.
 
-The Reth DB reader has an ignored live verification test for code-hash decode
+The Reth DB reader has ignored live verification tests for code-hash decode
 checks against the local Reth datadir, JSON-RPC `eth_getCode`, and stored
-`raw_code_hashes`. It is not a CI test because it requires the live Ethereum
-Mainnet archive node and bigname storage. The test only reads provider and
-storage data.
+`raw_code_hashes`. They are not CI tests because they require the live Ethereum
+Mainnet archive node and bigname storage. These tests only read provider and
+storage data. The green windowed test defaults to the 688-row known-correct
+island sample and is overrideable with comma-separated block numbers in
+`BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS`. The latest-row-per-watched
+address check is expected-red until the padded `raw_code_hashes` remediation
+lands; the full-table audit is outside this harness and is also known to fail
+pending that remediation. Local observation, not an upstream Reth guarantee: on
+this host, fresh read-only verifier opens have lagged the node persistence
+horizon by roughly 1-1.5k blocks, so near-head compare blocks can fail
+spuriously.
+
+```sh
+BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS=25287255,25287268 \
+BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
+BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
+BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@127.0.0.1:5432/bigname \
+cargo test -p bigname-indexer --features reth-db \
+  reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_window \
+  -- --ignored --nocapture
+```
+
+The expected-red latest-row check uses the same three live inputs and should
+only pass after the padded-row remediation:
 
 ```sh
 BIGNAME_INDEXER_TEST_RETH_DB_DATADIR=/var/lib/reth \
 BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
 BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL=postgres://bigname:bigname@127.0.0.1:5432/bigname \
 cargo test -p bigname-indexer --features reth-db \
-  reth_db_provider_matches_rpc_and_stored_for_live_code_hash_conflict_area \
+  reth_db_provider_latest_rows_match_consensus \
   -- --ignored --nocapture
 ```
 

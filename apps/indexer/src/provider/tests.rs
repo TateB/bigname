@@ -3,12 +3,12 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 #[cfg(feature = "reth-db")]
 use sqlx::Row;
 #[cfg(feature = "reth-db")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -16,6 +16,22 @@ use tokio::{
 };
 
 use super::*;
+
+#[cfg(feature = "reth-db")]
+const ETHEREUM_MAINNET_CHAIN: &str = "ethereum-mainnet";
+
+#[cfg(feature = "reth-db")]
+const DEFAULT_RETH_CODE_HASH_COMPARE_FROM_BLOCK: i64 = 25_287_245;
+
+#[cfg(feature = "reth-db")]
+const DEFAULT_RETH_CODE_HASH_COMPARE_TO_BLOCK: i64 = 25_287_287;
+
+#[cfg(feature = "reth-db")]
+const DEFAULT_RETH_CODE_HASH_COMPARE_ROW_COUNT: usize = 688;
+
+#[cfg(feature = "reth-db")]
+const RETH_CODE_HASH_COMPARE_BLOCKS_ENV: &str =
+    "BIGNAME_INDEXER_TEST_RETH_CODE_HASH_COMPARE_BLOCKS";
 
 #[test]
 fn provider_registry_parses_chain_rpc_urls() -> Result<()> {
@@ -194,20 +210,8 @@ async fn reth_db_provider_matches_json_rpc_for_local_blocks() -> Result<()> {
     )?;
     let rpc_url = std::env::var("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL")
         .context("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL must point at an Ethereum Mainnet RPC")?;
-    let block_numbers = std::env::var("BIGNAME_INDEXER_TEST_RETH_COMPARE_BLOCKS")
-        .unwrap_or_else(|_| "0".to_owned())
-        .split(',')
-        .map(|value| {
-            value
-                .trim()
-                .parse::<i64>()
-                .with_context(|| format!("invalid Reth compare block number {value}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    assert!(
-        !block_numbers.is_empty(),
-        "Reth compare block list must not be empty"
-    );
+    let (block_numbers, _) =
+        parse_reth_compare_blocks_env("BIGNAME_INDEXER_TEST_RETH_COMPARE_BLOCKS", [0_i64])?;
 
     let reth = RethDbProvider::new("ethereum-mainnet", &datadir)?;
     let rpc = JsonRpcProvider::new(&rpc_url)?;
@@ -235,12 +239,8 @@ async fn reth_db_provider_matches_json_rpc_for_local_blocks() -> Result<()> {
 #[cfg(feature = "reth-db")]
 #[tokio::test]
 #[ignore = "requires live Ethereum Mainnet Reth DB, JSON-RPC, and bigname raw_code_hashes storage"]
-async fn reth_db_provider_matches_rpc_and_stored_for_live_code_hash_conflict_area() -> Result<()> {
-    const CHAIN: &str = "ethereum-mainnet";
-    const FROM_BLOCK: i64 = 25_287_245;
-    const TO_BLOCK: i64 = 25_287_287;
-    const EXPECTED_STORED_ROW_COUNT: usize = 688;
-
+async fn reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_window() -> Result<()>
+{
     let datadir = std::env::var("BIGNAME_INDEXER_TEST_RETH_DB_DATADIR").context(
         "BIGNAME_INDEXER_TEST_RETH_DB_DATADIR must point at a local Ethereum Mainnet Reth datadir",
     )?;
@@ -253,68 +253,73 @@ async fn reth_db_provider_matches_rpc_and_stored_for_live_code_hash_conflict_are
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .context("failed to connect to bigname storage")?;
-    let stored = load_stored_code_hash_area(&pool, CHAIN, FROM_BLOCK, TO_BLOCK).await?;
-    assert_eq!(
-        stored.len(),
-        EXPECTED_STORED_ROW_COUNT,
-        "unexpected stored code-hash row count for live Reth conflict area"
-    );
-
-    let requests = code_observation_requests(&stored);
-    let reth = RethDbProvider::new(CHAIN, &datadir)?;
-    let rpc = JsonRpcProvider::new(&rpc_url)?;
-
-    let reth_observations = code_observation_digests(
-        &reth
-            .fetch_code_observations_at_block_hashes(&requests)
-            .await?,
+    let (block_numbers, block_override) = parse_reth_compare_blocks_env(
+        RETH_CODE_HASH_COMPARE_BLOCKS_ENV,
+        DEFAULT_RETH_CODE_HASH_COMPARE_FROM_BLOCK..=DEFAULT_RETH_CODE_HASH_COMPARE_TO_BLOCK,
     )?;
-    let rpc_observations = code_observation_digests(
-        &rpc.fetch_code_observations_at_block_hashes(&requests)
-            .await?,
-    )?;
-
-    for stored_row in &stored {
-        let key = (
-            stored_row.block_hash.clone(),
-            stored_row.contract_address.clone(),
-        );
-        let reth = reth_observations.get(&key).with_context(|| {
-            format!(
-                "Reth DB omitted code observation for {} at {}",
-                stored_row.contract_address, stored_row.block_hash
-            )
-        })?;
-        let rpc = rpc_observations.get(&key).with_context(|| {
-            format!(
-                "JSON-RPC omitted code observation for {} at {}",
-                stored_row.contract_address, stored_row.block_hash
-            )
-        })?;
-
+    let stored =
+        load_stored_code_hash_blocks(&pool, ETHEREUM_MAINNET_CHAIN, &block_numbers).await?;
+    validate_stored_code_hash_block_coverage(&stored, &block_numbers, "known-correct window")?;
+    if !block_override {
         assert_eq!(
-            reth, rpc,
-            "Reth DB and JSON-RPC code digests diverged for {} at block {} ({})",
-            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
-        );
-        assert_eq!(
-            reth.code_hash, stored_row.code_hash,
-            "Reth DB code hash diverged from stored raw_code_hashes for {} at block {} ({})",
-            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
-        );
-        assert_eq!(
-            reth.code_byte_length, stored_row.code_byte_length,
-            "Reth DB code length diverged from stored raw_code_hashes for {} at block {} ({})",
-            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
+            stored.len(),
+            DEFAULT_RETH_CODE_HASH_COMPARE_ROW_COUNT,
+            "unexpected stored code-hash row count for default live Reth code-hash compare window"
         );
     }
 
+    let reth = RethDbProvider::new(ETHEREUM_MAINNET_CHAIN, &datadir)?;
+    let rpc = JsonRpcProvider::new(&rpc_url)?;
+    assert_reth_rpc_and_stored_code_observations_match(
+        "known-correct code-hash window",
+        &reth,
+        &rpc,
+        &stored,
+    )
+    .await?;
+
     println!(
-        "verified Reth DB == JSON-RPC == stored raw_code_hashes for {} live code-hash rows across blocks {}..={}",
+        "verified Reth DB == JSON-RPC == stored raw_code_hashes for {} live code-hash rows across {} block selections",
         stored.len(),
-        FROM_BLOCK,
-        TO_BLOCK
+        block_numbers.len()
     );
+
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+#[tokio::test]
+#[ignore = "expected-red until padded raw_code_hash remediation lands; requires live Ethereum Mainnet Reth DB, JSON-RPC, and bigname storage"]
+async fn reth_db_provider_latest_rows_match_consensus() -> Result<()> {
+    let datadir = std::env::var("BIGNAME_INDEXER_TEST_RETH_DB_DATADIR").context(
+        "BIGNAME_INDEXER_TEST_RETH_DB_DATADIR must point at a local Ethereum Mainnet Reth datadir",
+    )?;
+    let rpc_url = std::env::var("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL")
+        .context("BIGNAME_INDEXER_TEST_ETHEREUM_RPC_URL must point at an Ethereum Mainnet RPC")?;
+    let database_url = std::env::var("BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL").context(
+        "BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL must point at bigname storage",
+    )?;
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .context("failed to connect to bigname storage")?;
+    let stored = load_latest_stored_code_hash_rows_by_address(&pool, ETHEREUM_MAINNET_CHAIN)
+        .await
+        .context("failed to load latest stored code-hash rows")?;
+    ensure!(
+        !stored.is_empty(),
+        "latest stored code-hash row comparison requires at least one stored watched address"
+    );
+
+    let reth = RethDbProvider::new(ETHEREUM_MAINNET_CHAIN, &datadir)?;
+    let rpc = JsonRpcProvider::new(&rpc_url)?;
+    assert_reth_rpc_and_stored_code_observations_match(
+        "latest stored code-hash rows",
+        &reth,
+        &rpc,
+        &stored,
+    )
+    .await?;
 
     Ok(())
 }
@@ -350,12 +355,15 @@ struct CodeObservationDigest {
 }
 
 #[cfg(feature = "reth-db")]
-async fn load_stored_code_hash_area(
+async fn load_stored_code_hash_blocks(
     pool: &sqlx::PgPool,
     chain: &str,
-    from_block: i64,
-    to_block: i64,
+    block_numbers: &[i64],
 ) -> Result<Vec<StoredCodeHashRow>> {
+    ensure!(
+        !block_numbers.is_empty(),
+        "stored code-hash block comparison requires at least one block number"
+    );
     let rows = sqlx::query(
         r#"
         SELECT
@@ -366,21 +374,63 @@ async fn load_stored_code_hash_area(
             code_byte_length
         FROM raw_code_hashes
         WHERE chain_id = $1
-          AND block_number BETWEEN $2 AND $3
+          AND block_number = ANY($2::bigint[])
+          AND canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         ORDER BY block_number, contract_address
         "#,
     )
     .bind(chain)
-    .bind(from_block)
-    .bind(to_block)
+    .bind(block_numbers)
     .fetch_all(pool)
     .await
-    .with_context(|| {
-        format!(
-            "failed to load stored raw_code_hashes for {chain} blocks {from_block}..={to_block}"
-        )
-    })?;
+    .with_context(|| format!("failed to load stored raw_code_hashes for {chain} compare blocks"))?;
 
+    stored_code_hash_rows(rows)
+}
+
+#[cfg(feature = "reth-db")]
+async fn load_latest_stored_code_hash_rows_by_address(
+    pool: &sqlx::PgPool,
+    chain: &str,
+) -> Result<Vec<StoredCodeHashRow>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (contract_address)
+            block_number,
+            LOWER(block_hash) AS block_hash,
+            LOWER(contract_address) AS contract_address,
+            LOWER(code_hash) AS code_hash,
+            code_byte_length
+        FROM raw_code_hashes
+        WHERE chain_id = $1
+          AND canonicality_state <> 'orphaned'::canonicality_state
+        ORDER BY
+            contract_address,
+            block_number DESC,
+            CASE canonicality_state
+                WHEN 'finalized' THEN 4
+                WHEN 'safe' THEN 3
+                WHEN 'canonical' THEN 2
+                WHEN 'observed' THEN 1
+                ELSE 0
+            END DESC,
+            raw_code_hash_id DESC
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load latest stored raw_code_hashes for {chain}"))?;
+
+    stored_code_hash_rows(rows)
+}
+
+#[cfg(feature = "reth-db")]
+fn stored_code_hash_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredCodeHashRow>> {
     rows.into_iter()
         .map(|row| {
             Ok(StoredCodeHashRow {
@@ -392,6 +442,160 @@ async fn load_stored_code_hash_area(
             })
         })
         .collect()
+}
+
+#[cfg(feature = "reth-db")]
+fn validate_stored_code_hash_block_coverage(
+    stored: &[StoredCodeHashRow],
+    requested_block_numbers: &[i64],
+    label: &str,
+) -> Result<()> {
+    let requested = requested_block_numbers
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let observed = stored
+        .iter()
+        .map(|row| row.block_number)
+        .collect::<BTreeSet<_>>();
+    let missing = requested
+        .difference(&observed)
+        .map(i64::to_string)
+        .collect::<Vec<_>>();
+
+    ensure!(
+        missing.is_empty(),
+        "{label} stored raw_code_hashes missing requested block numbers: {}",
+        missing.join(",")
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+async fn assert_reth_rpc_and_stored_code_observations_match(
+    label: &str,
+    reth: &RethDbProvider,
+    rpc: &JsonRpcProvider,
+    stored: &[StoredCodeHashRow],
+) -> Result<()> {
+    ensure!(
+        !stored.is_empty(),
+        "{label} requires at least one stored code-hash row"
+    );
+
+    let requests = code_observation_requests(stored);
+    let reth_observations = code_observation_digests(
+        &reth
+            .fetch_code_observations_at_block_hashes(&requests)
+            .await?,
+    )?;
+    let rpc_observations = code_observation_digests(
+        &rpc.fetch_code_observations_at_block_hashes(&requests)
+            .await?,
+    )?;
+
+    for stored_row in stored {
+        let key = (
+            stored_row.block_hash.clone(),
+            stored_row.contract_address.clone(),
+        );
+        let reth = reth_observations.get(&key).with_context(|| {
+            format!(
+                "Reth DB omitted code observation for {} at {} during {label}",
+                stored_row.contract_address, stored_row.block_hash
+            )
+        })?;
+        let rpc = rpc_observations.get(&key).with_context(|| {
+            format!(
+                "JSON-RPC omitted code observation for {} at {} during {label}",
+                stored_row.contract_address, stored_row.block_hash
+            )
+        })?;
+
+        assert_eq!(
+            reth, rpc,
+            "Reth DB and JSON-RPC code digests diverged for {} at block {} ({}) during {label}",
+            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
+        );
+        assert_eq!(
+            reth.code_hash, stored_row.code_hash,
+            "Reth DB code hash diverged from stored raw_code_hashes for {} at block {} ({}) during {label}",
+            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
+        );
+        assert_eq!(
+            reth.code_byte_length, stored_row.code_byte_length,
+            "Reth DB code length diverged from stored raw_code_hashes for {} at block {} ({}) during {label}",
+            stored_row.contract_address, stored_row.block_number, stored_row.block_hash
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "reth-db")]
+fn parse_reth_compare_blocks_env(
+    env_var: &str,
+    default_block_numbers: impl IntoIterator<Item = i64>,
+) -> Result<(Vec<i64>, bool)> {
+    match std::env::var(env_var) {
+        Ok(raw_block_numbers) => Ok((
+            parse_reth_compare_blocks(env_var, &raw_block_numbers)?,
+            true,
+        )),
+        Err(_) => {
+            let block_numbers = default_block_numbers.into_iter().collect::<Vec<_>>();
+            ensure!(
+                !block_numbers.is_empty(),
+                "default {env_var} block list must not be empty"
+            );
+            Ok((block_numbers, false))
+        }
+    }
+}
+
+#[cfg(feature = "reth-db")]
+fn parse_reth_compare_blocks(env_var: &str, raw_block_numbers: &str) -> Result<Vec<i64>> {
+    let block_numbers = raw_block_numbers
+        .split(',')
+        .map(|value| {
+            let value = value.trim();
+            ensure!(
+                !value.is_empty(),
+                "{env_var} contains an empty block number"
+            );
+            value
+                .parse::<i64>()
+                .with_context(|| format!("invalid {env_var} block number {value}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        !block_numbers.is_empty(),
+        "{env_var} block list must not be empty"
+    );
+    Ok(block_numbers)
+}
+
+#[cfg(feature = "reth-db")]
+#[test]
+fn stored_code_hash_block_coverage_rejects_missing_requested_block() {
+    let stored = vec![StoredCodeHashRow {
+        block_number: 25_287_255,
+        block_hash: "0x01".to_owned(),
+        contract_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        code_hash: "0x02".to_owned(),
+        code_byte_length: 0,
+    }];
+
+    let error =
+        validate_stored_code_hash_block_coverage(&stored, &[25_287_255, 25_287_256], "override")
+            .expect_err("missing requested block must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("missing requested block numbers: 25287256"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[cfg(feature = "reth-db")]
