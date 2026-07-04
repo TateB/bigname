@@ -502,14 +502,17 @@ drop-and-full-closure-rederive window documented in [`storage.md`](storage.md).
 Do not run it against a live indexer or worker process, and do not treat it as a
 projection rebuild. The execute step deletes Base current-projection rows because
 those rows have foreign keys into the identity rows being dropped; the API must
-not serve during that destructive window. The passed deployment profile must
-already own a `base-mainnet/raw_fact_normalized_events` replay cursor because the
-delete scope is global to Base while replay reset is profile-scoped. Updated
-indexer and worker runtimes and write-capable one-shot commands hold a shared
-advisory lock while running; the execute path takes the exclusive form of that
-lock and also refuses visible `bigname-indexer`/`bigname-worker` sessions before
-it writes. Guarded writer processes require at least two database pool
-connections so the held advisory lock connection cannot starve the writer work.
+not serve during the destructive and replay/rebuild window. The delete is
+batched and resumable under a session advisory lock, with durable progress in
+`base_normalized_rederive_runs` and `base_normalized_rederive_run_batches`.
+The passed deployment profile must already own a
+`base-mainnet/raw_fact_normalized_events` replay cursor because the delete scope
+is global to Base while replay reset is profile-scoped. Updated indexer and
+worker runtimes and write-capable one-shot commands hold a shared advisory lock
+while running; the execute path takes the exclusive form of that lock and also
+refuses visible `bigname-indexer`/`bigname-worker` sessions before it writes.
+Guarded writer processes require at least two database pool connections so the
+held advisory lock connection cannot starve the writer work.
 
 1. Stop the indexer and worker services, leaving PostgreSQL and the API online
    for dry-run review if desired.
@@ -520,7 +523,9 @@ connections so the held advisory lock connection cannot starve the writer work.
      -f docker-compose.server.yml \
      run --rm --no-deps indexer \
        bigname-indexer drop-and-rederive-base-normalized-events \
-       --deployment-profile mainnet
+       --deployment-profile mainnet \
+       --run-id base-normalized-rederive-2026-07-03 \
+       --batch-size 100000
    ```
 
 3. Review the printed derivation-kind/source-family partition, including the
@@ -528,7 +533,8 @@ connections so the held advisory lock connection cannot starve the writer work.
    `raw_log_preimage_observation` and non-closure source families;
    identity/projection/change-log delete counts; raw-fact completeness proof;
    both replay cursor counts; affected current-projection replay marker count;
-   max affected block; replay target floor; and the replay reset target
+   run id, batch size, batch count/order; max affected block; replay target
+   floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
 4. Execute only after review, passing the dry-run counts back as exact
    `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
@@ -552,6 +558,8 @@ connections so the held advisory lock connection cannot starve the writer work.
      run --rm --no-deps indexer \
        bigname-indexer drop-and-rederive-base-normalized-events \
        --deployment-profile mainnet \
+       --run-id base-normalized-rederive-2026-07-03 \
+       --batch-size 100000 \
        --replay-target-block <dry-run-target-block> \
        --execute \
        --confirm-ratified-2026-07-03 \
@@ -572,7 +580,31 @@ connections so the held advisory lock connection cannot starve the writer work.
        --expected-adapter-checkpoint-item-rows <dry-run-value>
    ```
 
-5. Run only the catch-up indexer with normalized replay catch-up enabled and
+5. Monitor batch progress while execute is running from another SQL session:
+
+   ```sql
+   SELECT run_id, status, current_step, deleted_counts, updated_at
+   FROM base_normalized_rederive_runs
+   WHERE run_id = 'base-normalized-rederive-2026-07-03';
+
+   SELECT step, count(*) AS batches, sum(row_count) AS rows
+   FROM base_normalized_rederive_run_batches
+   WHERE run_id = 'base-normalized-rederive-2026-07-03'
+   GROUP BY step
+   ORDER BY min(batch_sequence);
+   ```
+
+   The default `--batch-size 100000` bounds WAL and row locks per commit while
+   leaving row-level sidecar delete triggers enabled. Lower the batch size only
+   if per-commit WAL or lock duration needs more headroom.
+6. If the execute container dies before completion, keep the API drained and run
+   the same execute command again with the same `--run-id`, `--batch-size`,
+   `--replay-target-block`, and expected counts. The command resumes only when
+   recorded deleted counts plus the remaining live census still equal the
+   reviewed dry-run census. Do not run replay until the run row is
+   `status='completed'`; before that final state, replay cursors and projection
+   markers are intentionally untouched.
+7. Run only the catch-up indexer with normalized replay catch-up enabled and
    `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
    replay from block `17571485` through the reviewed target block. Keep the API
    drained. The correction command has cleared any stale
@@ -590,7 +622,7 @@ connections so the held advisory lock connection cannot starve the writer work.
        --normalized-replay-defer-projection-indexes
    ```
 
-6. After the normalized replay cursor reaches the reviewed target, stop the
+8. After the normalized replay cursor reaches the reviewed target, stop the
    catch-up indexer before rebuilding projections. If the command above is still
    running because live sync resumed after catch-up, stop that container first:
 
@@ -598,7 +630,7 @@ connections so the held advisory lock connection cannot starve the writer work.
    docker stop bigname-base-normalized-replay
    ```
 
-7. Rebuild all current projections:
+9. Rebuild all current projections:
 
    ```sh
    docker compose --env-file .env.server \
@@ -607,7 +639,7 @@ connections so the held advisory lock connection cannot starve the writer work.
        bigname-worker replay all-current-projections
    ```
 
-8. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
+10. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
    and the identity-10k sample before restoring the API, worker, and normal
    indexer service.
 

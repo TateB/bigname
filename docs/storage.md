@@ -113,12 +113,18 @@ derivation-kind/source-family delete/keep partition, block range, raw-fact
 completeness, and replay reset target without writing. The execute mode
 requires the explicit `--execute --confirm-ratified-2026-07-03` flags, the
 reviewed `--replay-target-block`, records a structured correction-event log
-line, takes a PostgreSQL exclusive advisory transaction lock, refuses
+line, takes a PostgreSQL exclusive advisory session lock for the full batched
+run, refuses
 concurrent `bigname-indexer` or `bigname-worker` sessions that are visible in
 `pg_stat_activity`, and fails closed unless the reviewed expected counts still
 match. Indexer and worker runtime processes and write-capable one-shot commands
 also hold the corresponding shared advisory lock while they run, so the
 correction command cannot execute concurrently with updated bigname writers.
+Execute records durable progress in `base_normalized_rederive_runs` and
+`base_normalized_rederive_run_batches`, keyed by a reviewed `--run-id`. A
+re-invocation with the same run id, target block, batch size, and expected
+census resumes incomplete work; if the live census plus recorded deleted counts
+does not equal the reviewed census, it refuses to continue.
 
 The normalized-event scope is:
 
@@ -149,22 +155,29 @@ The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
 `provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
 removes dependent current-projection rows and `projection_normalized_event_changes`
 rows only to satisfy foreign keys and to force the later projection rebuild to
-publish from the re-derived event stream. In the same transaction it clears
+publish from the re-derived event stream. The final reset transaction clears
 `current_projection_replay_status` markers for `name_current`,
 `address_names_current`, `children_current`, `permissions_current`, and
 `record_inventory_current`, plus `resolver_current` and `primary_names_current`
 because those families consume normalized events that this correction deletes
 and re-derives. That prevents automatic all-current replay from skipping a
-family with a stale completion marker. The global `projection_apply_cursors`
-watermark is not reset because it is not scoped to these affected families. It
-does not rebuild projections, so the API must be drained or stopped from execute
-through the replay, projection rebuild, and verification window.
+family with a stale completion marker after the delete finishes. The global
+`projection_apply_cursors` watermark is not reset because it is not scoped to
+these affected families. It does not rebuild projections, so the API must be
+drained or stopped from execute through the replay, projection rebuild, and
+verification window.
 
-The delete order is FK-safe: current projections keyed by scoped identity rows,
-then `projection_normalized_event_changes`, then affected
-`current_projection_replay_status` rows, then scoped `normalized_events`, then
+The delete is batched and resumable. The order is FK-safe at every commit:
+current projections keyed by scoped identity rows, then
+`projection_normalized_event_changes`, then scoped `normalized_events`, then
 `surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
-After the data drop, the same transaction clears
+Projection rows and normalized events are batched by deterministic key/block
+order; identity rows are batched by primary-key order. Identity-row batches do
+not begin until all dependent current projections, projection change rows, and
+normalized events are gone, so a crash leaves a partially deleted but
+referentially valid database.
+After all delete batches have completed, one final small transaction clears
+affected `current_projection_replay_status` rows,
 `normalized_replay_adapter_checkpoint_items` and
 `normalized_replay_adapter_checkpoints` for
 `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, and
@@ -173,7 +186,9 @@ After the data drop, the same transaction clears
 `normalized_replay_cursors` row for
 `mainnet/base-mainnet/raw_fact_normalized_events` to
 `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated replay target>`.
+`target_block_number = <validated replay target>`. If the process dies before
+that final reset, replay cursors and projection markers remain untouched and the
+same `--run-id` must be resumed before replay starts.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
@@ -203,6 +218,12 @@ Raw-fact completeness is recomputed for the requested target. The command also
 refuses if any normalized event outside the delete scope still references an
 identity row that the correction would drop. If any proof fails, no write is
 allowed.
+The default batch size is `100000` rows; operators may lower it with
+`--batch-size` to keep per-commit WAL and lock duration within the deployment's
+headroom. The correction leaves row-level sidecar delete triggers enabled. That
+keeps sidecar invalidation semantics normal while batching bounds WAL per
+commit; sidecars are then reconciled by the required all-current projection
+rebuild.
 
 ## Storage layers
 

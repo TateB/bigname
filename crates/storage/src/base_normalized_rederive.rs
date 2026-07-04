@@ -1,25 +1,26 @@
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tracing::info;
 
+mod batch;
+mod batch_plan;
 mod counts;
 mod execution;
 mod guards;
 mod profile;
 
+use batch::execute_base_normalized_rederive_drop_batched;
+pub use batch_plan::{BaseNormalizedRederiveBatchPlan, BaseNormalizedRederiveBatchPlanStep};
 use counts::{
     load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
     load_derivation_kind_census, load_derivation_kind_census_from, load_max_affected_block,
     load_max_affected_block_from, load_raw_fact_completeness, load_raw_fact_completeness_from,
     load_reset_replay_cursor_target_block, load_reset_replay_cursor_target_block_from,
 };
-use execution::{
-    create_scope_tables, delete_scoped_rows_and_reset_replay, refuse_if_bigname_runtime_sessions,
-    refuse_if_out_of_scope_identity_dependencies,
-};
 use guards::{
-    ensure_delete_scope_replay_active, ensure_delete_scope_replay_active_from,
-    ensure_no_affected_rows_above_raw_log_head, ensure_no_affected_rows_above_raw_log_head_from,
+    ensure_delete_scope_replay_active, ensure_no_affected_rows_above_raw_log_head,
+    ensure_no_affected_rows_above_raw_log_head_from,
 };
 use profile::{
     validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
@@ -40,8 +41,9 @@ pub const BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND: &str =
 pub const BASE_NORMALIZED_REDERIVE_CURSOR_KIND: &str = "raw_fact_normalized_events";
 pub const BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND: &str = "post_replay_live_adapter_backlog";
 pub const BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK: i64 = 17_571_485;
+pub const DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE: i64 = 100_000;
 
-const BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY: &str =
+pub(super) const BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY: &str =
     "bigname:indexer:drop-and-rederive-base-normalized-events:2026-07-03";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +53,7 @@ pub struct BaseNormalizedRederiveScopeRule {
     pub source_families: &'static [&'static str],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveDerivationKindCensus {
     pub derivation_kind: String,
     pub source_family: String,
@@ -61,7 +63,7 @@ pub struct BaseNormalizedRederiveDerivationKindCensus {
     pub rederivable: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveCursorCensus {
     pub raw_fact_replay_cursor_rows: i64,
     pub post_replay_live_adapter_backlog_cursor_rows: i64,
@@ -73,7 +75,7 @@ impl BaseNormalizedRederiveCursorCensus {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveCounts {
     pub normalized_events: i64,
     pub resources: i64,
@@ -92,7 +94,7 @@ pub struct BaseNormalizedRederiveCounts {
     pub adapter_checkpoint_item_rows: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveRawFactCompleteness {
     pub replay_target_block: i64,
     pub log_derived_event_count: i64,
@@ -116,7 +118,7 @@ impl BaseNormalizedRederiveRawFactCompleteness {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederivePlan {
     pub deployment_profile: String,
     pub replay_target_block: i64,
@@ -191,6 +193,8 @@ pub async fn load_base_normalized_rederive_plan(
 pub async fn execute_base_normalized_rederive_drop(
     pool: &PgPool,
     deployment_profile: &str,
+    run_id: &str,
+    batch_size: i64,
     requested_replay_target_block: Option<i64>,
     expected_counts: BaseNormalizedRederiveExpectedCounts,
 ) -> Result<BaseNormalizedRederiveExecutionOutcome> {
@@ -198,69 +202,53 @@ pub async fn execute_base_normalized_rederive_drop(
         requested_replay_target_block.is_some(),
         "Base normalized-event rederive execute requires reviewed replay target block"
     );
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open Base normalized-event rederive transaction")?;
-    let lock_acquired = sqlx::query_scalar::<_, bool>(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0::bigint))",
+    ensure!(
+        !run_id.trim().is_empty(),
+        "Base normalized-event rederive run id must not be empty"
+    );
+    ensure!(
+        batch_size > 0,
+        "Base normalized-event rederive batch size must be positive"
+    );
+    execute_base_normalized_rederive_drop_batched(
+        pool,
+        deployment_profile,
+        run_id,
+        batch_size,
+        requested_replay_target_block,
+        expected_counts,
+        None,
     )
-    .bind(BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY)
-    .fetch_one(&mut *transaction)
     .await
-    .context("failed to acquire Base normalized-event rederive advisory lock")?;
-    ensure!(
-        lock_acquired,
-        "Base normalized-event rederive advisory lock is already held"
-    );
-    refuse_if_bigname_runtime_sessions(&mut transaction).await?;
-    validate_base_deployment_profile_owns_chain_from(&mut transaction, deployment_profile).await?;
-
-    let (replay_target_block, max_affected_block, replay_target_floor_block) =
-        resolve_replay_target_block_from(
-            &mut transaction,
-            deployment_profile,
-            requested_replay_target_block,
-        )
-        .await
-        .context("failed to resolve Base normalized-event rederive replay target")?;
-    ensure_delete_scope_replay_active_from(&mut transaction, replay_target_block).await?;
-    create_scope_tables(&mut transaction, replay_target_block).await?;
-    let plan = load_plan_in_transaction(
-        &mut transaction,
-        deployment_profile,
-        replay_target_block,
-        max_affected_block,
-        replay_target_floor_block,
-    )
-    .await?;
-    ensure!(
-        plan.raw_fact_completeness.is_complete_for_rerun(),
-        "Base normalized-event rederive raw-fact completeness check failed: {:?}",
-        plan.raw_fact_completeness
-    );
-    ensure!(
-        expected_counts.counts == plan.counts,
-        "Base normalized-event rederive count divergence: expected {:?}, found {:?}",
-        expected_counts.counts,
-        plan.counts
-    );
-    refuse_if_out_of_scope_identity_dependencies(&mut transaction).await?;
-
-    let deleted = delete_scoped_rows_and_reset_replay(
-        &mut transaction,
-        deployment_profile,
-        replay_target_block,
-    )
-    .await?;
-    transaction
-        .commit()
-        .await
-        .context("failed to commit Base normalized-event rederive drop")?;
-    Ok(BaseNormalizedRederiveExecutionOutcome { plan, deleted })
 }
 
-async fn load_plan_in_transaction(
+#[cfg(test)]
+async fn execute_base_normalized_rederive_drop_with_batch_limit(
+    pool: &PgPool,
+    deployment_profile: &str,
+    run_id: &str,
+    batch_size: i64,
+    requested_replay_target_block: Option<i64>,
+    expected_counts: BaseNormalizedRederiveExpectedCounts,
+    max_delete_batches: usize,
+) -> Result<BaseNormalizedRederiveExecutionOutcome> {
+    ensure!(
+        requested_replay_target_block.is_some(),
+        "Base normalized-event rederive execute requires reviewed replay target block"
+    );
+    batch::execute_base_normalized_rederive_drop_with_batch_limit(
+        pool,
+        deployment_profile,
+        run_id,
+        batch_size,
+        requested_replay_target_block,
+        expected_counts,
+        max_delete_batches,
+    )
+    .await
+}
+
+pub(super) async fn load_plan_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
     replay_target_block: i64,
@@ -310,7 +298,7 @@ async fn resolve_replay_target_block(
     ))
 }
 
-async fn resolve_replay_target_block_from(
+pub(super) async fn resolve_replay_target_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
     requested_replay_target_block: Option<i64>,

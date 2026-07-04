@@ -12,6 +12,10 @@ use uuid::Uuid;
 use super::*;
 
 const DEPLOYMENT_PROFILE: &str = "mainnet";
+const RUN_ID: &str = "base-rederive-fixture-run";
+const RESUME_RUN_ID: &str = "base-rederive-resume-run";
+const SECOND_RUN_ID: &str = "base-rederive-second-run";
+const FIXTURE_BATCH_SIZE: i64 = 2;
 const FIXTURE_REPLAY_TARGET_BLOCK: i64 = 46_954_147;
 const FIXTURE_OUT_OF_RANGE_BLOCK: i64 = FIXTURE_REPLAY_TARGET_BLOCK + 100;
 
@@ -149,6 +153,8 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     let outcome = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts {
             counts: expected.clone(),
@@ -286,6 +292,142 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
 }
 
 #[tokio::test]
+async fn batched_execute_resumes_without_resetting_cursors_mid_run() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    let partial = execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        3,
+    )
+    .await?;
+
+    assert_eq!(partial.deleted.address_names_current, 1);
+    assert_eq!(partial.deleted.name_current, 1);
+    assert_eq!(partial.deleted.children_current, 1);
+    assert_eq!(partial.deleted.normalized_events, 0);
+    assert_eq!(
+        count_affected_projection_replay_status(database.pool()).await?,
+        7
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_replay_cursors",
+            "cursor_kind",
+            BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        load_run_status(database.pool(), RESUME_RUN_ID).await?.0,
+        "running"
+    );
+    assert_no_dangling_refs(database.pool()).await?;
+
+    let completed = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+    )
+    .await?;
+
+    assert_eq!(completed.deleted, expected.counts);
+    assert_eq!(
+        load_run_status(database.pool(), RESUME_RUN_ID).await?,
+        ("completed".to_owned(), "completed".to_owned())
+    );
+    assert_eq!(
+        count_affected_projection_replay_status(database.pool()).await?,
+        0
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_replay_cursors",
+            "cursor_kind",
+            BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+        )
+        .await?,
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_refuses_census_mismatch() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    seed_extra_scoped_resource(database.pool()).await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must stop when live+deleted census no longer matches review");
+    assert!(format!("{error:?}").contains("resume census mismatch for resources"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_size_limits_delete_batches_not_final_reset() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await?;
+
+    assert_eq!(max_non_reset_batch_rows(database.pool(), RUN_ID).await?, 1);
+    assert!(count_run_batches(database.pool(), RUN_ID).await? > 10);
+    assert_eq!(
+        final_reset_batch_rows(database.pool(), RUN_ID).await?,
+        7 + 2 + 6 + 6
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_refuses_unverified_deployment_profile_before_delete() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -294,6 +436,8 @@ async fn execute_refuses_unverified_deployment_profile_before_delete() -> Result
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         "mainnett",
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -329,6 +473,8 @@ async fn execute_refuses_running_indexer_or_worker_session() -> Result<()> {
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -353,6 +499,8 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -385,6 +533,8 @@ async fn execute_refuses_inactive_delete_scope_family_before_delete() -> Result<
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -435,6 +585,8 @@ async fn execute_refuses_active_family_without_replay_target_before_delete() -> 
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -508,6 +660,8 @@ async fn execute_runtime_session_check_uses_held_transaction_connection() -> Res
         execute_base_normalized_rederive_drop(
             &tight_pool,
             DEPLOYMENT_PROFILE,
+            RUN_ID,
+            FIXTURE_BATCH_SIZE,
             Some(FIXTURE_REPLAY_TARGET_BLOCK),
             expected,
         ),
@@ -551,6 +705,8 @@ async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts { counts: expected },
     )
@@ -568,10 +724,16 @@ async fn execute_refuses_missing_reviewed_replay_target() -> Result<()> {
     seed_rederive_fixture(database.pool()).await?;
     let expected = reviewed_counts(database.pool()).await?;
 
-    let error =
-        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, None, expected)
-            .await
-            .expect_err("execute must require a reviewed replay target block");
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        None,
+        expected,
+    )
+    .await
+    .expect_err("execute must require a reviewed replay target block");
     assert!(format!("{error:?}").contains("requires reviewed replay target block"));
 
     database.cleanup().await?;
@@ -588,6 +750,8 @@ async fn execute_refuses_remaining_normalized_event_identity_anchors() -> Result
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -692,6 +856,8 @@ async fn execute_refuses_raw_fact_completeness_gap() -> Result<()> {
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         expected,
     )
@@ -711,10 +877,27 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
-        expected,
+        expected.clone(),
     )
     .await?;
+    let completed_batch_count = count_run_batches(database.pool(), RUN_ID).await?;
+    let completed_repeat = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+    )
+    .await?;
+    assert_eq!(completed_repeat.deleted, expected.counts);
+    assert_eq!(
+        count_run_batches(database.pool(), RUN_ID).await?,
+        completed_batch_count
+    );
 
     let second_plan =
         load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
@@ -738,6 +921,8 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     let second = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        SECOND_RUN_ID,
+        FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts {
             counts: second_plan.counts.clone(),
@@ -1540,6 +1725,127 @@ async fn single_connection_pool(database_name: &str) -> Result<PgPool> {
         .connect_with(options)
         .await
         .context("failed to connect single-connection test pool")
+}
+
+async fn load_run_status(pool: &PgPool, run_id: &str) -> Result<(String, String)> {
+    Ok(sqlx::query_as::<_, (String, String)>(
+        "SELECT status, current_step FROM base_normalized_rederive_runs WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn count_run_batches(pool: &PgPool, run_id: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM base_normalized_rederive_run_batches WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn max_non_reset_batch_rows(pool: &PgPool, run_id: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COALESCE(MAX(row_count), 0)::BIGINT
+        FROM base_normalized_rederive_run_batches
+        WHERE run_id = $1
+          AND step <> 'final_replay_reset'
+        "#,
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn final_reset_batch_rows(pool: &PgPool, run_id: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT row_count
+        FROM base_normalized_rederive_run_batches
+        WHERE run_id = $1
+          AND step = 'final_replay_reset'
+        "#,
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn assert_no_dangling_refs(pool: &PgPool) -> Result<()> {
+    let dangling = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT
+            (
+                SELECT COUNT(*)::BIGINT
+                FROM projection_normalized_event_changes p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM normalized_events e
+                    WHERE e.normalized_event_id = p.normalized_event_id
+                )
+            )
+            + (
+                SELECT COUNT(*)::BIGINT
+                FROM normalized_events e
+                WHERE (
+                    e.resource_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM resources r WHERE r.resource_id = e.resource_id
+                    )
+                )
+                OR (
+                    e.logical_name_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM name_surfaces n WHERE n.logical_name_id = e.logical_name_id
+                    )
+                )
+            )
+            + (
+                SELECT COUNT(*)::BIGINT
+                FROM surface_bindings s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM resources r WHERE r.resource_id = s.resource_id
+                )
+                OR NOT EXISTS (
+                    SELECT 1 FROM name_surfaces n WHERE n.logical_name_id = s.logical_name_id
+                )
+            )
+            + (
+                SELECT COUNT(*)::BIGINT
+                FROM resources r
+                WHERE r.token_lineage_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM token_lineages t
+                      WHERE t.token_lineage_id = r.token_lineage_id
+                  )
+            )
+            + (
+                SELECT COUNT(*)::BIGINT
+                FROM name_current p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM name_surfaces n WHERE n.logical_name_id = p.logical_name_id
+                )
+                OR (
+                    p.resource_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM resources r WHERE r.resource_id = p.resource_id
+                    )
+                )
+                OR (
+                    p.surface_binding_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM surface_bindings s
+                        WHERE s.surface_binding_id = p.surface_binding_id
+                    )
+                )
+            )
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(dangling, 0);
+    Ok(())
 }
 
 async fn count_table(pool: &PgPool, table: &str) -> Result<i64> {

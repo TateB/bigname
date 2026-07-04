@@ -82,13 +82,14 @@ pub use base_normalized_rederive::{
     BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
     BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND,
     BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND,
-    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND, BaseNormalizedRederiveCounts,
+    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND, BaseNormalizedRederiveBatchPlan,
+    BaseNormalizedRederiveBatchPlanStep, BaseNormalizedRederiveCounts,
     BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
     BaseNormalizedRederiveExecutionOutcome, BaseNormalizedRederiveExpectedCounts,
     BaseNormalizedRederivePlan, BaseNormalizedRederiveRawFactCompleteness,
-    BaseNormalizedRederiveScopeRule, base_normalized_rederive_scope_rules,
-    execute_base_normalized_rederive_drop, hold_base_normalized_rederive_runtime_shared_lock,
-    load_base_normalized_rederive_plan,
+    BaseNormalizedRederiveScopeRule, DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE,
+    base_normalized_rederive_scope_rules, execute_base_normalized_rederive_drop,
+    hold_base_normalized_rederive_runtime_shared_lock, load_base_normalized_rederive_plan,
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
