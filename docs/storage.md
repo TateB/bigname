@@ -181,6 +181,12 @@ Before execution it proves that the scoped log-derived normalized events still
 join retained non-orphaned `raw_logs`, scoped boundary events still join retained
 non-orphaned `chain_lineage`, and the canonical raw-log range inside the
 ratified replay window spans the closure boundary and validated replay target.
+It also refuses if any row in the delete scope is above the retained canonical
+raw-log head, or if any row's `(derivation_kind, source_family, block, emitting
+address)` is not covered by a currently active Base replay target/range for the
+full-closure adapter that will re-emit it. These are hard stops because the
+correction may only delete rows that current replay can recreate from retained
+raw facts.
 Because the delete scope is global for `base-mainnet` while replay reset is
 profile-scoped, dry-run and execute also require the requested deployment
 profile to own an existing `base-mainnet/raw_fact_normalized_events` replay

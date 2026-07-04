@@ -12,7 +12,7 @@ use crate::{
     reconciliation::types::RawFactNormalizedEventReplaySourceScope,
 };
 
-pub(super) async fn load_replay_raw_log_selection_for_scoped_range(
+pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
     pool: &sqlx::PgPool,
     chain: &str,
     from_block: i64,

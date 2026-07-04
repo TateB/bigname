@@ -367,6 +367,136 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
 }
 
 #[tokio::test]
+async fn execute_refuses_inactive_delete_scope_family_before_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'deprecated'
+        WHERE chain = 'base-mainnet'
+          AND source_family = 'basenames_base_primary'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("inactive current replay manifest family must stop before delete");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_reverse_claim/basenames_base_primary"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "reverse-claim-log",
+        )
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_refuses_active_family_without_replay_target_before_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses cia
+        SET active_from_block_number = $1
+        FROM manifest_versions mv
+        WHERE mv.manifest_id = cia.source_manifest_id
+          AND mv.chain = 'base-mainnet'
+          AND mv.source_family = 'basenames_base_primary'
+        "#,
+    )
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK + 1)
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("active manifest family without a replay target must stop before delete");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_reverse_claim/basenames_base_primary"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "reverse-claim-log",
+        )
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_affected_rows_above_canonical_raw_log_head() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity, namespace, event_kind, source_family, manifest_version,
+            source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref,
+            derivation_kind, canonicality_state
+        )
+        VALUES ('above-raw-head', 'basenames', 'RecordChanged',
+                'basenames_base_registry', 1, 4, 'base-mainnet', $1,
+                '0xabove-raw-head', '{}'::jsonb, 'ens_v1_unwrapped_authority',
+                'canonical')
+        "#,
+    )
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK + 1)
+    .execute(database.pool())
+    .await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("affected rows above retained raw-log head must stop dry-run");
+    assert!(
+        format!("{error:?}").contains("affected rows above canonical raw-log head"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_runtime_session_check_uses_held_transaction_connection() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -691,8 +821,67 @@ async fn seed_manifests(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .with_context(|| format!("failed to seed manifest {manifest_id}"))?;
+        if manifest_id == 3 {
+            continue;
+        }
+        let contract_instance_id = Uuid::from_u128(0x9000_u128 + manifest_id as u128);
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id, chain_id, contract_kind, provenance
+            )
+            VALUES ($1, 'base-mainnet', 'test_replay_target', '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to seed replay target contract {manifest_id}"))?;
+        let address = replay_target_address(manifest_id);
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id, chain_id, address, active_from_block_number,
+                source_manifest_id, provenance
+            )
+            VALUES ($1, 'base-mainnet', $2, $3, $4, '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(address)
+        .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+        .bind(manifest_id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to seed replay target address {manifest_id}"))?;
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id, declaration_kind, declaration_name, contract_instance_id,
+                declared_address, role
+            )
+            VALUES ($1, 'contract', $2, $3, $4, $2)
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(format!("replay_target_{manifest_id}"))
+        .bind(contract_instance_id)
+        .bind(address)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to seed replay manifest target {manifest_id}"))?;
     }
     Ok(())
+}
+
+fn replay_target_address(manifest_id: i64) -> &'static str {
+    match manifest_id {
+        1 => "0x0000000000000000000000000000000000000001",
+        2 => "0x0000000000000000000000000000000000000002",
+        4 => "0x0000000000000000000000000000000000000004",
+        5 => "0x0000000000000000000000000000000000000005",
+        _ => "0x00000000000000000000000000000000000000ff",
+    }
 }
 
 async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
@@ -727,18 +916,20 @@ async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     }
-    for (block_hash, block_number, tx, log_index) in [
+    for (block_hash, block_number, tx, log_index, emitting_address) in [
         (
             "0xbase-start",
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
             "0xtx-start",
             0_i64,
+            replay_target_address(4),
         ),
         (
             "0xbase-target",
             FIXTURE_REPLAY_TARGET_BLOCK,
             "0xtx-target",
             9_i64,
+            replay_target_address(1),
         ),
     ] {
         sqlx::query(
@@ -747,13 +938,14 @@ async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
                 chain_id, block_hash, block_number, transaction_hash,
                 transaction_index, log_index, emitting_address, canonicality_state
             )
-            VALUES ('base-mainnet', $1, $2, $3, 0, $4, '0xemitter', 'canonical')
+            VALUES ('base-mainnet', $1, $2, $3, 0, $4, $5, 'canonical')
             "#,
         )
         .bind(block_hash)
         .bind(block_number)
         .bind(tx)
         .bind(log_index)
+        .bind(emitting_address)
         .execute(pool)
         .await?;
     }
@@ -853,13 +1045,13 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
         ),
         (
             "out-of-range",
-            "basenames_base_registry",
-            Some(1_i64),
+            "basenames_l1_compat",
+            Some(3_i64),
             Some(FIXTURE_OUT_OF_RANGE_BLOCK),
             Some("0xafter"),
             None,
             None,
-            "ens_v1_unwrapped_authority",
+            "raw_log_preimage_observation",
         ),
         (
             "preimage-observation",
@@ -1318,8 +1510,8 @@ async fn seed_out_of_scope_event_referencing_scoped_identity(
             block_hash, raw_fact_ref, derivation_kind, canonicality_state
         )
         VALUES ('out-of-range-anchor', 'basenames', $1, $2, 'RecordChanged',
-                'basenames_base_registry', 1, 1, 'base-mainnet', $3,
-                '0xafter-anchor', '{}'::jsonb, 'ens_v1_unwrapped_authority', 'canonical')
+                'basenames_l1_compat', 1, 3, 'base-mainnet', $3,
+                '0xafter-anchor', '{}'::jsonb, 'raw_log_preimage_observation', 'canonical')
         "#,
     )
     .bind(ids.logical_name_id)

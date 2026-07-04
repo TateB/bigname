@@ -1,10 +1,6 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Instant,
-};
+use std::{collections::BTreeMap, time::Instant};
 
 use anyhow::{Context, Result, ensure};
-use sqlx::Row;
 use tracing::info;
 
 use crate::runtime::{
@@ -16,8 +12,11 @@ use crate::runtime::{
 
 use super::sync_logging::log_adapter_call_timing;
 use crate::reconciliation::{
-    replay::NormalizedEventReplayAdapter, types::PersistedRawPayloadAdapterSyncSummary,
+    replay::NormalizedEventReplayAdapter,
+    replay::scoped::load_replay_raw_log_selection_for_scoped_range,
+    types::PersistedRawPayloadAdapterSyncSummary,
 };
+use crate::source_scope::{SourceScope, SourceScopeTarget};
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -268,8 +267,10 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
         return Ok(empty_reverse_claim_summary());
     }
 
-    let reverse_scope = load_reverse_claim_replay_scope(pool, chain).await?;
-    if reverse_scope.source_scope.is_empty() {
+    let reverse_scope =
+        load_reverse_claim_replay_scope(pool, chain, range_start_block_number, target_block_number)
+            .await?;
+    if reverse_scope.targets.is_empty() {
         return Ok(empty_reverse_claim_summary());
     }
 
@@ -282,24 +283,24 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
             chain,
             page_from_block,
             target_block_number,
-            &reverse_scope.addresses,
+            &reverse_scope.targets,
             max_raw_logs_per_page,
         )
         .await?;
-        let page_block_hashes = load_reverse_claim_replay_page_block_hashes(
+        let page_selection = load_replay_raw_log_selection_for_scoped_range(
             pool,
             chain,
             page_from_block,
             page_to_block,
-            &reverse_scope.addresses,
+            &reverse_scope.targets,
         )
         .await?;
         let page_summary =
             bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope(
                 pool,
                 chain,
-                &page_block_hashes,
-                &reverse_scope.source_scope,
+                &page_selection.block_hashes,
+                &reverse_scope.adapter_sync_scope,
             )
             .await?;
         merge_reverse_claim_summary(&mut aggregate, page_summary);
@@ -311,7 +312,7 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
             page_from_block,
             page_to_block,
             page_count,
-            page_block_hash_count = page_block_hashes.len(),
+            page_block_hash_count = page_selection.block_hashes.len(),
             max_raw_logs_per_page,
             scanned_log_count = aggregate.scanned_log_count,
             matched_log_count = aggregate.matched_log_count,
@@ -328,34 +329,38 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
 }
 
 struct ReverseClaimReplayScope {
-    source_scope: Vec<(String, String, i64, i64)>,
-    addresses: Vec<String>,
+    targets: Vec<SourceScopeTarget>,
+    adapter_sync_scope: Vec<(String, String, i64, i64)>,
 }
 
 async fn load_reverse_claim_replay_scope(
     pool: &sqlx::PgPool,
     chain: &str,
+    range_start_block_number: i64,
+    target_block_number: i64,
 ) -> Result<ReverseClaimReplayScope> {
-    let mut source_scope = Vec::new();
-    let mut addresses = BTreeSet::new();
-    for contract in bigname_manifests::load_manifest_declared_watched_contracts(pool)
+    let watched_contracts = bigname_manifests::load_manifest_declared_watched_contracts(pool)
         .await?
         .into_iter()
-        .filter(|contract| contract.chain == chain)
         .filter(|contract| {
             matches!(
                 contract.source_family.as_str(),
                 "ens_v1_reverse_l1" | "basenames_base_primary"
             )
         })
-    {
-        let address = contract.address.to_ascii_lowercase();
-        addresses.insert(address.clone());
-        source_scope.push((contract.source_family, address, i64::MIN, i64::MAX));
-    }
+        .collect::<Vec<_>>();
+    let source_scope = SourceScope::from_watched_contracts(
+        &watched_contracts,
+        chain,
+        range_start_block_number,
+        target_block_number,
+        false,
+    );
+    let adapter_sync_scope = source_scope.adapter_sync_scope();
+    let targets = source_scope.into_targets();
     Ok(ReverseClaimReplayScope {
-        source_scope,
-        addresses: addresses.into_iter().collect(),
+        targets,
+        adapter_sync_scope,
     })
 }
 
@@ -364,14 +369,16 @@ async fn select_reverse_claim_replay_page_to_block(
     chain: &str,
     from_block: i64,
     target_block: i64,
-    reverse_addresses: &[String],
+    source_scope: &[SourceScopeTarget],
     max_raw_logs_per_page: usize,
 ) -> Result<i64> {
-    if from_block >= target_block || reverse_addresses.is_empty() {
+    if from_block >= target_block || source_scope.is_empty() {
         return Ok(target_block);
     }
     let max_raw_logs_per_page = i64::try_from(max_raw_logs_per_page)
         .context("reverse-claim replay max logs per page does not fit in i64")?;
+    let (source_families, addresses, from_blocks, to_blocks) =
+        reverse_source_scope_filter_bindings(source_scope);
 
     sqlx::query_scalar::<_, i64>(
         r#"
@@ -383,7 +390,14 @@ async fn select_reverse_claim_replay_page_to_block(
              AND lineage.block_hash = rl.block_hash
             WHERE rl.chain_id = $1
               AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
-              AND LOWER(rl.emitting_address) = ANY($4::TEXT[])
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($4::TEXT[], $5::TEXT[], $6::BIGINT[], $7::BIGINT[])
+                    AS source_scope(source_family, address, from_block, to_block)
+                  WHERE LOWER(rl.emitting_address) = source_scope.address
+                    AND rl.block_number >= source_scope.from_block
+                    AND rl.block_number <= source_scope.to_block
+              )
               AND rl.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -400,7 +414,7 @@ async fn select_reverse_claim_replay_page_to_block(
                 rl.transaction_index,
                 rl.log_index,
                 rl.raw_log_id
-            LIMIT ($5::BIGINT + 1)
+            LIMIT ($8::BIGINT + 1)
         ),
         numbered_logs AS (
             SELECT block_number, ROW_NUMBER() OVER () AS ordinal
@@ -409,7 +423,7 @@ async fn select_reverse_claim_replay_page_to_block(
         overflow AS (
             SELECT block_number
             FROM numbered_logs
-            WHERE ordinal = $5::BIGINT + 1
+            WHERE ordinal = $8::BIGINT + 1
         ),
         bounded AS (
             SELECT block_number
@@ -428,13 +442,16 @@ async fn select_reverse_claim_replay_page_to_block(
         FROM bounded
         "#,
     )
-    .bind(chain)
-    .bind(from_block)
-    .bind(target_block)
-    .bind(reverse_addresses)
-    .bind(max_raw_logs_per_page)
-    .fetch_one(pool)
-    .await
+        .bind(chain)
+        .bind(from_block)
+        .bind(target_block)
+        .bind(&source_families)
+        .bind(&addresses)
+        .bind(&from_blocks)
+        .bind(&to_blocks)
+        .bind(max_raw_logs_per_page)
+        .fetch_one(pool)
+        .await
     .with_context(|| {
         format!(
             "failed to select log-bounded ENSv1 reverse-claim replay page for chain {chain} range {from_block}..={target_block}"
@@ -442,56 +459,20 @@ async fn select_reverse_claim_replay_page_to_block(
     })
 }
 
-async fn load_reverse_claim_replay_page_block_hashes(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    from_block: i64,
-    to_block: i64,
-    reverse_addresses: &[String],
-) -> Result<Vec<String>> {
-    if reverse_addresses.is_empty() {
-        return Ok(Vec::new());
+fn reverse_source_scope_filter_bindings(
+    source_scope: &[SourceScopeTarget],
+) -> (Vec<String>, Vec<String>, Vec<i64>, Vec<i64>) {
+    let mut source_families = Vec::with_capacity(source_scope.len());
+    let mut addresses = Vec::with_capacity(source_scope.len());
+    let mut from_blocks = Vec::with_capacity(source_scope.len());
+    let mut to_blocks = Vec::with_capacity(source_scope.len());
+    for target in source_scope {
+        source_families.push(target.source_family.clone());
+        addresses.push(target.address.clone());
+        from_blocks.push(target.from_block);
+        to_blocks.push(target.to_block);
     }
-    let rows = sqlx::query(
-        r#"
-        SELECT rl.block_number, rl.block_hash
-        FROM raw_logs rl
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = rl.chain_id
-         AND lineage.block_hash = rl.block_hash
-        WHERE rl.chain_id = $1
-          AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
-          AND LOWER(rl.emitting_address) = ANY($4::TEXT[])
-          AND rl.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        GROUP BY rl.block_number, rl.block_hash
-        ORDER BY rl.block_number, rl.block_hash
-        "#,
-    )
-    .bind(chain)
-    .bind(from_block)
-    .bind(to_block)
-    .bind(reverse_addresses)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to list canonical ENSv1 reverse-claim replay block hashes for chain {chain} range {from_block}..={to_block}"
-        )
-    })?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| row.get::<String, _>("block_hash"))
-        .collect())
+    (source_families, addresses, from_blocks, to_blocks)
 }
 
 fn empty_reverse_claim_summary() -> bigname_adapters::EnsV1ReverseClaimSyncSummary {

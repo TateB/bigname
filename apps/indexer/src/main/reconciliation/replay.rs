@@ -10,7 +10,7 @@ mod classification;
 #[path = "replay/profile_scope.rs"]
 mod profile_scope;
 #[path = "replay/scoped.rs"]
-mod scoped;
+pub(crate) mod scoped;
 
 use super::{
     adapter_sync::sync_replay_normalized_events_from_persisted_raw_payloads,
@@ -126,11 +126,11 @@ pub(crate) async fn replay_raw_fact_normalized_events(
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct ReplayRawLogSelection {
-    range: Option<(i64, i64)>,
-    block_hashes: Vec<String>,
-    address_targets: Vec<(String, String)>,
-    canonical_raw_log_count: usize,
+pub(crate) struct ReplayRawLogSelection {
+    pub(crate) range: Option<(i64, i64)>,
+    pub(crate) block_hashes: Vec<String>,
+    pub(crate) address_targets: Vec<(String, String)>,
+    pub(crate) canonical_raw_log_count: usize,
 }
 
 async fn load_replay_raw_log_selection(

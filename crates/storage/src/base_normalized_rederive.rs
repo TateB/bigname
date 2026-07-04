@@ -4,6 +4,7 @@ use tracing::info;
 
 mod counts;
 mod execution;
+mod guards;
 mod profile;
 
 use counts::{
@@ -15,6 +16,10 @@ use counts::{
 use execution::{
     create_scope_tables, delete_scoped_rows_and_reset_replay, refuse_if_bigname_runtime_sessions,
     refuse_if_out_of_scope_identity_dependencies,
+};
+use guards::{
+    ensure_delete_scope_replay_active, ensure_delete_scope_replay_active_from,
+    ensure_no_affected_rows_above_raw_log_head, ensure_no_affected_rows_above_raw_log_head_from,
 };
 use profile::{
     validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
@@ -166,6 +171,7 @@ pub async fn load_base_normalized_rederive_plan(
         resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
             .await
             .context("failed to resolve Base normalized-event rederive replay target")?;
+    ensure_delete_scope_replay_active(pool, replay_target_block).await?;
     let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
     let cursor_census = load_cursor_census(pool, deployment_profile).await?;
     let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
@@ -218,6 +224,7 @@ pub async fn execute_base_normalized_rederive_drop(
         )
         .await
         .context("failed to resolve Base normalized-event rederive replay target")?;
+    ensure_delete_scope_replay_active_from(&mut transaction, replay_target_block).await?;
     create_scope_tables(&mut transaction, replay_target_block).await?;
     let plan = load_plan_in_transaction(
         &mut transaction,
@@ -286,6 +293,7 @@ async fn resolve_replay_target_block(
     requested_replay_target_block: Option<i64>,
 ) -> Result<(i64, Option<i64>, Option<i64>)> {
     let head = validate_canonical_raw_log_head(load_canonical_raw_log_head(pool).await?)?;
+    ensure_no_affected_rows_above_raw_log_head(pool, head).await?;
     let max_affected_block = load_max_affected_block(pool, head).await?;
     let reset_replay_cursor_target_block =
         load_pending_reset_replay_cursor_target_block(pool, deployment_profile).await?;
@@ -309,6 +317,7 @@ async fn resolve_replay_target_block_from(
 ) -> Result<(i64, Option<i64>, Option<i64>)> {
     let head =
         validate_canonical_raw_log_head(load_canonical_raw_log_head_from(transaction).await?)?;
+    ensure_no_affected_rows_above_raw_log_head_from(transaction, head).await?;
     let max_affected_block = load_max_affected_block_from(transaction, head).await?;
     let reset_replay_cursor_target_block =
         load_pending_reset_replay_cursor_target_block_from(transaction, deployment_profile).await?;

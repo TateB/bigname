@@ -177,6 +177,16 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
         )
         .await?;
     }
+    insert_raw_reverse_claimed_log_at_index(
+        database.pool(),
+        chain,
+        &blocks[2],
+        reverse_address,
+        "0x5555555555555555555555555555555555555555",
+        CanonicalityState::Observed,
+        7,
+    )
+    .await?;
     insert_chain_lineage_for_block(
         database.pool(),
         chain,
@@ -234,6 +244,127 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
         )
         .bind(chain)
         .bind(&orphaned_same_height_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE chain_id = $1
+              AND raw_fact_ref->>'log_index' = '7'
+            "#
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_closure_reverse_claim_replay_respects_manifest_active_from() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let reverse_address = "0x00000000000000000000000000000000000000ac";
+    let reverse_contract_instance_id = Uuid::from_u128(0x902);
+    let before_active_block = provider_block(
+        "0x1515151515151515151515151515151515151515151515151515151515151515",
+        Some("0x1414141414141414141414141414141414141414141414141414141414141414"),
+        100,
+    );
+    let active_block = provider_block(
+        "0x1616161616161616161616161616161616161616161616161616161616161616",
+        Some(&before_active_block.block_hash),
+        101,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        902,
+        "basenames",
+        "basenames_base_primary",
+        chain,
+        "basenames_v1",
+        reverse_contract_instance_id,
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = $2
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(reverse_contract_instance_id)
+    .bind(active_block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &before_active_block,
+        reverse_address,
+        "0x5555555555555555555555555555555555555555",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &active_block,
+        reverse_address,
+        "0x6666666666666666666666666666666666666666",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let summary = sync_full_closure_normalized_events_from_persisted_raw_payloads(
+        database.pool(),
+        "mainnet",
+        chain,
+        before_active_block.block_number,
+        active_block.block_number,
+        &[NormalizedEventReplayAdapter::EnsV1ReverseClaim],
+        1,
+    )
+    .await?;
+
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_synced_count, 2);
+    assert_eq!(summary.total_inserted_count, 2);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT COUNT(*)::BIGINT, MIN(block_number)::BIGINT, MAX(block_number)::BIGINT
+            FROM normalized_events
+            WHERE chain_id = $1
+              AND derivation_kind = 'ens_v1_reverse_claim'
+            "#
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (2, Some(active_block.block_number), Some(active_block.block_number))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE chain_id = $1
+              AND block_hash = $2
+            "#
+        )
+        .bind(chain)
+        .bind(&before_active_block.block_hash)
         .fetch_one(database.pool())
         .await?,
         0

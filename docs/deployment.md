@@ -572,11 +572,33 @@ connections so the held advisory lock connection cannot starve the writer work.
        --expected-adapter-checkpoint-item-rows <dry-run-value>
    ```
 
-5. Start only the indexer with normalized replay catch-up enabled so the reset
-   cursor runs full-closure replay from block `17571485` through the reviewed
-   target block. Keep the API drained. The correction command has cleared any
-   stale `post_replay_live_adapter_backlog` cursor for the same Base deployment.
-6. After normalized replay completes, rebuild all current projections:
+5. Run only the catch-up indexer with normalized replay catch-up enabled and
+   `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
+   replay from block `17571485` through the reviewed target block. Keep the API
+   drained. The correction command has cleared any stale
+   `post_replay_live_adapter_backlog` cursor for the same Base deployment. This
+   mode can re-enable live adapter sync after replay catches up, so do not let
+   it overlap the projection rebuild:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     run --rm --name bigname-base-normalized-replay indexer \
+       bigname-indexer run \
+       --hash-pinned-adapter-sync auto \
+       --normalized-replay-catchup-enabled \
+       --normalized-replay-defer-projection-indexes
+   ```
+
+6. After the normalized replay cursor reaches the reviewed target, stop the
+   catch-up indexer before rebuilding projections. If the command above is still
+   running because live sync resumed after catch-up, stop that container first:
+
+   ```sh
+   docker stop bigname-base-normalized-replay
+   ```
+
+7. Rebuild all current projections:
 
    ```sh
    docker compose --env-file .env.server \
@@ -585,7 +607,7 @@ connections so the held advisory lock connection cannot starve the writer work.
        bigname-worker replay all-current-projections
    ```
 
-7. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
+8. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
    and the identity-10k sample before restoring the API, worker, and normal
    indexer service.
 
