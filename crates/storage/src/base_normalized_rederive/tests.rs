@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{collections::BTreeSet, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
@@ -24,6 +24,46 @@ struct FixtureIds {
     resource_id: Uuid,
     surface_binding_id: Uuid,
     logical_name_id: &'static str,
+}
+
+#[test]
+fn delete_predicate_pairs_match_scope_rule_pairs() {
+    assert_eq!(scope_rule_pair_set(), delete_predicate_pair_set());
+}
+
+#[test]
+fn replay_active_guard_sql_stays_pair_granularity() {
+    let sql = guards::inactive_delete_scope_pairs_sql();
+    assert!(sql.contains("scope_rule_pairs"));
+    assert!(sql.contains("delete_scope_pairs"));
+    assert!(sql.contains("active_replay_pairs"));
+    assert!(sql.contains("WHERE from_block <= 17571485"));
+    assert!(sql.contains("AND to_block >= $1"));
+    assert!(sql.contains("WHERE EXISTS"));
+    assert!(!sql.contains("normalized_event_id"));
+    assert!(!sql.contains("raw_logs"));
+    assert!(!sql.contains("scoped_events"));
+    assert!(!sql.contains("log_index"));
+}
+
+#[test]
+fn base_rederive_scope_index_migration_is_no_transaction() {
+    for version in [
+        20260704130000,
+        20260704130100,
+        20260704130200,
+        20260704130300,
+        20260704130400,
+    ] {
+        let migration = crate::MIGRATOR
+            .iter()
+            .find(|migration| migration.version == version)
+            .expect("base rederive scope index migration is registered");
+        assert!(
+            migration.no_tx,
+            "migration {version} must not use a DDL transaction"
+        );
+    }
 }
 
 async fn test_database() -> Result<TestDatabase> {
@@ -895,6 +935,108 @@ async fn execute_refuses_inactive_delete_scope_family_before_delete() -> Result<
 }
 
 #[tokio::test]
+async fn dry_run_refuses_inactive_delete_scope_pair() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'deprecated'
+        WHERE chain = 'base-mainnet'
+          AND source_family = 'basenames_base_primary'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("inactive current replay manifest family must stop dry-run");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_reverse_claim/basenames_base_primary"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "reverse-claim-log",
+        )
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_pair_when_replay_target_does_not_cover_full_range() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses cia
+        SET active_from_block_number = $1
+        FROM manifest_versions mv
+        WHERE mv.manifest_id = cia.source_manifest_id
+          AND mv.chain = 'base-mainnet'
+          AND mv.source_family = 'basenames_base_primary'
+        "#,
+    )
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1)
+    .execute(database.pool())
+    .await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err(
+            "overlapping replay target that does not cover the reviewed range must stop dry-run",
+        );
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_reverse_claim/basenames_base_primary"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_replay_active_guard_uses_pair_granularity_not_log_address() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_logs
+        SET emitting_address = '0x000000000000000000000000000000000000dead'
+        WHERE chain_id = 'base-mainnet'
+          AND transaction_hash = '0xtx-target'
+          AND log_index = 9
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    assert_eq!(plan.counts.normalized_events, 6);
+    assert_eq!(plan.active_replay_target_snapshot.len(), 5);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_refuses_active_family_without_replay_target_before_delete() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -1687,6 +1829,53 @@ fn expected_from_plan(
             &plan.active_manifest_snapshot,
         )?),
     })
+}
+
+fn scope_rule_pair_set() -> BTreeSet<(String, String, String)> {
+    base_normalized_rederive_scope_rules()
+        .iter()
+        .flat_map(|rule| {
+            rule.derivation_kinds
+                .iter()
+                .flat_map(move |derivation_kind| {
+                    rule.source_families.iter().map(move |source_family| {
+                        (
+                            rule.adapter.to_owned(),
+                            (*derivation_kind).to_owned(),
+                            (*source_family).to_owned(),
+                        )
+                    })
+                })
+        })
+        .collect()
+}
+
+fn delete_predicate_pair_set() -> BTreeSet<(String, String, String)> {
+    let mut pairs = BTreeSet::new();
+    for source_family in reverse_claim_source_families() {
+        pairs.insert((
+            BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER.to_owned(),
+            reverse_claim_derivation_kind(),
+            source_family,
+        ));
+    }
+    for derivation_kind in subregistry_derivation_kinds() {
+        for source_family in subregistry_source_families() {
+            pairs.insert((
+                BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER.to_owned(),
+                derivation_kind.clone(),
+                source_family,
+            ));
+        }
+    }
+    for source_family in unwrapped_authority_source_families() {
+        pairs.insert((
+            BASE_NORMALIZED_REDERIVE_ADAPTER.to_owned(),
+            unwrapped_authority_derivation_kind(),
+            source_family,
+        ));
+    }
+    pairs
 }
 
 async fn seed_manifests(pool: &PgPool) -> Result<()> {

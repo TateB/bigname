@@ -387,7 +387,7 @@ fn cursor_census_rows(
 fn raw_fact_completeness_sql() -> &'static str {
     r#"
     WITH scoped_events AS (
-        SELECT *
+        SELECT chain_id, block_hash, transaction_hash, log_index
         FROM normalized_events
         WHERE chain_id = 'base-mainnet'
           AND block_number BETWEEN 17571485 AND $1
@@ -399,10 +399,14 @@ fn raw_fact_completeness_sql() -> &'static str {
           )
     ),
     log_derived AS (
-        SELECT * FROM scoped_events WHERE log_index IS NOT NULL
+        SELECT chain_id, block_hash, transaction_hash, log_index
+        FROM scoped_events
+        WHERE log_index IS NOT NULL
     ),
     boundary_events AS (
-        SELECT * FROM scoped_events WHERE log_index IS NULL
+        SELECT chain_id, block_hash
+        FROM scoped_events
+        WHERE log_index IS NULL
     ),
     canonical_raw_log_bounds AS (
         SELECT MIN(raw_logs.block_number)::BIGINT AS min_block_number,

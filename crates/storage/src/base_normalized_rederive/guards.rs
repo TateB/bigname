@@ -145,11 +145,8 @@ fn ensure_inactive_delete_scope_pairs_empty(rows: Vec<sqlx::postgres::PgRow>) ->
             let derivation_kind: String = row.get("derivation_kind");
             let source_family: String = row.get("source_family");
             let replay_adapter: Option<String> = row.get("replay_adapter");
-            let row_count: i64 = row.get("row_count");
-            let min_block_number: i64 = row.get("min_block_number");
-            let max_block_number: i64 = row.get("max_block_number");
             format!(
-                "{derivation_kind}/{source_family} adapter={} rows={row_count} blocks={min_block_number}..={max_block_number}",
+                "{derivation_kind}/{source_family} adapter={}",
                 replay_adapter.unwrap_or_else(|| "<unmapped>".to_owned())
             )
         })
@@ -375,35 +372,44 @@ fn canonical_raw_log_floor_sql() -> &'static str {
     "#
 }
 
-fn inactive_delete_scope_pairs_sql() -> &'static str {
+pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
     r#"
-    WITH scoped_events AS (
+    WITH scope_rule_pairs AS (
         SELECT
-            normalized_event_id,
+            $2::TEXT AS derivation_kind,
+            source_family,
+            'ens_v1_reverse_claim'::TEXT AS replay_adapter
+        FROM unnest($3::TEXT[]) AS source_families(source_family)
+
+        UNION ALL
+
+        SELECT
             derivation_kind,
             source_family,
-            block_number,
-            block_hash,
-            transaction_hash,
-            log_index,
-            CASE
-                WHEN derivation_kind = $2 AND source_family = ANY($3::TEXT[])
-                    THEN 'ens_v1_reverse_claim'
-                WHEN derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[])
-                    THEN 'ens_v1_subregistry_discovery'
-                WHEN derivation_kind = $6 AND source_family = ANY($7::TEXT[])
-                    THEN 'ens_v1_unwrapped_authority'
-                ELSE NULL
-            END AS replay_adapter
-        FROM normalized_events
-        WHERE chain_id = 'base-mainnet'
-          AND block_number BETWEEN 17571485 AND $1
-          AND block_hash IS NOT NULL
-          AND (
-              (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
-              OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
-              OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
-          )
+            'ens_v1_subregistry_discovery'::TEXT AS replay_adapter
+        FROM unnest($4::TEXT[]) AS derivation_kinds(derivation_kind)
+        CROSS JOIN unnest($5::TEXT[]) AS source_families(source_family)
+
+        UNION ALL
+
+        SELECT
+            $6::TEXT AS derivation_kind,
+            source_family,
+            'ens_v1_unwrapped_authority'::TEXT AS replay_adapter
+        FROM unnest($7::TEXT[]) AS source_families(source_family)
+    ),
+    delete_scope_pairs AS (
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM scope_rule_pairs pair
+        WHERE EXISTS (
+            SELECT 1
+            FROM normalized_events event
+            WHERE event.chain_id = 'base-mainnet'
+              AND event.block_number BETWEEN 17571485 AND $1
+              AND event.block_hash IS NOT NULL
+              AND event.derivation_kind = pair.derivation_kind
+              AND event.source_family = pair.source_family
+        )
     ),
     manifest_declared_targets AS (
         SELECT
@@ -515,66 +521,51 @@ fn inactive_delete_scope_pairs_sql() -> &'static str {
               OR cia.active_from_block_number <= de.active_to_block_number
           )
     ),
-    scoped_events_with_log AS (
-        SELECT scoped_events.*, LOWER(raw_logs.emitting_address) AS emitting_address
-        FROM scoped_events
-        LEFT JOIN raw_logs
-          ON raw_logs.chain_id = 'base-mainnet'
-         AND raw_logs.block_hash = scoped_events.block_hash
-         AND raw_logs.transaction_hash = scoped_events.transaction_hash
-         AND raw_logs.log_index = scoped_events.log_index
+    adapter_targets AS (
+        SELECT
+            'ens_v1_reverse_claim'::TEXT AS replay_adapter,
+            source_family,
+            from_block,
+            to_block
+        FROM manifest_declared_targets
+        WHERE chain = 'base-mainnet'
+          AND source_family = ANY($3::TEXT[])
+
+        UNION
+
+        SELECT
+            'ens_v1_subregistry_discovery'::TEXT AS replay_adapter,
+            source_family,
+            from_block,
+            to_block
+        FROM watched_targets
+        WHERE chain = 'base-mainnet'
+          AND source_family = ANY($5::TEXT[])
+
+        UNION
+
+        SELECT
+            'ens_v1_unwrapped_authority'::TEXT AS replay_adapter,
+            source_family,
+            from_block,
+            to_block
+        FROM watched_targets
+        WHERE chain = 'base-mainnet'
+          AND source_family = ANY($7::TEXT[])
     ),
-    uncovered_events AS (
-        SELECT *
-        FROM scoped_events_with_log event
-        WHERE NOT (
-            (
-                event.replay_adapter = 'ens_v1_reverse_claim'
-                AND EXISTS (
-                    SELECT 1
-                    FROM manifest_declared_targets target
-                    WHERE target.chain = 'base-mainnet'
-                      AND target.source_family = event.source_family
-                      AND target.from_block <= event.block_number
-                      AND event.block_number <= target.to_block
-                      AND (
-                          event.log_index IS NULL
-                          OR event.emitting_address IS NULL
-                          OR target.address = event.emitting_address
-                      )
-                )
-            )
-            OR (
-                event.replay_adapter IN (
-                    'ens_v1_subregistry_discovery',
-                    'ens_v1_unwrapped_authority'
-                )
-                AND EXISTS (
-                    SELECT 1
-                    FROM watched_targets target
-                    WHERE target.chain = 'base-mainnet'
-                      AND target.source_family = event.source_family
-                      AND target.from_block <= event.block_number
-                      AND event.block_number <= target.to_block
-                      AND (
-                          event.log_index IS NULL
-                          OR event.emitting_address IS NULL
-                          OR target.address = event.emitting_address
-                      )
-                )
-            )
-        )
+    active_replay_pairs AS (
+        SELECT DISTINCT replay_adapter, source_family
+        FROM adapter_targets
+        WHERE from_block <= 17571485
+          AND to_block >= $1
     )
-    SELECT
-        derivation_kind,
-        source_family,
-        replay_adapter,
-        COUNT(*)::BIGINT AS row_count,
-        MIN(block_number)::BIGINT AS min_block_number,
-        MAX(block_number)::BIGINT AS max_block_number
-    FROM uncovered_events
-    GROUP BY derivation_kind, source_family, replay_adapter
-    ORDER BY derivation_kind, source_family
+    SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+    FROM delete_scope_pairs pair
+    LEFT JOIN active_replay_pairs active
+      ON active.replay_adapter = pair.replay_adapter
+     AND active.source_family = pair.source_family
+    WHERE active.replay_adapter IS NULL
+    ORDER BY pair.derivation_kind, pair.source_family
     "#
 }
 
