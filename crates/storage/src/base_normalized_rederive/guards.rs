@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail, ensure};
 use sqlx::{PgPool, Row};
 
@@ -6,6 +8,12 @@ use super::{
     BaseNormalizedRederiveReplayTargetSnapshot, reverse_claim_derivation_kind,
     reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
     unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
+};
+
+mod emitter;
+
+use emitter::{
+    ensure_delete_scope_emitters_replay_active, ensure_delete_scope_emitters_replay_active_from,
 };
 
 pub(super) async fn ensure_canonical_raw_log_floor(pool: &PgPool) -> Result<()> {
@@ -31,8 +39,9 @@ pub(super) async fn ensure_canonical_raw_log_floor_from(
 pub(super) async fn ensure_delete_scope_replay_active(
     pool: &PgPool,
     replay_target_block: i64,
+    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    let rows = sqlx::query(inactive_delete_scope_pairs_sql())
+    let rows = sqlx::query(delete_scope_pairs_sql())
         .bind(replay_target_block)
         .bind(reverse_claim_derivation_kind())
         .bind(reverse_claim_source_families())
@@ -45,14 +54,26 @@ pub(super) async fn ensure_delete_scope_replay_active(
         .context(
             "failed to validate Base delete-scope source families against active replay manifests",
         )?;
-    ensure_inactive_delete_scope_pairs_empty(rows)
+    let pairs = delete_scope_pairs_from_rows(rows)?;
+    ensure_inactive_delete_scope_pairs_empty(inactive_delete_scope_pairs(
+        &pairs,
+        active_replay_target_snapshot,
+        replay_target_block,
+    ))?;
+    ensure_delete_scope_emitters_replay_active(
+        pool,
+        replay_target_block,
+        active_replay_target_snapshot,
+    )
+    .await
 }
 
 pub(super) async fn ensure_delete_scope_replay_active_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
+    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    let rows = sqlx::query(inactive_delete_scope_pairs_sql())
+    let rows = sqlx::query(delete_scope_pairs_sql())
         .bind(replay_target_block)
         .bind(reverse_claim_derivation_kind())
         .bind(reverse_claim_source_families())
@@ -65,7 +86,18 @@ pub(super) async fn ensure_delete_scope_replay_active_from(
         .context(
             "failed to validate Base delete-scope source families against active replay manifests",
         )?;
-    ensure_inactive_delete_scope_pairs_empty(rows)
+    let pairs = delete_scope_pairs_from_rows(rows)?;
+    ensure_inactive_delete_scope_pairs_empty(inactive_delete_scope_pairs(
+        &pairs,
+        active_replay_target_snapshot,
+        replay_target_block,
+    ))?;
+    ensure_delete_scope_emitters_replay_active_from(
+        transaction,
+        replay_target_block,
+        active_replay_target_snapshot,
+    )
+    .await
 }
 
 pub(super) async fn load_active_replay_target_snapshot(
@@ -134,20 +166,26 @@ pub(super) async fn ensure_no_affected_rows_above_raw_log_head_from(
     ensure_no_rows_above_raw_log_head(canonical_raw_log_head, count)
 }
 
-fn ensure_inactive_delete_scope_pairs_empty(rows: Vec<sqlx::postgres::PgRow>) -> Result<()> {
-    if rows.is_empty() {
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DeleteScopePair {
+    derivation_kind: String,
+    source_family: String,
+    replay_adapter: String,
+}
+
+fn ensure_inactive_delete_scope_pairs_empty(missing_pairs: Vec<DeleteScopePair>) -> Result<()> {
+    if missing_pairs.is_empty() {
         return Ok(());
     }
 
-    let missing = rows
+    let missing = missing_pairs
         .into_iter()
-        .map(|row| {
-            let derivation_kind: String = row.get("derivation_kind");
-            let source_family: String = row.get("source_family");
-            let replay_adapter: Option<String> = row.get("replay_adapter");
+        .map(|pair| {
             format!(
                 "{derivation_kind}/{source_family} adapter={}",
-                replay_adapter.unwrap_or_else(|| "<unmapped>".to_owned())
+                pair.replay_adapter,
+                derivation_kind = pair.derivation_kind,
+                source_family = pair.source_family,
             )
         })
         .collect::<Vec<_>>();
@@ -155,6 +193,46 @@ fn ensure_inactive_delete_scope_pairs_empty(rows: Vec<sqlx::postgres::PgRow>) ->
         "Base normalized-event rederive delete scope contains rows current full-closure replay will not re-emit: {}",
         missing.join(", ")
     );
+}
+
+fn delete_scope_pairs_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<DeleteScopePair>> {
+    rows.into_iter()
+        .map(|row| {
+            Ok(DeleteScopePair {
+                derivation_kind: row.try_get("derivation_kind")?,
+                source_family: row.try_get("source_family")?,
+                replay_adapter: row.try_get("replay_adapter")?,
+            })
+        })
+        .collect()
+}
+
+fn inactive_delete_scope_pairs(
+    delete_scope_pairs: &[DeleteScopePair],
+    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
+    replay_target_block: i64,
+) -> Vec<DeleteScopePair> {
+    let active_pairs = active_replay_target_snapshot
+        .iter()
+        .filter(|target| {
+            target.from_block <= BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
+                && target.to_block >= replay_target_block
+        })
+        .map(|target| {
+            (
+                target.replay_adapter.as_str(),
+                target.source_family.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    delete_scope_pairs
+        .iter()
+        .filter(|pair| {
+            !active_pairs.contains(&(pair.replay_adapter.as_str(), pair.source_family.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 fn ensure_no_rows_above_raw_log_head(canonical_raw_log_head: i64, count: i64) -> Result<()> {
@@ -372,7 +450,7 @@ fn canonical_raw_log_floor_sql() -> &'static str {
     "#
 }
 
-pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
+pub(super) fn delete_scope_pairs_sql() -> &'static str {
     r#"
     WITH scope_rule_pairs AS (
         SELECT
@@ -410,163 +488,16 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
               AND event.derivation_kind = pair.derivation_kind
               AND event.source_family = pair.source_family
         )
-    ),
-    manifest_declared_targets AS (
-        SELECT
-            mv.chain,
-            mv.source_family,
-            LOWER(cia.address) AS address,
-            COALESCE(
-                CASE
-                    WHEN manifest_range.start_block IS NULL THEN cia.active_from_block_number
-                    WHEN cia.active_from_block_number IS NULL THEN manifest_range.start_block
-                    ELSE GREATEST(manifest_range.start_block, cia.active_from_block_number)
-                END,
-                17571485
-            ) AS from_block,
-            COALESCE(cia.active_to_block_number, $1) AS to_block
-        FROM manifest_versions mv
-        JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
-        LEFT JOIN LATERAL (
-            SELECT (entry ->> 'start_block')::BIGINT AS start_block
-            FROM jsonb_array_elements(
-                CASE
-                    WHEN mci.declaration_kind = 'root' THEN mv.manifest_payload -> 'roots'
-                    ELSE mv.manifest_payload -> 'contracts'
-                END
-            ) entry
-            WHERE (
-                    mci.declaration_kind = 'root'
-                    AND entry ->> 'name' = mci.declaration_name
-                )
-               OR (
-                    mci.declaration_kind = 'contract'
-                    AND entry ->> 'role' = mci.declaration_name
-                )
-            ORDER BY start_block NULLS LAST
-            LIMIT 1
-        ) manifest_range ON TRUE
-        JOIN contract_instance_addresses cia
-          ON cia.contract_instance_id = mci.contract_instance_id
-         AND cia.deactivated_at IS NULL
-        WHERE mv.rollout_status = 'active'::manifest_rollout_status
-          AND mv.chain = 'base-mainnet'
-    ),
-    watched_targets AS (
-        SELECT chain, source_family, address, from_block, to_block
-        FROM manifest_declared_targets
-
-        UNION
-
-        SELECT
-            de.chain_id AS chain,
-            COALESCE(target_mv.source_family, mv.source_family) AS source_family,
-            LOWER(cia.address) AS address,
-            COALESCE(
-                CASE
-                    WHEN de.active_from_block_number IS NULL THEN cia.active_from_block_number
-                    WHEN cia.active_from_block_number IS NULL THEN de.active_from_block_number
-                    ELSE GREATEST(de.active_from_block_number, cia.active_from_block_number)
-                END,
-                17571485
-            ) AS from_block,
-            COALESCE(
-                CASE
-                    WHEN de.active_to_block_number IS NULL THEN cia.active_to_block_number
-                    WHEN cia.active_to_block_number IS NULL THEN de.active_to_block_number
-                    ELSE LEAST(de.active_to_block_number, cia.active_to_block_number)
-                END,
-                $1
-            ) AS to_block
-        FROM discovery_edges de
-        JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
-        LEFT JOIN manifest_versions target_mv
-          ON target_mv.rollout_status = 'active'::manifest_rollout_status
-         AND target_mv.namespace = mv.namespace
-         AND target_mv.chain = de.chain_id
-         AND target_mv.deployment_epoch = mv.deployment_epoch
-         AND target_mv.source_family = CASE
-             WHEN de.edge_kind = 'resolver' AND mv.source_family = 'ens_v1_registry_l1'
-                 THEN 'ens_v1_resolver_l1'
-             WHEN de.edge_kind = 'resolver' AND mv.source_family = 'ens_v2_registry_l1'
-                 THEN 'ens_v2_resolver_l1'
-             WHEN de.edge_kind = 'resolver' AND mv.source_family = 'basenames_base_registry'
-                 THEN 'basenames_base_resolver'
-             ELSE NULL
-         END
-        JOIN contract_instance_addresses cia
-          ON cia.contract_instance_id = de.to_contract_instance_id
-         AND cia.deactivated_at IS NULL
-        WHERE mv.rollout_status = 'active'::manifest_rollout_status
-          AND de.chain_id = 'base-mainnet'
-          AND de.deactivated_at IS NULL
-          AND de.edge_kind <> 'migration'
-          AND (
-              de.edge_kind <> 'resolver'
-              OR mv.source_family NOT IN (
-                  'ens_v1_registry_l1',
-                  'ens_v2_registry_l1',
-                  'basenames_base_registry'
-              )
-              OR target_mv.manifest_id IS NOT NULL
-          )
-          AND (
-              de.active_from_block_number IS NULL
-              OR cia.active_to_block_number IS NULL
-              OR de.active_from_block_number <= cia.active_to_block_number
-          )
-          AND (
-              cia.active_from_block_number IS NULL
-              OR de.active_to_block_number IS NULL
-              OR cia.active_from_block_number <= de.active_to_block_number
-          )
-    ),
-    adapter_targets AS (
-        SELECT
-            'ens_v1_reverse_claim'::TEXT AS replay_adapter,
-            source_family,
-            from_block,
-            to_block
-        FROM manifest_declared_targets
-        WHERE chain = 'base-mainnet'
-          AND source_family = ANY($3::TEXT[])
-
-        UNION
-
-        SELECT
-            'ens_v1_subregistry_discovery'::TEXT AS replay_adapter,
-            source_family,
-            from_block,
-            to_block
-        FROM watched_targets
-        WHERE chain = 'base-mainnet'
-          AND source_family = ANY($5::TEXT[])
-
-        UNION
-
-        SELECT
-            'ens_v1_unwrapped_authority'::TEXT AS replay_adapter,
-            source_family,
-            from_block,
-            to_block
-        FROM watched_targets
-        WHERE chain = 'base-mainnet'
-          AND source_family = ANY($7::TEXT[])
-    ),
-    active_replay_pairs AS (
-        SELECT DISTINCT replay_adapter, source_family
-        FROM adapter_targets
-        WHERE from_block <= 17571485
-          AND to_block >= $1
     )
-    SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+    SELECT derivation_kind, source_family, replay_adapter
     FROM delete_scope_pairs pair
-    LEFT JOIN active_replay_pairs active
-      ON active.replay_adapter = pair.replay_adapter
-     AND active.source_family = pair.source_family
-    WHERE active.replay_adapter IS NULL
     ORDER BY pair.derivation_kind, pair.source_family
     "#
+}
+
+#[cfg(test)]
+pub(super) fn orphaned_delete_scope_emitters_sql() -> &'static str {
+    emitter::orphaned_delete_scope_emitters_sql()
 }
 
 fn affected_rows_above_raw_log_head_sql() -> &'static str {

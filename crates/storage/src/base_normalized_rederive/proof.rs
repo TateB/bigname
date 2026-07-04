@@ -1,7 +1,7 @@
 use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveRawFactRangeProof {
@@ -25,18 +25,6 @@ where
     let bytes =
         serde_json::to_vec(value).context("failed to serialize Base rederive digest input")?;
     Ok(format!("keccak256:{}", hex::encode(keccak256(bytes))))
-}
-
-pub(super) async fn load_raw_fact_range_proof(
-    pool: &PgPool,
-    replay_target_block: i64,
-) -> Result<BaseNormalizedRederiveRawFactRangeProof> {
-    let row = sqlx::query(raw_fact_range_proof_sql())
-        .bind(replay_target_block)
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive raw-fact range proof")?;
-    raw_fact_range_proof_from_row(&row)
 }
 
 pub(super) async fn load_raw_fact_range_proof_from(

@@ -208,7 +208,7 @@ async fn prepare_or_resume_run(
 
     refuse_if_other_running_run(&mut transaction, run_id).await?;
     validate_base_deployment_profile_owns_chain_from(&mut transaction, deployment_profile).await?;
-    let (replay_target_block, max_affected_block, replay_target_floor_block) =
+    let (replay_target_block, max_affected_block, replay_target_floor_block, _) =
         resolve_replay_target_block_from(
             &mut transaction,
             deployment_profile,
@@ -216,7 +216,14 @@ async fn prepare_or_resume_run(
         )
         .await
         .context("failed to resolve Base normalized-event rederive replay target")?;
-    ensure_delete_scope_replay_active_from(&mut transaction, replay_target_block).await?;
+    let active_replay_target_snapshot =
+        load_active_replay_target_snapshot_from(&mut transaction, replay_target_block).await?;
+    ensure_delete_scope_replay_active_from(
+        &mut transaction,
+        replay_target_block,
+        &active_replay_target_snapshot,
+    )
+    .await?;
     create_scope_tables(&mut transaction, replay_target_block).await?;
     let plan = load_plan_in_transaction(
         &mut transaction,
@@ -224,6 +231,7 @@ async fn prepare_or_resume_run(
         replay_target_block,
         max_affected_block,
         replay_target_floor_block,
+        active_replay_target_snapshot,
     )
     .await?;
     ensure!(
@@ -357,7 +365,7 @@ async fn rerun_resume_guards(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &RunState,
 ) -> Result<()> {
-    let (target, _, _) = resolve_replay_target_block_from(
+    let (target, _, _, _) = resolve_replay_target_block_from(
         transaction,
         &state.deployment_profile,
         Some(state.replay_target_block),
@@ -386,7 +394,12 @@ async fn rerun_resume_guards(
         state.plan_snapshot.active_manifest_snapshot.len(),
         current_manifest_snapshot.len()
     );
-    ensure_delete_scope_replay_active_from(transaction, state.replay_target_block).await?;
+    ensure_delete_scope_replay_active_from(
+        transaction,
+        state.replay_target_block,
+        &current_replay_target_snapshot,
+    )
+    .await?;
     let current_raw_fact_range_proof =
         load_raw_fact_range_proof_from(transaction, state.replay_target_block).await?;
     ensure!(

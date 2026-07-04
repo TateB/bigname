@@ -11,20 +11,20 @@ mod manifest_snapshot;
 mod profile;
 mod proof;
 mod runtime_guard;
+mod scope;
 
 use batch::execute_base_normalized_rederive_drop_batched;
 pub use batch_plan::{BaseNormalizedRederiveBatchPlan, BaseNormalizedRederiveBatchPlanStep};
 use counts::{
     load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
     load_derivation_kind_census, load_derivation_kind_census_from, load_max_affected_block,
-    load_max_affected_block_from, load_raw_fact_completeness, load_raw_fact_completeness_from,
+    load_max_affected_block_from, load_raw_fact_completeness_from,
     load_reset_replay_cursor_target_block, load_reset_replay_cursor_target_block_from,
 };
 use guards::{
     ensure_canonical_raw_log_floor, ensure_canonical_raw_log_floor_from,
     ensure_delete_scope_replay_active, ensure_no_affected_rows_above_raw_log_head,
     ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot,
-    load_active_replay_target_snapshot_from,
 };
 pub use manifest_snapshot::BaseNormalizedRederiveActiveManifestSnapshot;
 use manifest_snapshot::{load_active_manifest_snapshot, load_active_manifest_snapshot_from};
@@ -32,14 +32,21 @@ use profile::{
     validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
     validate_deployment_profile,
 };
+use proof::load_raw_fact_range_proof_from;
 pub use proof::{BaseNormalizedRederiveRawFactRangeProof, base_normalized_rederive_json_digest};
-use proof::{load_raw_fact_range_proof, load_raw_fact_range_proof_from};
 pub use runtime_guard::{
     base_normalized_rederive_manifest_sync_pending_replay,
     ensure_base_normalized_rederive_replay_manifest_snapshot_current,
     hold_base_normalized_rederive_runtime_shared_lock,
     pending_base_normalized_rederive_replay_target,
     refuse_base_normalized_rederive_manifest_sync_during_pending_replay,
+};
+pub use scope::{BaseNormalizedRederiveScopeRule, base_normalized_rederive_scope_rules};
+use scope::{
+    checkpoint_adapters, current_projection_replay_status_projections, cursor_kinds,
+    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
+    subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 pub const BASE_NORMALIZED_REDERIVE_CHAIN_ID: &str = "base-mainnet";
@@ -60,13 +67,6 @@ pub const DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE: i64 = 100_000;
 
 pub(super) const BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY: &str =
     "bigname:indexer:drop-and-rederive-base-normalized-events:2026-07-03";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BaseNormalizedRederiveScopeRule {
-    pub adapter: &'static str,
-    pub derivation_kinds: &'static [&'static str],
-    pub source_families: &'static [&'static str],
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveDerivationKindCensus {
@@ -131,6 +131,19 @@ pub struct BaseNormalizedRederiveRawFactCompleteness {
 }
 
 impl BaseNormalizedRederiveRawFactCompleteness {
+    fn deferred_to_execute_start(replay_target_block: i64, canonical_raw_log_head: i64) -> Self {
+        Self {
+            replay_target_block,
+            log_derived_event_count: 0,
+            missing_log_derived_raw_fact_count: 0,
+            boundary_event_count: 0,
+            missing_boundary_lineage_count: 0,
+            canonical_raw_log_min_block: None,
+            canonical_raw_log_max_block: None,
+            canonical_raw_log_head_block: Some(canonical_raw_log_head),
+        }
+    }
+
     pub fn is_complete_for_rerun(&self) -> bool {
         self.missing_log_derived_raw_fact_count == 0
             && self.missing_boundary_lineage_count == 0
@@ -155,6 +168,8 @@ pub struct BaseNormalizedRederivePlan {
     pub active_manifest_snapshot: Vec<BaseNormalizedRederiveActiveManifestSnapshot>,
     #[serde(default)]
     pub raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof,
+    #[serde(default)]
+    pub raw_fact_safety_checks_deferred: bool,
     pub cursor_census: BaseNormalizedRederiveCursorCensus,
     pub counts: BaseNormalizedRederiveCounts,
     pub raw_fact_completeness: BaseNormalizedRederiveRawFactCompleteness,
@@ -180,19 +195,27 @@ pub async fn load_base_normalized_rederive_plan(
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
     validate_base_deployment_profile_owns_chain(pool, deployment_profile).await?;
-    let (replay_target_block, max_affected_block, replay_target_floor_block) =
-        resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
-            .await
-            .context("failed to resolve Base normalized-event rederive replay target")?;
-    ensure_delete_scope_replay_active(pool, replay_target_block).await?;
-    let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
+    let (
+        replay_target_block,
+        max_affected_block,
+        replay_target_floor_block,
+        canonical_raw_log_head,
+    ) = resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
+        .await
+        .context("failed to resolve Base normalized-event rederive replay target")?;
     let active_replay_target_snapshot =
         load_active_replay_target_snapshot(pool, replay_target_block).await?;
+    ensure_delete_scope_replay_active(pool, replay_target_block, &active_replay_target_snapshot)
+        .await?;
+    let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
     let active_manifest_snapshot = load_active_manifest_snapshot(pool).await?;
-    let raw_fact_range_proof = load_raw_fact_range_proof(pool, replay_target_block).await?;
     let cursor_census = load_cursor_census(pool, deployment_profile).await?;
     let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
-    let raw_fact_completeness = load_raw_fact_completeness(pool, replay_target_block).await?;
+    let raw_fact_completeness =
+        BaseNormalizedRederiveRawFactCompleteness::deferred_to_execute_start(
+            replay_target_block,
+            canonical_raw_log_head,
+        );
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
         replay_target_block,
@@ -201,7 +224,8 @@ pub async fn load_base_normalized_rederive_plan(
         derivation_kind_census,
         active_replay_target_snapshot,
         active_manifest_snapshot,
-        raw_fact_range_proof,
+        raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof::default(),
+        raw_fact_safety_checks_deferred: true,
         cursor_census,
         counts,
         raw_fact_completeness,
@@ -292,13 +316,12 @@ pub(super) async fn load_plan_in_transaction(
     replay_target_block: i64,
     max_affected_block: Option<i64>,
     replay_target_floor_block: Option<i64>,
+    active_replay_target_snapshot: Vec<BaseNormalizedRederiveReplayTargetSnapshot>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
     validate_base_deployment_profile_owns_chain_from(transaction, deployment_profile).await?;
     let derivation_kind_census =
         load_derivation_kind_census_from(transaction, replay_target_block).await?;
-    let active_replay_target_snapshot =
-        load_active_replay_target_snapshot_from(transaction, replay_target_block).await?;
     let active_manifest_snapshot = load_active_manifest_snapshot_from(transaction).await?;
     let raw_fact_range_proof =
         load_raw_fact_range_proof_from(transaction, replay_target_block).await?;
@@ -315,6 +338,7 @@ pub(super) async fn load_plan_in_transaction(
         active_replay_target_snapshot,
         active_manifest_snapshot,
         raw_fact_range_proof,
+        raw_fact_safety_checks_deferred: false,
         cursor_census,
         counts,
         raw_fact_completeness,
@@ -325,7 +349,7 @@ async fn resolve_replay_target_block(
     pool: &PgPool,
     deployment_profile: &str,
     requested_replay_target_block: Option<i64>,
-) -> Result<(i64, Option<i64>, Option<i64>)> {
+) -> Result<(i64, Option<i64>, Option<i64>, i64)> {
     let head = validate_canonical_raw_log_head(load_canonical_raw_log_head(pool).await?)?;
     ensure_canonical_raw_log_floor(pool).await?;
     ensure_no_affected_rows_above_raw_log_head(pool, head).await?;
@@ -342,6 +366,7 @@ async fn resolve_replay_target_block(
         target,
         max_affected_block,
         target_floor_block(max_affected_block, reset_replay_cursor_target_block),
+        head,
     ))
 }
 
@@ -349,7 +374,7 @@ pub(super) async fn resolve_replay_target_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
     requested_replay_target_block: Option<i64>,
-) -> Result<(i64, Option<i64>, Option<i64>)> {
+) -> Result<(i64, Option<i64>, Option<i64>, i64)> {
     let head =
         validate_canonical_raw_log_head(load_canonical_raw_log_head_from(transaction).await?)?;
     ensure_canonical_raw_log_floor_from(transaction).await?;
@@ -367,6 +392,7 @@ pub(super) async fn resolve_replay_target_block_from(
         target,
         max_affected_block,
         target_floor_block(max_affected_block, reset_replay_cursor_target_block),
+        head,
     ))
 }
 
@@ -479,114 +505,6 @@ fn target_floor_block(
         (None, Some(reset_target)) => Some(reset_target),
         (None, None) => None,
     }
-}
-
-pub fn base_normalized_rederive_scope_rules() -> &'static [BaseNormalizedRederiveScopeRule] {
-    &[
-        BaseNormalizedRederiveScopeRule {
-            adapter: BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
-            derivation_kinds: &[BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND],
-            source_families: &["ens_v1_reverse_l1", "basenames_base_primary"],
-        },
-        BaseNormalizedRederiveScopeRule {
-            adapter: BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-            derivation_kinds: &[
-                BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND,
-                BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND,
-            ],
-            source_families: &["ens_v1_registry_l1", "basenames_base_registry"],
-        },
-        BaseNormalizedRederiveScopeRule {
-            adapter: BASE_NORMALIZED_REDERIVE_ADAPTER,
-            derivation_kinds: &[BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND],
-            source_families: &[
-                "ens_v1_registrar_l1",
-                "ens_v1_registry_l1",
-                "ens_v1_resolver_l1",
-                "ens_v1_wrapper_l1",
-                "basenames_base_registrar",
-                "basenames_base_registry",
-                "basenames_base_resolver",
-            ],
-        },
-    ]
-}
-
-pub(super) fn reverse_claim_derivation_kind() -> String {
-    BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND.to_owned()
-}
-
-pub(super) fn reverse_claim_source_families() -> Vec<String> {
-    vec![
-        "ens_v1_reverse_l1".to_owned(),
-        "basenames_base_primary".to_owned(),
-    ]
-}
-
-pub(super) fn subregistry_derivation_kinds() -> Vec<String> {
-    vec![
-        BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND.to_owned(),
-        BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND.to_owned(),
-    ]
-}
-
-pub(super) fn subregistry_source_families() -> Vec<String> {
-    vec![
-        "ens_v1_registry_l1".to_owned(),
-        "basenames_base_registry".to_owned(),
-    ]
-}
-
-pub(super) fn unwrapped_authority_derivation_kind() -> String {
-    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND.to_owned()
-}
-
-pub(super) fn unwrapped_authority_source_families() -> Vec<String> {
-    vec![
-        "ens_v1_registrar_l1".to_owned(),
-        "ens_v1_registry_l1".to_owned(),
-        "ens_v1_resolver_l1".to_owned(),
-        "ens_v1_wrapper_l1".to_owned(),
-        "basenames_base_registrar".to_owned(),
-        "basenames_base_registry".to_owned(),
-        "basenames_base_resolver".to_owned(),
-    ]
-}
-
-pub(super) fn cursor_kinds() -> Vec<String> {
-    [
-        BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
-        BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-pub(super) fn checkpoint_adapters() -> Vec<String> {
-    [
-        BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
-        BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-        BASE_NORMALIZED_REDERIVE_ADAPTER,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-pub(super) fn current_projection_replay_status_projections() -> Vec<String> {
-    [
-        "address_names_current",
-        "children_current",
-        "name_current",
-        "permissions_current",
-        "primary_names_current",
-        "record_inventory_current",
-        "resolver_current",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
 }
 
 #[cfg(test)]

@@ -33,17 +33,28 @@ fn delete_predicate_pairs_match_scope_rule_pairs() {
 
 #[test]
 fn replay_active_guard_sql_stays_pair_granularity() {
-    let sql = guards::inactive_delete_scope_pairs_sql();
+    let sql = guards::delete_scope_pairs_sql();
     assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("delete_scope_pairs"));
-    assert!(sql.contains("active_replay_pairs"));
-    assert!(sql.contains("WHERE from_block <= 17571485"));
-    assert!(sql.contains("AND to_block >= $1"));
     assert!(sql.contains("WHERE EXISTS"));
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("raw_logs"));
-    assert!(!sql.contains("scoped_events"));
     assert!(!sql.contains("log_index"));
+    assert!(!sql.contains("watched_targets"));
+    assert!(!sql.contains("manifest_declared_targets"));
+}
+
+#[test]
+fn orphaned_emitter_guard_sql_is_bounded_and_uses_active_target_arrays() {
+    let sql = guards::orphaned_delete_scope_emitters_sql();
+    assert!(sql.contains("active_targets"));
+    assert!(sql.contains("JOIN raw_logs raw_log"));
+    assert!(sql.contains("NOT EXISTS"));
+    assert!(sql.contains("LIMIT 10"));
+    assert!(sql.contains("$8::TEXT[]"));
+    assert!(!sql.contains("normalized_event_id"));
+    assert!(!sql.contains("watched_targets"));
+    assert!(!sql.contains("manifest_declared_targets"));
 }
 
 #[test]
@@ -54,6 +65,8 @@ fn base_rederive_scope_index_migration_is_no_transaction() {
         20260704130200,
         20260704130300,
         20260704130400,
+        20260704130500,
+        20260704130600,
     ] {
         let migration = crate::MIGRATOR
             .iter()
@@ -121,9 +134,13 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
             .post_replay_live_adapter_backlog_cursor_rows,
         1
     );
-    assert_eq!(plan.raw_fact_completeness.log_derived_event_count, 2);
-    assert_eq!(plan.raw_fact_completeness.boundary_event_count, 4);
-    assert!(plan.raw_fact_completeness.is_complete_for_rerun());
+    assert!(plan.raw_fact_safety_checks_deferred);
+    assert!(plan.raw_fact_range_proof.is_empty());
+    assert_eq!(
+        plan.raw_fact_completeness.canonical_raw_log_head_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
+    assert!(!plan.raw_fact_completeness.is_complete_for_rerun());
     assert_eq!(
         plan.derivation_kind_census
             .iter()
@@ -1012,7 +1029,7 @@ async fn dry_run_refuses_pair_when_replay_target_does_not_cover_full_range() -> 
 }
 
 #[tokio::test]
-async fn dry_run_replay_active_guard_uses_pair_granularity_not_log_address() -> Result<()> {
+async fn dry_run_refuses_orphaned_emitter_not_in_active_targets() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     sqlx::query(
@@ -1027,10 +1044,13 @@ async fn dry_run_replay_active_guard_uses_pair_granularity_not_log_address() -> 
     .execute(database.pool())
     .await?;
 
-    let plan =
-        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
-    assert_eq!(plan.counts.normalized_events, 6);
-    assert_eq!(plan.active_replay_target_snapshot.len(), 5);
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("dry-run must refuse a scoped log from a non-active emitter");
+    assert!(
+        format!("{error:?}").contains("addresses not in the current active replay target set"),
+        "unexpected error: {error:?}"
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -1574,15 +1594,12 @@ async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()
         plan.replay_target_floor_block,
         Some(FIXTURE_REPLAY_TARGET_BLOCK)
     );
+    assert!(plan.raw_fact_safety_checks_deferred);
     assert_eq!(
-        plan.raw_fact_completeness.canonical_raw_log_min_block,
-        Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
-    );
-    assert_eq!(
-        plan.raw_fact_completeness.canonical_raw_log_max_block,
+        plan.raw_fact_completeness.canonical_raw_log_head_block,
         Some(FIXTURE_REPLAY_TARGET_BLOCK + 10)
     );
-    assert!(plan.raw_fact_completeness.is_complete_for_rerun());
+    assert!(!plan.raw_fact_completeness.is_complete_for_rerun());
 
     database.cleanup().await?;
     Ok(())
@@ -1682,7 +1699,8 @@ async fn dry_run_validates_requested_target_range() -> Result<()> {
         plan.raw_fact_completeness.canonical_raw_log_head_block,
         Some(FIXTURE_REPLAY_TARGET_BLOCK + 10)
     );
-    assert!(plan.raw_fact_completeness.is_complete_for_rerun());
+    assert!(plan.raw_fact_safety_checks_deferred);
+    assert!(!plan.raw_fact_completeness.is_complete_for_rerun());
 
     database.cleanup().await?;
     Ok(())

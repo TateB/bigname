@@ -122,24 +122,6 @@ pub(super) async fn load_cursor_census_from(
     cursor_census_rows(rows)
 }
 
-pub(super) async fn load_raw_fact_completeness(
-    pool: &PgPool,
-    replay_target_block: i64,
-) -> Result<BaseNormalizedRederiveRawFactCompleteness> {
-    let row = sqlx::query(raw_fact_completeness_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive raw-fact completeness")?;
-    raw_fact_completeness_from_row(&row)
-}
-
 pub(super) async fn load_raw_fact_completeness_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
