@@ -235,9 +235,13 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         1
     );
 
-    let cursor = sqlx::query_as::<_, (i64, i64, i64)>(
+    let cursor = sqlx::query_as::<_, (i64, Option<i64>, i64, i64)>(
         r#"
-        SELECT range_start_block_number, next_block_number, target_block_number
+        SELECT
+            range_start_block_number,
+            range_start_floor_block_number,
+            next_block_number,
+            target_block_number
         FROM normalized_replay_cursors
         WHERE deployment_profile = $1
           AND chain_id = 'base-mainnet'
@@ -251,6 +255,7 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         cursor,
         (
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
             FIXTURE_REPLAY_TARGET_BLOCK
         )

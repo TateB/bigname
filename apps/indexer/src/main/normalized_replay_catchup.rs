@@ -110,6 +110,50 @@ pub(crate) async fn ensure_cursor_for_test(
     ))
 }
 
+#[cfg(test)]
+pub(crate) async fn rewind_cursor_for_test(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) -> Result<(i64, i64, i64)> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
+        r#"
+        SELECT
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_replayed_at
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
+    .fetch_one(pool)
+    .await?;
+    let cursor = rewind_cursor_for_newly_observed_older_logs(
+        pool,
+        deployment_profile,
+        chain,
+        NormalizedReplayCursor {
+            range_start_block_number: row.0,
+            next_block_number: row.1,
+            target_block_number: row.2,
+            last_replayed_at: row.3,
+        },
+    )
+    .await?;
+
+    Ok((
+        cursor.range_start_block_number,
+        cursor.next_block_number,
+        cursor.target_block_number,
+    ))
+}
+
 impl NormalizedReplayCatchupConfig {
     pub(crate) fn new(
         deployment_profile: String,

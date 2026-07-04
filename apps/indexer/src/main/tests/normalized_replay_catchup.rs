@@ -513,6 +513,201 @@ async fn normalized_replay_catchup_preserves_latched_closure_target() -> Result<
 }
 
 #[tokio::test]
+async fn normalized_replay_catchup_preserves_correction_cursor_start_floor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let floor = 17_571_485_i64;
+    let target = 46_954_147_i64;
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            range_start_floor_block_number,
+            next_block_number,
+            target_block_number
+        )
+        VALUES ('mainnet', 'base-mainnet', 'raw_fact_normalized_events', $1, $1, $1, $2)
+        "#,
+    )
+    .bind(floor)
+    .bind(target)
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            "base-mainnet",
+            1,
+            target,
+            false,
+        )
+        .await?,
+        (floor, floor, target)
+    );
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            "base-mainnet",
+            1,
+            target + 10,
+            true,
+        )
+        .await?,
+        (floor, floor, target + 10)
+    );
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET next_block_number = target_block_number + 1
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = 'base-mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            "base-mainnet",
+            1,
+            target + 10,
+            false,
+        )
+        .await?,
+        (floor, target + 11, target + 10),
+        "a completed correction cursor must not reopen when the apparent bounds start is below the floor"
+    );
+
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            "ethereum-mainnet",
+            100,
+            200,
+            false,
+        )
+        .await?,
+        (100, 100, 200)
+    );
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            "ethereum-mainnet",
+            50,
+            200,
+            false,
+        )
+        .await?,
+        (50, 50, 200),
+        "normal cursors without a floor must still widen to older retained raw logs"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_rewind_preserves_correction_cursor_start_floor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let floor = 100_i64;
+    let target = 200_i64;
+    let reverse_address = "0x0000000000000000000000000000000000000140";
+    let older_block = provider_block(
+        "0x4040404040404040404040404040404040404040404040404040404040404040",
+        Some("0x3939393939393939393939393939393939393939393939393939393939393939"),
+        50,
+    );
+    let last_replayed_at = OffsetDateTime::now_utc();
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            range_start_floor_block_number,
+            next_block_number,
+            target_block_number,
+            last_replayed_at
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', $2, $2, $2, $3, $4)
+        "#,
+    )
+    .bind(chain)
+    .bind(floor)
+    .bind(target)
+    .bind(last_replayed_at)
+    .execute(database.pool())
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &older_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &older_block,
+        reverse_address,
+        "0x0000000000000000000000000000000000000050",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET observed_at = $1 + INTERVAL '1 second' WHERE chain_id = $2 AND block_hash = $3",
+    )
+    .bind(last_replayed_at)
+    .bind(chain)
+    .bind(&older_block.block_hash)
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        normalized_replay_catchup::rewind_cursor_for_test(database.pool(), "mainnet", chain)
+            .await?,
+        (floor, floor, target),
+        "newly observed raw logs below a correction floor must not rewind the reset cursor"
+    );
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET next_block_number = target_block_number + 1
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = $1
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        normalized_replay_catchup::rewind_cursor_for_test(database.pool(), "mainnet", chain)
+            .await?,
+        (floor, target + 1, target),
+        "newly observed raw logs below a correction floor must not reopen a completed reset cursor"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_chain_has_no_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -576,6 +771,10 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
             chain_id TEXT NOT NULL,
             cursor_kind TEXT NOT NULL,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
+            range_start_floor_block_number BIGINT CHECK (
+                range_start_floor_block_number IS NULL
+                OR range_start_floor_block_number >= 0
+            ),
             next_block_number BIGINT NOT NULL CHECK (next_block_number >= range_start_block_number),
             target_block_number BIGINT NOT NULL CHECK (target_block_number >= range_start_block_number),
             last_completed_block_number BIGINT CHECK (last_completed_block_number IS NULL OR last_completed_block_number >= range_start_block_number),

@@ -199,13 +199,16 @@ affected `current_projection_replay_status` rows,
 `normalized_replay_cursors` row for
 `mainnet/base-mainnet/raw_fact_normalized_events` to
 `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated replay target>`. The final reset revalidates
-that the retained canonical Base raw-log floor is exactly block `17571485`; if
-retained canonical raw logs start earlier, the command refuses to install the
-cursor because the generic closure replay cursor refresh path could otherwise
-widen the start below the delete scope. If the process dies before that final
-reset, replay cursors and projection markers remain untouched and the same
-`--run-id` must be resumed before replay starts.
+`target_block_number = <validated replay target>`, with
+`range_start_floor_block_number = 17571485`. The generic catch-up cursor refresh
+and older-log rewind paths must not move a cursor below a non-null
+`range_start_floor_block_number` or reopen a completed floored cursor merely
+because older retained raw logs exist below that floor; ordinary cursors leave
+this column NULL and retain their normal ability to widen when older retained raw
+logs appear. The final reset still revalidates that the retained canonical Base
+raw-log floor is exactly block `17571485` as defense in depth. If the process
+dies before that final reset, replay cursors and projection markers remain
+untouched and the same `--run-id` must be resumed before replay starts.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.

@@ -612,10 +612,13 @@ held advisory lock connection cannot starve the writer work.
 7. Run only the catch-up indexer with normalized replay catch-up enabled and
    `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
    replay from block `17571485` through the reviewed target block. Keep the API
-   drained. The correction command has cleared any stale
-   `post_replay_live_adapter_backlog` cursor for the same Base deployment. This
-   mode can re-enable live adapter sync after replay catches up, so do not let
-   it overlap the projection rebuild:
+   drained. The correction command pins the reset cursor's
+   `range_start_floor_block_number` to `17571485`, so catch-up cursor refresh
+   cannot widen this correction replay below the delete boundary or reopen a
+   completed reset from older retained raw logs below that floor. It also clears
+   any stale `post_replay_live_adapter_backlog` cursor for the same Base
+   deployment. This mode can re-enable live adapter sync after replay catches up,
+   so do not let it overlap the projection rebuild:
 
    ```sh
    docker compose --env-file .env.server \

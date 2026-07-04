@@ -113,10 +113,11 @@ async fn reset_replay_cursors(
             chain_id,
             cursor_kind,
             range_start_block_number,
+            range_start_floor_block_number,
             next_block_number,
             target_block_number
         )
-        VALUES ($1, $2, $3, $4, $4, $5)
+        VALUES ($1, $2, $3, $4, $4, $4, $5)
         "#,
     )
     .bind(deployment_profile)
