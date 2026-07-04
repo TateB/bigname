@@ -435,6 +435,8 @@ pub(crate) struct DropAndRederiveBaseNormalizedEventsArgs {
     pub(crate) execute: bool,
     #[arg(long = "confirm-ratified-2026-07-03", requires = "execute")]
     pub(crate) confirm_ratified_2026_07_03: bool,
+    #[arg(long = "replay-target-block")]
+    pub(crate) replay_target_block: Option<i64>,
     #[arg(long = "expected-normalized-events")]
     pub(crate) expected_normalized_events: Option<i64>,
     #[arg(long = "expected-resources")]

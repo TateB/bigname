@@ -1,10 +1,12 @@
 use anyhow::{Result, bail};
 use bigname_storage::{
-    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
-    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
-    BaseNormalizedRederiveCounts, BaseNormalizedRederiveExpectedCounts, BaseNormalizedRederivePlan,
-    execute_base_normalized_rederive_drop, load_base_normalized_rederive_plan,
+    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+    BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+    BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+    BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER, BaseNormalizedRederiveCounts,
+    BaseNormalizedRederiveExpectedCounts, BaseNormalizedRederivePlan,
+    base_normalized_rederive_scope_rules, execute_base_normalized_rederive_drop,
+    load_base_normalized_rederive_plan,
 };
 use tracing::info;
 
@@ -16,6 +18,9 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     if args.execute && !args.confirm_ratified_2026_07_03 {
         bail!("--execute requires --confirm-ratified-2026-07-03");
     }
+    if args.execute && args.replay_target_block.is_none() {
+        bail!("--execute requires --replay-target-block from reviewed dry-run output");
+    }
     let expected_counts = expected_counts_from_args(&args)?;
     if args.execute && expected_counts.is_none() {
         bail!("--execute requires every --expected-* count emitted by dry-run");
@@ -23,7 +28,12 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     let pool = bigname_storage::connect(&args.database).await?;
     let dry_run = !args.execute;
 
-    let plan = load_base_normalized_rederive_plan(&pool, &args.deployment_profile).await?;
+    let plan = load_base_normalized_rederive_plan(
+        &pool,
+        &args.deployment_profile,
+        args.replay_target_block,
+    )
+    .await?;
     print!("{}", render_plan(&plan, dry_run));
     log_plan(&plan, dry_run);
 
@@ -34,6 +44,7 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     let outcome = execute_base_normalized_rederive_drop(
         &pool,
         &args.deployment_profile,
+        args.replay_target_block,
         BaseNormalizedRederiveExpectedCounts {
             counts: expected_counts.expect("execute path requires expected counts"),
         },
@@ -54,7 +65,7 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
         deleted_projection_normalized_event_changes =
             outcome.deleted.projection_normalized_event_changes,
         reset_replay_start_block = BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-        reset_replay_target_block = BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
+        reset_replay_target_block = outcome.plan.replay_target_block,
         "Base normalized-event drop-and-rederive corpus correction completed"
     );
     Ok(())
@@ -117,43 +128,70 @@ fn render_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) -> String {
         if dry_run { "dry-run" } else { "execute" }
     ));
     output.push_str(&format!(
-        "scope: chain_id={} source_manifest_ids=[1,2,4,5] block_range={}..{} exclude_derivation_kind=[manifest_sync,manifest_alert]\n",
+        "scope: chain_id={} block_range={}..{} block_hash_not_null=true rederivable_rules={}\n",
         BASE_NORMALIZED_REDERIVE_CHAIN_ID,
         BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-        BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK
+        plan.replay_target_block,
+        render_scope_rules()
     ));
     output.push_str(&format!(
-        "replay_reset: deployment_profile={} cursor_kind={} checkpoint_adapters=[{},{}] next_block={} target_block={}\n",
+        "identity_scope: chain_id={} provenance.adapter={}\n",
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_ADAPTER
+    ));
+    output.push_str(&format!(
+        "replay_reset: deployment_profile={} reset_cursor={} clear_cursor={} checkpoint_adapters=[{},{},{}] next_block={} target_block={}\n",
         plan.deployment_profile,
         BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+        BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+        BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
         BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
         BASE_NORMALIZED_REDERIVE_ADAPTER,
         BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-        BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK
+        plan.replay_target_block
     ));
-    output.push_str("manifest_confirmation:\n");
-    for manifest in &plan.manifests {
+    output.push_str("derivation_kind_partition:\n");
+    for census in plan
+        .derivation_kind_census
+        .iter()
+        .filter(|census| census.rederivable)
+    {
         output.push_str(&format!(
-            "  {} {} namespace={} chain={} rollout={} file={}\n",
-            manifest.manifest_id,
-            manifest.source_family,
-            manifest.namespace,
-            manifest.chain,
-            manifest.rollout_status,
-            manifest.file_path
+            "  delete derivation_kind={} source_family={} rows={} min_block={:?} max_block={:?}\n",
+            census.derivation_kind,
+            census.source_family,
+            census.row_count,
+            census.min_block_number,
+            census.max_block_number
         ));
     }
-    output.push_str("family_census:\n");
-    for family in &plan.family_census {
+    let mut kept_any = false;
+    for census in plan
+        .derivation_kind_census
+        .iter()
+        .filter(|census| !census.rederivable)
+    {
+        kept_any = true;
         output.push_str(&format!(
-            "  {} {} rows={} min_block={:?} max_block={:?}\n",
-            family.source_manifest_id,
-            family.source_family,
-            family.row_count,
-            family.min_block_number,
-            family.max_block_number
+            "  keep derivation_kind={} source_family={} rows={} min_block={:?} max_block={:?}\n",
+            census.derivation_kind,
+            census.source_family,
+            census.row_count,
+            census.min_block_number,
+            census.max_block_number
         ));
     }
+    if !kept_any {
+        output.push_str("  keep none rows=0\n");
+    }
+    output.push_str(&format!(
+        "cursor_census: {}={} {}={} expected_replay_cursor_rows={}\n",
+        BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+        plan.cursor_census.raw_fact_replay_cursor_rows,
+        BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+        plan.cursor_census
+            .post_replay_live_adapter_backlog_cursor_rows,
+        plan.cursor_census.total_cursor_rows()
+    ));
     output.push_str(&format!("delete_census: {:?}\n", plan.counts));
     output.push_str(&format!(
         "raw_fact_completeness: {:?} complete_for_execute={}\n",
@@ -161,6 +199,21 @@ fn render_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) -> String {
         plan.raw_fact_completeness.is_complete_for_rerun()
     ));
     output
+}
+
+fn render_scope_rules() -> String {
+    base_normalized_rederive_scope_rules()
+        .iter()
+        .map(|rule| {
+            format!(
+                "{}:derivation_kinds=[{}]:source_families=[{}]",
+                rule.adapter,
+                rule.derivation_kinds.join(","),
+                rule.source_families.join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn log_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) {
@@ -176,22 +229,28 @@ fn log_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) {
         name_surfaces = plan.counts.name_surfaces,
         surface_bindings = plan.counts.surface_bindings,
         projection_normalized_event_changes = plan.counts.projection_normalized_event_changes,
+        replay_cursor_rows = plan.counts.replay_cursor_rows,
+        replay_raw_cursor_rows = plan.cursor_census.raw_fact_replay_cursor_rows,
+        replay_backlog_cursor_rows = plan
+            .cursor_census
+            .post_replay_live_adapter_backlog_cursor_rows,
         replay_start_block = BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-        replay_target_block = BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
+        replay_target_block = plan.replay_target_block,
         raw_fact_complete = plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event drop-and-rederive census"
     );
-    for family in &plan.family_census {
+    for census in &plan.derivation_kind_census {
         info!(
             service = "indexer",
             command = "drop-and-rederive-base-normalized-events",
             dry_run,
-            source_manifest_id = family.source_manifest_id,
-            source_family = %family.source_family,
-            row_count = family.row_count,
-            min_block = family.min_block_number,
-            max_block = family.max_block_number,
-            "Base normalized-event drop-and-rederive family census"
+            derivation_kind = %census.derivation_kind,
+            source_family = %census.source_family,
+            row_count = census.row_count,
+            min_block = census.min_block_number,
+            max_block = census.max_block_number,
+            rederivable = census.rederivable,
+            "Base normalized-event drop-and-rederive derivation-kind census"
         );
     }
 }
@@ -208,6 +267,7 @@ mod tests {
             dry_run: false,
             execute: true,
             confirm_ratified_2026_07_03: true,
+            replay_target_block: Some(1),
             expected_normalized_events: count,
             expected_resources: count,
             expected_token_lineages: count,
@@ -251,5 +311,76 @@ mod tests {
             .await
             .expect_err("execute must require reviewed dry-run counts before connecting");
         assert!(format!("{error:?}").contains("--execute requires every --expected-* count"));
+    }
+
+    #[tokio::test]
+    async fn execute_requires_reviewed_replay_target_block() {
+        let mut args = args_with_expected(Some(1));
+        args.replay_target_block = None;
+
+        let error = drop_and_rederive_base_normalized_events_command(args)
+            .await
+            .expect_err("execute must require reviewed dry-run target before connecting");
+        assert!(format!("{error:?}").contains("--execute requires --replay-target-block"));
+    }
+
+    #[test]
+    fn render_plan_reports_source_family_partition_and_both_cursors() {
+        let target_block = BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 42;
+        let plan = BaseNormalizedRederivePlan {
+            deployment_profile: "mainnet".to_owned(),
+            replay_target_block: target_block,
+            derivation_kind_census: vec![
+                bigname_storage::BaseNormalizedRederiveDerivationKindCensus {
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    source_family: "basenames_base_registry".to_owned(),
+                    row_count: 56_040_812,
+                    min_block_number: Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
+                    max_block_number: Some(target_block),
+                    rederivable: true,
+                },
+                bigname_storage::BaseNormalizedRederiveDerivationKindCensus {
+                    derivation_kind: "raw_log_preimage_observation".to_owned(),
+                    source_family: "basenames_l1_compat".to_owned(),
+                    row_count: 64,
+                    min_block_number: Some(46_923_016),
+                    max_block_number: Some(46_927_167),
+                    rederivable: false,
+                },
+            ],
+            cursor_census: bigname_storage::BaseNormalizedRederiveCursorCensus {
+                raw_fact_replay_cursor_rows: 1,
+                post_replay_live_adapter_backlog_cursor_rows: 1,
+            },
+            counts: BaseNormalizedRederiveCounts {
+                normalized_events: 56_040_812,
+                replay_cursor_rows: 2,
+                ..BaseNormalizedRederiveCounts::default()
+            },
+            raw_fact_completeness: bigname_storage::BaseNormalizedRederiveRawFactCompleteness {
+                replay_target_block: target_block,
+                log_derived_event_count: 44_000_000,
+                missing_log_derived_raw_fact_count: 0,
+                boundary_event_count: 12_000_000,
+                missing_boundary_lineage_count: 0,
+                canonical_raw_log_min_block: Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
+                canonical_raw_log_max_block: Some(target_block),
+                canonical_raw_log_head_block: Some(target_block),
+            },
+        };
+
+        let output = render_plan(&plan, true);
+
+        assert!(output.contains("source_families=[ens_v1_reverse_l1,basenames_base_primary]"));
+        assert!(
+            output.contains(
+                "delete derivation_kind=ens_v1_unwrapped_authority source_family=basenames_base_registry"
+            )
+        );
+        assert!(output.contains(
+            "keep derivation_kind=raw_log_preimage_observation source_family=basenames_l1_compat"
+        ));
+        assert!(output.contains("clear_cursor=post_replay_live_adapter_backlog"));
+        assert!(output.contains(&format!("target_block={target_block}")));
     }
 }

@@ -75,14 +75,20 @@ pub use backfill_jobs::{
     load_backfill_ranges, reserve_backfill_range,
 };
 pub use base_normalized_rederive::{
-    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
-    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
-    BaseNormalizedRederiveCounts, BaseNormalizedRederiveExecutionOutcome,
-    BaseNormalizedRederiveExpectedCounts, BaseNormalizedRederiveFamilyCensus,
-    BaseNormalizedRederiveManifest, BaseNormalizedRederivePlan,
-    BaseNormalizedRederiveRawFactCompleteness, execute_base_normalized_rederive_drop,
-    hold_base_normalized_rederive_runtime_shared_lock, load_base_normalized_rederive_plan,
+    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+    BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+    BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
+    BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND,
+    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
+    BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND,
+    BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND,
+    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND, BaseNormalizedRederiveCounts,
+    BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
+    BaseNormalizedRederiveExecutionOutcome, BaseNormalizedRederiveExpectedCounts,
+    BaseNormalizedRederivePlan, BaseNormalizedRederiveRawFactCompleteness,
+    BaseNormalizedRederiveScopeRule, base_normalized_rederive_scope_rules,
+    execute_base_normalized_rederive_drop, hold_base_normalized_rederive_runtime_shared_lock,
+    load_base_normalized_rederive_plan,
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,

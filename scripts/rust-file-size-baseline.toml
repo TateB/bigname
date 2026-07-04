@@ -41,11 +41,6 @@ loc = 632
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
-path = "apps/indexer/src/main/reconciliation/replay/classification.rs"
-loc = 604
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
 loc = 602
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

@@ -2,18 +2,31 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
 use super::{
-    BaseNormalizedRederiveCounts, BaseNormalizedRederiveFamilyCensus,
-    BaseNormalizedRederiveRawFactCompleteness, checkpoint_adapters, expected_manifest_ids,
+    BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BaseNormalizedRederiveCounts,
+    BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
+    BaseNormalizedRederiveRawFactCompleteness, checkpoint_adapters, cursor_kinds,
+    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
+    subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 pub(super) async fn load_counts(
     pool: &PgPool,
     deployment_profile: &str,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveCounts> {
     let row = sqlx::query(counts_sql())
-        .bind(expected_manifest_ids())
         .bind(deployment_profile)
         .bind(checkpoint_adapters())
+        .bind(cursor_kinds())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_one(pool)
         .await
         .context("failed to load Base normalized-event rederive census")?;
@@ -23,44 +36,101 @@ pub(super) async fn load_counts(
 pub(super) async fn load_counts_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveCounts> {
     let row = sqlx::query(counts_sql())
-        .bind(expected_manifest_ids())
         .bind(deployment_profile)
         .bind(checkpoint_adapters())
+        .bind(cursor_kinds())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_one(&mut **transaction)
         .await
         .context("failed to load Base normalized-event rederive census")?;
     counts_from_row(&row)
 }
 
-pub(super) async fn load_family_census(
+pub(super) async fn load_derivation_kind_census(
     pool: &PgPool,
-) -> Result<Vec<BaseNormalizedRederiveFamilyCensus>> {
-    let rows = sqlx::query(family_census_sql())
-        .bind(expected_manifest_ids())
+    replay_target_block: i64,
+) -> Result<Vec<BaseNormalizedRederiveDerivationKindCensus>> {
+    let rows = sqlx::query(derivation_kind_census_sql())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_all(pool)
         .await
-        .context("failed to load Base normalized-event rederive family census")?;
-    family_census_rows(rows)
+        .context("failed to load Base normalized-event rederive derivation-kind census")?;
+    derivation_kind_census_rows(rows)
 }
 
-pub(super) async fn load_family_census_from(
+pub(super) async fn load_derivation_kind_census_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<Vec<BaseNormalizedRederiveFamilyCensus>> {
-    let rows = sqlx::query(family_census_sql())
-        .bind(expected_manifest_ids())
+    replay_target_block: i64,
+) -> Result<Vec<BaseNormalizedRederiveDerivationKindCensus>> {
+    let rows = sqlx::query(derivation_kind_census_sql())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_all(&mut **transaction)
         .await
-        .context("failed to load Base normalized-event rederive family census")?;
-    family_census_rows(rows)
+        .context("failed to load Base normalized-event rederive derivation-kind census")?;
+    derivation_kind_census_rows(rows)
+}
+
+pub(super) async fn load_cursor_census(
+    pool: &PgPool,
+    deployment_profile: &str,
+) -> Result<BaseNormalizedRederiveCursorCensus> {
+    let rows = sqlx::query(cursor_census_sql())
+        .bind(deployment_profile)
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .bind(cursor_kinds())
+        .fetch_all(pool)
+        .await
+        .context("failed to load Base normalized-event rederive cursor census")?;
+    cursor_census_rows(rows)
+}
+
+pub(super) async fn load_cursor_census_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<BaseNormalizedRederiveCursorCensus> {
+    let rows = sqlx::query(cursor_census_sql())
+        .bind(deployment_profile)
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .bind(cursor_kinds())
+        .fetch_all(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive cursor census")?;
+    cursor_census_rows(rows)
 }
 
 pub(super) async fn load_raw_fact_completeness(
     pool: &PgPool,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveRawFactCompleteness> {
     let row = sqlx::query(raw_fact_completeness_sql())
-        .bind(expected_manifest_ids())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_one(pool)
         .await
         .context("failed to load Base normalized-event rederive raw-fact completeness")?;
@@ -69,9 +139,16 @@ pub(super) async fn load_raw_fact_completeness(
 
 pub(super) async fn load_raw_fact_completeness_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveRawFactCompleteness> {
     let row = sqlx::query(raw_fact_completeness_sql())
-        .bind(expected_manifest_ids())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
         .fetch_one(&mut **transaction)
         .await
         .context("failed to load Base normalized-event rederive raw-fact completeness")?;
@@ -85,10 +162,13 @@ fn counts_sql() -> &'static str {
         SELECT normalized_event_id
         FROM normalized_events
         WHERE chain_id = 'base-mainnet'
-          AND source_manifest_id = ANY($1::BIGINT[])
-          AND block_number BETWEEN 17571485 AND 46954147
+          AND block_number BETWEEN 17571485 AND $4
           AND block_hash IS NOT NULL
-          AND derivation_kind NOT IN ('manifest_sync', 'manifest_alert')
+          AND (
+              (derivation_kind = $5 AND source_family = ANY($6::TEXT[]))
+              OR (derivation_kind = ANY($7::TEXT[]) AND source_family = ANY($8::TEXT[]))
+              OR (derivation_kind = $9 AND source_family = ANY($10::TEXT[]))
+          )
     ),
     scoped_resources AS (
         SELECT resource_id
@@ -140,9 +220,9 @@ fn counts_sql() -> &'static str {
         (SELECT COUNT(*)::BIGINT FROM permissions_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS permissions_current,
         (SELECT COUNT(*)::BIGINT FROM record_inventory_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS record_inventory_current,
         (SELECT COUNT(*)::BIGINT FROM projection_normalized_event_changes p WHERE EXISTS (SELECT 1 FROM scoped_events s WHERE s.normalized_event_id = p.normalized_event_id)) AS projection_normalized_event_changes,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $2 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events') AS replay_cursor_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $2 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($3::TEXT[])) AS adapter_checkpoint_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $2 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($3::TEXT[])) AS adapter_checkpoint_item_rows
+        (SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[])) AS replay_cursor_rows,
+        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_rows,
+        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_item_rows
     FROM (SELECT 1) AS one
     "#
 }
@@ -166,41 +246,75 @@ fn counts_from_row(row: &sqlx::postgres::PgRow) -> Result<BaseNormalizedRederive
     })
 }
 
-fn family_census_sql() -> &'static str {
+fn derivation_kind_census_sql() -> &'static str {
     r#"
     SELECT
-        mv.manifest_id AS source_manifest_id,
-        mv.source_family,
-        COUNT(ne.normalized_event_id)::BIGINT AS row_count,
-        MIN(ne.block_number)::BIGINT AS min_block_number,
-        MAX(ne.block_number)::BIGINT AS max_block_number
-    FROM manifest_versions mv
-    LEFT JOIN normalized_events ne
-      ON ne.source_manifest_id = mv.manifest_id
-     AND ne.chain_id = 'base-mainnet'
-     AND ne.block_number BETWEEN 17571485 AND 46954147
-     AND ne.block_hash IS NOT NULL
-     AND ne.derivation_kind NOT IN ('manifest_sync', 'manifest_alert')
-    WHERE mv.manifest_id = ANY($1::BIGINT[])
-    GROUP BY mv.manifest_id, mv.source_family
-    ORDER BY mv.manifest_id
+        derivation_kind,
+        source_family,
+        COUNT(*)::BIGINT AS row_count,
+        MIN(block_number)::BIGINT AS min_block_number,
+        MAX(block_number)::BIGINT AS max_block_number,
+        (
+            (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
+            OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
+            OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
+        ) AS rederivable
+    FROM normalized_events
+    WHERE chain_id = 'base-mainnet'
+      AND block_number BETWEEN 17571485 AND $1
+      AND block_hash IS NOT NULL
+    GROUP BY derivation_kind, source_family, rederivable
+    ORDER BY rederivable DESC, derivation_kind, source_family
     "#
 }
 
-fn family_census_rows(
+fn derivation_kind_census_rows(
     rows: Vec<sqlx::postgres::PgRow>,
-) -> Result<Vec<BaseNormalizedRederiveFamilyCensus>> {
+) -> Result<Vec<BaseNormalizedRederiveDerivationKindCensus>> {
     rows.into_iter()
         .map(|row| {
-            Ok(BaseNormalizedRederiveFamilyCensus {
-                source_manifest_id: row.try_get("source_manifest_id")?,
+            Ok(BaseNormalizedRederiveDerivationKindCensus {
+                derivation_kind: row.try_get("derivation_kind")?,
                 source_family: row.try_get("source_family")?,
                 row_count: row.try_get("row_count")?,
                 min_block_number: row.try_get("min_block_number")?,
                 max_block_number: row.try_get("max_block_number")?,
+                rederivable: row.try_get("rederivable")?,
             })
         })
         .collect()
+}
+
+fn cursor_census_sql() -> &'static str {
+    r#"
+    SELECT cursor_kind, COUNT(*)::BIGINT AS row_count
+    FROM normalized_replay_cursors
+    WHERE deployment_profile = $1
+      AND chain_id = $2
+      AND cursor_kind = ANY($3::TEXT[])
+    GROUP BY cursor_kind
+    ORDER BY cursor_kind
+    "#
+}
+
+fn cursor_census_rows(
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<BaseNormalizedRederiveCursorCensus> {
+    let mut census = BaseNormalizedRederiveCursorCensus::default();
+    for row in rows {
+        let cursor_kind: String = row.try_get("cursor_kind")?;
+        let row_count: i64 = row.try_get("row_count")?;
+        match cursor_kind.as_str() {
+            BASE_NORMALIZED_REDERIVE_CURSOR_KIND => {
+                census.raw_fact_replay_cursor_rows = row_count;
+            }
+            BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND => {
+                census.post_replay_live_adapter_backlog_cursor_rows = row_count;
+            }
+            _ => {}
+        }
+    }
+    Ok(census)
 }
 
 fn raw_fact_completeness_sql() -> &'static str {
@@ -209,10 +323,13 @@ fn raw_fact_completeness_sql() -> &'static str {
         SELECT *
         FROM normalized_events
         WHERE chain_id = 'base-mainnet'
-          AND source_manifest_id = ANY($1::BIGINT[])
-          AND block_number BETWEEN 17571485 AND 46954147
+          AND block_number BETWEEN 17571485 AND $1
           AND block_hash IS NOT NULL
-          AND derivation_kind NOT IN ('manifest_sync', 'manifest_alert')
+          AND (
+              (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
+              OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
+              OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
+          )
     ),
     log_derived AS (
         SELECT * FROM scoped_events WHERE log_index IS NOT NULL
@@ -228,11 +345,22 @@ fn raw_fact_completeness_sql() -> &'static str {
           ON lineage.chain_id = raw_logs.chain_id
          AND lineage.block_hash = raw_logs.block_hash
         WHERE raw_logs.chain_id = 'base-mainnet'
-          AND raw_logs.block_number BETWEEN 17571485 AND 46954147
+          AND raw_logs.block_number BETWEEN 17571485 AND $1
+          AND raw_logs.canonicality_state IN ('canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state)
+          AND lineage.canonicality_state IN ('canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state)
+    ),
+    canonical_raw_log_head AS (
+        SELECT MAX(raw_logs.block_number)::BIGINT AS head_block
+        FROM raw_logs
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = raw_logs.chain_id
+         AND lineage.block_hash = raw_logs.block_hash
+        WHERE raw_logs.chain_id = 'base-mainnet'
           AND raw_logs.canonicality_state IN ('canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state)
           AND lineage.canonicality_state IN ('canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state)
     )
     SELECT
+        $1::BIGINT AS replay_target_block,
         (SELECT COUNT(*)::BIGINT FROM log_derived) AS log_derived_event_count,
         (
             SELECT COUNT(*)::BIGINT
@@ -264,7 +392,8 @@ fn raw_fact_completeness_sql() -> &'static str {
             )
         ) AS missing_boundary_lineage_count,
         (SELECT min_block_number FROM canonical_raw_log_bounds) AS canonical_raw_log_min_block,
-        (SELECT max_block_number FROM canonical_raw_log_bounds) AS canonical_raw_log_max_block
+        (SELECT max_block_number FROM canonical_raw_log_bounds) AS canonical_raw_log_max_block,
+        (SELECT head_block FROM canonical_raw_log_head) AS canonical_raw_log_head_block
     "#
 }
 
@@ -272,11 +401,13 @@ fn raw_fact_completeness_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<BaseNormalizedRederiveRawFactCompleteness> {
     Ok(BaseNormalizedRederiveRawFactCompleteness {
+        replay_target_block: row.try_get("replay_target_block")?,
         log_derived_event_count: row.try_get("log_derived_event_count")?,
         missing_log_derived_raw_fact_count: row.try_get("missing_log_derived_raw_fact_count")?,
         boundary_event_count: row.try_get("boundary_event_count")?,
         missing_boundary_lineage_count: row.try_get("missing_boundary_lineage_count")?,
         canonical_raw_log_min_block: row.try_get("canonical_raw_log_min_block")?,
         canonical_raw_log_max_block: row.try_get("canonical_raw_log_max_block")?,
+        canonical_raw_log_head_block: row.try_get("canonical_raw_log_head_block")?,
     })
 }

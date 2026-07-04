@@ -108,26 +108,41 @@ not delete stale rows.
 
 The implementation owner is the indexer command
 `bigname-indexer drop-and-rederive-base-normalized-events`. Its dry run is the
-maintainer review gate: it prints the exact live census by table, source family,
-block range, raw-fact completeness, and replay reset target without writing. The
-execute mode requires the explicit `--execute --confirm-ratified-2026-07-03`
-flags, records a structured correction-event log line, takes a PostgreSQL
-exclusive advisory transaction lock, refuses concurrent `bigname-indexer` or
-`bigname-worker` sessions that are visible in `pg_stat_activity`, and fails
-closed unless the reviewed expected counts still match. Indexer and worker
-runtime processes and write-capable one-shot commands also hold the
-corresponding shared advisory lock while they run, so the correction command
-cannot execute concurrently with updated bigname writers.
+maintainer review gate: it prints the exact live census by table,
+derivation-kind/source-family delete/keep partition, block range, raw-fact
+completeness, and replay reset target without writing. The execute mode
+requires the explicit `--execute --confirm-ratified-2026-07-03` flags, the
+reviewed `--replay-target-block`, records a structured correction-event log
+line, takes a PostgreSQL exclusive advisory transaction lock, refuses
+concurrent `bigname-indexer` or `bigname-worker` sessions that are visible in
+`pg_stat_activity`, and fails closed unless the reviewed expected counts still
+match. Indexer and worker runtime processes and write-capable one-shot commands
+also hold the corresponding shared advisory lock while they run, so the
+correction command cannot execute concurrently with updated bigname writers.
 
 The normalized-event scope is:
 
 - `chain_id = 'base-mainnet'`
-- `source_manifest_id IN (1, 2, 4, 5)`, after confirming those live manifest ids
-  map exactly to `basenames_base_registry`, `basenames_base_registrar`,
-  `basenames_base_resolver`, and `basenames_base_primary` on `base-mainnet`
-- `block_number BETWEEN 17571485 AND 46954147`
+- `block_number BETWEEN 17571485 AND <validated canonical raw-log head>`
 - `block_hash IS NOT NULL`
-- `derivation_kind NOT IN ('manifest_sync', 'manifest_alert')`
+- a re-derivable derivation/source-family pair emitted by the selected Base
+  closure replay adapters:
+  - `ens_v1_reverse_claim`: `source_family IN ('ens_v1_reverse_l1',
+    'basenames_base_primary')`
+  - `ens_v1_registry_resolver_changed` or `ens_v1_subregistry_changed`:
+    `source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')`
+  - `ens_v1_unwrapped_authority`: `source_family IN ('ens_v1_registrar_l1',
+    'ens_v1_registry_l1', 'ens_v1_resolver_l1', 'ens_v1_wrapper_l1',
+    'basenames_base_registrar', 'basenames_base_registry',
+    'basenames_base_resolver')`
+
+The scope does not use `source_manifest_id`; rows with a NULL manifest id are
+included when their derivation/source-family pair is re-derivable. The dry-run
+also enumerates every other `base-mainnet` derivation/source-family pair present
+in the same block-backed range and reports it as kept. In particular,
+`raw_log_preimage_observation` rows and re-derivable-looking derivation kinds on
+non-replay source families are not in the delete scope because this supervised
+Base closure replay does not re-derive them.
 
 The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
 `surface_bindings` where `chain_id = 'base-mainnet'` and
@@ -142,17 +157,23 @@ then `surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
 After the data drop, the same transaction clears
 `normalized_replay_adapter_checkpoint_items` and
 `normalized_replay_adapter_checkpoints` for
-`ens_v1_subregistry_discovery` and `ens_v1_unwrapped_authority`, then resets the
-`normalized_replay_cursors` row for `mainnet/base-mainnet/raw_fact_normalized_events`
-to `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = 46954147`.
+`ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, and
+`ens_v1_unwrapped_authority`, clears any sibling
+`mainnet/base-mainnet/post_replay_live_adapter_backlog` cursor, then resets the
+`normalized_replay_cursors` row for
+`mainnet/base-mainnet/raw_fact_normalized_events` to
+`range_start_block_number = next_block_number = 17571485` and
+`target_block_number = <validated canonical raw-log head>`.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
 Before execution it proves that the scoped log-derived normalized events still
 join retained non-orphaned `raw_logs`, scoped boundary events still join retained
 non-orphaned `chain_lineage`, and the canonical raw-log range inside the
-ratified replay window spans the closure boundary and replay target. It also
+ratified replay window spans the closure boundary and validated replay target.
+Dry-run defaults the target to the live canonical Base raw-log head. Execute
+requires an explicitly provided `--replay-target-block`, and that reviewed value
+is accepted only when it matches the current canonical raw-log head. It also
 refuses if any normalized event outside the delete scope still references an
 identity row that the correction would drop. If any proof fails, no write is
 allowed.

@@ -1,15 +1,14 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result, bail, ensure};
-use sqlx::{PgPool, Postgres, Row, pool::PoolConnection};
+use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tracing::info;
 
 mod counts;
 mod execution;
 
 use counts::{
-    load_counts, load_counts_from, load_family_census, load_family_census_from,
-    load_raw_fact_completeness, load_raw_fact_completeness_from,
+    load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
+    load_derivation_kind_census, load_derivation_kind_census_from, load_raw_fact_completeness,
+    load_raw_fact_completeness_from,
 };
 use execution::{
     create_scope_tables, delete_scoped_rows_and_reset_replay, refuse_if_bigname_runtime_sessions,
@@ -17,38 +16,50 @@ use execution::{
 };
 
 pub const BASE_NORMALIZED_REDERIVE_CHAIN_ID: &str = "base-mainnet";
+pub const BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER: &str = "ens_v1_reverse_claim";
 pub const BASE_NORMALIZED_REDERIVE_ADAPTER: &str = "ens_v1_unwrapped_authority";
 pub const BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER: &str = "ens_v1_subregistry_discovery";
+pub const BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND: &str = "ens_v1_reverse_claim";
+pub const BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND: &str =
+    "ens_v1_subregistry_changed";
+pub const BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND: &str =
+    "ens_v1_registry_resolver_changed";
+pub const BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND: &str =
+    "ens_v1_unwrapped_authority";
 pub const BASE_NORMALIZED_REDERIVE_CURSOR_KIND: &str = "raw_fact_normalized_events";
+pub const BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND: &str = "post_replay_live_adapter_backlog";
 pub const BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK: i64 = 17_571_485;
-pub const BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK: i64 = 46_954_147;
 
 const BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY: &str =
     "bigname:indexer:drop-and-rederive-base-normalized-events:2026-07-03";
-const EXPECTED_MANIFESTS: [(i64, &str); 4] = [
-    (1, "basenames_base_registry"),
-    (2, "basenames_base_registrar"),
-    (4, "basenames_base_resolver"),
-    (5, "basenames_base_primary"),
-];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BaseNormalizedRederiveManifest {
-    pub manifest_id: i64,
-    pub source_family: String,
-    pub namespace: String,
-    pub chain: String,
-    pub rollout_status: String,
-    pub file_path: String,
+pub struct BaseNormalizedRederiveScopeRule {
+    pub adapter: &'static str,
+    pub derivation_kinds: &'static [&'static str],
+    pub source_families: &'static [&'static str],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BaseNormalizedRederiveFamilyCensus {
-    pub source_manifest_id: i64,
+pub struct BaseNormalizedRederiveDerivationKindCensus {
+    pub derivation_kind: String,
     pub source_family: String,
     pub row_count: i64,
     pub min_block_number: Option<i64>,
     pub max_block_number: Option<i64>,
+    pub rederivable: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BaseNormalizedRederiveCursorCensus {
+    pub raw_fact_replay_cursor_rows: i64,
+    pub post_replay_live_adapter_backlog_cursor_rows: i64,
+}
+
+impl BaseNormalizedRederiveCursorCensus {
+    pub fn total_cursor_rows(&self) -> i64 {
+        self.raw_fact_replay_cursor_rows + self.post_replay_live_adapter_backlog_cursor_rows
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -71,12 +82,14 @@ pub struct BaseNormalizedRederiveCounts {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseNormalizedRederiveRawFactCompleteness {
+    pub replay_target_block: i64,
     pub log_derived_event_count: i64,
     pub missing_log_derived_raw_fact_count: i64,
     pub boundary_event_count: i64,
     pub missing_boundary_lineage_count: i64,
     pub canonical_raw_log_min_block: Option<i64>,
     pub canonical_raw_log_max_block: Option<i64>,
+    pub canonical_raw_log_head_block: Option<i64>,
 }
 
 impl BaseNormalizedRederiveRawFactCompleteness {
@@ -84,16 +97,17 @@ impl BaseNormalizedRederiveRawFactCompleteness {
         self.missing_log_derived_raw_fact_count == 0
             && self.missing_boundary_lineage_count == 0
             && self.canonical_raw_log_min_block == Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
-            && self.canonical_raw_log_max_block
-                == Some(BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK)
+            && self.canonical_raw_log_max_block == Some(self.replay_target_block)
+            && self.canonical_raw_log_head_block == Some(self.replay_target_block)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseNormalizedRederivePlan {
     pub deployment_profile: String,
-    pub manifests: Vec<BaseNormalizedRederiveManifest>,
-    pub family_census: Vec<BaseNormalizedRederiveFamilyCensus>,
+    pub replay_target_block: i64,
+    pub derivation_kind_census: Vec<BaseNormalizedRederiveDerivationKindCensus>,
+    pub cursor_census: BaseNormalizedRederiveCursorCensus,
     pub counts: BaseNormalizedRederiveCounts,
     pub raw_fact_completeness: BaseNormalizedRederiveRawFactCompleteness,
 }
@@ -133,17 +147,21 @@ pub async fn hold_base_normalized_rederive_runtime_shared_lock(
 pub async fn load_base_normalized_rederive_plan(
     pool: &PgPool,
     deployment_profile: &str,
+    requested_replay_target_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
-    let manifests = load_manifest_confirmation(pool).await?;
-    validate_manifest_confirmation(&manifests)?;
-    let family_census = load_family_census(pool).await?;
-    let counts = load_counts(pool, deployment_profile).await?;
-    let raw_fact_completeness = load_raw_fact_completeness(pool).await?;
+    let replay_target_block = resolve_replay_target_block(pool, requested_replay_target_block)
+        .await
+        .context("failed to resolve Base normalized-event rederive replay target")?;
+    let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
+    let cursor_census = load_cursor_census(pool, deployment_profile).await?;
+    let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
+    let raw_fact_completeness = load_raw_fact_completeness(pool, replay_target_block).await?;
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
-        manifests,
-        family_census,
+        replay_target_block,
+        derivation_kind_census,
+        cursor_census,
         counts,
         raw_fact_completeness,
     })
@@ -152,8 +170,13 @@ pub async fn load_base_normalized_rederive_plan(
 pub async fn execute_base_normalized_rederive_drop(
     pool: &PgPool,
     deployment_profile: &str,
+    requested_replay_target_block: Option<i64>,
     expected_counts: BaseNormalizedRederiveExpectedCounts,
 ) -> Result<BaseNormalizedRederiveExecutionOutcome> {
+    ensure!(
+        requested_replay_target_block.is_some(),
+        "Base normalized-event rederive execute requires reviewed replay target block"
+    );
     let mut transaction = pool
         .begin()
         .await
@@ -171,8 +194,13 @@ pub async fn execute_base_normalized_rederive_drop(
     );
     refuse_if_bigname_runtime_sessions(pool).await?;
 
-    create_scope_tables(&mut transaction).await?;
-    let plan = load_plan_in_transaction(&mut transaction, deployment_profile).await?;
+    let replay_target_block =
+        resolve_replay_target_block_from(&mut transaction, requested_replay_target_block)
+            .await
+            .context("failed to resolve Base normalized-event rederive replay target")?;
+    create_scope_tables(&mut transaction, replay_target_block).await?;
+    let plan =
+        load_plan_in_transaction(&mut transaction, deployment_profile, replay_target_block).await?;
     ensure!(
         plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event rederive raw-fact completeness check failed: {:?}",
@@ -186,7 +214,12 @@ pub async fn execute_base_normalized_rederive_drop(
     );
     refuse_if_out_of_scope_identity_dependencies(&mut transaction).await?;
 
-    let deleted = delete_scoped_rows_and_reset_replay(&mut transaction, deployment_profile).await?;
+    let deleted = delete_scoped_rows_and_reset_replay(
+        &mut transaction,
+        deployment_profile,
+        replay_target_block,
+    )
+    .await?;
     transaction
         .commit()
         .await
@@ -197,107 +230,189 @@ pub async fn execute_base_normalized_rederive_drop(
 async fn load_plan_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
-    let manifests = load_manifest_confirmation_from(transaction).await?;
-    validate_manifest_confirmation(&manifests)?;
-    let family_census = load_family_census_from(transaction).await?;
-    let counts = load_counts_from(transaction, deployment_profile).await?;
-    let raw_fact_completeness = load_raw_fact_completeness_from(transaction).await?;
+    let derivation_kind_census =
+        load_derivation_kind_census_from(transaction, replay_target_block).await?;
+    let cursor_census = load_cursor_census_from(transaction, deployment_profile).await?;
+    let counts = load_counts_from(transaction, deployment_profile, replay_target_block).await?;
+    let raw_fact_completeness =
+        load_raw_fact_completeness_from(transaction, replay_target_block).await?;
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
-        manifests,
-        family_census,
+        replay_target_block,
+        derivation_kind_census,
+        cursor_census,
         counts,
         raw_fact_completeness,
     })
 }
 
-async fn load_manifest_confirmation(pool: &PgPool) -> Result<Vec<BaseNormalizedRederiveManifest>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, source_family, namespace, chain, rollout_status::TEXT, file_path
-        FROM manifest_versions
-        WHERE manifest_id = ANY($1::BIGINT[])
-        ORDER BY manifest_id
-        "#,
-    )
-    .bind(expected_manifest_ids())
-    .fetch_all(pool)
-    .await
-    .context("failed to load Base normalized-event rederive manifest confirmation")?;
-    manifest_rows(rows)
+async fn resolve_replay_target_block(
+    pool: &PgPool,
+    requested_replay_target_block: Option<i64>,
+) -> Result<i64> {
+    let head = load_canonical_raw_log_head(pool).await?;
+    validate_replay_target_block(head, requested_replay_target_block)
 }
 
-async fn load_manifest_confirmation_from(
+async fn resolve_replay_target_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<Vec<BaseNormalizedRederiveManifest>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, source_family, namespace, chain, rollout_status::TEXT, file_path
-        FROM manifest_versions
-        WHERE manifest_id = ANY($1::BIGINT[])
-        ORDER BY manifest_id
-        "#,
-    )
-    .bind(expected_manifest_ids())
-    .fetch_all(&mut **transaction)
-    .await
-    .context("failed to load Base normalized-event rederive manifest confirmation")?;
-    manifest_rows(rows)
+    requested_replay_target_block: Option<i64>,
+) -> Result<i64> {
+    let head = load_canonical_raw_log_head_from(transaction).await?;
+    validate_replay_target_block(head, requested_replay_target_block)
 }
 
-fn manifest_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<BaseNormalizedRederiveManifest>> {
-    rows.into_iter()
-        .map(|row| {
-            Ok(BaseNormalizedRederiveManifest {
-                manifest_id: row.try_get("manifest_id")?,
-                source_family: row.try_get("source_family")?,
-                namespace: row.try_get("namespace")?,
-                chain: row.try_get("chain")?,
-                rollout_status: row.try_get("rollout_status")?,
-                file_path: row.try_get("file_path")?,
-            })
-        })
-        .collect()
+async fn load_canonical_raw_log_head(pool: &PgPool) -> Result<Option<i64>> {
+    sqlx::query_scalar(canonical_raw_log_head_sql())
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .fetch_one(pool)
+        .await
+        .context("failed to load Base canonical raw-log head")
 }
 
-fn validate_manifest_confirmation(manifests: &[BaseNormalizedRederiveManifest]) -> Result<()> {
-    let expected = EXPECTED_MANIFESTS
-        .into_iter()
-        .collect::<BTreeMap<i64, &'static str>>();
-    ensure!(
-        manifests.len() == expected.len(),
-        "Base normalized-event rederive expected manifest IDs {:?}, found {:?}",
-        expected.keys().collect::<Vec<_>>(),
-        manifests.iter().map(|m| m.manifest_id).collect::<Vec<_>>()
-    );
-    for manifest in manifests {
-        let expected_family = expected
-            .get(&manifest.manifest_id)
-            .with_context(|| format!("unexpected source_manifest_id {}", manifest.manifest_id))?;
-        ensure!(
-            manifest.source_family == *expected_family
-                && manifest.namespace == "basenames"
-                && manifest.chain == BASE_NORMALIZED_REDERIVE_CHAIN_ID,
-            "Base normalized-event rederive manifest {} is {}/{}/{}; expected basenames/{}/{}",
-            manifest.manifest_id,
-            manifest.namespace,
-            manifest.source_family,
-            manifest.chain,
-            expected_family,
+async fn load_canonical_raw_log_head_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(canonical_raw_log_head_sql())
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base canonical raw-log head")
+}
+
+fn canonical_raw_log_head_sql() -> &'static str {
+    r#"
+    SELECT MAX(raw_logs.block_number)::BIGINT
+    FROM raw_logs
+    JOIN chain_lineage lineage
+      ON lineage.chain_id = raw_logs.chain_id
+     AND lineage.block_hash = raw_logs.block_hash
+    WHERE raw_logs.chain_id = $1
+      AND raw_logs.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+      AND lineage.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+    "#
+}
+
+fn validate_replay_target_block(
+    canonical_raw_log_head: Option<i64>,
+    requested_replay_target_block: Option<i64>,
+) -> Result<i64> {
+    let Some(head) = canonical_raw_log_head else {
+        bail!(
+            "Base normalized-event rederive cannot resolve replay target: no canonical raw logs for {}",
             BASE_NORMALIZED_REDERIVE_CHAIN_ID
         );
+    };
+    ensure!(
+        head >= BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+        "Base normalized-event rederive canonical raw-log head {head} is before closure boundary {}",
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
+    );
+    if let Some(requested) = requested_replay_target_block {
+        ensure!(
+            requested == head,
+            "Base normalized-event rederive requested replay target block {requested} must match canonical raw-log head {head}"
+        );
     }
-    Ok(())
+    Ok(head)
 }
 
-pub(super) fn expected_manifest_ids() -> Vec<i64> {
-    EXPECTED_MANIFESTS.iter().map(|(id, _)| *id).collect()
+pub fn base_normalized_rederive_scope_rules() -> &'static [BaseNormalizedRederiveScopeRule] {
+    &[
+        BaseNormalizedRederiveScopeRule {
+            adapter: BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
+            derivation_kinds: &[BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND],
+            source_families: &["ens_v1_reverse_l1", "basenames_base_primary"],
+        },
+        BaseNormalizedRederiveScopeRule {
+            adapter: BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
+            derivation_kinds: &[
+                BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND,
+                BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND,
+            ],
+            source_families: &["ens_v1_registry_l1", "basenames_base_registry"],
+        },
+        BaseNormalizedRederiveScopeRule {
+            adapter: BASE_NORMALIZED_REDERIVE_ADAPTER,
+            derivation_kinds: &[BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND],
+            source_families: &[
+                "ens_v1_registrar_l1",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1_wrapper_l1",
+                "basenames_base_registrar",
+                "basenames_base_registry",
+                "basenames_base_resolver",
+            ],
+        },
+    ]
+}
+
+pub(super) fn reverse_claim_derivation_kind() -> String {
+    BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND.to_owned()
+}
+
+pub(super) fn reverse_claim_source_families() -> Vec<String> {
+    vec![
+        "ens_v1_reverse_l1".to_owned(),
+        "basenames_base_primary".to_owned(),
+    ]
+}
+
+pub(super) fn subregistry_derivation_kinds() -> Vec<String> {
+    vec![
+        BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND.to_owned(),
+        BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND.to_owned(),
+    ]
+}
+
+pub(super) fn subregistry_source_families() -> Vec<String> {
+    vec![
+        "ens_v1_registry_l1".to_owned(),
+        "basenames_base_registry".to_owned(),
+    ]
+}
+
+pub(super) fn unwrapped_authority_derivation_kind() -> String {
+    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND.to_owned()
+}
+
+pub(super) fn unwrapped_authority_source_families() -> Vec<String> {
+    vec![
+        "ens_v1_registrar_l1".to_owned(),
+        "ens_v1_registry_l1".to_owned(),
+        "ens_v1_resolver_l1".to_owned(),
+        "ens_v1_wrapper_l1".to_owned(),
+        "basenames_base_registrar".to_owned(),
+        "basenames_base_registry".to_owned(),
+        "basenames_base_resolver".to_owned(),
+    ]
+}
+
+pub(super) fn cursor_kinds() -> Vec<String> {
+    [
+        BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+        BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 pub(super) fn checkpoint_adapters() -> Vec<String> {
     [
+        BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
         BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
         BASE_NORMALIZED_REDERIVE_ADAPTER,
     ]

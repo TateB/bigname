@@ -77,6 +77,20 @@ pub async fn sync_ens_v1_reverse_claim(
     sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None).await
 }
 
+pub async fn sync_ens_v1_reverse_claim_range(
+    pool: &PgPool,
+    chain: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<EnsV1ReverseClaimSyncSummary> {
+    let source_scope = load_active_emitters(pool, chain)
+        .await?
+        .into_iter()
+        .map(|emitter| (emitter.source_family, emitter.address, from_block, to_block))
+        .collect::<Vec<_>>();
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], Some(&source_scope)).await
+}
+
 async fn sync_ens_v1_reverse_claim_with_scope(
     pool: &PgPool,
     chain: &str,

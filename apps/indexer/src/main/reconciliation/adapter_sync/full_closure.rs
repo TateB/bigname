@@ -4,9 +4,10 @@ use anyhow::Result;
 use tracing::info;
 
 use crate::runtime::{
-    log_ens_v1_subregistry_discovery_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
-    log_ens_v2_permissions_sync_summary, log_ens_v2_registrar_sync_summary,
-    log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
+    log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
+    log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
+    log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
+    log_ens_v2_resolver_sync_summary,
 };
 
 use super::sync_logging::log_adapter_call_timing;
@@ -35,6 +36,36 @@ pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_paylo
         range_start_block_number,
         target_block_number,
     };
+
+    if adapters.contains(&NormalizedEventReplayAdapter::EnsV1ReverseClaim) {
+        let adapter_started = Instant::now();
+        let summary = bigname_adapters::sync_ens_v1_reverse_claim_range(
+            pool,
+            chain,
+            range_start_block_number,
+            target_block_number,
+        )
+        .await?;
+        log_adapter_call_timing(
+            chain,
+            "ens_v1_reverse_claim",
+            "sync_ens_v1_reverse_claim_range",
+            0,
+            0,
+            summary.scanned_log_count,
+            summary.matched_log_count,
+            summary.total_synced_count,
+            summary.total_inserted_count,
+            adapter_started.elapsed().as_millis(),
+        );
+        log_ens_v1_reverse_claim_sync_summary(chain, &summary);
+        aggregate.add_counts(
+            summary.scanned_log_count,
+            summary.matched_log_count,
+            summary.total_synced_count,
+            summary.total_inserted_count,
+        );
+    }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery) {
         let adapter_started = Instant::now();

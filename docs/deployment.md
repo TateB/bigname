@@ -515,18 +515,22 @@ takes the exclusive form of that lock and also refuses visible
        --deployment-profile mainnet
    ```
 
-3. Review the printed manifest-id confirmation, per-family normalized-event
-   counts, identity/projection/change-log delete counts, raw-fact completeness
-   proof, and the replay reset target
-   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=46954147`.
+3. Review the printed derivation-kind/source-family partition, including the
+   re-derivable delete count and explicitly kept nonreplay pairs such as
+   `raw_log_preimage_observation` and non-closure source families;
+   identity/projection/change-log delete counts; raw-fact completeness proof;
+   both replay cursor counts; and the replay reset target
+   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated canonical raw-log head>`.
 4. Execute only after review, passing the dry-run counts back as exact
-   `--expected-*` arguments so the tool refuses drift between review and write:
+   `--expected-*` arguments and the printed `--replay-target-block` so the tool
+   refuses drift between review and write:
 
    ```sh
    docker compose --env-file .env.server \
      -f docker-compose.server.yml \
      exec -T indexer bigname-indexer drop-and-rederive-base-normalized-events \
        --deployment-profile mainnet \
+       --replay-target-block <dry-run-target-block> \
        --execute \
        --confirm-ratified-2026-07-03 \
        --expected-normalized-events <dry-run-value> \
@@ -546,7 +550,9 @@ takes the exclusive form of that lock and also refuses visible
    ```
 
 5. Start the indexer with normalized replay catch-up enabled so the reset cursor
-   runs full-closure replay from block `17571485` through `46954147`.
+   runs full-closure replay from block `17571485` through the reviewed target
+   block. The correction command has cleared any stale
+   `post_replay_live_adapter_backlog` cursor for the same Base deployment.
 6. After normalized replay completes, rebuild all current projections:
 
    ```sh

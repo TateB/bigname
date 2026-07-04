@@ -70,6 +70,79 @@ fn implemented_full_closure_contracts_are_enumerated() {
     );
 }
 
+#[test]
+fn full_closure_reemitted_adapters_include_base_reverse_claim_dependency() {
+    let actual = NORMALIZED_EVENT_REPLAY_CONTRACTS
+        .iter()
+        .filter(|contract| contract.raw_fact_replay_participant)
+        .filter(|contract| full_closure_reemits_adapter(contract.adapter))
+        .map(|contract| contract.adapter)
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from([
+        NormalizedEventReplayAdapter::EnsV1ReverseClaim,
+        NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+        NormalizedEventReplayAdapter::EnsV1UnwrappedAuthority,
+        NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+        NormalizedEventReplayAdapter::EnsV2Registrar,
+        NormalizedEventReplayAdapter::EnsV2Resolver,
+        NormalizedEventReplayAdapter::EnsV2Permissions,
+    ]);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn base_rederive_scope_rules_match_replay_contract_source_families() {
+    let expected_adapters = BTreeSet::from([
+        NormalizedEventReplayAdapter::EnsV1ReverseClaim,
+        NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+        NormalizedEventReplayAdapter::EnsV1UnwrappedAuthority,
+    ]);
+    let actual_adapters = bigname_storage::base_normalized_rederive_scope_rules()
+        .iter()
+        .map(|rule| adapter_for_name(rule.adapter))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_adapters, expected_adapters);
+
+    for rule in bigname_storage::base_normalized_rederive_scope_rules() {
+        let adapter = adapter_for_name(rule.adapter);
+        let contract = replay_contract(adapter);
+        assert_eq!(
+            rule.source_families
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            contract
+                .source_families
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            "{} source-family scope must stay aligned with replay classification",
+            rule.adapter
+        );
+    }
+
+    let discovery_rule = bigname_storage::base_normalized_rederive_scope_rules()
+        .iter()
+        .find(|rule| rule.adapter == "ens_v1_subregistry_discovery")
+        .expect("Base rederive scope must include subregistry discovery");
+    assert_eq!(
+        discovery_rule
+            .derivation_kinds
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "ens_v1_registry_resolver_changed",
+            "ens_v1_subregistry_changed"
+        ])
+    );
+    assert!(
+        !discovery_rule
+            .derivation_kinds
+            .contains(&"ens_v1_subregistry_discovery")
+    );
+}
+
 fn scan_normalized_event_producers() -> BTreeSet<NormalizedEventReplayAdapter> {
     let mut adapters = BTreeSet::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -124,4 +197,12 @@ fn adapter_for_producer_path(path: &str) -> NormalizedEventReplayAdapter {
     } else {
         panic!("unclassified normalized-event producer path: {path}");
     }
+}
+
+fn adapter_for_name(name: &str) -> NormalizedEventReplayAdapter {
+    NORMALIZED_EVENT_REPLAY_CONTRACTS
+        .iter()
+        .find(|contract| contract.adapter.as_str() == name)
+        .map(|contract| contract.adapter)
+        .unwrap_or_else(|| panic!("unclassified normalized-event replay adapter: {name}"))
 }

@@ -25,49 +25,24 @@ pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_
 pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 
-const BLOCK_DERIVED_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
-];
-const ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V1_REVERSE_L1,
-    SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
-];
-const ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-];
-const ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-    SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-    SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-];
-const ENS_V2_REGISTRY_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-];
+#[rustfmt::skip]
+const BLOCK_DERIVED_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
+#[rustfmt::skip]
+const ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REVERSE_L1, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY];
+#[rustfmt::skip]
+const ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRY_L1, SOURCE_FAMILY_BASENAMES_BASE_REGISTRY];
+#[rustfmt::skip]
+const ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_REGISTRY_L1, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR, SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_BASENAMES_BASE_RESOLVER];
+#[rustfmt::skip]
+const ENS_V2_REGISTRY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1];
 const ENS_V2_REGISTRAR_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
 const ENS_V2_RESOLVER_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 const ENS_V2_PERMISSIONS_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 
-const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
-];
-const ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
-];
+#[rustfmt::skip]
+const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
+#[rustfmt::skip]
+const ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayDependencyModel {
@@ -413,7 +388,7 @@ pub(crate) async fn active_closure_or_dependency_replay_adapters(
         "#,
     )
     .bind(chain)
-    .bind(closure_or_dependency_source_families())
+    .bind(full_closure_reemitted_source_families())
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -427,7 +402,7 @@ pub(crate) async fn active_closure_or_dependency_replay_adapters(
     Ok(NORMALIZED_EVENT_REPLAY_CONTRACTS
         .iter()
         .filter(|contract| contract.raw_fact_replay_participant)
-        .filter(|contract| !contract.model.restricted_replay_supported())
+        .filter(|contract| full_closure_reemits_adapter(contract.adapter))
         .filter(|contract| {
             active_source_families
                 .iter()
@@ -504,6 +479,23 @@ fn closure_or_dependency_source_families() -> Vec<String> {
         .into_iter()
         .map(str::to_owned)
         .collect()
+}
+
+fn full_closure_reemitted_source_families() -> Vec<String> {
+    NORMALIZED_EVENT_REPLAY_CONTRACTS
+        .iter()
+        .filter(|contract| contract.raw_fact_replay_participant)
+        .filter(|contract| full_closure_reemits_adapter(contract.adapter))
+        .flat_map(|contract| contract.source_families.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn full_closure_reemits_adapter(adapter: NormalizedEventReplayAdapter) -> bool {
+    adapter == NormalizedEventReplayAdapter::EnsV1ReverseClaim
+        || !replay_contract(adapter).model.restricted_replay_supported()
 }
 
 fn adapter_list(contracts: &[&'static AdapterReplayContract]) -> String {

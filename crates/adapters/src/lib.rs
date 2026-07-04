@@ -30,6 +30,7 @@ pub use block_derived_normalized_events::{
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
+    sync_ens_v1_reverse_claim_range,
 };
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,

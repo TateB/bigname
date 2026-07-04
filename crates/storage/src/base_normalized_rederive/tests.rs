@@ -11,6 +11,8 @@ use uuid::Uuid;
 use super::*;
 
 const DEPLOYMENT_PROFILE: &str = "mainnet";
+const FIXTURE_REPLAY_TARGET_BLOCK: i64 = 46_954_147;
+const FIXTURE_OUT_OF_RANGE_BLOCK: i64 = FIXTURE_REPLAY_TARGET_BLOCK + 100;
 
 struct FixtureIds {
     token_lineage_id: Uuid,
@@ -35,9 +37,18 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     let database = test_database().await?;
     let ids = seed_rederive_fixture(database.pool()).await?;
 
-    let plan = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE).await?;
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    let explicit_target_plan = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+    )
+    .await?;
 
-    assert_eq!(plan.counts.normalized_events, 2);
+    assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK);
+    assert_eq!(explicit_target_plan.counts, plan.counts);
+    assert_eq!(plan.counts.normalized_events, 6);
     assert_eq!(plan.counts.resources, 1);
     assert_eq!(plan.counts.token_lineages, 1);
     assert_eq!(plan.counts.name_surfaces, 1);
@@ -47,19 +58,72 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     assert_eq!(plan.counts.children_current, 1);
     assert_eq!(plan.counts.permissions_current, 1);
     assert_eq!(plan.counts.record_inventory_current, 1);
-    assert_eq!(plan.counts.projection_normalized_event_changes, 2);
-    assert_eq!(plan.counts.replay_cursor_rows, 1);
-    assert_eq!(plan.counts.adapter_checkpoint_rows, 2);
-    assert_eq!(plan.counts.adapter_checkpoint_item_rows, 2);
-    assert_eq!(plan.raw_fact_completeness.log_derived_event_count, 1);
-    assert_eq!(plan.raw_fact_completeness.boundary_event_count, 1);
+    assert_eq!(plan.counts.projection_normalized_event_changes, 6);
+    assert_eq!(plan.counts.replay_cursor_rows, 2);
+    assert_eq!(plan.counts.adapter_checkpoint_rows, 3);
+    assert_eq!(plan.counts.adapter_checkpoint_item_rows, 3);
+    assert_eq!(plan.cursor_census.raw_fact_replay_cursor_rows, 1);
+    assert_eq!(
+        plan.cursor_census
+            .post_replay_live_adapter_backlog_cursor_rows,
+        1
+    );
+    assert_eq!(plan.raw_fact_completeness.log_derived_event_count, 2);
+    assert_eq!(plan.raw_fact_completeness.boundary_event_count, 4);
     assert!(plan.raw_fact_completeness.is_complete_for_rerun());
     assert_eq!(
-        plan.family_census
+        plan.derivation_kind_census
             .iter()
-            .map(|family| (family.source_manifest_id, family.row_count))
+            .map(|census| {
+                (
+                    census.derivation_kind.as_str(),
+                    census.source_family.as_str(),
+                    census.rederivable,
+                    census.row_count,
+                )
+            })
             .collect::<Vec<_>>(),
-        vec![(1, 1), (2, 0), (4, 1), (5, 0)]
+        vec![
+            (
+                "ens_v1_registry_resolver_changed",
+                "basenames_base_registry",
+                true,
+                1
+            ),
+            ("ens_v1_reverse_claim", "basenames_base_primary", true, 1),
+            (
+                "ens_v1_subregistry_changed",
+                "basenames_base_registry",
+                true,
+                1
+            ),
+            (
+                "ens_v1_unwrapped_authority",
+                "basenames_base_registry",
+                true,
+                3
+            ),
+            (
+                "ens_v1_unwrapped_authority",
+                "basenames_l1_compat",
+                false,
+                1
+            ),
+            (
+                "raw_log_preimage_observation",
+                "basenames_l1_compat",
+                false,
+                1
+            ),
+        ]
+    );
+    assert_eq!(
+        plan.derivation_kind_census
+            .iter()
+            .filter(|census| !census.rederivable)
+            .map(|census| census.row_count)
+            .sum::<i64>(),
+        2
     );
     assert_eq!(ids.logical_name_id, "basenames:alice.base.eth");
 
@@ -71,13 +135,14 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
 async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     let database = test_database().await?;
     let ids = seed_rederive_fixture(database.pool()).await?;
-    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE)
+    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
         .await?
         .counts;
 
     let outcome = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts {
             counts: expected.clone(),
         },
@@ -124,9 +189,39 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     );
     assert_eq!(
         count_table(database.pool(), "projection_normalized_event_changes").await?,
-        3
+        4
     );
-    assert_eq!(count_table(database.pool(), "normalized_events").await?, 3);
+    assert_eq!(count_table(database.pool(), "normalized_events").await?, 4);
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "null-source-boundary",
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "preimage-observation",
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "unsupported-source-family-authority",
+        )
+        .await?,
+        1
+    );
 
     let cursor = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
@@ -145,7 +240,7 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         (
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-            BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK
+            FIXTURE_REPLAY_TARGET_BLOCK
         )
     );
     assert_eq!(
@@ -156,6 +251,16 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         count_table(
             database.pool(),
             "normalized_replay_adapter_checkpoint_items"
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_replay_cursors",
+            "cursor_kind",
+            BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
         )
         .await?,
         0
@@ -172,10 +277,14 @@ async fn execute_refuses_running_indexer_or_worker_session() -> Result<()> {
     let expected = reviewed_counts(database.pool()).await?;
     let runtime_pool = runtime_named_pool(database.database_name(), "bigname-indexer").await?;
 
-    let error =
-        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, expected)
-            .await
-            .expect_err("running runtime session must block execution");
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("running runtime session must block execution");
     assert!(format!("{error:?}").contains("runtime sessions are connected"));
 
     runtime_pool.close().await;
@@ -192,10 +301,14 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
     let runtime_guard =
         hold_base_normalized_rederive_runtime_shared_lock(&runtime_pool, "other-runtime").await?;
 
-    let error =
-        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, expected)
-            .await
-            .expect_err("runtime shared advisory lock must block execution");
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("runtime shared advisory lock must block execution");
     assert!(format!("{error:?}").contains("advisory lock is already held"));
 
     drop(runtime_guard);
@@ -208,7 +321,7 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
 async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
-    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE)
+    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
         .await?
         .counts;
     seed_extra_scoped_resource(database.pool()).await?;
@@ -216,11 +329,28 @@ async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let error = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts { counts: expected },
     )
     .await
     .expect_err("count divergence must block execution");
     assert!(format!("{error:?}").contains("count divergence"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_refuses_missing_reviewed_replay_target() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    let error =
+        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, None, expected)
+            .await
+            .expect_err("execute must require a reviewed replay target block");
+    assert!(format!("{error:?}").contains("requires reviewed replay target block"));
 
     database.cleanup().await?;
     Ok(())
@@ -233,10 +363,14 @@ async fn execute_refuses_remaining_normalized_event_identity_anchors() -> Result
     seed_out_of_scope_event_referencing_scoped_identity(database.pool(), &ids).await?;
     let expected = reviewed_counts(database.pool()).await?;
 
-    let error =
-        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, expected)
-            .await
-            .expect_err("remaining normalized-event identity anchor must block execution");
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("remaining normalized-event identity anchor must block execution");
     assert!(format!("{error:?}").contains("remaining_events_referencing_identity=1"));
 
     database.cleanup().await?;
@@ -244,23 +378,44 @@ async fn execute_refuses_remaining_normalized_event_identity_anchors() -> Result
 }
 
 #[tokio::test]
-async fn dry_run_raw_fact_span_ignores_retained_logs_outside_rederive_window() -> Result<()> {
+async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
-    seed_extra_retained_raw_logs_outside_window(database.pool()).await?;
+    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
 
-    let plan = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE).await?;
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
 
     assert_eq!(count_table(database.pool(), "raw_logs").await?, 4);
+    assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK + 10);
     assert_eq!(
         plan.raw_fact_completeness.canonical_raw_log_min_block,
         Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
     );
     assert_eq!(
         plan.raw_fact_completeness.canonical_raw_log_max_block,
-        Some(BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK)
+        Some(FIXTURE_REPLAY_TARGET_BLOCK + 10)
     );
     assert!(plan.raw_fact_completeness.is_complete_for_rerun());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_requested_target_that_lags_canonical_raw_log_head() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
+
+    let error = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+    )
+    .await
+    .expect_err("requested replay target must match the actual raw-log head");
+    assert!(format!("{error:?}").contains("must match canonical raw-log head"));
 
     database.cleanup().await?;
     Ok(())
@@ -275,10 +430,14 @@ async fn execute_refuses_raw_fact_completeness_gap() -> Result<()> {
         .execute(database.pool())
         .await?;
 
-    let error =
-        execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, expected)
-            .await
-            .expect_err("raw fact gap must block execution");
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("raw fact gap must block execution");
     assert!(format!("{error:?}").contains("raw-fact completeness check failed"));
 
     database.cleanup().await?;
@@ -290,16 +449,23 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     let expected = reviewed_counts(database.pool()).await?;
-    execute_base_normalized_rederive_drop(database.pool(), DEPLOYMENT_PROFILE, expected).await?;
+    execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await?;
 
     let second_plan =
-        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE).await?;
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
     assert_eq!(second_plan.counts.normalized_events, 0);
     assert_eq!(second_plan.counts.resources, 0);
     assert_eq!(second_plan.counts.replay_cursor_rows, 1);
     let second = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
         BaseNormalizedRederiveExpectedCounts {
             counts: second_plan.counts.clone(),
         },
@@ -324,7 +490,7 @@ async fn seed_rederive_fixture(pool: &PgPool) -> Result<FixtureIds> {
 
 async fn reviewed_counts(pool: &PgPool) -> Result<BaseNormalizedRederiveExpectedCounts> {
     Ok(BaseNormalizedRederiveExpectedCounts {
-        counts: load_base_normalized_rederive_plan(pool, DEPLOYMENT_PROFILE)
+        counts: load_base_normalized_rederive_plan(pool, DEPLOYMENT_PROFILE, None)
             .await?
             .counts,
     })
@@ -332,11 +498,11 @@ async fn reviewed_counts(pool: &PgPool) -> Result<BaseNormalizedRederiveExpected
 
 async fn seed_manifests(pool: &PgPool) -> Result<()> {
     for (manifest_id, source_family) in [
-        (1, "basenames_base_registry"),
+        (1, "basenames_base_primary"),
         (2, "basenames_base_registrar"),
         (3, "basenames_l1_compat"),
-        (4, "basenames_base_resolver"),
-        (5, "basenames_base_primary"),
+        (4, "basenames_base_registry"),
+        (5, "basenames_base_resolver"),
     ] {
         sqlx::query(
             r#"
@@ -379,7 +545,7 @@ async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
         (
             "0xbase-target",
             Some("0xbase-mid"),
-            BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
+            FIXTURE_REPLAY_TARGET_BLOCK,
         ),
     ] {
         sqlx::query(
@@ -405,7 +571,7 @@ async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
         ),
         (
             "0xbase-target",
-            BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
+            FIXTURE_REPLAY_TARGET_BLOCK,
             "0xtx-target",
             9_i64,
         ),
@@ -430,10 +596,20 @@ async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
 }
 
 async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
-    for (identity, source_manifest_id, block_number, block_hash, tx, log_index, derivation) in [
+    for (
+        identity,
+        source_family,
+        source_manifest_id,
+        block_number,
+        block_hash,
+        tx,
+        log_index,
+        derivation,
+    ) in [
         (
             "scoped-log",
-            1_i64,
+            "basenames_base_registry",
+            Some(1_i64),
             Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
             Some("0xbase-start"),
             Some("0xtx-start"),
@@ -442,7 +618,58 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
         ),
         (
             "scoped-boundary",
-            4_i64,
+            "basenames_base_registry",
+            Some(4_i64),
+            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
+            Some("0xbase-mid"),
+            None,
+            None,
+            "ens_v1_unwrapped_authority",
+        ),
+        (
+            "null-source-boundary",
+            "basenames_base_registry",
+            None,
+            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
+            Some("0xbase-mid"),
+            None,
+            None,
+            "ens_v1_unwrapped_authority",
+        ),
+        (
+            "reverse-claim-log",
+            "basenames_base_primary",
+            Some(1_i64),
+            Some(FIXTURE_REPLAY_TARGET_BLOCK),
+            Some("0xbase-target"),
+            Some("0xtx-target"),
+            Some(9_i64),
+            "ens_v1_reverse_claim",
+        ),
+        (
+            "subregistry-changed-boundary",
+            "basenames_base_registry",
+            Some(4_i64),
+            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
+            Some("0xbase-mid"),
+            None,
+            None,
+            "ens_v1_subregistry_changed",
+        ),
+        (
+            "registry-resolver-changed-boundary",
+            "basenames_base_registry",
+            Some(4_i64),
+            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
+            Some("0xbase-mid"),
+            None,
+            None,
+            "ens_v1_registry_resolver_changed",
+        ),
+        (
+            "unsupported-source-family-authority",
+            "basenames_l1_compat",
+            Some(3_i64),
             Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
             Some("0xbase-mid"),
             None,
@@ -451,7 +678,8 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
         ),
         (
             "manifest-no-block",
-            1_i64,
+            "basenames_base_registry",
+            Some(1_i64),
             None,
             None,
             None,
@@ -460,21 +688,23 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
         ),
         (
             "out-of-range",
-            1_i64,
-            Some(BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK + 1),
+            "basenames_base_registry",
+            Some(1_i64),
+            Some(FIXTURE_OUT_OF_RANGE_BLOCK),
             Some("0xafter"),
             None,
             None,
             "ens_v1_unwrapped_authority",
         ),
         (
-            "wrong-manifest",
-            3_i64,
-            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
-            Some("0xbase-start"),
-            None,
-            None,
-            "ens_v1_unwrapped_authority",
+            "preimage-observation",
+            "basenames_l1_compat",
+            Some(3_i64),
+            Some(FIXTURE_REPLAY_TARGET_BLOCK),
+            Some("0xbase-target"),
+            Some("0xtx-target"),
+            Some(9_i64),
+            "raw_log_preimage_observation",
         ),
     ] {
         sqlx::query(
@@ -484,11 +714,12 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
                 source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
                 log_index, raw_fact_ref, derivation_kind, canonicality_state
             )
-            VALUES ($1, 'basenames', 'RecordChanged', 'basenames_base_registry', 1,
-                    $2, 'base-mainnet', $3, $4, $5, $6, '{}'::jsonb, $7, 'canonical')
+            VALUES ($1, 'basenames', 'RecordChanged', $2, 1,
+                    $3, 'base-mainnet', $4, $5, $6, $7, '{}'::jsonb, $8, 'canonical')
             "#,
         )
         .bind(identity)
+        .bind(source_family)
         .bind(source_manifest_id)
         .bind(block_number)
         .bind(block_hash)
@@ -716,7 +947,24 @@ async fn seed_replay_state(pool: &PgPool) -> Result<()> {
     .bind(DEPLOYMENT_PROFILE)
     .execute(pool)
     .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile, chain_id, cursor_kind, range_start_block_number,
+            next_block_number, target_block_number, last_completed_block_number
+        )
+        VALUES ($1, 'base-mainnet', 'post_replay_live_adapter_backlog', 100, 250, 300, 249)
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .execute(pool)
+    .await?;
     for (adapter, item_kind, item_key) in [
+        (
+            BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
+            "reverse_claim",
+            "alice",
+        ),
         (
             BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
             "registry_edge",
@@ -762,7 +1010,7 @@ async fn seed_replay_state(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn seed_extra_retained_raw_logs_outside_window(pool: &PgPool) -> Result<()> {
+async fn seed_retained_raw_logs_around_fixture_target(pool: &PgPool) -> Result<()> {
     for (block_hash, block_number, tx) in [
         (
             "0xbase-before-retained",
@@ -771,7 +1019,7 @@ async fn seed_extra_retained_raw_logs_outside_window(pool: &PgPool) -> Result<()
         ),
         (
             "0xbase-after-retained",
-            BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK + 10,
+            FIXTURE_REPLAY_TARGET_BLOCK + 10,
             "0xtx-after-retained",
         ),
     ] {
@@ -839,7 +1087,7 @@ async fn seed_out_of_scope_event_referencing_scoped_identity(
     )
     .bind(ids.logical_name_id)
     .bind(ids.resource_id)
-    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK + 1)
+    .bind(FIXTURE_OUT_OF_RANGE_BLOCK)
     .execute(pool)
     .await?;
     Ok(())
@@ -870,6 +1118,14 @@ async fn count_scalar(pool: &PgPool, sql: &str, id: Uuid) -> Result<i64> {
 
 async fn count_text_scalar(pool: &PgPool, sql: &str, value: &str) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>(sql)
+        .bind(value)
+        .fetch_one(pool)
+        .await?)
+}
+
+async fn count_text_table(pool: &PgPool, table: &str, column: &str, value: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*)::BIGINT FROM {table} WHERE {column} = $1");
+    Ok(sqlx::query_scalar::<_, i64>(&sql)
         .bind(value)
         .fetch_one(pool)
         .await?)

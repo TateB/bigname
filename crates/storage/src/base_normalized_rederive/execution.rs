@@ -3,8 +3,10 @@ use sqlx::{PgPool, Row};
 
 use super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
-    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
-    BaseNormalizedRederiveCounts, checkpoint_adapters, expected_manifest_ids,
+    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BaseNormalizedRederiveCounts, checkpoint_adapters,
+    cursor_kinds, reverse_claim_derivation_kind, reverse_claim_source_families,
+    subregistry_derivation_kinds, subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 pub(super) async fn refuse_if_bigname_runtime_sessions(pool: &PgPool) -> Result<()> {
@@ -43,6 +45,7 @@ pub(super) async fn refuse_if_bigname_runtime_sessions(pool: &PgPool) -> Result<
 
 pub(super) async fn create_scope_tables(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replay_target_block: i64,
 ) -> Result<()> {
     for table in [
         "base_rederive_scope_normalized_events",
@@ -69,13 +72,22 @@ pub(super) async fn create_scope_tables(
         SELECT normalized_event_id
         FROM normalized_events
         WHERE chain_id = 'base-mainnet'
-          AND source_manifest_id = ANY($1::BIGINT[])
-          AND block_number BETWEEN 17571485 AND 46954147
+          AND block_number BETWEEN 17571485 AND $1
           AND block_hash IS NOT NULL
-          AND derivation_kind NOT IN ('manifest_sync', 'manifest_alert')
+          AND (
+              (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
+              OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
+              OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
+          )
         "#,
     )
-    .bind(expected_manifest_ids())
+    .bind(replay_target_block)
+    .bind(reverse_claim_derivation_kind())
+    .bind(reverse_claim_source_families())
+    .bind(subregistry_derivation_kinds())
+    .bind(subregistry_source_families())
+    .bind(unwrapped_authority_derivation_kind())
+    .bind(unwrapped_authority_source_families())
     .execute(&mut **transaction)
     .await
     .context("failed to materialize Base normalized-event rederive event scope")?;
@@ -163,6 +175,7 @@ pub(super) async fn refuse_if_out_of_scope_identity_dependencies(
 pub(super) async fn delete_scoped_rows_and_reset_replay(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
+    replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveCounts> {
     let address_names_current = delete_count(
         transaction,
@@ -184,7 +197,8 @@ pub(super) async fn delete_scoped_rows_and_reset_replay(
         delete_replay_checkpoint_items(transaction, deployment_profile).await?;
     let adapter_checkpoint_rows =
         delete_replay_checkpoints(transaction, deployment_profile).await?;
-    let replay_cursor_rows = reset_replay_cursor(transaction, deployment_profile).await?;
+    let replay_cursor_rows =
+        reset_replay_cursors(transaction, deployment_profile, replay_target_block).await?;
     Ok(BaseNormalizedRederiveCounts {
         normalized_events,
         resources,
@@ -239,24 +253,25 @@ async fn delete_replay_checkpoints(
     .await
 }
 
-async fn reset_replay_cursor(
+async fn reset_replay_cursors(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
+    replay_target_block: i64,
 ) -> Result<i64> {
     let result = sqlx::query(
         r#"
         DELETE FROM normalized_replay_cursors
         WHERE deployment_profile = $1
           AND chain_id = $2
-          AND cursor_kind = $3
+          AND cursor_kind = ANY($3::TEXT[])
         "#,
     )
     .bind(deployment_profile)
     .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .bind(cursor_kinds())
     .execute(&mut **transaction)
     .await
-    .context("failed to delete Base normalized-event replay cursor")?;
+    .context("failed to delete Base normalized-event replay cursors")?;
     let deleted = i64::try_from(result.rows_affected()).context("delete count overflowed i64")?;
     sqlx::query(
         r#"
@@ -275,7 +290,7 @@ async fn reset_replay_cursor(
     .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
     .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
     .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
-    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK)
+    .bind(replay_target_block)
     .execute(&mut **transaction)
     .await
     .context("failed to reset Base normalized-event replay cursor")?;
