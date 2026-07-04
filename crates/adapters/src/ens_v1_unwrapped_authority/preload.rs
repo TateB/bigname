@@ -111,6 +111,7 @@ pub(super) async fn preload_restricted_name_histories(
             binding.block_hash AS binding_block_hash,
             binding.block_number AS binding_block_number,
             binding.canonicality_state::TEXT AS binding_canonicality_state,
+            binding.provenance AS binding_provenance,
             resource.provenance AS resource_provenance
         FROM name_surfaces surface
         JOIN surface_bindings binding
@@ -149,8 +150,8 @@ pub(super) async fn preload_restricted_name_histories(
 
     let mut registrar_scopes = Vec::with_capacity(rows.len());
     for row in &rows {
-        let resource_provenance: Value = sql_row::get(row, "resource_provenance")?;
-        let authority_kind = resource_provenance
+        let authority_provenance = authority_provenance_from_preload_row(row)?;
+        let authority_kind = authority_provenance
             .get("authority_kind")
             .and_then(Value::as_str)
             .unwrap_or_default();
@@ -266,7 +267,7 @@ pub(super) async fn preload_restricted_name_histories(
             .or_insert_with(|| labelhash.clone());
 
         let logical_name_id = name.logical_name_id.clone();
-        let resource_provenance: Value = sql_row::get(&row, "resource_provenance")?;
+        let authority_provenance = authority_provenance_from_preload_row(&row)?;
         let active_from = row
             .try_get("active_from")
             .context("missing binding active_from")?;
@@ -292,7 +293,7 @@ pub(super) async fn preload_restricted_name_histories(
         }
         known_name_refs_by_namehash
             .entry(name.namehash.clone())
-            .or_insert_with(|| observation_ref_from_boundary(&binding_ref, None, None, None));
+            .or_insert_with(|| observation_ref_from_boundary(&binding_ref, None, None, None, None));
 
         if let Some(resolver) = resolver_state.get(&logical_name_id) {
             history.current_resolver = Some(resolver.clone());
@@ -301,14 +302,14 @@ pub(super) async fn preload_restricted_name_histories(
             history.current_record_version = Some(*record_version);
         }
 
-        let authority_kind = resource_provenance
+        let authority_kind = authority_provenance
             .get("authority_kind")
             .and_then(Value::as_str)
             .unwrap_or_default();
         match authority_kind {
             "registrar" => preload_registrar_history(
                 history,
-                &resource_provenance,
+                &authority_provenance,
                 &binding_ref,
                 surface_binding_id,
                 active_to,
@@ -317,7 +318,7 @@ pub(super) async fn preload_restricted_name_histories(
             )?,
             "wrapper" => preload_wrapper_history(
                 history,
-                &resource_provenance,
+                &authority_provenance,
                 &binding_ref,
                 surface_binding_id,
                 &wrapper_state,
@@ -325,7 +326,7 @@ pub(super) async fn preload_restricted_name_histories(
             "registry_only" => {
                 preload_registry_history(
                     history,
-                    &resource_provenance,
+                    &authority_provenance,
                     &binding_ref,
                     surface_binding_id,
                     resource_id,
@@ -384,3 +385,42 @@ pub(super) async fn preload_restricted_name_histories(
 
     Ok(())
 }
+
+fn authority_provenance_from_preload_row(row: &sqlx::postgres::PgRow) -> Result<Value> {
+    let resource_provenance: Value = sql_row::get(row, "resource_provenance")?;
+    let binding_provenance: Value = sql_row::get(row, "binding_provenance")?;
+    Ok(binding_provenance_over_resource_provenance(
+        resource_provenance,
+        binding_provenance,
+    ))
+}
+
+fn binding_provenance_over_resource_provenance(
+    mut resource_provenance: Value,
+    binding_provenance: Value,
+) -> Value {
+    let (Some(resource_object), Some(binding_object)) = (
+        resource_provenance.as_object_mut(),
+        binding_provenance.as_object(),
+    ) else {
+        return resource_provenance;
+    };
+
+    for (key, value) in binding_object {
+        resource_object.insert(key.clone(), value.clone());
+    }
+    for key in [
+        "binding_source_family",
+        "binding_manifest_version",
+        "binding_manifest_id",
+    ] {
+        if !binding_object.contains_key(key) {
+            resource_object.remove(key);
+        }
+    }
+
+    resource_provenance
+}
+
+#[cfg(test)]
+mod tests;

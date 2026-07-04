@@ -4,6 +4,7 @@ use bigname_storage::sql_row;
 mod lineage;
 mod orphaning;
 mod overlap_repair;
+mod surface_binding;
 
 pub(super) use lineage::{build_resource, build_token_lineage, build_token_lineage_from_boundary};
 use orphaning::orphan_stale_overlapping_surface_bindings;
@@ -13,6 +14,9 @@ use orphaning::stale_overlapping_surface_binding_candidates;
 #[cfg(test)]
 use orphaning::weaker_same_start_surface_binding_candidates;
 pub(super) use overlap_repair::close_weaker_overlapping_existing_surface_bindings;
+pub(super) use surface_binding::build_surface_binding;
+#[cfg(test)]
+pub(super) use surface_binding::surface_binding_provenance;
 
 const EXISTING_SURFACE_BINDING_LOOKUP_NAME_CHUNK_SIZE: usize = 5_000;
 
@@ -288,31 +292,6 @@ fn name_surface_from_anchor(
         }),
         canonicality_state,
     }
-}
-
-pub(super) async fn build_surface_binding(
-    _pool: &PgPool,
-    logical_name_id: &str,
-    segment: &BindingSegment,
-    chain: &str,
-) -> Result<SurfaceBinding> {
-    Ok(SurfaceBinding {
-        surface_binding_id: segment.surface_binding_id,
-        logical_name_id: logical_name_id.to_owned(),
-        resource_id: segment.authority.resource_id,
-        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-        active_from: segment.active_from,
-        active_to: segment.active_to,
-        chain_id: chain.to_owned(),
-        block_hash: segment.anchor_ref.block_hash.clone(),
-        block_number: segment.anchor_ref.block_number,
-        provenance: json!({
-            "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-            "authority_kind": segment.authority.kind.as_str(),
-            "authority_key": segment.authority.authority_key,
-        }),
-        canonicality_state: segment.anchor_ref.canonicality_state,
-    })
 }
 
 pub(super) async fn prepend_existing_open_binding_closures(

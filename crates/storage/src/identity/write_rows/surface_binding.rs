@@ -87,6 +87,12 @@ pub(in crate::identity) async fn upsert_surface_binding(
 
     ensure_surface_binding_identity_matches(&existing, binding)?;
     let next_active_to = merge_binding_active_to(existing.active_to, binding.active_to)?;
+    let next_provenance = if existing.provenance == binding.provenance {
+        serde_json::to_string(&existing.provenance)
+    } else {
+        serde_json::to_string(&binding.provenance)
+    }
+    .context("failed to serialize merged surface-binding provenance")?;
     let next_state = existing
         .canonicality_state
         .merge_observation(binding.canonicality_state);
@@ -96,7 +102,8 @@ pub(in crate::identity) async fn upsert_surface_binding(
         UPDATE surface_bindings
         SET
             active_to = $2,
-            canonicality_state = $3::canonicality_state,
+            provenance = $3::jsonb,
+            canonicality_state = $4::canonicality_state,
             observed_at = now()
         WHERE surface_binding_id = $1
         RETURNING
@@ -115,6 +122,7 @@ pub(in crate::identity) async fn upsert_surface_binding(
     )
     .bind(binding.surface_binding_id)
     .bind(next_active_to)
+    .bind(next_provenance)
     .bind(next_state.as_str())
     .fetch_one(&mut **executor)
     .await

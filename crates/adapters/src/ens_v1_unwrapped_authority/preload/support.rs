@@ -117,6 +117,7 @@ pub(super) async fn load_name_metadata_by_logical_name_ids(
 pub(super) fn observation_ref_from_boundary(
     boundary: &BoundaryRef,
     source_family: Option<String>,
+    source_manifest_version: Option<i64>,
     source_manifest_id: Option<i64>,
     log_index: Option<i64>,
 ) -> ObservationRef {
@@ -133,7 +134,7 @@ pub(super) fn observation_ref_from_boundary(
         source_manifest_id: source_manifest_id.unwrap_or(0),
         source_family: source_family
             .unwrap_or_else(|| default_registrar_source_family(&boundary.namespace).to_owned()),
-        manifest_version: 1,
+        manifest_version: source_manifest_version.unwrap_or(1),
     }
 }
 

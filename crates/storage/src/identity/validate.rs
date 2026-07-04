@@ -243,6 +243,54 @@ fn ens_v1_unwrapped_authority_surface_provenance(provenance: &serde_json::Value)
         == Some("ens_v1_unwrapped_authority")
 }
 
+fn surface_binding_provenance_enrichment_key(key: &str) -> bool {
+    matches!(
+        key,
+        "binding_source_family" | "binding_manifest_version" | "binding_manifest_id"
+    )
+}
+
+fn surface_binding_provenance_compatible(
+    existing: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> bool {
+    if existing == incoming {
+        return true;
+    }
+    if !ens_v1_unwrapped_authority_surface_provenance(existing)
+        || !ens_v1_unwrapped_authority_surface_provenance(incoming)
+    {
+        return false;
+    }
+
+    let (Some(existing), Some(incoming)) = (existing.as_object(), incoming.as_object()) else {
+        return false;
+    };
+
+    for (key, existing_value) in existing {
+        if surface_binding_provenance_enrichment_key(key) {
+            if incoming.get(key) != Some(existing_value) {
+                return false;
+            }
+            continue;
+        }
+        if incoming.get(key) != Some(existing_value) {
+            return false;
+        }
+    }
+
+    for (key, incoming_value) in incoming {
+        if surface_binding_provenance_enrichment_key(key) {
+            continue;
+        }
+        if existing.get(key) != Some(incoming_value) {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub(super) fn ensure_surface_binding_identity_matches(
     existing: &SurfaceBinding,
     incoming: &SurfaceBinding,
@@ -254,7 +302,7 @@ pub(super) fn ensure_surface_binding_identity_matches(
         || existing.chain_id != incoming.chain_id
         || existing.block_hash != incoming.block_hash
         || existing.block_number != incoming.block_number
-        || existing.provenance != incoming.provenance
+        || !surface_binding_provenance_compatible(&existing.provenance, &incoming.provenance)
     {
         bail!(
             "surface binding identity mismatch for {}",

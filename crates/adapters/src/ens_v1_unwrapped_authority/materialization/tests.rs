@@ -106,6 +106,56 @@ fn coalesce_name_surfaces_for_upsert_keeps_first_identity() {
 }
 
 #[test]
+fn surface_binding_provenance_carries_binding_manifest_fields() -> Result<()> {
+    let anchor_ref = BoundaryRef {
+        chain_id: "base-mainnet".to_owned(),
+        block_hash: "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+        block_number: 321,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_321)?,
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "basenames".to_owned(),
+    };
+    let segment = BindingSegment {
+        surface_binding_id: Uuid::from_u128(0x321),
+        authority: AuthorityAnchor {
+            kind: AuthorityKind::RegistryOnly,
+            authority_key: "registry-only:base-mainnet:0xabc".to_owned(),
+            resource_id: Uuid::from_u128(0x322),
+            token_lineage_id: None,
+            binding_source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned(),
+            binding_manifest_version: 7,
+            binding_manifest_id: 707,
+        },
+        active_from: anchor_ref.block_timestamp,
+        active_to: None,
+        anchor_ref,
+    };
+
+    let provenance = surface_binding_provenance(&segment);
+
+    assert_eq!(
+        provenance
+            .get("binding_source_family")
+            .and_then(Value::as_str),
+        Some(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY)
+    );
+    assert_eq!(
+        provenance
+            .get("binding_manifest_version")
+            .and_then(Value::as_i64),
+        Some(7)
+    );
+    assert_eq!(
+        provenance
+            .get("binding_manifest_id")
+            .and_then(Value::as_i64),
+        Some(707)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn name_surface_anchor_can_use_authority_binding_when_name_ref_is_missing() {
     let name = NameMetadata {
         namespace: "basenames".to_owned(),
