@@ -151,12 +151,21 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
             pair.derivation_kind,
             pair.source_family,
             pair.replay_adapter,
-            NOT (
-                pair.replay_adapter = 'ens_v1_unwrapped_authority'
-                AND event.transaction_hash IS NULL
-                AND event.log_index IS NULL
-                AND event.raw_fact_ref ->> 'kind' = 'raw_block'
-            ) AS requires_source_family_coverage
+            CASE
+                WHEN pair.replay_adapter = 'ens_v1_unwrapped_authority'
+                 AND event.transaction_hash IS NULL
+                 AND event.log_index IS NULL
+                 AND event.raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'
+                    THEN FALSE
+                ELSE TRUE
+            END AS requires_source_family_coverage,
+            CASE
+                WHEN pair.replay_adapter = 'ens_v1_unwrapped_authority'
+                 AND event.namespace = 'basenames'
+                 AND pair.source_family = 'ens_v1_registry_l1'
+                    THEN 'basenames_base_registry'
+                ELSE pair.source_family
+            END AS boundary_rederive_source_family
         FROM scope_rule_pairs pair
         JOIN normalized_events event
           ON event.chain_id = 'base-mainnet'
@@ -171,7 +180,11 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
         WHERE requires_source_family_coverage
     ),
     closure_boundary_delete_scope_pairs AS (
-        SELECT DISTINCT derivation_kind, source_family, replay_adapter
+        SELECT DISTINCT
+            derivation_kind,
+            source_family,
+            replay_adapter,
+            boundary_rederive_source_family
         FROM delete_scope_rows
         WHERE NOT requires_source_family_coverage
     ),
@@ -217,32 +230,6 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
                FALSE
            )
     ),
-    ordered_active_adapter_targets AS (
-        SELECT
-            replay_adapter,
-            from_block,
-            to_block,
-            MAX(to_block) OVER (
-                PARTITION BY replay_adapter
-                ORDER BY from_block, to_block
-                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-            ) AS prior_max_to_block
-        FROM active_targets
-    ),
-    covered_replay_adapters AS (
-        SELECT replay_adapter
-        FROM ordered_active_adapter_targets
-        GROUP BY replay_adapter
-        HAVING MIN(from_block) <= 17571485
-           AND MAX(to_block) >= $1
-           AND NOT COALESCE(
-               BOOL_OR(
-                   prior_max_to_block IS NOT NULL
-                   AND from_block > prior_max_to_block + 1
-               ),
-               FALSE
-           )
-    ),
     inactive_log_pairs AS (
         SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
         FROM log_derived_delete_scope_pairs pair
@@ -258,8 +245,9 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
         FROM closure_boundary_delete_scope_pairs pair
         WHERE NOT EXISTS (
             SELECT 1
-            FROM covered_replay_adapters covered
+            FROM covered_replay_pairs covered
             WHERE covered.replay_adapter = pair.replay_adapter
+              AND covered.source_family = pair.boundary_rederive_source_family
         )
     )
     SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter

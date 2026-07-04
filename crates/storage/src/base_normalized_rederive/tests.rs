@@ -37,13 +37,15 @@ fn replay_active_guard_sql_stays_pair_granularity() {
     assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("delete_scope_rows"));
     assert!(sql.contains("closure_boundary_delete_scope_pairs"));
+    assert!(sql.contains("boundary_rederive_source_family"));
     assert!(sql.contains("active_targets"));
     assert!(sql.contains("ordered_active_targets"));
     assert!(sql.contains("covered_replay_pairs"));
-    assert!(sql.contains("covered_replay_adapters"));
     assert!(sql.contains("prior_max_to_block"));
-    assert!(sql.contains("raw_fact_ref ->> 'kind' = 'raw_block'"));
+    assert!(sql.contains("raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'"));
+    assert!(sql.contains("covered.source_family = pair.boundary_rederive_source_family"));
     assert!(sql.contains("$8::TEXT[]"));
+    assert!(!sql.contains("covered_replay_adapters"));
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("raw_logs"));
     assert!(!sql.contains("watched_targets"));
@@ -1009,6 +1011,14 @@ async fn dry_run_accepts_adapter_closure_boundary_pair_without_source_family_tar
 
     let plan =
         load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    assert!(plan.active_replay_target_snapshot.iter().any(|target| {
+        target.replay_adapter == "ens_v1_unwrapped_authority"
+            && target.source_family == "basenames_base_registry"
+    }));
+    assert!(!plan.active_replay_target_snapshot.iter().any(|target| {
+        target.replay_adapter == "ens_v1_unwrapped_authority"
+            && target.source_family == "ens_v1_registry_l1"
+    }));
     let pair = plan
         .derivation_kind_census
         .iter()
@@ -1019,6 +1029,53 @@ async fn dry_run_accepts_adapter_closure_boundary_pair_without_source_family_tar
         .context("ENSv1 registry boundary pair should be reported in the census")?;
     assert!(pair.rederivable);
     assert_eq!(pair.row_count, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_missing_raw_block_kind_without_source_family_target() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    seed_ens_v1_registry_l1_boundary_event_missing_kind(database.pool()).await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("boundary-shaped rows without explicit raw_block facts need target coverage");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_unwrapped_authority/ens_v1_registry_l1"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_registry_boundary_with_only_resolver_target() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    move_fixture_basenames_registry_rows_out_of_delete_scope(database.pool()).await?;
+    deactivate_base_source_family(database.pool(), "basenames_base_registry").await?;
+    deactivate_base_source_family(database.pool(), "basenames_base_registrar").await?;
+    seed_ens_v1_registry_l1_boundary_event(database.pool()).await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("registry boundary rows need registry-family closure coverage");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("ens_v1_unwrapped_authority/ens_v1_registry_l1"),
+        "unexpected error: {error:?}"
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -2275,6 +2332,76 @@ async fn seed_ens_v1_registry_l1_boundary_event(pool: &PgPool) -> Result<()> {
         "#,
     )
     .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_ens_v1_registry_l1_boundary_event_missing_kind(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, event_kind, source_family,
+            manifest_version, source_manifest_id, chain_id, block_number, block_hash,
+            transaction_hash, log_index, raw_fact_ref, derivation_kind, canonicality_state
+        )
+        VALUES (
+            'ens-v1-registry-boundary-missing-kind',
+            'basenames',
+            'basenames:based1.base.eth',
+            'SurfaceUnbound',
+            'ens_v1_registry_l1',
+            1,
+            NULL,
+            'base-mainnet',
+            $1,
+            '0xbase-mid',
+            NULL,
+            NULL,
+            '{}'::jsonb,
+            'ens_v1_unwrapped_authority',
+            'canonical'
+        )
+        "#,
+    )
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn move_fixture_basenames_registry_rows_out_of_delete_scope(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET source_family = 'basenames_l1_compat'
+        WHERE source_family = 'basenames_base_registry'
+          AND chain_id = 'base-mainnet'
+          AND block_hash IS NOT NULL
+          AND (
+              derivation_kind = 'ens_v1_unwrapped_authority'
+              OR derivation_kind IN (
+                  'ens_v1_subregistry_changed',
+                  'ens_v1_registry_resolver_changed'
+              )
+          )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn deactivate_base_source_family(pool: &PgPool, source_family: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'deprecated'
+        WHERE chain = 'base-mainnet'
+          AND source_family = $1
+        "#,
+    )
+    .bind(source_family)
     .execute(pool)
     .await?;
     Ok(())
