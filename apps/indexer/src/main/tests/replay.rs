@@ -121,6 +121,92 @@ async fn replay_normalized_events_runs_full_persisted_raw_adapter_boundary() -> 
 }
 
 #[tokio::test]
+async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let reverse_address = "0x00000000000000000000000000000000000000ab";
+    let reverse_contract_instance_id = Uuid::from_u128(0x901);
+    let blocks = [
+        provider_block(
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            Some("0x1010101010101010101010101010101010101010101010101010101010101010"),
+            100,
+        ),
+        provider_block(
+            "0x1212121212121212121212121212121212121212121212121212121212121212",
+            Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
+            101,
+        ),
+        provider_block(
+            "0x1313131313131313131313131313131313131313131313131313131313131313",
+            Some("0x1212121212121212121212121212121212121212121212121212121212121212"),
+            102,
+        ),
+    ];
+    let claimed_addresses = [
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+    ];
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        901,
+        "basenames",
+        "basenames_base_primary",
+        chain,
+        "basenames_v1",
+        reverse_contract_instance_id,
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    for (block, claimed_address) in blocks.iter().zip(claimed_addresses) {
+        insert_raw_reverse_claimed_log(
+            database.pool(),
+            chain,
+            block,
+            reverse_address,
+            claimed_address,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+
+    let summary = sync_full_closure_normalized_events_from_persisted_raw_payloads(
+        database.pool(),
+        "mainnet",
+        chain,
+        100,
+        102,
+        &[NormalizedEventReplayAdapter::EnsV1ReverseClaim],
+        1,
+    )
+    .await?;
+
+    assert_eq!(summary.scanned_log_count, 3);
+    assert_eq!(summary.matched_log_count, 3);
+    assert_eq!(summary.total_synced_count, 6);
+    assert_eq!(summary.total_inserted_count, 6);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT COUNT(*)::BIGINT, MIN(block_number)::BIGINT, MAX(block_number)::BIGINT
+            FROM normalized_events
+            WHERE chain_id = $1
+              AND derivation_kind = 'ens_v1_reverse_claim'
+            "#
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (6, Some(100), Some(102))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_normalized_events_scoped_block_range_selects_only_requested_targets() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";

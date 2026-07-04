@@ -58,8 +58,9 @@ pub(crate) use persistence::{
 };
 #[allow(unused_imports)]
 pub(crate) use replay::{
-    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
-    replay_raw_fact_normalized_events, unsupported_closure_replay_adapters,
+    NormalizedEventReplayAdapter, active_closure_or_dependency_replay_adapters,
+    chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
+    unsupported_closure_replay_adapters,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

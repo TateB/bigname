@@ -323,6 +323,22 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
 }
 
 #[tokio::test]
+async fn writer_guard_refuses_single_connection_pool() -> Result<()> {
+    let error = crate::connect_with_base_normalized_rederive_writer_guard(
+        &crate::DatabaseConfig {
+            database_url: Some("postgres://bigname:bigname@127.0.0.1:1/bigname".to_owned()),
+            max_connections: 1,
+        },
+        "bigname-indexer",
+    )
+    .await
+    .expect_err("single-connection guarded writer pools must fail before connecting");
+
+    assert!(format!("{error:?}").contains("requires at least 2 database connections"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;

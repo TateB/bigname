@@ -149,7 +149,9 @@ The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
 `provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
 removes dependent current-projection rows and `projection_normalized_event_changes`
 rows only to satisfy foreign keys and to force the later projection rebuild to
-publish from the re-derived event stream. It does not rebuild projections.
+publish from the re-derived event stream. It does not rebuild projections, so
+the API must be drained or stopped from execute through the replay, projection
+rebuild, and verification window.
 
 The delete order is FK-safe: current projections keyed by scoped identity rows,
 then `projection_normalized_event_changes`, then scoped `normalized_events`,

@@ -32,7 +32,7 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use sqlx::{
     PgPool, Postgres,
@@ -301,6 +301,8 @@ pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
 }
 
+const BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS: u32 = 2;
+
 /// Open a PostgreSQL connection pool using the shared bootstrap settings.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
     connect_inner(config, None).await
@@ -321,6 +323,12 @@ pub async fn connect_with_base_normalized_rederive_writer_guard(
     config: &DatabaseConfig,
     application_name: &str,
 ) -> Result<(PgPool, PoolConnection<Postgres>)> {
+    ensure!(
+        config.max_connections >= BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS,
+        "Base normalized-event rederive writer guard requires at least {} database connections; set BIGNAME_DATABASE_MAX_CONNECTIONS or --database-max-connections to {} or higher",
+        BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS,
+        BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS
+    );
     let pool = connect_with_application_name(config, application_name).await?;
     let guard = hold_base_normalized_rederive_runtime_shared_lock(&pool, application_name).await?;
     Ok((pool, guard))
