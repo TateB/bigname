@@ -146,47 +146,28 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
             'ens_v1_unwrapped_authority'::TEXT AS replay_adapter
         FROM unnest($7::TEXT[]) AS source_families(source_family)
     ),
-    delete_scope_rows AS (
-        SELECT
-            pair.derivation_kind,
-            pair.source_family,
-            pair.replay_adapter,
-            CASE
-                WHEN pair.replay_adapter = 'ens_v1_unwrapped_authority'
-                 AND event.transaction_hash IS NULL
-                 AND event.log_index IS NULL
-                 AND event.raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'
-                    THEN FALSE
-                ELSE TRUE
-            END AS requires_source_family_coverage,
-            CASE
-                WHEN pair.replay_adapter = 'ens_v1_unwrapped_authority'
-                 AND event.namespace = 'basenames'
-                 AND pair.source_family = 'ens_v1_registry_l1'
-                    THEN 'basenames_base_registry'
-                ELSE pair.source_family
-            END AS boundary_rederive_source_family
-        FROM scope_rule_pairs pair
-        JOIN normalized_events event
-          ON event.chain_id = 'base-mainnet'
-         AND event.block_number BETWEEN 17571485 AND $1
-         AND event.block_hash IS NOT NULL
-         AND event.derivation_kind = pair.derivation_kind
-         AND event.source_family = pair.source_family
-    ),
     log_derived_delete_scope_pairs AS (
-        SELECT DISTINCT derivation_kind, source_family, replay_adapter
-        FROM delete_scope_rows
-        WHERE requires_source_family_coverage
-    ),
-    closure_boundary_delete_scope_pairs AS (
-        SELECT DISTINCT
-            derivation_kind,
-            source_family,
-            replay_adapter,
-            boundary_rederive_source_family
-        FROM delete_scope_rows
-        WHERE NOT requires_source_family_coverage
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM scope_rule_pairs pair
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT 1
+                FROM normalized_events event
+                WHERE event.chain_id = 'base-mainnet'
+                  AND event.block_number BETWEEN 17571485 AND $1
+                  AND event.block_hash IS NOT NULL
+                  AND event.derivation_kind = pair.derivation_kind
+                  AND event.source_family = pair.source_family
+                  AND NOT (
+                      pair.replay_adapter = 'ens_v1_unwrapped_authority'
+                      AND event.transaction_hash IS NULL
+                      AND event.log_index IS NULL
+                      AND event.raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'
+                  )
+                LIMIT 1
+            ) non_boundary_event
+        )
     ),
     active_targets AS (
         SELECT
@@ -230,6 +211,84 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
                FALSE
            )
     ),
+    uncovered_basenames_registry_boundary_pairs AS MATERIALIZED (
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM scope_rule_pairs pair
+        WHERE pair.replay_adapter = 'ens_v1_unwrapped_authority'
+          AND pair.source_family = 'ens_v1_registry_l1'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM covered_replay_pairs covered
+            WHERE covered.replay_adapter = pair.replay_adapter
+              AND covered.source_family = 'basenames_base_registry'
+        )
+    ),
+    uncovered_stored_family_boundary_pairs AS MATERIALIZED (
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM scope_rule_pairs pair
+        WHERE pair.replay_adapter = 'ens_v1_unwrapped_authority'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM covered_replay_pairs covered
+            WHERE covered.replay_adapter = pair.replay_adapter
+              AND covered.source_family = pair.source_family
+        )
+    ),
+    closure_boundary_rederive_families AS (
+        SELECT
+            pair.derivation_kind,
+            pair.source_family,
+            pair.replay_adapter,
+            'basenames_base_registry'::TEXT AS boundary_rederive_source_family
+        FROM uncovered_basenames_registry_boundary_pairs pair
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT 1
+                FROM normalized_events event
+                WHERE event.chain_id = 'base-mainnet'
+                  AND event.block_number BETWEEN 17571485 AND $1
+                  AND event.block_hash IS NOT NULL
+                  AND event.derivation_kind = pair.derivation_kind
+                  AND event.source_family = pair.source_family
+                  AND event.namespace = 'basenames'
+                  AND event.transaction_hash IS NULL
+                  AND event.log_index IS NULL
+                  AND event.raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'
+                LIMIT 1
+            ) basenames_boundary_event
+        )
+
+        UNION ALL
+
+        SELECT
+            pair.derivation_kind,
+            pair.source_family,
+            pair.replay_adapter,
+            pair.source_family AS boundary_rederive_source_family
+        FROM uncovered_stored_family_boundary_pairs pair
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT 1
+                FROM normalized_events event
+                WHERE event.chain_id = 'base-mainnet'
+                  AND event.block_number BETWEEN 17571485 AND $1
+                  AND event.block_hash IS NOT NULL
+                  AND event.derivation_kind = pair.derivation_kind
+                  AND event.source_family = pair.source_family
+                  AND event.transaction_hash IS NULL
+                  AND event.log_index IS NULL
+                  AND event.raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'
+                  AND NOT (
+                      pair.replay_adapter = 'ens_v1_unwrapped_authority'
+                      AND pair.source_family = 'ens_v1_registry_l1'
+                      AND event.namespace = 'basenames'
+                  )
+                LIMIT 1
+            ) stored_family_boundary_event
+        )
+    ),
     inactive_log_pairs AS (
         SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
         FROM log_derived_delete_scope_pairs pair
@@ -242,7 +301,7 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
     ),
     inactive_closure_boundary_pairs AS (
         SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
-        FROM closure_boundary_delete_scope_pairs pair
+        FROM closure_boundary_rederive_families pair
         WHERE NOT EXISTS (
             SELECT 1
             FROM covered_replay_pairs covered
