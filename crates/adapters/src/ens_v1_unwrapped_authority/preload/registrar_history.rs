@@ -70,7 +70,6 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registrar_history(
             observation_ref_from_boundary(
                 binding_ref,
                 Some(source_family),
-                None,
                 Some(source_manifest_id),
                 log_index_from_authority_key(&authority_key),
             )

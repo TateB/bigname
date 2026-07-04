@@ -56,67 +56,6 @@ pub(super) fn surface_binding_active_to_merge_sql(
     )
 }
 
-fn surface_binding_provenance_without_binding_manifest_fields_sql(provenance: &str) -> String {
-    format!(
-        r#"
-        ({provenance}
-            - 'binding_source_family'
-            - 'binding_manifest_version'
-            - 'binding_manifest_id')
-        "#
-    )
-}
-
-pub(super) fn surface_binding_provenance_compatible_sql(
-    existing_provenance: &str,
-    incoming_provenance: &str,
-) -> String {
-    format!(
-        r#"
-        (
-            {existing_provenance} = {incoming_provenance}
-            OR (
-                {existing_provenance}->>'adapter' = 'ens_v1_unwrapped_authority'
-                AND {incoming_provenance}->>'adapter' = 'ens_v1_unwrapped_authority'
-                AND {existing_without_manifest_fields} = {incoming_without_manifest_fields}
-                AND (
-                    NOT ({existing_provenance} ? 'binding_source_family')
-                    OR {existing_provenance}->'binding_source_family' = {incoming_provenance}->'binding_source_family'
-                )
-                AND (
-                    NOT ({existing_provenance} ? 'binding_manifest_version')
-                    OR {existing_provenance}->'binding_manifest_version' = {incoming_provenance}->'binding_manifest_version'
-                )
-                AND (
-                    NOT ({existing_provenance} ? 'binding_manifest_id')
-                    OR {existing_provenance}->'binding_manifest_id' = {incoming_provenance}->'binding_manifest_id'
-                )
-            )
-        )
-        "#,
-        existing_without_manifest_fields =
-            surface_binding_provenance_without_binding_manifest_fields_sql(existing_provenance),
-        incoming_without_manifest_fields =
-            surface_binding_provenance_without_binding_manifest_fields_sql(incoming_provenance),
-    )
-}
-
-pub(super) fn surface_binding_provenance_merge_sql(
-    existing_provenance: &str,
-    incoming_provenance: &str,
-) -> String {
-    format!(
-        r#"
-        CASE
-            WHEN {compatible} THEN {incoming_provenance}
-            ELSE {existing_provenance}
-        END
-        "#,
-        compatible =
-            surface_binding_provenance_compatible_sql(existing_provenance, incoming_provenance),
-    )
-}
-
 fn stable_anchor_matches_sql(table_name: &str) -> String {
     format!(
         r#"

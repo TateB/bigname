@@ -344,7 +344,6 @@ pub(super) fn preload_wrapper_history(
     let start_ref = observation_ref_from_boundary(
         binding_ref,
         Some(SOURCE_FAMILY_ENS_V1_WRAPPER_L1.to_owned()),
-        None,
         Some(source_manifest_id),
         log_index_from_authority_key(&authority_key),
     );
@@ -431,7 +430,6 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registry_history(
             Some(observation_ref_from_boundary(
                 binding_ref,
                 Some(authority.binding_source_family.clone()),
-                Some(authority.binding_manifest_version),
                 Some(authority.binding_manifest_id),
                 None,
             ))

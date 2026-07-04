@@ -1661,6 +1661,76 @@ fn preload_registry_history_recovers_binding_manifest_provenance() -> Result<()>
 }
 
 #[test]
+fn fresh_registry_anchor_uses_basenames_registry_family_for_surface_unbound() -> Result<()> {
+    let name = observe_registrar_name_with_version(
+        "based1",
+        AuthorityProfile::Basenames,
+        ENS_NORMALIZER_VERSION,
+    )?;
+    let labelhash = name.labelhashes[0].clone();
+    let registry_ref = ObservationRef {
+        chain_id: "base-mainnet".to_owned(),
+        block_hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        block_number: 46_606_106,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_760_000_000)?,
+        transaction_hash: Some(
+            "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+        ),
+        transaction_index: Some(0),
+        log_index: Some(7),
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: AuthorityProfile::Basenames.namespace().to_owned(),
+        source_manifest_id: 202,
+        source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned(),
+        manifest_version: 2,
+    };
+    let boundary_ref = BoundaryRef {
+        chain_id: registry_ref.chain_id.clone(),
+        block_hash: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
+        block_number: 46_606_107,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_760_000_012)?,
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: AuthorityProfile::Basenames.namespace().to_owned(),
+    };
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(name));
+    history.current_registry_owner = Some("0x0000000000000000000000000000000000000202".to_owned());
+    history.latest_registry_owner_ref = Some(registry_ref);
+
+    let anchor = registry_anchor_for_history(&history, "base-mainnet", &labelhash)
+        .context("fresh registry owner should produce a registry-only anchor")?;
+    assert_eq!(
+        anchor.binding_source_family,
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
+    );
+    history.open_binding = Some(OpenBinding {
+        surface_binding_id: Uuid::from_u128(0x51321),
+        authority: anchor.clone(),
+        active_from: OffsetDateTime::from_unix_timestamp(1_760_000_000)?,
+        anchor_ref: boundary_ref.clone(),
+    });
+
+    transition_authority(
+        &mut history,
+        Some(anchor),
+        None,
+        &boundary_ref,
+        boundary_ref.block_timestamp,
+    )?;
+
+    let surface_unbound = history
+        .events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_SURFACE_UNBOUND)
+        .context("fresh Basenames registry binding should emit SurfaceUnbound")?;
+    assert_eq!(
+        surface_unbound.source_family,
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
+    );
+
+    Ok(())
+}
+
+#[test]
 fn preload_registry_history_uses_basenames_registry_family_for_basenames_boundaries() -> Result<()>
 {
     for provenance in [
