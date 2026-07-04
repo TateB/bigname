@@ -531,10 +531,11 @@ held advisory lock connection cannot starve the writer work.
 3. Review the printed derivation-kind/source-family partition, including the
    re-derivable delete count and explicitly kept nonreplay pairs such as
    `raw_log_preimage_observation` and non-closure source families;
-   identity/projection/change-log delete counts; raw-fact completeness proof;
-   both replay cursor counts; affected current-projection replay marker count;
-   run id, batch size, batch count/order; max affected block; replay target
-   floor; and the replay reset target
+   identity/projection/change-log delete counts; raw-fact completeness proof,
+   including that the retained canonical Base raw-log floor is exactly block
+   `17571485`; active replay target snapshot row count and digest; both replay
+   cursor counts; affected current-projection replay marker count; run id, batch
+   size, batch count/order; max affected block; replay target floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
 4. Execute only after review, passing the dry-run counts back as exact
    `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
@@ -577,7 +578,8 @@ held advisory lock connection cannot starve the writer work.
        --expected-current-projection-replay-status <dry-run-value> \
        --expected-replay-cursor-rows <dry-run-value> \
        --expected-adapter-checkpoint-rows <dry-run-value> \
-       --expected-adapter-checkpoint-item-rows <dry-run-value>
+       --expected-adapter-checkpoint-item-rows <dry-run-value> \
+       --expected-active-replay-target-snapshot-digest <dry-run-value>
    ```
 
 5. Monitor batch progress while execute is running from another SQL session:
@@ -601,9 +603,12 @@ held advisory lock connection cannot starve the writer work.
    the same execute command again with the same `--run-id`, `--batch-size`,
    `--replay-target-block`, and expected counts. The command resumes only when
    recorded deleted counts plus the remaining live census still equal the
-   reviewed dry-run census. Do not run replay until the run row is
-   `status='completed'`; before that final state, replay cursors and projection
-   markers are intentionally untouched.
+   reviewed dry-run census, the current active replay target/range snapshot
+   still matches the reviewed run snapshot, and retained raw facts remain
+   complete and unchanged for the stored target.
+   Do not run replay until the run row is `status='completed'`; before that
+   final state, replay cursors and projection markers are intentionally
+   untouched.
 7. Run only the catch-up indexer with normalized replay catch-up enabled and
    `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
    replay from block `17571485` through the reviewed target block. Keep the API

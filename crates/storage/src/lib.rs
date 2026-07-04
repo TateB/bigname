@@ -87,7 +87,8 @@ pub use base_normalized_rederive::{
     BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
     BaseNormalizedRederiveExecutionOutcome, BaseNormalizedRederiveExpectedCounts,
     BaseNormalizedRederivePlan, BaseNormalizedRederiveRawFactCompleteness,
-    BaseNormalizedRederiveScopeRule, DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE,
+    BaseNormalizedRederiveRawFactRangeProof, BaseNormalizedRederiveScopeRule,
+    DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE, base_normalized_rederive_json_digest,
     base_normalized_rederive_scope_rules, execute_base_normalized_rederive_drop,
     hold_base_normalized_rederive_runtime_shared_lock, load_base_normalized_rederive_plan,
 };

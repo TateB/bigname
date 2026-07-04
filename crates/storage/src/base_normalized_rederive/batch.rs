@@ -11,10 +11,12 @@ use super::execution::{
     refuse_if_out_of_scope_identity_dependencies,
 };
 use super::guards::ensure_delete_scope_replay_active_from;
+use super::guards::load_active_replay_target_snapshot_from;
 use super::profile::validate_base_deployment_profile_owns_chain_from;
 use super::{
     BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY, BaseNormalizedRederiveExecutionOutcome,
-    BaseNormalizedRederiveExpectedCounts, load_plan_in_transaction,
+    BaseNormalizedRederiveExpectedCounts, base_normalized_rederive_json_digest,
+    load_plan_in_transaction, load_raw_fact_completeness_from, load_raw_fact_range_proof_from,
     resolve_replay_target_block_from,
 };
 use delete::delete_step_batch;
@@ -163,7 +165,7 @@ async fn prepare_or_resume_run(
         .context("failed to set Base normalized-event rederive start transaction isolation")?;
     refuse_if_bigname_runtime_sessions(&mut transaction).await?;
 
-    if let Some(state) = load_run_for_update(&mut transaction, run_id).await? {
+    if let Some(mut state) = load_run_for_update(&mut transaction, run_id).await? {
         ensure_run_matches(
             &state,
             deployment_profile,
@@ -172,6 +174,19 @@ async fn prepare_or_resume_run(
             &expected_counts.counts,
         )?;
         if !state.is_completed() {
+            let expected_active_snapshot_digest = expected_counts
+                .active_replay_target_snapshot_digest
+                .as_deref()
+                .context("Base normalized-event rederive resume requires reviewed active replay target snapshot digest")?;
+            validate_or_upgrade_resume_guard_snapshots(
+                &mut transaction,
+                &mut state,
+                expected_active_snapshot_digest,
+            )
+            .await?;
+            rerun_resume_guards(&mut transaction, &state)
+                .await
+                .context("Base normalized-event rederive resume guard failed")?;
             validate_resume_census(&mut transaction, &state).await?;
         }
         transaction
@@ -212,6 +227,16 @@ async fn prepare_or_resume_run(
         expected_counts.counts,
         plan.counts
     );
+    let active_snapshot_digest =
+        base_normalized_rederive_json_digest(&plan.active_replay_target_snapshot)?;
+    ensure!(
+        expected_counts
+            .active_replay_target_snapshot_digest
+            .as_deref()
+            == Some(active_snapshot_digest.as_str()),
+        "Base normalized-event rederive active replay target snapshot divergence: expected {:?}, found {active_snapshot_digest}",
+        expected_counts.active_replay_target_snapshot_digest
+    );
     refuse_if_out_of_scope_identity_dependencies(&mut transaction).await?;
     let state = insert_run(
         &mut transaction,
@@ -228,6 +253,103 @@ async fn prepare_or_resume_run(
         .await
         .context("failed to commit Base normalized-event rederive run start")?;
     Ok((plan, state))
+}
+
+async fn validate_or_upgrade_resume_guard_snapshots(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &mut RunState,
+    expected_active_snapshot_digest: &str,
+) -> Result<()> {
+    if !state.plan_snapshot.active_replay_target_snapshot.is_empty()
+        && !state.plan_snapshot.raw_fact_range_proof.is_empty()
+    {
+        let stored_digest = base_normalized_rederive_json_digest(
+            &state.plan_snapshot.active_replay_target_snapshot,
+        )?;
+        ensure!(
+            stored_digest == expected_active_snapshot_digest,
+            "Base normalized-event rederive active replay target snapshot digest mismatch for run {:?}: stored {stored_digest}, requested {expected_active_snapshot_digest}",
+            state.run_id
+        );
+        return Ok(());
+    }
+    ensure!(
+        state.deleted_counts.normalized_events == 0,
+        "Base normalized-event rederive run {:?} lacks durable resume guard snapshots and has already deleted normalized events; restart with a new reviewed run id after operator review",
+        state.run_id
+    );
+    if state.plan_snapshot.active_replay_target_snapshot.is_empty() {
+        state.plan_snapshot.active_replay_target_snapshot =
+            load_active_replay_target_snapshot_from(transaction, state.replay_target_block).await?;
+        let upgraded_digest = base_normalized_rederive_json_digest(
+            &state.plan_snapshot.active_replay_target_snapshot,
+        )?;
+        ensure!(
+            upgraded_digest == expected_active_snapshot_digest,
+            "Base normalized-event rederive legacy active replay target snapshot divergence for run {:?}: reviewed {expected_active_snapshot_digest}, current {upgraded_digest}",
+            state.run_id
+        );
+    } else {
+        let stored_digest = base_normalized_rederive_json_digest(
+            &state.plan_snapshot.active_replay_target_snapshot,
+        )?;
+        ensure!(
+            stored_digest == expected_active_snapshot_digest,
+            "Base normalized-event rederive active replay target snapshot digest mismatch for run {:?}: stored {stored_digest}, requested {expected_active_snapshot_digest}",
+            state.run_id
+        );
+    }
+    if state.plan_snapshot.raw_fact_range_proof.is_empty() {
+        state.plan_snapshot.raw_fact_range_proof =
+            load_raw_fact_range_proof_from(transaction, state.replay_target_block).await?;
+    }
+    update_run_state(transaction, state).await?;
+    Ok(())
+}
+
+async fn rerun_resume_guards(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &RunState,
+) -> Result<()> {
+    let (target, _, _) = resolve_replay_target_block_from(
+        transaction,
+        &state.deployment_profile,
+        Some(state.replay_target_block),
+    )
+    .await?;
+    ensure!(
+        target == state.replay_target_block,
+        "Base normalized-event rederive run {:?} resolved replay target {target}, not stored target {}",
+        state.run_id,
+        state.replay_target_block
+    );
+    let current_replay_target_snapshot =
+        load_active_replay_target_snapshot_from(transaction, state.replay_target_block).await?;
+    ensure!(
+        current_replay_target_snapshot == state.plan_snapshot.active_replay_target_snapshot,
+        "Base normalized-event rederive active replay target snapshot changed during run {:?}: stored {} targets, current {} targets",
+        state.run_id,
+        state.plan_snapshot.active_replay_target_snapshot.len(),
+        current_replay_target_snapshot.len()
+    );
+    ensure_delete_scope_replay_active_from(transaction, state.replay_target_block).await?;
+    let current_raw_fact_range_proof =
+        load_raw_fact_range_proof_from(transaction, state.replay_target_block).await?;
+    ensure!(
+        current_raw_fact_range_proof == state.plan_snapshot.raw_fact_range_proof,
+        "Base normalized-event rederive raw-fact range proof changed during run {:?}: stored {:?}, current {:?}",
+        state.run_id,
+        state.plan_snapshot.raw_fact_range_proof,
+        current_raw_fact_range_proof
+    );
+    let raw_fact_completeness =
+        load_raw_fact_completeness_from(transaction, state.replay_target_block).await?;
+    ensure!(
+        raw_fact_completeness.is_complete_for_rerun(),
+        "Base normalized-event rederive raw-fact completeness check failed on resume: {:?}",
+        raw_fact_completeness
+    );
+    Ok(())
 }
 
 async fn execute_next_batch(connection: &mut PgConnection, run_id: &str) -> Result<BatchProgress> {

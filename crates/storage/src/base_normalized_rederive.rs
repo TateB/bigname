@@ -9,6 +9,7 @@ mod counts;
 mod execution;
 mod guards;
 mod profile;
+mod proof;
 
 use batch::execute_base_normalized_rederive_drop_batched;
 pub use batch_plan::{BaseNormalizedRederiveBatchPlan, BaseNormalizedRederiveBatchPlanStep};
@@ -19,13 +20,17 @@ use counts::{
     load_reset_replay_cursor_target_block, load_reset_replay_cursor_target_block_from,
 };
 use guards::{
+    ensure_canonical_raw_log_floor, ensure_canonical_raw_log_floor_from,
     ensure_delete_scope_replay_active, ensure_no_affected_rows_above_raw_log_head,
-    ensure_no_affected_rows_above_raw_log_head_from,
+    ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot,
+    load_active_replay_target_snapshot_from,
 };
 use profile::{
     validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
     validate_deployment_profile,
 };
+pub use proof::{BaseNormalizedRederiveRawFactRangeProof, base_normalized_rederive_json_digest};
+use proof::{load_raw_fact_range_proof, load_raw_fact_range_proof_from};
 
 pub const BASE_NORMALIZED_REDERIVE_CHAIN_ID: &str = "base-mainnet";
 pub const BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER: &str = "ens_v1_reverse_claim";
@@ -61,6 +66,15 @@ pub struct BaseNormalizedRederiveDerivationKindCensus {
     pub min_block_number: Option<i64>,
     pub max_block_number: Option<i64>,
     pub rederivable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BaseNormalizedRederiveReplayTargetSnapshot {
+    pub replay_adapter: String,
+    pub source_family: String,
+    pub address: String,
+    pub from_block: i64,
+    pub to_block: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -125,6 +139,10 @@ pub struct BaseNormalizedRederivePlan {
     pub max_affected_block: Option<i64>,
     pub replay_target_floor_block: Option<i64>,
     pub derivation_kind_census: Vec<BaseNormalizedRederiveDerivationKindCensus>,
+    #[serde(default)]
+    pub active_replay_target_snapshot: Vec<BaseNormalizedRederiveReplayTargetSnapshot>,
+    #[serde(default)]
+    pub raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof,
     pub cursor_census: BaseNormalizedRederiveCursorCensus,
     pub counts: BaseNormalizedRederiveCounts,
     pub raw_fact_completeness: BaseNormalizedRederiveRawFactCompleteness,
@@ -133,6 +151,7 @@ pub struct BaseNormalizedRederivePlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseNormalizedRederiveExpectedCounts {
     pub counts: BaseNormalizedRederiveCounts,
+    pub active_replay_target_snapshot_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +194,9 @@ pub async fn load_base_normalized_rederive_plan(
             .context("failed to resolve Base normalized-event rederive replay target")?;
     ensure_delete_scope_replay_active(pool, replay_target_block).await?;
     let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
+    let active_replay_target_snapshot =
+        load_active_replay_target_snapshot(pool, replay_target_block).await?;
+    let raw_fact_range_proof = load_raw_fact_range_proof(pool, replay_target_block).await?;
     let cursor_census = load_cursor_census(pool, deployment_profile).await?;
     let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
     let raw_fact_completeness = load_raw_fact_completeness(pool, replay_target_block).await?;
@@ -184,6 +206,8 @@ pub async fn load_base_normalized_rederive_plan(
         max_affected_block,
         replay_target_floor_block,
         derivation_kind_census,
+        active_replay_target_snapshot,
+        raw_fact_range_proof,
         cursor_census,
         counts,
         raw_fact_completeness,
@@ -209,6 +233,12 @@ pub async fn execute_base_normalized_rederive_drop(
     ensure!(
         batch_size > 0,
         "Base normalized-event rederive batch size must be positive"
+    );
+    ensure!(
+        expected_counts
+            .active_replay_target_snapshot_digest
+            .is_some(),
+        "Base normalized-event rederive execute requires reviewed active replay target snapshot digest"
     );
     execute_base_normalized_rederive_drop_batched(
         pool,
@@ -236,6 +266,12 @@ async fn execute_base_normalized_rederive_drop_with_batch_limit(
         requested_replay_target_block.is_some(),
         "Base normalized-event rederive execute requires reviewed replay target block"
     );
+    ensure!(
+        expected_counts
+            .active_replay_target_snapshot_digest
+            .is_some(),
+        "Base normalized-event rederive execute requires reviewed active replay target snapshot digest"
+    );
     batch::execute_base_normalized_rederive_drop_with_batch_limit(
         pool,
         deployment_profile,
@@ -259,6 +295,10 @@ pub(super) async fn load_plan_in_transaction(
     validate_base_deployment_profile_owns_chain_from(transaction, deployment_profile).await?;
     let derivation_kind_census =
         load_derivation_kind_census_from(transaction, replay_target_block).await?;
+    let active_replay_target_snapshot =
+        load_active_replay_target_snapshot_from(transaction, replay_target_block).await?;
+    let raw_fact_range_proof =
+        load_raw_fact_range_proof_from(transaction, replay_target_block).await?;
     let cursor_census = load_cursor_census_from(transaction, deployment_profile).await?;
     let counts = load_counts_from(transaction, deployment_profile, replay_target_block).await?;
     let raw_fact_completeness =
@@ -269,6 +309,8 @@ pub(super) async fn load_plan_in_transaction(
         max_affected_block,
         replay_target_floor_block,
         derivation_kind_census,
+        active_replay_target_snapshot,
+        raw_fact_range_proof,
         cursor_census,
         counts,
         raw_fact_completeness,
@@ -281,6 +323,7 @@ async fn resolve_replay_target_block(
     requested_replay_target_block: Option<i64>,
 ) -> Result<(i64, Option<i64>, Option<i64>)> {
     let head = validate_canonical_raw_log_head(load_canonical_raw_log_head(pool).await?)?;
+    ensure_canonical_raw_log_floor(pool).await?;
     ensure_no_affected_rows_above_raw_log_head(pool, head).await?;
     let max_affected_block = load_max_affected_block(pool, head).await?;
     let reset_replay_cursor_target_block =
@@ -305,6 +348,7 @@ pub(super) async fn resolve_replay_target_block_from(
 ) -> Result<(i64, Option<i64>, Option<i64>)> {
     let head =
         validate_canonical_raw_log_head(load_canonical_raw_log_head_from(transaction).await?)?;
+    ensure_canonical_raw_log_floor_from(transaction).await?;
     ensure_no_affected_rows_above_raw_log_head_from(transaction, head).await?;
     let max_affected_block = load_max_affected_block_from(transaction, head).await?;
     let reset_replay_cursor_target_block =

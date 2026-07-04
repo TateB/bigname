@@ -124,7 +124,20 @@ Execute records durable progress in `base_normalized_rederive_runs` and
 `base_normalized_rederive_run_batches`, keyed by a reviewed `--run-id`. A
 re-invocation with the same run id, target block, batch size, and expected
 census resumes incomplete work; if the live census plus recorded deleted counts
-does not equal the reviewed census, it refuses to continue.
+does not equal the reviewed census, it refuses to continue. Resume also reruns
+the re-runnable replay-coverage and raw-fact completeness guards before any
+additional batch is deleted. The reviewed plan stored in the run row includes a
+snapshot of the active Base replay targets/ranges, and resume requires the
+current active target set to match that snapshot, so the check remains
+non-vacuous even after the scoped `normalized_events` rows have already been
+deleted. Execute also requires the dry-run's active target snapshot digest as an
+expected value, so review-to-write replay-target drift cannot become the stored
+run snapshot. The run row also stores a compact retained raw-fact range proof
+over canonical raw-log identity, payload fields, and lineage rows, and resume
+requires the current retained raw-log and lineage proof to match it; this keeps
+raw-fact drift detection non-vacuous after event rows are deleted. A long-paused
+run cannot continue after the active replay targets or retained raw facts have
+drifted out of the reviewed safe state.
 
 The normalized-event scope is:
 
@@ -186,9 +199,13 @@ affected `current_projection_replay_status` rows,
 `normalized_replay_cursors` row for
 `mainnet/base-mainnet/raw_fact_normalized_events` to
 `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated replay target>`. If the process dies before
-that final reset, replay cursors and projection markers remain untouched and the
-same `--run-id` must be resumed before replay starts.
+`target_block_number = <validated replay target>`. The final reset revalidates
+that the retained canonical Base raw-log floor is exactly block `17571485`; if
+retained canonical raw logs start earlier, the command refuses to install the
+cursor because the generic closure replay cursor refresh path could otherwise
+widen the start below the delete scope. If the process dies before that final
+reset, replay cursors and projection markers remain untouched and the same
+`--run-id` must be resumed before replay starts.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
@@ -196,6 +213,8 @@ Before execution it proves that the scoped log-derived normalized events still
 join retained non-orphaned `raw_logs`, scoped boundary events still join retained
 non-orphaned `chain_lineage`, and the canonical raw-log range inside the
 ratified replay window spans the closure boundary and validated replay target.
+It also proves that the retained canonical Base raw-log floor itself equals the
+ratified closure boundary, block `17571485`.
 It also refuses if any row in the delete scope is above the retained canonical
 raw-log head, or if any row's `(derivation_kind, source_family, block, emitting
 address)` is not covered by a currently active Base replay target/range for the

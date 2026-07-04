@@ -298,6 +298,7 @@ pub(super) async fn update_run_state(
         SET status = $2,
             current_step = $3,
             deleted_counts = $4,
+            plan_snapshot = $5,
             updated_at = now(),
             completed_at = CASE WHEN $2 = 'completed' THEN now() ELSE NULL END
         WHERE run_id = $1
@@ -307,6 +308,7 @@ pub(super) async fn update_run_state(
     .bind(&state.status)
     .bind(&state.current_step)
     .bind(serde_json::to_value(&state.deleted_counts)?)
+    .bind(serde_json::to_value(&state.plan_snapshot)?)
     .execute(&mut **transaction)
     .await
     .context("failed to update Base normalized-event rederive run state")?;

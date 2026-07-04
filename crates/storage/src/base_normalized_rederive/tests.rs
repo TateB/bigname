@@ -58,6 +58,7 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
         Some(FIXTURE_REPLAY_TARGET_BLOCK)
     );
     assert_eq!(explicit_target_plan.counts, plan.counts);
+    assert_eq!(plan.active_replay_target_snapshot.len(), 5);
     assert_eq!(plan.counts.normalized_events, 6);
     assert_eq!(plan.counts.resources, 1);
     assert_eq!(plan.counts.token_lineages, 1);
@@ -146,9 +147,9 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
 async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     let database = test_database().await?;
     let ids = seed_rederive_fixture(database.pool()).await?;
-    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
-        .await?
-        .counts;
+    let expected_plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    let expected = expected_from_plan(&expected_plan)?;
 
     let outcome = execute_base_normalized_rederive_drop(
         database.pool(),
@@ -156,13 +157,11 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         RUN_ID,
         FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
-        BaseNormalizedRederiveExpectedCounts {
-            counts: expected.clone(),
-        },
+        expected.clone(),
     )
     .await?;
 
-    assert_eq!(outcome.deleted, expected);
+    assert_eq!(outcome.deleted, expected.counts);
     assert_eq!(count_table(database.pool(), "raw_logs").await?, 2);
     assert_eq!(
         count_scalar(
@@ -395,6 +394,334 @@ async fn batched_resume_refuses_census_mismatch() -> Result<()> {
     .await
     .expect_err("resume must stop when live+deleted census no longer matches review");
     assert!(format!("{error:?}").contains("resume census mismatch for resources"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_reruns_replay_active_guard_before_next_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'deprecated'
+        WHERE chain = 'base-mainnet'
+          AND source_family = 'basenames_base_primary'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must re-run replay-active coverage before deleting another batch");
+    assert!(
+        format!("{error:?}").contains("active replay target snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "name_current").await?, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_replay_active_guard_survives_after_event_delete_step() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        7,
+    )
+    .await?;
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "scoped-log",
+        )
+        .await?,
+        0
+    );
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'deprecated'
+        WHERE chain = 'base-mainnet'
+          AND source_family = 'basenames_base_primary'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must still detect replay target drift after scoped events are gone");
+    assert!(
+        format!("{error:?}").contains("active replay target snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "surface_bindings").await?, 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_refuses_active_replay_target_snapshot_drift_from_review() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    seed_extra_active_replay_target(database.pool(), 1).await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("active replay target drift from reviewed dry-run must block execute");
+    assert!(
+        format!("{error:?}").contains("active replay target snapshot divergence"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "scoped-log",
+        )
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_raw_fact_proof_survives_after_event_delete_step() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        7,
+    )
+    .await?;
+    assert_eq!(count_table(database.pool(), "normalized_events").await?, 4);
+    sqlx::query(
+        "UPDATE raw_logs SET data = decode('abcd', 'hex') WHERE block_hash = '0xbase-target'",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must still detect raw-fact drift after scoped events are gone");
+    assert!(
+        format!("{error:?}").contains("raw-fact range proof changed"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "surface_bindings").await?, 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_refuses_legacy_guard_snapshot_drift_before_event_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    let run_id = "base-rederive-legacy-drift-run";
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        run_id,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE base_normalized_rederive_runs
+        SET plan_snapshot = plan_snapshot - 'active_replay_target_snapshot' - 'raw_fact_range_proof'
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(run_id)
+    .execute(database.pool())
+    .await?;
+    seed_extra_active_replay_target(database.pool(), 1).await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        run_id,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("legacy missing snapshot must not adopt active-target drift");
+    assert!(
+        format!("{error:?}").contains("legacy active replay target snapshot divergence"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "name_current").await?, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_upgrades_legacy_guard_snapshot_before_event_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE base_normalized_rederive_runs
+        SET plan_snapshot = plan_snapshot - 'active_replay_target_snapshot' - 'raw_fact_range_proof'
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .execute(database.pool())
+    .await?;
+
+    let completed = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+    )
+    .await?;
+    assert_eq!(completed.deleted, expected.counts);
+    let persisted_upgrade = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT plan_snapshot ? 'active_replay_target_snapshot'
+           AND plan_snapshot ? 'raw_fact_range_proof'
+        FROM base_normalized_rederive_runs
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .fetch_one(database.pool())
+    .await?;
+    assert!(persisted_upgrade);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_reruns_raw_fact_completeness_before_next_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET transaction_hash = '0xtx-target-missing' WHERE block_hash = '0xbase-target'",
+    )
+        .execute(database.pool())
+        .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must re-run raw-fact completeness before deleting another batch");
+    assert!(
+        format!("{error:?}").contains("raw-fact range proof changed"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "name_current").await?, 1);
 
     database.cleanup().await?;
     Ok(())
@@ -697,9 +1024,9 @@ async fn writer_guard_refuses_single_connection_pool() -> Result<()> {
 async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
-    let expected = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
-        .await?
-        .counts;
+    let expected_plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    let expected = expected_from_plan(&expected_plan)?;
     seed_extra_scoped_resource(database.pool()).await?;
 
     let error = execute_base_normalized_rederive_drop(
@@ -708,7 +1035,7 @@ async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
         RUN_ID,
         FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
-        BaseNormalizedRederiveExpectedCounts { counts: expected },
+        expected,
     )
     .await
     .expect_err("count divergence must block execution");
@@ -767,12 +1094,12 @@ async fn execute_refuses_remaining_normalized_event_identity_anchors() -> Result
 async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
-    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
+    seed_retained_raw_log_after_fixture_target(database.pool()).await?;
 
     let plan =
         load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
 
-    assert_eq!(count_table(database.pool(), "raw_logs").await?, 4);
+    assert_eq!(count_table(database.pool(), "raw_logs").await?, 3);
     assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK + 10);
     assert_eq!(plan.max_affected_block, Some(FIXTURE_REPLAY_TARGET_BLOCK));
     assert_eq!(
@@ -794,6 +1121,55 @@ async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()
 }
 
 #[tokio::test]
+async fn execute_refuses_retained_raw_logs_before_replay_boundary_before_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    seed_retained_raw_log_before_boundary(database.pool()).await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("retained raw logs before the correction boundary must stop execution");
+    assert!(
+        format!("{error:?}").contains("retained canonical raw-log floor"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "scoped-log",
+        )
+        .await?,
+        1
+    );
+    let cursor_start = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT range_start_block_number
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = $1
+          AND chain_id = 'base-mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(cursor_start, 100);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn dry_run_validates_requested_target_range() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -807,7 +1183,7 @@ async fn dry_run_validates_requested_target_range() -> Result<()> {
     .expect_err("requested replay target above the actual raw-log head must fail");
     assert!(format!("{above_head:?}").contains("must not exceed canonical raw-log head"));
 
-    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
+    seed_retained_raw_log_after_fixture_target(database.pool()).await?;
     mark_raw_replay_cursor_completed_from_closure(database.pool()).await?;
 
     let below_max_affected = load_base_normalized_rederive_plan(
@@ -849,7 +1225,9 @@ async fn execute_refuses_raw_fact_completeness_gap() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     let expected = reviewed_counts(database.pool()).await?;
-    sqlx::query("DELETE FROM raw_logs WHERE block_hash = '0xbase-start'")
+    sqlx::query(
+        "UPDATE raw_logs SET transaction_hash = '0xtx-target-missing' WHERE block_hash = '0xbase-target'",
+    )
         .execute(database.pool())
         .await?;
 
@@ -924,9 +1302,7 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
         SECOND_RUN_ID,
         FIXTURE_BATCH_SIZE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
-        BaseNormalizedRederiveExpectedCounts {
-            counts: second_plan.counts.clone(),
-        },
+        expected_from_plan(&second_plan)?,
     )
     .await?;
     assert_eq!(second.deleted.normalized_events, 0);
@@ -969,10 +1345,18 @@ async fn seed_rederive_fixture(pool: &PgPool) -> Result<FixtureIds> {
 }
 
 async fn reviewed_counts(pool: &PgPool) -> Result<BaseNormalizedRederiveExpectedCounts> {
+    let plan = load_base_normalized_rederive_plan(pool, DEPLOYMENT_PROFILE, None).await?;
+    expected_from_plan(&plan)
+}
+
+fn expected_from_plan(
+    plan: &BaseNormalizedRederivePlan,
+) -> Result<BaseNormalizedRederiveExpectedCounts> {
     Ok(BaseNormalizedRederiveExpectedCounts {
-        counts: load_base_normalized_rederive_plan(pool, DEPLOYMENT_PROFILE, None)
-            .await?
-            .counts,
+        counts: plan.counts.clone(),
+        active_replay_target_snapshot_digest: Some(base_normalized_rederive_json_digest(
+            &plan.active_replay_target_snapshot,
+        )?),
     })
 }
 
@@ -1067,6 +1451,53 @@ fn replay_target_address(manifest_id: i64) -> &'static str {
         5 => "0x0000000000000000000000000000000000000005",
         _ => "0x00000000000000000000000000000000000000ff",
     }
+}
+
+async fn seed_extra_active_replay_target(pool: &PgPool, manifest_id: i64) -> Result<()> {
+    let contract_instance_id = Uuid::from_u128(0xA000_u128 + manifest_id as u128);
+    let address = format!("0x000000000000000000000000000000000000a{manifest_id:03x}");
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id, chain_id, contract_kind, provenance
+        )
+        VALUES ($1, 'base-mainnet', 'test_replay_target_extra', '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address, active_from_block_number,
+            source_manifest_id, provenance
+        )
+        VALUES ($1, 'base-mainnet', $2, $3, $4, '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(&address)
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id, declaration_kind, declaration_name, contract_instance_id,
+            declared_address, role
+        )
+        VALUES ($1, 'contract', $2, $3, $4, $2)
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(format!("extra_replay_target_{manifest_id}"))
+    .bind(contract_instance_id)
+    .bind(address)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_raw_facts(pool: &PgPool) -> Result<()> {
@@ -1624,46 +2055,58 @@ async fn mark_raw_replay_cursor_completed_from_closure(pool: &PgPool) -> Result<
     Ok(())
 }
 
-async fn seed_retained_raw_logs_around_fixture_target(pool: &PgPool) -> Result<()> {
-    for (block_hash, block_number, tx) in [
-        (
-            "0xbase-before-retained",
-            BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK - 10,
-            "0xtx-before-retained",
-        ),
-        (
-            "0xbase-after-retained",
-            FIXTURE_REPLAY_TARGET_BLOCK + 10,
-            "0xtx-after-retained",
-        ),
-    ] {
-        sqlx::query(
-            r#"
-            INSERT INTO chain_lineage (
-                chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
-            )
-            VALUES ('base-mainnet', $1, NULL, $2, '2026-07-03T00:00:00Z', 'canonical')
-            "#,
+async fn seed_retained_raw_log_after_fixture_target(pool: &PgPool) -> Result<()> {
+    seed_retained_raw_log(
+        pool,
+        "0xbase-after-retained",
+        FIXTURE_REPLAY_TARGET_BLOCK + 10,
+        "0xtx-after-retained",
+    )
+    .await
+}
+
+async fn seed_retained_raw_log_before_boundary(pool: &PgPool) -> Result<()> {
+    seed_retained_raw_log(
+        pool,
+        "0xbase-before-retained",
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK - 10,
+        "0xtx-before-retained",
+    )
+    .await
+}
+
+async fn seed_retained_raw_log(
+    pool: &PgPool,
+    block_hash: &str,
+    block_number: i64,
+    tx: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
         )
-        .bind(block_hash)
-        .bind(block_number)
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO raw_logs (
-                chain_id, block_hash, block_number, transaction_hash,
-                transaction_index, log_index, emitting_address, canonicality_state
-            )
-            VALUES ('base-mainnet', $1, $2, $3, 0, 0, '0xemitter', 'canonical')
-            "#,
+        VALUES ('base-mainnet', $1, NULL, $2, '2026-07-03T00:00:00Z', 'canonical')
+        "#,
+    )
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, log_index, emitting_address, canonicality_state
         )
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(tx)
-        .execute(pool)
-        .await?;
-    }
+        VALUES ('base-mainnet', $1, $2, $3, 0, 0, '0xemitter', 'canonical')
+        "#,
+    )
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(tx)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

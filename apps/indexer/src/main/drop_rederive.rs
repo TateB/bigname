@@ -6,8 +6,8 @@ use bigname_storage::{
     BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER, BaseNormalizedRederiveBatchPlan,
     BaseNormalizedRederiveCounts, BaseNormalizedRederiveExpectedCounts, BaseNormalizedRederivePlan,
     DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE, DatabaseConfig,
-    base_normalized_rederive_scope_rules, execute_base_normalized_rederive_drop,
-    load_base_normalized_rederive_plan,
+    base_normalized_rederive_json_digest, base_normalized_rederive_scope_rules,
+    execute_base_normalized_rederive_drop, load_base_normalized_rederive_plan,
 };
 use clap::Args;
 use tracing::info;
@@ -64,6 +64,8 @@ pub(crate) struct DropAndRederiveBaseNormalizedEventsArgs {
     pub(crate) expected_adapter_checkpoint_rows: Option<i64>,
     #[arg(long = "expected-adapter-checkpoint-item-rows")]
     pub(crate) expected_adapter_checkpoint_item_rows: Option<i64>,
+    #[arg(long = "expected-active-replay-target-snapshot-digest")]
+    pub(crate) expected_active_replay_target_snapshot_digest: Option<String>,
 }
 
 pub(crate) async fn drop_and_rederive_base_normalized_events_command(
@@ -81,9 +83,11 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     if args.execute && args.batch_size <= 0 {
         bail!("--execute requires a positive --batch-size");
     }
-    let expected_counts = expected_counts_from_args(&args)?;
-    if args.execute && expected_counts.is_none() {
-        bail!("--execute requires every --expected-* count emitted by dry-run");
+    let expected = expected_from_args(&args)?;
+    if args.execute && expected.is_none() {
+        bail!(
+            "--execute requires every --expected-* count and --expected-active-replay-target-snapshot-digest emitted by dry-run"
+        );
     }
     let pool = bigname_storage::connect(&args.database).await?;
     let dry_run = !args.execute;
@@ -110,9 +114,7 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
         &args.run_id,
         args.batch_size,
         args.replay_target_block,
-        BaseNormalizedRederiveExpectedCounts {
-            counts: expected_counts.expect("execute path requires expected counts"),
-        },
+        expected.expect("execute path requires expected counts"),
     )
     .await?;
     info!(
@@ -140,9 +142,9 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     Ok(())
 }
 
-fn expected_counts_from_args(
+fn expected_from_args(
     args: &DropAndRederiveBaseNormalizedEventsArgs,
-) -> Result<Option<BaseNormalizedRederiveCounts>> {
+) -> Result<Option<BaseNormalizedRederiveExpectedCounts>> {
     let values = [
         args.expected_normalized_events,
         args.expected_resources,
@@ -160,36 +162,48 @@ fn expected_counts_from_args(
         args.expected_adapter_checkpoint_rows,
         args.expected_adapter_checkpoint_item_rows,
     ];
-    if values.iter().all(Option::is_none) {
+    if values.iter().all(Option::is_none)
+        && args.expected_active_replay_target_snapshot_digest.is_none()
+    {
         return Ok(None);
     }
-    if values.iter().any(Option::is_none) {
+    if values.iter().any(Option::is_none)
+        || args
+            .expected_active_replay_target_snapshot_digest
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
         bail!(
-            "expected-count execution guard requires every --expected-* count emitted by dry-run"
+            "expected execution guard requires every --expected-* count and --expected-active-replay-target-snapshot-digest emitted by dry-run"
         );
     }
-    Ok(Some(BaseNormalizedRederiveCounts {
-        normalized_events: args.expected_normalized_events.unwrap_or_default(),
-        resources: args.expected_resources.unwrap_or_default(),
-        token_lineages: args.expected_token_lineages.unwrap_or_default(),
-        name_surfaces: args.expected_name_surfaces.unwrap_or_default(),
-        surface_bindings: args.expected_surface_bindings.unwrap_or_default(),
-        name_current: args.expected_name_current.unwrap_or_default(),
-        address_names_current: args.expected_address_names_current.unwrap_or_default(),
-        children_current: args.expected_children_current.unwrap_or_default(),
-        permissions_current: args.expected_permissions_current.unwrap_or_default(),
-        record_inventory_current: args.expected_record_inventory_current.unwrap_or_default(),
-        projection_normalized_event_changes: args
-            .expected_projection_normalized_event_changes
-            .unwrap_or_default(),
-        current_projection_replay_status: args
-            .expected_current_projection_replay_status
-            .unwrap_or_default(),
-        replay_cursor_rows: args.expected_replay_cursor_rows.unwrap_or_default(),
-        adapter_checkpoint_rows: args.expected_adapter_checkpoint_rows.unwrap_or_default(),
-        adapter_checkpoint_item_rows: args
-            .expected_adapter_checkpoint_item_rows
-            .unwrap_or_default(),
+    Ok(Some(BaseNormalizedRederiveExpectedCounts {
+        counts: BaseNormalizedRederiveCounts {
+            normalized_events: args.expected_normalized_events.unwrap_or_default(),
+            resources: args.expected_resources.unwrap_or_default(),
+            token_lineages: args.expected_token_lineages.unwrap_or_default(),
+            name_surfaces: args.expected_name_surfaces.unwrap_or_default(),
+            surface_bindings: args.expected_surface_bindings.unwrap_or_default(),
+            name_current: args.expected_name_current.unwrap_or_default(),
+            address_names_current: args.expected_address_names_current.unwrap_or_default(),
+            children_current: args.expected_children_current.unwrap_or_default(),
+            permissions_current: args.expected_permissions_current.unwrap_or_default(),
+            record_inventory_current: args.expected_record_inventory_current.unwrap_or_default(),
+            projection_normalized_event_changes: args
+                .expected_projection_normalized_event_changes
+                .unwrap_or_default(),
+            current_projection_replay_status: args
+                .expected_current_projection_replay_status
+                .unwrap_or_default(),
+            replay_cursor_rows: args.expected_replay_cursor_rows.unwrap_or_default(),
+            adapter_checkpoint_rows: args.expected_adapter_checkpoint_rows.unwrap_or_default(),
+            adapter_checkpoint_item_rows: args
+                .expected_adapter_checkpoint_item_rows
+                .unwrap_or_default(),
+        },
+        active_replay_target_snapshot_digest: args
+            .expected_active_replay_target_snapshot_digest
+            .clone(),
     }))
 }
 
@@ -238,6 +252,13 @@ fn render_plan(
         plan.max_affected_block,
         plan.replay_target_floor_block,
         plan.raw_fact_completeness.canonical_raw_log_head_block
+    ));
+    let active_replay_target_snapshot_digest =
+        base_normalized_rederive_json_digest(&plan.active_replay_target_snapshot)?;
+    output.push_str(&format!(
+        "active_replay_target_snapshot: rows={} expected_active_replay_target_snapshot_digest={}\n",
+        plan.active_replay_target_snapshot.len(),
+        active_replay_target_snapshot_digest
     ));
     output.push_str("derivation_kind_partition:\n");
     for census in plan
@@ -344,6 +365,10 @@ fn log_plan(
             .post_replay_live_adapter_backlog_cursor_rows,
         replay_start_block = BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
         replay_target_block = plan.replay_target_block,
+        active_replay_target_digest = %base_normalized_rederive_json_digest(
+            &plan.active_replay_target_snapshot
+        )?,
+        active_replay_target_rows = plan.active_replay_target_snapshot.len(),
         raw_fact_complete = plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event drop-and-rederive census"
     );
@@ -406,26 +431,38 @@ mod tests {
             expected_replay_cursor_rows: count,
             expected_adapter_checkpoint_rows: count,
             expected_adapter_checkpoint_item_rows: count,
+            expected_active_replay_target_snapshot_digest: count
+                .map(|_| "keccak256:reviewed".to_owned()),
         }
     }
 
     #[test]
     fn expected_counts_require_complete_dry_run_census() {
         assert!(
-            expected_counts_from_args(&args_with_expected(None))
+            expected_from_args(&args_with_expected(None))
                 .unwrap()
                 .is_none()
         );
-        let counts = expected_counts_from_args(&args_with_expected(Some(7)))
+        let expected = expected_from_args(&args_with_expected(Some(7)))
             .unwrap()
             .expect("complete expected counts should build guard");
-        assert_eq!(counts.normalized_events, 7);
+        assert_eq!(expected.counts.normalized_events, 7);
+        assert_eq!(
+            expected.active_replay_target_snapshot_digest.as_deref(),
+            Some("keccak256:reviewed")
+        );
 
         let mut incomplete = args_with_expected(Some(1));
         incomplete.expected_resources = None;
         assert!(
-            format!("{:?}", expected_counts_from_args(&incomplete).unwrap_err())
+            format!("{:?}", expected_from_args(&incomplete).unwrap_err())
                 .contains("requires every --expected-* count")
+        );
+        let mut missing_digest = args_with_expected(Some(1));
+        missing_digest.expected_active_replay_target_snapshot_digest = None;
+        assert!(
+            format!("{:?}", expected_from_args(&missing_digest).unwrap_err())
+                .contains("--expected-active-replay-target-snapshot-digest")
         );
     }
 
@@ -456,6 +493,14 @@ mod tests {
             replay_target_block: target_block,
             max_affected_block: Some(target_block),
             replay_target_floor_block: Some(target_block),
+            active_replay_target_snapshot: vec![],
+            raw_fact_range_proof: bigname_storage::BaseNormalizedRederiveRawFactRangeProof {
+                replay_target_block: target_block,
+                canonical_raw_log_count: 2,
+                canonical_raw_log_checksum: "0".to_owned(),
+                canonical_lineage_count: 3,
+                canonical_lineage_checksum: "0".to_owned(),
+            },
             derivation_kind_census: vec![
                 bigname_storage::BaseNormalizedRederiveDerivationKindCensus {
                     derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
@@ -511,6 +556,8 @@ mod tests {
         assert!(output.contains(&format!("target_block={target_block}")));
         assert!(output.contains(&format!("max_affected_block=Some({target_block})")));
         assert!(output.contains(&format!("replay_target_floor_block=Some({target_block})")));
+        assert!(output.contains("active_replay_target_snapshot: rows=0"));
+        assert!(output.contains("expected_active_replay_target_snapshot_digest=keccak256:"));
         assert!(output.contains("batch_plan:"));
         assert!(output.contains("step=normalized_events rows=56040812 estimated_batches=561"));
     }

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use super::super::guards::ensure_canonical_raw_log_floor_from;
 use super::super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
     BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BaseNormalizedRederiveCounts, checkpoint_adapters,
@@ -11,6 +12,7 @@ pub(super) async fn reset_replay_state(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &RunState,
 ) -> Result<BaseNormalizedRederiveCounts> {
+    ensure_canonical_raw_log_floor_from(transaction).await?;
     let current_projection_replay_status =
         delete_current_projection_replay_status(transaction).await?;
     let adapter_checkpoint_item_rows =
