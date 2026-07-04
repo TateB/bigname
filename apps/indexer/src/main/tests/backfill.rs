@@ -219,6 +219,143 @@ async fn whole_active_compact_source_identity_reuses_legacy_full_backfill_job() 
             discovery_edge_entry_count: 0,
         },
     };
+    let topic_plan = backfill::BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()],
+        )]),
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["NewOwner(bytes32,bytes32,address)".to_owned()],
+        )]),
+        BTreeSet::new(),
+    );
+    let config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 8_192,
+        max_window_blocks: 16_384,
+        page_limit: 50_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 5,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let legacy_selected_targets = selected_targets
+        .iter()
+        .map(|target| {
+            json!({
+                "effective_to_block": target.effective_to_block,
+                "effective_from_block": target.effective_from_block,
+                "address": target.address,
+                "contract_instance_id": target.contract_instance_id,
+                "source_family": target.source_family,
+            })
+        })
+        .collect::<Vec<_>>();
+    let legacy_full_identity = json!({
+        "selector_kind": source_plan.selector_kind.as_str(),
+        "source_family": source_plan.source_family.clone(),
+        "requested_watched_targets": source_plan.requested_watched_targets.clone(),
+        "selected_targets": legacy_selected_targets,
+        "backfill_provider": "coinbase_cdp_sql",
+        "scan_mode": "coinbase_sql_hash_pinned_logs_v1",
+        "coinbase_sql_plan_version": "base_logs_v2",
+        "validation_provider_required": true,
+        "coinbase_sql_validation_mode": config.validation_mode.as_str(),
+        "topic_filtering": "manifest_abi_topic0_union_v1",
+        "coinbase_sql_topic_plan": topic_plan.source_identity_payload()?,
+        "source_identity_hash": "keccak256:0x4444444444444444444444444444444444444444444444444444444444444444",
+    });
+    let compact_identity = backfill::coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &config,
+        &topic_plan,
+    )?;
+    assert_eq!(
+        compact_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_digest_v1")
+    );
+    assert_ne!(
+        compact_identity.get("source_identity_hash"),
+        legacy_full_identity.get("source_identity_hash")
+    );
+
+    let request = BackfillJobCreate {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "base-mainnet".to_owned(),
+        source_identity: legacy_full_identity.clone(),
+        scan_mode: "coinbase_sql_hash_pinned_logs_v1".to_owned(),
+        range_start_block_number: 100,
+        range_end_block_number: 120,
+        idempotency_key: "whole-active-legacy-full-identity".to_owned(),
+        ranges: vec![BackfillRangeSpec {
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+        }],
+    };
+
+    let created = create_backfill_job(database.pool(), &request).await?;
+    let mut compact_request = request.clone();
+    compact_request.source_identity = compact_identity;
+    let repeated = create_backfill_job(database.pool(), &compact_request).await?;
+
+    assert_eq!(repeated.job.backfill_job_id, created.job.backfill_job_id);
+    assert_eq!(repeated.job.source_identity, legacy_full_identity);
+
+    let mut drifted_source_plan = source_plan.clone();
+    drifted_source_plan
+        .selected_targets
+        .last_mut()
+        .expect("test source plan has selected targets")
+        .effective_to_block += 1;
+    let mut drifted_compact_request = request;
+    drifted_compact_request.source_identity =
+        backfill::coinbase_sql_backfill_job_source_identity_payload(
+            &drifted_source_plan,
+            &config,
+            &topic_plan,
+        )?;
+    let error = create_backfill_job(database.pool(), &drifted_compact_request)
+        .await
+        .expect_err("different whole-active target set must not reuse legacy full job");
+    assert!(
+        error
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn source_family_compact_source_identity_reuses_legacy_full_backfill_job() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "ens_v1_wrapper_l1".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "ethereum-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("ens_v1_wrapper_l1".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: selected_targets.clone(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
     let legacy_selected_targets = selected_targets
         .iter()
         .map(|target| {
@@ -245,15 +382,19 @@ async fn whole_active_compact_source_identity_reuses_legacy_full_backfill_job() 
             .and_then(Value::as_str),
         Some("selected_targets_digest_v1")
     );
+    assert_ne!(
+        compact_identity.get("source_identity_hash"),
+        legacy_full_identity.get("source_identity_hash")
+    );
 
     let request = BackfillJobCreate {
         deployment_profile: "mainnet".to_owned(),
-        chain_id: "base-mainnet".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
         source_identity: legacy_full_identity.clone(),
-        scan_mode: "coinbase_sql".to_owned(),
+        scan_mode: "hash_pinned_block".to_owned(),
         range_start_block_number: 100,
         range_end_block_number: 120,
-        idempotency_key: "whole-active-legacy-full-identity".to_owned(),
+        idempotency_key: "source-family-legacy-full-identity".to_owned(),
         ranges: vec![BackfillRangeSpec {
             range_start_block_number: 100,
             range_end_block_number: 120,

@@ -1,5 +1,6 @@
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 
@@ -145,15 +146,19 @@ fn source_identity_compact_full_equivalent(compact: &Value, full: &Value) -> boo
     {
         return false;
     }
-    if source_identity_hash_field(compact).is_none()
-        || source_identity_hash_field(compact) != source_identity_hash_field(full)
-    {
+    if compact.get("selected_targets").is_some() {
+        return false;
+    }
+    if source_identity_hash_field(compact).is_none() || source_identity_hash_field(full).is_none() {
         return false;
     }
     if compact.get("selector_kind") != full.get("selector_kind")
         || compact.get("source_family") != full.get("source_family")
         || compact.get("requested_watched_targets") != full.get("requested_watched_targets")
     {
+        return false;
+    }
+    if !source_identity_common_fields_match(compact, full) {
         return false;
     }
 
@@ -172,25 +177,53 @@ fn source_identity_compact_full_equivalent(compact: &Value, full: &Value) -> boo
     {
         return false;
     }
-    let expected_digest = selected_targets_digest(selected_targets);
-    if compact
+    let Some(actual_digest) = compact
         .get("selected_targets_digest")
         .and_then(Value::as_str)
-        != Some(expected_digest.as_str())
-    {
+    else {
+        return false;
+    };
+    if !selected_targets_digest_matches(actual_digest, selected_targets) {
         return false;
     }
-    if let Some(sample) = compact.get("selected_targets_sample") {
-        let expected = json!({
-            "first": selected_targets.first(),
-            "last": selected_targets.last(),
-        });
-        if sample != &expected {
-            return false;
-        }
+    let Some(sample) = compact.get("selected_targets_sample") else {
+        return false;
+    };
+    let expected = json!({
+        "first": selected_targets.first(),
+        "last": selected_targets.last(),
+    });
+    if sample != &expected {
+        return false;
     }
 
     true
+}
+
+fn source_identity_common_fields_match(compact: &Value, full: &Value) -> bool {
+    const COMPACT_ONLY_FIELDS: &[&str] = &[
+        "source_identity_hash",
+        "source_identity_payload_format",
+        "selected_target_count",
+        "selected_targets_digest_algorithm",
+        "selected_targets_digest",
+        "selected_targets_sample",
+    ];
+    const FULL_ONLY_FIELDS: &[&str] = &["source_identity_hash", "selected_targets"];
+
+    source_identity_without_fields(compact, COMPACT_ONLY_FIELDS)
+        == source_identity_without_fields(full, FULL_ONLY_FIELDS)
+}
+
+fn source_identity_without_fields(
+    source_identity: &Value,
+    fields_to_remove: &[&str],
+) -> Option<Value> {
+    let mut fields = source_identity.as_object()?.clone();
+    for field in fields_to_remove {
+        fields.remove(*field);
+    }
+    Some(Value::Object(fields))
 }
 
 fn source_identity_hash_field(source_identity: &Value) -> Option<&str> {
@@ -205,6 +238,40 @@ pub(super) fn selected_targets_digest(selected_targets: &[Value]) -> String {
     )))
     .expect("selected target identity must serialize");
     format!("keccak256:{}", keccak256(payload))
+}
+
+fn selected_targets_digest_matches(actual_digest: &str, selected_targets: &[Value]) -> bool {
+    actual_digest == selected_targets_digest(selected_targets)
+        || selected_targets_producer_order_digest(selected_targets).as_deref()
+            == Some(actual_digest)
+}
+
+fn selected_targets_producer_order_digest(selected_targets: &[Value]) -> Option<String> {
+    #[derive(Serialize)]
+    struct WatchedBackfillTargetDigestInput<'a> {
+        source_family: &'a Value,
+        contract_instance_id: &'a Value,
+        address: &'a Value,
+        effective_from_block: &'a Value,
+        effective_to_block: &'a Value,
+    }
+
+    let ordered_targets = selected_targets
+        .iter()
+        .map(|target| {
+            let fields = target.as_object()?;
+            Some(WatchedBackfillTargetDigestInput {
+                source_family: fields.get("source_family")?,
+                contract_instance_id: fields.get("contract_instance_id")?,
+                address: fields.get("address")?,
+                effective_from_block: fields.get("effective_from_block")?,
+                effective_to_block: fields.get("effective_to_block")?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let payload =
+        serde_json::to_vec(&ordered_targets).expect("selected target identity must serialize");
+    Some(format!("keccak256:{}", keccak256(payload)))
 }
 
 fn canonical_json_value(value: Value) -> Value {
