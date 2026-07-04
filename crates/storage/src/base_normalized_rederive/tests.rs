@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use sqlx::{
-    PgPool,
+    ConnectOptions, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tokio::time::timeout;
@@ -59,6 +59,7 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     );
     assert_eq!(explicit_target_plan.counts, plan.counts);
     assert_eq!(plan.active_replay_target_snapshot.len(), 5);
+    assert_eq!(plan.active_manifest_snapshot.len(), 4);
     assert_eq!(plan.counts.normalized_events, 6);
     assert_eq!(plan.counts.resources, 1);
     assert_eq!(plan.counts.token_lineages, 1);
@@ -235,11 +236,10 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         1
     );
 
-    let cursor = sqlx::query_as::<_, (i64, Option<i64>, i64, i64)>(
+    let cursor = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
         SELECT
             range_start_block_number,
-            range_start_floor_block_number,
             next_block_number,
             target_block_number
         FROM normalized_replay_cursors
@@ -255,7 +255,6 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         cursor,
         (
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-            Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
             BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
             FIXTURE_REPLAY_TARGET_BLOCK
         )
@@ -1026,6 +1025,328 @@ async fn writer_guard_refuses_single_connection_pool() -> Result<()> {
 }
 
 #[tokio::test]
+async fn writer_guard_refuses_incomplete_rederive_run() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    let _partial = super::batch::execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+        1,
+    )
+    .await?;
+    let config = database_config(database.database_name())?;
+
+    let error =
+        crate::connect_with_base_normalized_rederive_writer_guard(&config, "bigname-indexer")
+            .await
+            .expect_err("incomplete rederive run must block guarded writers");
+    let error = format!("{error:?}");
+    assert!(error.contains("rederive run is incomplete"), "{error}");
+    assert!(error.contains(RESUME_RUN_ID), "{error}");
+
+    sqlx::query(
+        r#"
+        UPDATE base_normalized_rederive_runs
+        SET status = 'completed',
+            current_step = 'completed',
+            completed_at = now()
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .execute(database.pool())
+    .await?;
+
+    let (guarded_pool, guard) =
+        crate::connect_with_base_normalized_rederive_writer_guard(&config, "bigname-indexer")
+            .await?;
+    drop(guard);
+    guarded_pool.close().await;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn aborted_rederive_run_unblocks_writers_but_cannot_resume() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    let _partial = super::batch::execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE base_normalized_rederive_runs
+        SET status = 'aborted',
+            current_step = 'aborted',
+            updated_at = now()
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .execute(database.pool())
+    .await?;
+
+    let config = database_config(database.database_name())?;
+    let (guarded_pool, guard) =
+        crate::connect_with_base_normalized_rederive_writer_guard(&config, "bigname-indexer")
+            .await?;
+    drop(guard);
+    guarded_pool.close().await;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("aborted rederive runs must not be resumable");
+    let error = format!("{error:?}");
+    assert!(error.contains("is aborted"), "{error}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn writer_guard_rechecks_incomplete_rederive_run_after_waiting_for_lock() -> Result<()> {
+    let database = test_database().await?;
+    let config = database_config(database.database_name())?;
+    let mut exclusive_lock_connection = database
+        .pool()
+        .acquire()
+        .await
+        .context("failed to acquire exclusive-lock test connection")?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text, 0::bigint))")
+        .bind(BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY)
+        .execute(&mut *exclusive_lock_connection)
+        .await?;
+
+    let guard_task = tokio::spawn(async move {
+        crate::connect_with_base_normalized_rederive_writer_guard(&config, "bigname-indexer").await
+    });
+    let mut waiter_seen = false;
+    for _ in 0..50 {
+        waiter_seen = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND application_name = 'bigname-indexer'
+                  AND wait_event_type = 'Lock'
+            )
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+        if waiter_seen {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        waiter_seen,
+        "writer guard task did not wait on the held rederive advisory lock"
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO base_normalized_rederive_runs (
+            run_id, deployment_profile, chain_id, replay_target_block, batch_size,
+            status, current_step, expected_counts, plan_snapshot
+        )
+        VALUES ($1, $2, $3, $4, 1, 'running', 'address_names_current', '{}'::jsonb, '{}'::jsonb)
+        "#,
+    )
+    .bind("base-rederive-waiting-writer-run")
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .execute(database.pool())
+    .await?;
+    let released = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))",
+    )
+    .bind(BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY)
+    .fetch_one(&mut *exclusive_lock_connection)
+    .await?;
+    assert!(released);
+
+    let result = timeout(Duration::from_secs(5), guard_task)
+        .await
+        .context("writer guard task did not finish after exclusive lock released")?
+        .context("writer guard task panicked")?;
+    let error = match result {
+        Ok((guarded_pool, guard)) => {
+            drop(guard);
+            guarded_pool.close().await;
+            anyhow::bail!("writer guard acquired lock despite incomplete rederive run")
+        }
+        Err(error) => format!("{error:?}"),
+    };
+    assert!(error.contains("rederive run is incomplete"), "{error}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_rederive_replay_requires_reviewed_manifest_snapshot() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RUN_ID,
+        FIXTURE_BATCH_SIZE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await?;
+
+    assert_eq!(
+        pending_base_normalized_rederive_replay_target(
+            database.pool(),
+            DEPLOYMENT_PROFILE,
+            BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        )
+        .await?,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
+    ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET manifest_payload = jsonb_build_object('same_targets_manifest_change', true)
+        WHERE manifest_id = 1
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let error = ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await
+    .expect_err(
+        "pending Base correction replay must reject manifest payload drift even when replay targets are unchanged",
+    );
+    assert!(
+        format!("{error:?}").contains("active manifest snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+    sqlx::query(
+        "UPDATE manifest_versions SET manifest_payload = '{}'::jsonb WHERE manifest_id = 1",
+    )
+    .execute(database.pool())
+    .await?;
+    ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await?;
+
+    seed_extra_active_replay_target(database.pool(), 1).await?;
+    let error = ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await
+    .expect_err("pending Base correction replay must be pinned to reviewed manifest snapshot");
+    assert!(
+        format!("{error:?}").contains("replay target snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET next_block_number = $4 + 1,
+            target_block_number = $4 + 10
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        pending_base_normalized_rederive_replay_target(
+            database.pool(),
+            DEPLOYMENT_PROFILE,
+            BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        )
+        .await?,
+        None,
+        "a later unrelated Base replay target must not be treated as the pending correction replay"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET target_block_number = $4,
+            next_block_number = $4 + 1
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        pending_base_normalized_rederive_replay_target(
+            database.pool(),
+            DEPLOYMENT_PROFILE,
+            BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        )
+        .await?,
+        None
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_refuses_count_divergence_from_reviewed_census() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -1361,6 +1682,9 @@ fn expected_from_plan(
         counts: plan.counts.clone(),
         active_replay_target_snapshot_digest: Some(base_normalized_rederive_json_digest(
             &plan.active_replay_target_snapshot,
+        )?),
+        active_manifest_snapshot_digest: Some(base_normalized_rederive_json_digest(
+            &plan.active_manifest_snapshot,
         )?),
     })
 }
@@ -2173,6 +2497,17 @@ async fn single_connection_pool(database_name: &str) -> Result<PgPool> {
         .connect_with(options)
         .await
         .context("failed to connect single-connection test pool")
+}
+
+fn database_config(database_name: &str) -> Result<crate::DatabaseConfig> {
+    let database_url = PgConnectOptions::from_str(&database_url_from_env())?
+        .database(database_name)
+        .to_url_lossy()
+        .to_string();
+    Ok(crate::DatabaseConfig {
+        database_url: Some(database_url),
+        max_connections: 2,
+    })
 }
 
 async fn load_run_status(pool: &PgPool, run_id: &str) -> Result<(String, String)> {

@@ -12,6 +12,7 @@ use super::execution::{
 };
 use super::guards::ensure_delete_scope_replay_active_from;
 use super::guards::load_active_replay_target_snapshot_from;
+use super::manifest_snapshot::load_active_manifest_snapshot_from;
 use super::profile::validate_base_deployment_profile_owns_chain_from;
 use super::{
     BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY, BaseNormalizedRederiveExecutionOutcome,
@@ -173,15 +174,24 @@ async fn prepare_or_resume_run(
             requested_replay_target_block,
             &expected_counts.counts,
         )?;
+        ensure!(
+            !state.is_aborted(),
+            "Base normalized-event rederive run {run_id:?} is aborted; restore the database to a reviewed consistent snapshot and start a new run id"
+        );
         if !state.is_completed() {
             let expected_active_snapshot_digest = expected_counts
                 .active_replay_target_snapshot_digest
                 .as_deref()
                 .context("Base normalized-event rederive resume requires reviewed active replay target snapshot digest")?;
+            let expected_manifest_snapshot_digest = expected_counts
+                .active_manifest_snapshot_digest
+                .as_deref()
+                .context("Base normalized-event rederive resume requires reviewed active manifest snapshot digest")?;
             validate_or_upgrade_resume_guard_snapshots(
                 &mut transaction,
                 &mut state,
                 expected_active_snapshot_digest,
+                expected_manifest_snapshot_digest,
             )
             .await?;
             rerun_resume_guards(&mut transaction, &state)
@@ -229,6 +239,8 @@ async fn prepare_or_resume_run(
     );
     let active_snapshot_digest =
         base_normalized_rederive_json_digest(&plan.active_replay_target_snapshot)?;
+    let active_manifest_snapshot_digest =
+        base_normalized_rederive_json_digest(&plan.active_manifest_snapshot)?;
     ensure!(
         expected_counts
             .active_replay_target_snapshot_digest
@@ -236,6 +248,12 @@ async fn prepare_or_resume_run(
             == Some(active_snapshot_digest.as_str()),
         "Base normalized-event rederive active replay target snapshot divergence: expected {:?}, found {active_snapshot_digest}",
         expected_counts.active_replay_target_snapshot_digest
+    );
+    ensure!(
+        expected_counts.active_manifest_snapshot_digest.as_deref()
+            == Some(active_manifest_snapshot_digest.as_str()),
+        "Base normalized-event rederive active manifest snapshot divergence: expected {:?}, found {active_manifest_snapshot_digest}",
+        expected_counts.active_manifest_snapshot_digest
     );
     refuse_if_out_of_scope_identity_dependencies(&mut transaction).await?;
     let state = insert_run(
@@ -259,8 +277,10 @@ async fn validate_or_upgrade_resume_guard_snapshots(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &mut RunState,
     expected_active_snapshot_digest: &str,
+    expected_manifest_snapshot_digest: &str,
 ) -> Result<()> {
     if !state.plan_snapshot.active_replay_target_snapshot.is_empty()
+        && !state.plan_snapshot.active_manifest_snapshot.is_empty()
         && !state.plan_snapshot.raw_fact_range_proof.is_empty()
     {
         let stored_digest = base_normalized_rederive_json_digest(
@@ -269,6 +289,13 @@ async fn validate_or_upgrade_resume_guard_snapshots(
         ensure!(
             stored_digest == expected_active_snapshot_digest,
             "Base normalized-event rederive active replay target snapshot digest mismatch for run {:?}: stored {stored_digest}, requested {expected_active_snapshot_digest}",
+            state.run_id
+        );
+        let stored_manifest_digest =
+            base_normalized_rederive_json_digest(&state.plan_snapshot.active_manifest_snapshot)?;
+        ensure!(
+            stored_manifest_digest == expected_manifest_snapshot_digest,
+            "Base normalized-event rederive active manifest snapshot digest mismatch for run {:?}: stored {stored_manifest_digest}, requested {expected_manifest_snapshot_digest}",
             state.run_id
         );
         return Ok(());
@@ -299,6 +326,25 @@ async fn validate_or_upgrade_resume_guard_snapshots(
             state.run_id
         );
     }
+    if state.plan_snapshot.active_manifest_snapshot.is_empty() {
+        state.plan_snapshot.active_manifest_snapshot =
+            load_active_manifest_snapshot_from(transaction).await?;
+        let upgraded_digest =
+            base_normalized_rederive_json_digest(&state.plan_snapshot.active_manifest_snapshot)?;
+        ensure!(
+            upgraded_digest == expected_manifest_snapshot_digest,
+            "Base normalized-event rederive legacy active manifest snapshot divergence for run {:?}: reviewed {expected_manifest_snapshot_digest}, current {upgraded_digest}",
+            state.run_id
+        );
+    } else {
+        let stored_digest =
+            base_normalized_rederive_json_digest(&state.plan_snapshot.active_manifest_snapshot)?;
+        ensure!(
+            stored_digest == expected_manifest_snapshot_digest,
+            "Base normalized-event rederive active manifest snapshot digest mismatch for run {:?}: stored {stored_digest}, requested {expected_manifest_snapshot_digest}",
+            state.run_id
+        );
+    }
     if state.plan_snapshot.raw_fact_range_proof.is_empty() {
         state.plan_snapshot.raw_fact_range_proof =
             load_raw_fact_range_proof_from(transaction, state.replay_target_block).await?;
@@ -325,12 +371,20 @@ async fn rerun_resume_guards(
     );
     let current_replay_target_snapshot =
         load_active_replay_target_snapshot_from(transaction, state.replay_target_block).await?;
+    let current_manifest_snapshot = load_active_manifest_snapshot_from(transaction).await?;
     ensure!(
         current_replay_target_snapshot == state.plan_snapshot.active_replay_target_snapshot,
         "Base normalized-event rederive active replay target snapshot changed during run {:?}: stored {} targets, current {} targets",
         state.run_id,
         state.plan_snapshot.active_replay_target_snapshot.len(),
         current_replay_target_snapshot.len()
+    );
+    ensure!(
+        current_manifest_snapshot == state.plan_snapshot.active_manifest_snapshot,
+        "Base normalized-event rederive active manifest snapshot changed during run {:?}: stored {} manifests, current {} manifests",
+        state.run_id,
+        state.plan_snapshot.active_manifest_snapshot.len(),
+        current_manifest_snapshot.len()
     );
     ensure_delete_scope_replay_active_from(transaction, state.replay_target_block).await?;
     let current_raw_fact_range_proof =

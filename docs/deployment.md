@@ -511,6 +511,13 @@ is global to Base while replay reset is profile-scoped. Updated indexer and
 worker runtimes and write-capable one-shot commands hold a shared advisory lock
 while running; the execute path takes the exclusive form of that lock and also
 refuses visible `bigname-indexer`/`bigname-worker` sessions before it writes.
+Those guarded writers also refuse to start while any Base rederive run is still
+incomplete, even if a crashed execute container released its session advisory
+lock. Apply this release's checked-in migrations before starting the correction;
+the worker migration command remains a guarded writer because checked-in
+migrations can include replay-adjacent data repairs. If a crash occurs before
+the abort-status migration is installed, resume/complete the run or restore the
+database to a consistent pre-run snapshot before running migrations or writers.
 Guarded writer processes require at least two database pool connections so the
 held advisory lock connection cannot starve the writer work.
 
@@ -533,9 +540,10 @@ held advisory lock connection cannot starve the writer work.
    `raw_log_preimage_observation` and non-closure source families;
    identity/projection/change-log delete counts; raw-fact completeness proof,
    including that the retained canonical Base raw-log floor is exactly block
-   `17571485`; active replay target snapshot row count and digest; both replay
-   cursor counts; affected current-projection replay marker count; run id, batch
-   size, batch count/order; max affected block; replay target floor; and the replay reset target
+   `17571485`; active replay target snapshot row count and digest; active
+   manifest snapshot row count and digest; both replay cursor counts; affected
+   current-projection replay marker count; run id, batch size, batch count/order;
+   max affected block; replay target floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
 4. Execute only after review, passing the dry-run counts back as exact
    `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
@@ -579,7 +587,8 @@ held advisory lock connection cannot starve the writer work.
        --expected-replay-cursor-rows <dry-run-value> \
        --expected-adapter-checkpoint-rows <dry-run-value> \
        --expected-adapter-checkpoint-item-rows <dry-run-value> \
-       --expected-active-replay-target-snapshot-digest <dry-run-value>
+       --expected-active-replay-target-snapshot-digest <dry-run-value> \
+       --expected-active-manifest-snapshot-digest <dry-run-value>
    ```
 
 5. Monitor batch progress while execute is running from another SQL session:
@@ -604,21 +613,47 @@ held advisory lock connection cannot starve the writer work.
    `--replay-target-block`, and expected counts. The command resumes only when
    recorded deleted counts plus the remaining live census still equal the
    reviewed dry-run census, the current active replay target/range snapshot
-   still matches the reviewed run snapshot, and retained raw facts remain
-   complete and unchanged for the stored target.
+   and active manifest snapshot still match the reviewed run snapshots, and
+   retained raw facts remain complete and unchanged for the stored target.
    Do not run replay until the run row is `status='completed'`; before that
    final state, replay cursors and projection markers are intentionally
-   untouched.
+   untouched. Normal indexer, worker, and guarded one-shot writers also refuse
+   to start while the run remains incomplete. If the operator decides not to
+   resume, restore the database to a consistent pre-run snapshot first, then
+   explicitly mark the run aborted so guarded writers may start:
+
+   ```sql
+   UPDATE base_normalized_rederive_runs
+   SET status = 'aborted',
+       current_step = 'aborted',
+       updated_at = now()
+   WHERE run_id = 'base-normalized-rederive-2026-07-03'
+     AND status <> 'completed';
+   ```
+
+   Do not mark a half-deleted database aborted merely to unblock writers; either
+   complete the rederive run or restore the database before aborting.
 7. Run only the catch-up indexer with normalized replay catch-up enabled and
    `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
    replay from block `17571485` through the reviewed target block. Keep the API
-   drained. The correction command pins the reset cursor's
-   `range_start_floor_block_number` to `17571485`, so catch-up cursor refresh
-   cannot widen this correction replay below the delete boundary or reopen a
-   completed reset from older retained raw logs below that floor. It also clears
-   any stale `post_replay_live_adapter_backlog` cursor for the same Base
-   deployment. This mode can re-enable live adapter sync after replay catches up,
-   so do not let it overlap the projection rebuild:
+   drained. Run this from the same reviewed manifest image/root used for dry-run
+   and execute. The catch-up path compares both the current active Base replay
+   target/range snapshot and the full active manifest snapshot with the
+   completed run's reviewed snapshots before replaying; if either differs, it
+   bails before re-emitting rows. While this completed correction reset cursor
+   is still pending replay, the indexer skips repository manifest sync and
+   builds runtime state from the already-stored reviewed manifest snapshot, so
+   a second indexer cannot rotate the stored manifest snapshot during
+   full-closure re-derivation. The skipped repository refresh remains marked for
+   retry, so the same long-running indexer syncs normally once the pending reset
+   replay cursor completes. The final reset already
+   validated that the retained canonical Base raw-log floor equals block
+   `17571485`; catch-up repeats that check while the reset cursor is pending, so
+   normal cursor refresh cannot widen this correction replay below the delete
+   boundary on the reviewed deployment. The command also clears any stale
+   `post_replay_live_adapter_backlog` cursor for the same Base deployment. This
+   mode can re-enable live adapter sync after replay catches up, so do not let it
+   overlap the projection rebuild:
 
    ```sh
    docker compose --env-file .env.server \

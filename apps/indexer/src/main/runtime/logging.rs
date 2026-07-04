@@ -88,6 +88,16 @@ pub(crate) fn log_manifest_sync_summary(summary: &ManifestSyncSummary) {
             manifest_sync_status = summary.status.as_str(),
             "manifest sync skipped because the repository root was not usable"
         ),
+        ManifestSyncStatus::SkippedPendingBaseRederiveReplay => warn!(
+            service = "indexer",
+            manifest_sync_status = summary.status.as_str(),
+            stored_active_manifest_count = summary.active_manifest_count,
+            stored_root_count = summary.root_count,
+            stored_contract_count = summary.contract_count,
+            stored_capability_count = summary.capability_count,
+            stored_discovery_rule_count = summary.discovery_rule_count,
+            "manifest sync skipped because Base normalized-event rederive replay is pending"
+        ),
     }
 }
 

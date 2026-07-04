@@ -888,6 +888,98 @@ async fn watched_plan_excludes_successor_migration_edges_from_address_expansion(
 }
 
 #[tokio::test]
+async fn build_manifest_runtime_state_uses_stored_manifests_while_base_rederive_replay_pending()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents(
+        "0x0000000000000000000000000000000000000001",
+        "supported",
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    assert_eq!(initial_state.sync_summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(
+        initial_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    fs::write(
+        &manifest_path,
+        manifest_contents("0x0000000000000000000000000000000000000002", "supported"),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+    let refreshed_repository = load_manifest_repository(&manifests.path)?;
+    seed_pending_base_rederive_replay(database.pool()).await?;
+
+    let pending_state =
+        build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+    assert_eq!(
+        pending_state.sync_summary.status,
+        ManifestSyncStatus::SkippedPendingBaseRederiveReplay
+    );
+    assert!(
+        pending_state.repository_refresh_needed(&refreshed_repository),
+        "a skipped manifest sync must be retried after the pending Base replay finishes even if the repository files do not change again"
+    );
+    assert_eq!(
+        pending_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET next_block_number = target_block_number + 1
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = 'base-mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let runtime_state =
+        build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+    assert_eq!(runtime_state.sync_summary.status, ManifestSyncStatus::Synced);
+    assert!(!runtime_state.repository_refresh_needed(&refreshed_repository));
+    assert_eq!(
+        runtime_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000002".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_manifest_runtime_state_accepts_empty_root_and_clears_watch_plan() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
@@ -1671,6 +1763,56 @@ discovery_rules = []
     ,
         abi = test_manifest_abi_toml()
     )
+}
+
+async fn seed_pending_base_rederive_replay(pool: &PgPool) -> Result<()> {
+    create_base_normalized_rederive_run_table(pool).await?;
+    create_normalized_replay_cursor_table(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO base_normalized_rederive_runs (
+            run_id,
+            deployment_profile,
+            chain_id,
+            replay_target_block,
+            status,
+            completed_at
+        )
+        VALUES (
+            'base-rederive-pending-manifest-sync',
+            'mainnet',
+            'base-mainnet',
+            17571490,
+            'completed',
+            now()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number
+        )
+        VALUES (
+            'mainnet',
+            'base-mainnet',
+            'raw_fact_normalized_events',
+            17571485,
+            17571485,
+            17571490
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn insert_raw_new_resolver_log_for_node(

@@ -30,24 +30,15 @@ pub(super) async fn ensure_cursor(
         VALUES ($1, $2, $3, $4, $4, $5)
         ON CONFLICT (deployment_profile, chain_id, cursor_kind) DO UPDATE
         SET
-            range_start_block_number = GREATEST(
-                LEAST(
-                    normalized_replay_cursors.range_start_block_number,
-                    EXCLUDED.range_start_block_number
-                ),
-                COALESCE(normalized_replay_cursors.range_start_floor_block_number, 0)
+            range_start_block_number = LEAST(
+                normalized_replay_cursors.range_start_block_number,
+                EXCLUDED.range_start_block_number
             ),
             next_block_number = CASE
-                WHEN GREATEST(
-                    EXCLUDED.range_start_block_number,
-                    COALESCE(normalized_replay_cursors.range_start_floor_block_number, 0)
-                ) < normalized_replay_cursors.range_start_block_number
+                WHEN EXCLUDED.range_start_block_number < normalized_replay_cursors.range_start_block_number
                     THEN LEAST(
                         normalized_replay_cursors.next_block_number,
-                        GREATEST(
-                            EXCLUDED.range_start_block_number,
-                            COALESCE(normalized_replay_cursors.range_start_floor_block_number, 0)
-                        )
+                        EXCLUDED.range_start_block_number
                     )
                 ELSE normalized_replay_cursors.next_block_number
             END,
@@ -142,18 +133,8 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
         r#"
         UPDATE normalized_replay_cursors
         SET
-            range_start_block_number = GREATEST(
-                LEAST(range_start_block_number, $4),
-                COALESCE(range_start_floor_block_number, 0)
-            ),
-            next_block_number = CASE
-                WHEN GREATEST($4, COALESCE(range_start_floor_block_number, 0)) < range_start_block_number
-                    THEN LEAST(
-                        next_block_number,
-                        GREATEST($4, COALESCE(range_start_floor_block_number, 0))
-                    )
-                ELSE next_block_number
-            END,
+            range_start_block_number = LEAST(range_start_block_number, $4),
+            next_block_number = LEAST(next_block_number, $4),
             updated_at = now()
         WHERE deployment_profile = $1
           AND chain_id = $2

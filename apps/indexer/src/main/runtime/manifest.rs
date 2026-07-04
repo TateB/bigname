@@ -39,6 +39,16 @@ pub(crate) struct ManifestRuntimeState {
     pub(crate) watched_chain_plan: Vec<WatchedChainPlan>,
 }
 
+impl ManifestRuntimeState {
+    pub(crate) fn repository_refresh_needed(
+        &self,
+        manifest_repository: &ManifestRepository,
+    ) -> bool {
+        manifest_repository != &self.manifest_repository
+            || self.sync_summary.status == ManifestSyncStatus::SkippedPendingBaseRederiveReplay
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeWatchScope {
     ActiveWatchedChain,
@@ -81,7 +91,8 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
     ) = match watch_scope {
         RuntimeWatchScope::ActiveWatchedChain => {
             let sync_summary =
-                bigname_manifests::sync_repository(pool, manifest_repository).await?;
+                sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository)
+                    .await?;
             let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
             (
@@ -94,7 +105,8 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         }
         RuntimeWatchScope::ManifestDeclaredOnly => {
             let sync_summary =
-                bigname_manifests::sync_repository(pool, manifest_repository).await?;
+                sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository)
+                    .await?;
             let stored_active_manifest_count = load_stored_active_manifest_count(pool).await?;
             verify_stored_manifest_count(&sync_summary, stored_active_manifest_count)?;
             (
@@ -115,6 +127,62 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         manifest_normalized_event_summary,
         watched_contract_summary,
         watched_chain_plan,
+    })
+}
+
+async fn sync_repository_or_load_stored_for_pending_rederive(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+) -> Result<ManifestSyncSummary> {
+    if bigname_storage::base_normalized_rederive_manifest_sync_pending_replay(pool).await? {
+        return load_stored_manifest_sync_summary_for_pending_rederive(pool).await;
+    }
+
+    bigname_manifests::sync_repository(pool, manifest_repository).await
+}
+
+async fn load_stored_manifest_sync_summary_for_pending_rederive(
+    pool: &sqlx::PgPool,
+) -> Result<ManifestSyncSummary> {
+    let (active_manifest_count, root_count, contract_count, capability_count, discovery_rule_count) =
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+            r#"
+        SELECT
+            (SELECT COUNT(*)::BIGINT
+             FROM manifest_versions
+             WHERE rollout_status = 'active') AS active_manifest_count,
+            (SELECT COUNT(*)::BIGINT
+             FROM manifest_contract_instances
+             WHERE declaration_kind = 'root') AS root_count,
+            (SELECT COUNT(*)::BIGINT
+             FROM manifest_contract_instances
+             WHERE declaration_kind = 'contract') AS contract_count,
+            (SELECT COUNT(*)::BIGINT
+             FROM manifest_capability_flags) AS capability_count,
+            (SELECT COUNT(*)::BIGINT
+             FROM manifest_discovery_rules) AS discovery_rule_count
+        "#,
+        )
+        .fetch_one(pool)
+        .await
+        .context(
+            "failed to load stored manifest sync summary while Base rederive replay is pending",
+        )?;
+
+    Ok(ManifestSyncSummary {
+        status: ManifestSyncStatus::SkippedPendingBaseRederiveReplay,
+        synced_manifest_count: 0,
+        active_manifest_count: usize::try_from(active_manifest_count)
+            .context("stored active manifest count cannot fit in usize")?,
+        root_count: usize::try_from(root_count).context("stored root count cannot fit in usize")?,
+        contract_count: usize::try_from(contract_count)
+            .context("stored contract count cannot fit in usize")?,
+        capability_count: usize::try_from(capability_count)
+            .context("stored capability count cannot fit in usize")?,
+        discovery_rule_count: usize::try_from(discovery_rule_count)
+            .context("stored discovery-rule count cannot fit in usize")?,
+        removed_manifest_count: 0,
+        cleared_discovery_edge_count: 0,
     })
 }
 
@@ -185,8 +253,10 @@ fn verify_stored_manifest_count(
     sync_summary: &ManifestSyncSummary,
     stored_active_manifest_count: usize,
 ) -> Result<()> {
-    if sync_summary.status == ManifestSyncStatus::Synced
-        && sync_summary.active_manifest_count != stored_active_manifest_count
+    if matches!(
+        sync_summary.status,
+        ManifestSyncStatus::Synced | ManifestSyncStatus::SkippedPendingBaseRederiveReplay
+    ) && sync_summary.active_manifest_count != stored_active_manifest_count
     {
         bail!(
             "stored active manifest count {} does not match the synced active manifest count {}",

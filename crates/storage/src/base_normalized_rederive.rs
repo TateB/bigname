@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, pool::PoolConnection};
-use tracing::info;
+use sqlx::PgPool;
 
 mod batch;
 mod batch_plan;
 mod counts;
 mod execution;
 mod guards;
+mod manifest_snapshot;
 mod profile;
 mod proof;
+mod runtime_guard;
 
 use batch::execute_base_normalized_rederive_drop_batched;
 pub use batch_plan::{BaseNormalizedRederiveBatchPlan, BaseNormalizedRederiveBatchPlanStep};
@@ -25,12 +26,21 @@ use guards::{
     ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot,
     load_active_replay_target_snapshot_from,
 };
+pub use manifest_snapshot::BaseNormalizedRederiveActiveManifestSnapshot;
+use manifest_snapshot::{load_active_manifest_snapshot, load_active_manifest_snapshot_from};
 use profile::{
     validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
     validate_deployment_profile,
 };
 pub use proof::{BaseNormalizedRederiveRawFactRangeProof, base_normalized_rederive_json_digest};
 use proof::{load_raw_fact_range_proof, load_raw_fact_range_proof_from};
+pub use runtime_guard::{
+    base_normalized_rederive_manifest_sync_pending_replay,
+    ensure_base_normalized_rederive_replay_manifest_snapshot_current,
+    hold_base_normalized_rederive_runtime_shared_lock,
+    pending_base_normalized_rederive_replay_target,
+    refuse_base_normalized_rederive_manifest_sync_during_pending_replay,
+};
 
 pub const BASE_NORMALIZED_REDERIVE_CHAIN_ID: &str = "base-mainnet";
 pub const BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER: &str = "ens_v1_reverse_claim";
@@ -142,6 +152,8 @@ pub struct BaseNormalizedRederivePlan {
     #[serde(default)]
     pub active_replay_target_snapshot: Vec<BaseNormalizedRederiveReplayTargetSnapshot>,
     #[serde(default)]
+    pub active_manifest_snapshot: Vec<BaseNormalizedRederiveActiveManifestSnapshot>,
+    #[serde(default)]
     pub raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof,
     pub cursor_census: BaseNormalizedRederiveCursorCensus,
     pub counts: BaseNormalizedRederiveCounts,
@@ -152,33 +164,13 @@ pub struct BaseNormalizedRederivePlan {
 pub struct BaseNormalizedRederiveExpectedCounts {
     pub counts: BaseNormalizedRederiveCounts,
     pub active_replay_target_snapshot_digest: Option<String>,
+    pub active_manifest_snapshot_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseNormalizedRederiveExecutionOutcome {
     pub plan: BaseNormalizedRederivePlan,
     pub deleted: BaseNormalizedRederiveCounts,
-}
-
-pub async fn hold_base_normalized_rederive_runtime_shared_lock(
-    pool: &PgPool,
-    service: &str,
-) -> Result<PoolConnection<Postgres>> {
-    let mut connection = pool
-        .acquire()
-        .await
-        .context("failed to acquire runtime guard connection")?;
-    sqlx::query("SELECT pg_advisory_lock_shared(hashtextextended($1::text, 0::bigint))")
-        .bind(BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY)
-        .execute(&mut *connection)
-        .await
-        .context("failed to acquire Base normalized-event rederive runtime shared lock")?;
-    info!(
-        service,
-        lock = BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY,
-        "runtime holds Base normalized-event rederive shared advisory lock"
-    );
-    Ok(connection)
 }
 
 pub async fn load_base_normalized_rederive_plan(
@@ -196,6 +188,7 @@ pub async fn load_base_normalized_rederive_plan(
     let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
     let active_replay_target_snapshot =
         load_active_replay_target_snapshot(pool, replay_target_block).await?;
+    let active_manifest_snapshot = load_active_manifest_snapshot(pool).await?;
     let raw_fact_range_proof = load_raw_fact_range_proof(pool, replay_target_block).await?;
     let cursor_census = load_cursor_census(pool, deployment_profile).await?;
     let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
@@ -207,6 +200,7 @@ pub async fn load_base_normalized_rederive_plan(
         replay_target_floor_block,
         derivation_kind_census,
         active_replay_target_snapshot,
+        active_manifest_snapshot,
         raw_fact_range_proof,
         cursor_census,
         counts,
@@ -240,6 +234,10 @@ pub async fn execute_base_normalized_rederive_drop(
             .is_some(),
         "Base normalized-event rederive execute requires reviewed active replay target snapshot digest"
     );
+    ensure!(
+        expected_counts.active_manifest_snapshot_digest.is_some(),
+        "Base normalized-event rederive execute requires reviewed active manifest snapshot digest"
+    );
     execute_base_normalized_rederive_drop_batched(
         pool,
         deployment_profile,
@@ -272,6 +270,10 @@ async fn execute_base_normalized_rederive_drop_with_batch_limit(
             .is_some(),
         "Base normalized-event rederive execute requires reviewed active replay target snapshot digest"
     );
+    ensure!(
+        expected_counts.active_manifest_snapshot_digest.is_some(),
+        "Base normalized-event rederive execute requires reviewed active manifest snapshot digest"
+    );
     batch::execute_base_normalized_rederive_drop_with_batch_limit(
         pool,
         deployment_profile,
@@ -297,6 +299,7 @@ pub(super) async fn load_plan_in_transaction(
         load_derivation_kind_census_from(transaction, replay_target_block).await?;
     let active_replay_target_snapshot =
         load_active_replay_target_snapshot_from(transaction, replay_target_block).await?;
+    let active_manifest_snapshot = load_active_manifest_snapshot_from(transaction).await?;
     let raw_fact_range_proof =
         load_raw_fact_range_proof_from(transaction, replay_target_block).await?;
     let cursor_census = load_cursor_census_from(transaction, deployment_profile).await?;
@@ -310,6 +313,7 @@ pub(super) async fn load_plan_in_transaction(
         replay_target_floor_block,
         derivation_kind_census,
         active_replay_target_snapshot,
+        active_manifest_snapshot,
         raw_fact_range_proof,
         cursor_census,
         counts,

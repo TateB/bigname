@@ -130,14 +130,15 @@ additional batch is deleted. The reviewed plan stored in the run row includes a
 snapshot of the active Base replay targets/ranges, and resume requires the
 current active target set to match that snapshot, so the check remains
 non-vacuous even after the scoped `normalized_events` rows have already been
-deleted. Execute also requires the dry-run's active target snapshot digest as an
-expected value, so review-to-write replay-target drift cannot become the stored
-run snapshot. The run row also stores a compact retained raw-fact range proof
-over canonical raw-log identity, payload fields, and lineage rows, and resume
-requires the current retained raw-log and lineage proof to match it; this keeps
-raw-fact drift detection non-vacuous after event rows are deleted. A long-paused
-run cannot continue after the active replay targets or retained raw facts have
-drifted out of the reviewed safe state.
+deleted. Execute also requires the dry-run's active target snapshot digest and
+active manifest snapshot digest as expected values, so review-to-write
+replay-target or manifest drift cannot become the stored run snapshot. The run
+row also stores a compact retained raw-fact range proof over canonical raw-log
+identity, payload fields, and lineage rows, and resume requires the current
+retained raw-log and lineage proof to match it; this keeps raw-fact drift
+detection non-vacuous after event rows are deleted. A long-paused run cannot
+continue after the active replay targets, active manifests, or retained raw
+facts have drifted out of the reviewed safe state.
 
 The normalized-event scope is:
 
@@ -199,16 +200,20 @@ affected `current_projection_replay_status` rows,
 `normalized_replay_cursors` row for
 `mainnet/base-mainnet/raw_fact_normalized_events` to
 `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated replay target>`, with
-`range_start_floor_block_number = 17571485`. The generic catch-up cursor refresh
-and older-log rewind paths must not move a cursor below a non-null
-`range_start_floor_block_number` or reopen a completed floored cursor merely
-because older retained raw logs exist below that floor; ordinary cursors leave
-this column NULL and retain their normal ability to widen when older retained raw
-logs appear. The final reset still revalidates that the retained canonical Base
-raw-log floor is exactly block `17571485` as defense in depth. If the process
-dies before that final reset, replay cursors and projection markers remain
-untouched and the same `--run-id` must be resumed before replay starts.
+`target_block_number = <validated replay target>`. The final reset revalidates
+that the retained canonical Base raw-log floor is exactly block `17571485`, and
+the catch-up path repeats that floor check while the completed run's reset cursor
+is still pending replay. Because the catch-up cursor's replay bounds are derived
+from the canonical raw-log floor, replay refuses before cursor refresh if a later
+retention change would widen this correction below the delete boundary. The
+generic catch-up cursor refresh and older-log rewind paths otherwise retain their
+normal ability to widen or rewind when older retained raw logs appear. If the
+process dies before that final reset, replay cursors and projection markers
+remain untouched and the same `--run-id` must be resumed before replay starts.
+Guarded writer processes also refuse to start while a Base rederive run remains
+incomplete (`status` other than `completed` or `aborted`), so a released session
+lock after a crash is not enough for normal writers to proceed against a
+partially deleted corpus.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
@@ -224,6 +229,19 @@ address)` is not covered by a currently active Base replay target/range for the
 full-closure adapter that will re-emit it. These are hard stops because the
 correction may only delete rows that current replay can recreate from retained
 raw facts.
+The completed run records both the reviewed active replay target/range snapshot
+and the full active Base manifest snapshot, including active manifest payloads
+and manifest-linked contract/discovery rows. While the reset cursor is still
+pending replay, the catch-up replay path checks the current active snapshots
+against those reviewed snapshots and refuses to replay if a different manifest
+image was synced after review, even when the replay target addresses and ranges
+would otherwise be unchanged. Repository manifest sync is skipped while the
+reviewed completed run's reset cursor is still pending; the indexer builds
+runtime state from the already-stored reviewed manifest snapshot so another
+indexer cannot rotate the stored active manifest state between the replay guard
+and the full-closure adapter reads. A skipped repository refresh remains marked
+for retry, so the same long-running indexer syncs the repository normally once
+the pending reset replay cursor completes.
 Because the delete scope is global for `base-mainnet` while replay reset is
 profile-scoped, dry-run and execute also require the requested deployment
 profile to own an existing `base-mainnet/raw_fact_normalized_events` replay

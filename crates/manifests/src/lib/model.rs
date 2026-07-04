@@ -107,6 +107,7 @@ pub enum ManifestSyncStatus {
     Synced,
     SkippedMissingRoot,
     SkippedInvalidRoot,
+    SkippedPendingBaseRederiveReplay,
 }
 
 impl ManifestSyncStatus {
@@ -115,6 +116,7 @@ impl ManifestSyncStatus {
             Self::Synced => "synced",
             Self::SkippedMissingRoot => "skipped_missing_root",
             Self::SkippedInvalidRoot => "skipped_invalid_root",
+            Self::SkippedPendingBaseRederiveReplay => "skipped_pending_base_rederive_replay",
         }
     }
 }

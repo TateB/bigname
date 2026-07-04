@@ -9,6 +9,7 @@ use super::super::{
 
 pub(super) const RUN_STATUS_RUNNING: &str = "running";
 pub(super) const RUN_STATUS_COMPLETED: &str = "completed";
+pub(super) const RUN_STATUS_ABORTED: &str = "aborted";
 
 #[derive(Clone, Debug)]
 pub(super) struct RunState {
@@ -26,6 +27,10 @@ pub(super) struct RunState {
 impl RunState {
     pub(super) fn is_completed(&self) -> bool {
         self.status == RUN_STATUS_COMPLETED
+    }
+
+    pub(super) fn is_aborted(&self) -> bool {
+        self.status == RUN_STATUS_ABORTED
     }
 
     pub(super) fn advance_step(&mut self, step: Step) {

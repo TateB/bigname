@@ -65,7 +65,7 @@ pub(crate) async fn run_poll_loop(
                             log_manifest_summary(&manifest_summary);
                         }
 
-                        if manifest_repository == manifest_runtime_state.manifest_repository {
+                        if !manifest_runtime_state.repository_refresh_needed(&manifest_repository) {
                         } else if let Err(error) = ensure_manifest_root_ready(&manifest_summary) {
                             let current_watch_state =
                                 watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);

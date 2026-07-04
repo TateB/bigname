@@ -66,6 +66,8 @@ pub(crate) struct DropAndRederiveBaseNormalizedEventsArgs {
     pub(crate) expected_adapter_checkpoint_item_rows: Option<i64>,
     #[arg(long = "expected-active-replay-target-snapshot-digest")]
     pub(crate) expected_active_replay_target_snapshot_digest: Option<String>,
+    #[arg(long = "expected-active-manifest-snapshot-digest")]
+    pub(crate) expected_active_manifest_snapshot_digest: Option<String>,
 }
 
 pub(crate) async fn drop_and_rederive_base_normalized_events_command(
@@ -86,7 +88,7 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
     let expected = expected_from_args(&args)?;
     if args.execute && expected.is_none() {
         bail!(
-            "--execute requires every --expected-* count and --expected-active-replay-target-snapshot-digest emitted by dry-run"
+            "--execute requires every --expected-* count plus --expected-active-replay-target-snapshot-digest and --expected-active-manifest-snapshot-digest emitted by dry-run"
         );
     }
     let pool = bigname_storage::connect(&args.database).await?;
@@ -164,6 +166,7 @@ fn expected_from_args(
     ];
     if values.iter().all(Option::is_none)
         && args.expected_active_replay_target_snapshot_digest.is_none()
+        && args.expected_active_manifest_snapshot_digest.is_none()
     {
         return Ok(None);
     }
@@ -172,9 +175,13 @@ fn expected_from_args(
             .expected_active_replay_target_snapshot_digest
             .as_deref()
             .is_none_or(str::is_empty)
+        || args
+            .expected_active_manifest_snapshot_digest
+            .as_deref()
+            .is_none_or(str::is_empty)
     {
         bail!(
-            "expected execution guard requires every --expected-* count and --expected-active-replay-target-snapshot-digest emitted by dry-run"
+            "expected execution guard requires every --expected-* count plus --expected-active-replay-target-snapshot-digest and --expected-active-manifest-snapshot-digest emitted by dry-run"
         );
     }
     Ok(Some(BaseNormalizedRederiveExpectedCounts {
@@ -204,6 +211,7 @@ fn expected_from_args(
         active_replay_target_snapshot_digest: args
             .expected_active_replay_target_snapshot_digest
             .clone(),
+        active_manifest_snapshot_digest: args.expected_active_manifest_snapshot_digest.clone(),
     }))
 }
 
@@ -259,6 +267,13 @@ fn render_plan(
         "active_replay_target_snapshot: rows={} expected_active_replay_target_snapshot_digest={}\n",
         plan.active_replay_target_snapshot.len(),
         active_replay_target_snapshot_digest
+    ));
+    let active_manifest_snapshot_digest =
+        base_normalized_rederive_json_digest(&plan.active_manifest_snapshot)?;
+    output.push_str(&format!(
+        "active_manifest_snapshot: rows={} expected_active_manifest_snapshot_digest={}\n",
+        plan.active_manifest_snapshot.len(),
+        active_manifest_snapshot_digest
     ));
     output.push_str("derivation_kind_partition:\n");
     for census in plan
@@ -368,7 +383,11 @@ fn log_plan(
         active_replay_target_digest = %base_normalized_rederive_json_digest(
             &plan.active_replay_target_snapshot
         )?,
+        active_manifest_digest = %base_normalized_rederive_json_digest(
+            &plan.active_manifest_snapshot
+        )?,
         active_replay_target_rows = plan.active_replay_target_snapshot.len(),
+        active_manifest_rows = plan.active_manifest_snapshot.len(),
         raw_fact_complete = plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event drop-and-rederive census"
     );
@@ -433,6 +452,8 @@ mod tests {
             expected_adapter_checkpoint_item_rows: count,
             expected_active_replay_target_snapshot_digest: count
                 .map(|_| "keccak256:reviewed".to_owned()),
+            expected_active_manifest_snapshot_digest: count
+                .map(|_| "keccak256:manifest-reviewed".to_owned()),
         }
     }
 
@@ -451,7 +472,10 @@ mod tests {
             expected.active_replay_target_snapshot_digest.as_deref(),
             Some("keccak256:reviewed")
         );
-
+        assert_eq!(
+            expected.active_manifest_snapshot_digest.as_deref(),
+            Some("keccak256:manifest-reviewed")
+        );
         let mut incomplete = args_with_expected(Some(1));
         incomplete.expected_resources = None;
         assert!(
@@ -463,6 +487,15 @@ mod tests {
         assert!(
             format!("{:?}", expected_from_args(&missing_digest).unwrap_err())
                 .contains("--expected-active-replay-target-snapshot-digest")
+        );
+        let mut missing_manifest_digest = args_with_expected(Some(1));
+        missing_manifest_digest.expected_active_manifest_snapshot_digest = None;
+        assert!(
+            format!(
+                "{:?}",
+                expected_from_args(&missing_manifest_digest).unwrap_err()
+            )
+            .contains("--expected-active-manifest-snapshot-digest")
         );
     }
 
@@ -494,6 +527,7 @@ mod tests {
             max_affected_block: Some(target_block),
             replay_target_floor_block: Some(target_block),
             active_replay_target_snapshot: vec![],
+            active_manifest_snapshot: vec![],
             raw_fact_range_proof: bigname_storage::BaseNormalizedRederiveRawFactRangeProof {
                 replay_target_block: target_block,
                 canonical_raw_log_count: 2,
@@ -558,6 +592,8 @@ mod tests {
         assert!(output.contains(&format!("replay_target_floor_block=Some({target_block})")));
         assert!(output.contains("active_replay_target_snapshot: rows=0"));
         assert!(output.contains("expected_active_replay_target_snapshot_digest=keccak256:"));
+        assert!(output.contains("active_manifest_snapshot: rows=0"));
+        assert!(output.contains("expected_active_manifest_snapshot_digest=keccak256:"));
         assert!(output.contains("batch_plan:"));
         assert!(output.contains("step=normalized_events rows=56040812 estimated_batches=561"));
     }
