@@ -6,9 +6,10 @@ use super::{
     BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
     BaseNormalizedRederiveCounts, BaseNormalizedRederiveCursorCensus,
     BaseNormalizedRederiveDerivationKindCensus, BaseNormalizedRederiveRawFactCompleteness,
-    checkpoint_adapters, cursor_kinds, reverse_claim_derivation_kind,
-    reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
-    unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
+    checkpoint_adapters, current_projection_replay_status_projections, cursor_kinds,
+    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
+    subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 pub(super) async fn load_counts(
@@ -27,6 +28,7 @@ pub(super) async fn load_counts(
         .bind(subregistry_source_families())
         .bind(unwrapped_authority_derivation_kind())
         .bind(unwrapped_authority_source_families())
+        .bind(current_projection_replay_status_projections())
         .fetch_one(pool)
         .await
         .context("failed to load Base normalized-event rederive census")?;
@@ -49,6 +51,7 @@ pub(super) async fn load_counts_from(
         .bind(subregistry_source_families())
         .bind(unwrapped_authority_derivation_kind())
         .bind(unwrapped_authority_source_families())
+        .bind(current_projection_replay_status_projections())
         .fetch_one(&mut **transaction)
         .await
         .context("failed to load Base normalized-event rederive census")?;
@@ -282,6 +285,7 @@ fn counts_sql() -> &'static str {
         (SELECT COUNT(*)::BIGINT FROM permissions_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS permissions_current,
         (SELECT COUNT(*)::BIGINT FROM record_inventory_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS record_inventory_current,
         (SELECT COUNT(*)::BIGINT FROM projection_normalized_event_changes p WHERE EXISTS (SELECT 1 FROM scoped_events s WHERE s.normalized_event_id = p.normalized_event_id)) AS projection_normalized_event_changes,
+        (SELECT COUNT(*)::BIGINT FROM current_projection_replay_status WHERE projection = ANY($11::TEXT[])) AS current_projection_replay_status,
         (SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[])) AS replay_cursor_rows,
         (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_rows,
         (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_item_rows
@@ -302,6 +306,7 @@ fn counts_from_row(row: &sqlx::postgres::PgRow) -> Result<BaseNormalizedRederive
         permissions_current: row.try_get("permissions_current")?,
         record_inventory_current: row.try_get("record_inventory_current")?,
         projection_normalized_event_changes: row.try_get("projection_normalized_event_changes")?,
+        current_projection_replay_status: row.try_get("current_projection_replay_status")?,
         replay_cursor_rows: row.try_get("replay_cursor_rows")?,
         adapter_checkpoint_rows: row.try_get("adapter_checkpoint_rows")?,
         adapter_checkpoint_item_rows: row.try_get("adapter_checkpoint_item_rows")?,

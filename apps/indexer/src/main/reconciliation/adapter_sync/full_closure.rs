@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use sqlx::Row;
 use tracing::info;
 
 use crate::runtime::{
@@ -267,8 +268,8 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
         return Ok(empty_reverse_claim_summary());
     }
 
-    let reverse_addresses = load_reverse_claim_replay_addresses(pool, chain).await?;
-    if reverse_addresses.is_empty() {
+    let reverse_scope = load_reverse_claim_replay_scope(pool, chain).await?;
+    if reverse_scope.source_scope.is_empty() {
         return Ok(empty_reverse_claim_summary());
     }
 
@@ -281,17 +282,26 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
             chain,
             page_from_block,
             target_block_number,
-            &reverse_addresses,
+            &reverse_scope.addresses,
             max_raw_logs_per_page,
         )
         .await?;
-        let page_summary = bigname_adapters::sync_ens_v1_reverse_claim_range(
+        let page_block_hashes = load_reverse_claim_replay_page_block_hashes(
             pool,
             chain,
             page_from_block,
             page_to_block,
+            &reverse_scope.addresses,
         )
         .await?;
+        let page_summary =
+            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope(
+                pool,
+                chain,
+                &page_block_hashes,
+                &reverse_scope.source_scope,
+            )
+            .await?;
         merge_reverse_claim_summary(&mut aggregate, page_summary);
         page_count += 1;
         info!(
@@ -301,6 +311,7 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
             page_from_block,
             page_to_block,
             page_count,
+            page_block_hash_count = page_block_hashes.len(),
             max_raw_logs_per_page,
             scanned_log_count = aggregate.scanned_log_count,
             matched_log_count = aggregate.matched_log_count,
@@ -316,26 +327,36 @@ async fn sync_ens_v1_reverse_claim_range_in_pages(
     Ok(aggregate)
 }
 
-async fn load_reverse_claim_replay_addresses(
+struct ReverseClaimReplayScope {
+    source_scope: Vec<(String, String, i64, i64)>,
+    addresses: Vec<String>,
+}
+
+async fn load_reverse_claim_replay_scope(
     pool: &sqlx::PgPool,
     chain: &str,
-) -> Result<Vec<String>> {
-    Ok(
-        bigname_manifests::load_manifest_declared_watched_contracts(pool)
-            .await?
-            .into_iter()
-            .filter(|contract| contract.chain == chain)
-            .filter(|contract| {
-                matches!(
-                    contract.source_family.as_str(),
-                    "ens_v1_reverse_l1" | "basenames_base_primary"
-                )
-            })
-            .map(|contract| contract.address.to_ascii_lowercase())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-    )
+) -> Result<ReverseClaimReplayScope> {
+    let mut source_scope = Vec::new();
+    let mut addresses = BTreeSet::new();
+    for contract in bigname_manifests::load_manifest_declared_watched_contracts(pool)
+        .await?
+        .into_iter()
+        .filter(|contract| contract.chain == chain)
+        .filter(|contract| {
+            matches!(
+                contract.source_family.as_str(),
+                "ens_v1_reverse_l1" | "basenames_base_primary"
+            )
+        })
+    {
+        let address = contract.address.to_ascii_lowercase();
+        addresses.insert(address.clone());
+        source_scope.push((contract.source_family, address, i64::MIN, i64::MAX));
+    }
+    Ok(ReverseClaimReplayScope {
+        source_scope,
+        addresses: addresses.into_iter().collect(),
+    })
 }
 
 async fn select_reverse_claim_replay_page_to_block(
@@ -355,8 +376,11 @@ async fn select_reverse_claim_replay_page_to_block(
     sqlx::query_scalar::<_, i64>(
         r#"
         WITH ordered_logs AS (
-            SELECT block_number
+            SELECT rl.block_number
             FROM raw_logs rl
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = rl.chain_id
+             AND lineage.block_hash = rl.block_hash
             WHERE rl.chain_id = $1
               AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
               AND LOWER(rl.emitting_address) = ANY($4::TEXT[])
@@ -365,12 +389,17 @@ async fn select_reverse_claim_replay_page_to_block(
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
             ORDER BY
-                block_number,
-                block_hash,
-                transaction_index,
-                log_index,
-                raw_log_id
+                rl.block_number,
+                rl.block_hash,
+                rl.transaction_index,
+                rl.log_index,
+                rl.raw_log_id
             LIMIT ($5::BIGINT + 1)
         ),
         numbered_logs AS (
@@ -411,6 +440,58 @@ async fn select_reverse_claim_replay_page_to_block(
             "failed to select log-bounded ENSv1 reverse-claim replay page for chain {chain} range {from_block}..={target_block}"
         )
     })
+}
+
+async fn load_reverse_claim_replay_page_block_hashes(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    from_block: i64,
+    to_block: i64,
+    reverse_addresses: &[String],
+) -> Result<Vec<String>> {
+    if reverse_addresses.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT rl.block_number, rl.block_hash
+        FROM raw_logs rl
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = rl.chain_id
+         AND lineage.block_hash = rl.block_hash
+        WHERE rl.chain_id = $1
+          AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
+          AND LOWER(rl.emitting_address) = ANY($4::TEXT[])
+          AND rl.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        GROUP BY rl.block_number, rl.block_hash
+        ORDER BY rl.block_number, rl.block_hash
+        "#,
+    )
+    .bind(chain)
+    .bind(from_block)
+    .bind(to_block)
+    .bind(reverse_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to list canonical ENSv1 reverse-claim replay block hashes for chain {chain} range {from_block}..={to_block}"
+        )
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("block_hash"))
+        .collect())
 }
 
 fn empty_reverse_claim_summary() -> bigname_adapters::EnsV1ReverseClaimSyncSummary {

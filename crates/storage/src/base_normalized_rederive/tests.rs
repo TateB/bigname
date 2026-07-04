@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
@@ -6,6 +6,7 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use super::*;
@@ -64,6 +65,7 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     assert_eq!(plan.counts.permissions_current, 1);
     assert_eq!(plan.counts.record_inventory_current, 1);
     assert_eq!(plan.counts.projection_normalized_event_changes, 6);
+    assert_eq!(plan.counts.current_projection_replay_status, 7);
     assert_eq!(plan.counts.replay_cursor_rows, 2);
     assert_eq!(plan.counts.adapter_checkpoint_rows, 6);
     assert_eq!(plan.counts.adapter_checkpoint_item_rows, 6);
@@ -270,6 +272,48 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
         .await?,
         0
     );
+    assert_eq!(
+        count_affected_projection_replay_status(database.pool()).await?,
+        0
+    );
+    assert_eq!(
+        count_table(database.pool(), "current_projection_replay_status").await?,
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_refuses_unverified_deployment_profile_before_delete() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        "mainnett",
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("mistyped deployment profile must fail before global Base delete");
+    assert!(format!("{error:?}").contains("is not verified for the global Base delete"));
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "scoped-log",
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        count_affected_projection_replay_status(database.pool()).await?,
+        7
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -318,6 +362,33 @@ async fn execute_refuses_runtime_shared_advisory_lock() -> Result<()> {
 
     drop(runtime_guard);
     runtime_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_runtime_session_check_uses_held_transaction_connection() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+    let tight_pool = single_connection_pool(database.database_name()).await?;
+
+    let outcome = timeout(
+        Duration::from_secs(5),
+        execute_base_normalized_rederive_drop(
+            &tight_pool,
+            DEPLOYMENT_PROFILE,
+            Some(FIXTURE_REPLAY_TARGET_BLOCK),
+            expected,
+        ),
+    )
+    .await
+    .expect(
+        "single-connection execute timed out; runtime-session check likely acquired from pool",
+    )?;
+    assert_eq!(outcome.deleted.current_projection_replay_status, 7);
+
+    tight_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
@@ -1128,6 +1199,29 @@ async fn seed_replay_state(pool: &PgPool) -> Result<()> {
             .await?;
         }
     }
+    for projection in [
+        "address_names_current",
+        "children_current",
+        "name_current",
+        "permissions_current",
+        "record_inventory_current",
+        "resolver_current",
+        "primary_names_current",
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO current_projection_replay_status (
+                projection, replay_version, completed_normalized_target_block,
+                requested_key_count, upserted_row_count, deleted_row_count
+            )
+            VALUES ($1, 6, $2, 1, 1, 0)
+            "#,
+        )
+        .bind(projection)
+        .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1247,9 +1341,31 @@ async fn runtime_named_pool(database_name: &str, application_name: &str) -> Resu
         .context("failed to connect named runtime test pool")
 }
 
+async fn single_connection_pool(database_name: &str) -> Result<PgPool> {
+    let options = PgConnectOptions::from_str(&database_url_from_env())?.database(database_name);
+    PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .context("failed to connect single-connection test pool")
+}
+
 async fn count_table(pool: &PgPool, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*)::BIGINT FROM {table}");
     Ok(sqlx::query_scalar::<_, i64>(&sql).fetch_one(pool).await?)
+}
+
+async fn count_affected_projection_replay_status(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM current_projection_replay_status
+        WHERE projection = ANY($1::TEXT[])
+        "#,
+    )
+    .bind(current_projection_replay_status_projections())
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn count_scalar(pool: &PgPool, sql: &str, id: Uuid) -> Result<i64> {

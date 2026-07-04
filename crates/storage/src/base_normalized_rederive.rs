@@ -4,6 +4,7 @@ use tracing::info;
 
 mod counts;
 mod execution;
+mod profile;
 
 use counts::{
     load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
@@ -14,6 +15,10 @@ use counts::{
 use execution::{
     create_scope_tables, delete_scoped_rows_and_reset_replay, refuse_if_bigname_runtime_sessions,
     refuse_if_out_of_scope_identity_dependencies,
+};
+use profile::{
+    validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
+    validate_deployment_profile,
 };
 
 pub const BASE_NORMALIZED_REDERIVE_CHAIN_ID: &str = "base-mainnet";
@@ -76,6 +81,7 @@ pub struct BaseNormalizedRederiveCounts {
     pub permissions_current: i64,
     pub record_inventory_current: i64,
     pub projection_normalized_event_changes: i64,
+    pub current_projection_replay_status: i64,
     pub replay_cursor_rows: i64,
     pub adapter_checkpoint_rows: i64,
     pub adapter_checkpoint_item_rows: i64,
@@ -155,6 +161,7 @@ pub async fn load_base_normalized_rederive_plan(
     requested_replay_target_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
+    validate_base_deployment_profile_owns_chain(pool, deployment_profile).await?;
     let (replay_target_block, max_affected_block, replay_target_floor_block) =
         resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
             .await
@@ -200,7 +207,8 @@ pub async fn execute_base_normalized_rederive_drop(
         lock_acquired,
         "Base normalized-event rederive advisory lock is already held"
     );
-    refuse_if_bigname_runtime_sessions(pool).await?;
+    refuse_if_bigname_runtime_sessions(&mut transaction).await?;
+    validate_base_deployment_profile_owns_chain_from(&mut transaction, deployment_profile).await?;
 
     let (replay_target_block, max_affected_block, replay_target_floor_block) =
         resolve_replay_target_block_from(
@@ -253,6 +261,7 @@ async fn load_plan_in_transaction(
     replay_target_floor_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
+    validate_base_deployment_profile_owns_chain_from(transaction, deployment_profile).await?;
     let derivation_kind_census =
         load_derivation_kind_census_from(transaction, replay_target_block).await?;
     let cursor_census = load_cursor_census_from(transaction, deployment_profile).await?;
@@ -520,11 +529,19 @@ pub(super) fn checkpoint_adapters() -> Vec<String> {
     .collect()
 }
 
-fn validate_deployment_profile(deployment_profile: &str) -> Result<()> {
-    if deployment_profile.trim().is_empty() {
-        bail!("Base normalized-event rederive deployment profile must not be empty");
-    }
-    Ok(())
+pub(super) fn current_projection_replay_status_projections() -> Vec<String> {
+    [
+        "address_names_current",
+        "children_current",
+        "name_current",
+        "permissions_current",
+        "primary_names_current",
+        "record_inventory_current",
+        "resolver_current",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 #[cfg(test)]

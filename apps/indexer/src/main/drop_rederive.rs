@@ -64,6 +64,8 @@ pub(crate) async fn drop_and_rederive_base_normalized_events_command(
         deleted_surface_bindings = outcome.deleted.surface_bindings,
         deleted_projection_normalized_event_changes =
             outcome.deleted.projection_normalized_event_changes,
+        reset_current_projection_replay_status_rows =
+            outcome.deleted.current_projection_replay_status,
         reset_replay_start_block = BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
         reset_replay_target_block = outcome.plan.replay_target_block,
         "Base normalized-event drop-and-rederive corpus correction completed"
@@ -86,6 +88,7 @@ fn expected_counts_from_args(
         args.expected_permissions_current,
         args.expected_record_inventory_current,
         args.expected_projection_normalized_event_changes,
+        args.expected_current_projection_replay_status,
         args.expected_replay_cursor_rows,
         args.expected_adapter_checkpoint_rows,
         args.expected_adapter_checkpoint_item_rows,
@@ -111,6 +114,9 @@ fn expected_counts_from_args(
         record_inventory_current: args.expected_record_inventory_current.unwrap_or_default(),
         projection_normalized_event_changes: args
             .expected_projection_normalized_event_changes
+            .unwrap_or_default(),
+        current_projection_replay_status: args
+            .expected_current_projection_replay_status
             .unwrap_or_default(),
         replay_cursor_rows: args.expected_replay_cursor_rows.unwrap_or_default(),
         adapter_checkpoint_rows: args.expected_adapter_checkpoint_rows.unwrap_or_default(),
@@ -235,6 +241,7 @@ fn log_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) {
         name_surfaces = plan.counts.name_surfaces,
         surface_bindings = plan.counts.surface_bindings,
         projection_normalized_event_changes = plan.counts.projection_normalized_event_changes,
+        current_projection_replay_status = plan.counts.current_projection_replay_status,
         replay_cursor_rows = plan.counts.replay_cursor_rows,
         replay_raw_cursor_rows = plan.cursor_census.raw_fact_replay_cursor_rows,
         replay_backlog_cursor_rows = plan
@@ -285,6 +292,7 @@ mod tests {
             expected_permissions_current: count,
             expected_record_inventory_current: count,
             expected_projection_normalized_event_changes: count,
+            expected_current_projection_replay_status: count,
             expected_replay_cursor_rows: count,
             expected_adapter_checkpoint_rows: count,
             expected_adapter_checkpoint_item_rows: count,

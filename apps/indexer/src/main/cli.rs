@@ -459,6 +459,8 @@ pub(crate) struct DropAndRederiveBaseNormalizedEventsArgs {
     pub(crate) expected_record_inventory_current: Option<i64>,
     #[arg(long = "expected-projection-normalized-event-changes")]
     pub(crate) expected_projection_normalized_event_changes: Option<i64>,
+    #[arg(long = "expected-current-projection-replay-status")]
+    pub(crate) expected_current_projection_replay_status: Option<i64>,
     #[arg(long = "expected-replay-cursor-rows")]
     pub(crate) expected_replay_cursor_rows: Option<i64>,
     #[arg(long = "expected-adapter-checkpoint-rows")]

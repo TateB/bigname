@@ -143,6 +143,11 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
             102,
         ),
     ];
+    let orphaned_same_height_block = provider_block(
+        "0x1414141414141414141414141414141414141414141414141414141414141414",
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
+        101,
+    );
     let claimed_addresses = [
         "0x1111111111111111111111111111111111111111",
         "0x2222222222222222222222222222222222222222",
@@ -172,6 +177,22 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
         )
         .await?;
     }
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &orphaned_same_height_block,
+        CanonicalityState::Orphaned,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &orphaned_same_height_block,
+        reverse_address,
+        "0x4444444444444444444444444444444444444444",
+        CanonicalityState::Canonical,
+    )
+    .await?;
 
     let summary = sync_full_closure_normalized_events_from_persisted_raw_payloads(
         database.pool(),
@@ -201,6 +222,21 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
         .fetch_one(database.pool())
         .await?,
         (6, Some(100), Some(102))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE chain_id = $1
+              AND block_hash = $2
+            "#
+        )
+        .bind(chain)
+        .bind(&orphaned_same_height_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     database.cleanup().await

@@ -149,13 +149,21 @@ The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
 `provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
 removes dependent current-projection rows and `projection_normalized_event_changes`
 rows only to satisfy foreign keys and to force the later projection rebuild to
-publish from the re-derived event stream. It does not rebuild projections, so
-the API must be drained or stopped from execute through the replay, projection
-rebuild, and verification window.
+publish from the re-derived event stream. In the same transaction it clears
+`current_projection_replay_status` markers for `name_current`,
+`address_names_current`, `children_current`, `permissions_current`, and
+`record_inventory_current`, plus `resolver_current` and `primary_names_current`
+because those families consume normalized events that this correction deletes
+and re-derives. That prevents automatic all-current replay from skipping a
+family with a stale completion marker. The global `projection_apply_cursors`
+watermark is not reset because it is not scoped to these affected families. It
+does not rebuild projections, so the API must be drained or stopped from execute
+through the replay, projection rebuild, and verification window.
 
 The delete order is FK-safe: current projections keyed by scoped identity rows,
-then `projection_normalized_event_changes`, then scoped `normalized_events`,
-then `surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
+then `projection_normalized_event_changes`, then affected
+`current_projection_replay_status` rows, then scoped `normalized_events`, then
+`surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
 After the data drop, the same transaction clears
 `normalized_replay_adapter_checkpoint_items` and
 `normalized_replay_adapter_checkpoints` for
@@ -173,6 +181,10 @@ Before execution it proves that the scoped log-derived normalized events still
 join retained non-orphaned `raw_logs`, scoped boundary events still join retained
 non-orphaned `chain_lineage`, and the canonical raw-log range inside the
 ratified replay window spans the closure boundary and validated replay target.
+Because the delete scope is global for `base-mainnet` while replay reset is
+profile-scoped, dry-run and execute also require the requested deployment
+profile to own an existing `base-mainnet/raw_fact_normalized_events` replay
+cursor before they report or run the correction.
 Dry-run defaults the target to the live canonical Base raw-log head and reports
 the maximum affected normalized-event block plus the effective replay target
 floor. The floor is the greater of the maximum affected block and any pending
@@ -304,7 +316,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `event_silent_resolver_call_observations` | intake | durable block-scoped direct-call observations for documented projection hydration invalidation where the watched resolver emits no usable event |
 | `projection_*` | projection workers | disposable read models |
 | `address_names_current_identity_counts`, `address_names_current_identity_feed` | storage triggers on `address_names_current`, `primary_names_current`, and supporting identity-anchor and `name_current` readability changes | exact reverse identity total counts and compact feed display rows by address, role filter, and primary-name coin type for the partner-compatible identity façade, using the same canonical/read-safe and reachable-`name_current` row eligibility as reverse identity pages; this is the bounded exception in [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md) |
-| `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
+| `current_projection_replay_status` | projection workers; ratified storage correction tooling may clear affected markers when it deletes projection rows | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
 | `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
 | `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |

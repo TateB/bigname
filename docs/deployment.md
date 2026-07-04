@@ -502,12 +502,14 @@ drop-and-full-closure-rederive window documented in [`storage.md`](storage.md).
 Do not run it against a live indexer or worker process, and do not treat it as a
 projection rebuild. The execute step deletes Base current-projection rows because
 those rows have foreign keys into the identity rows being dropped; the API must
-not serve during that destructive window. Updated indexer and worker runtimes
-and write-capable one-shot commands hold a shared advisory lock while running;
-the execute path takes the exclusive form of that lock and also refuses visible
-`bigname-indexer`/`bigname-worker` sessions before it writes. Guarded writer
-processes require at least two database pool connections so the held advisory
-lock connection cannot starve the writer work.
+not serve during that destructive window. The passed deployment profile must
+already own a `base-mainnet/raw_fact_normalized_events` replay cursor because the
+delete scope is global to Base while replay reset is profile-scoped. Updated
+indexer and worker runtimes and write-capable one-shot commands hold a shared
+advisory lock while running; the execute path takes the exclusive form of that
+lock and also refuses visible `bigname-indexer`/`bigname-worker` sessions before
+it writes. Guarded writer processes require at least two database pool
+connections so the held advisory lock connection cannot starve the writer work.
 
 1. Stop the indexer and worker services, leaving PostgreSQL and the API online
    for dry-run review if desired.
@@ -525,7 +527,8 @@ lock connection cannot starve the writer work.
    re-derivable delete count and explicitly kept nonreplay pairs such as
    `raw_log_preimage_observation` and non-closure source families;
    identity/projection/change-log delete counts; raw-fact completeness proof;
-   both replay cursor counts; max affected block; replay target floor; and the replay reset target
+   both replay cursor counts; affected current-projection replay marker count;
+   max affected block; replay target floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
 4. Execute only after review, passing the dry-run counts back as exact
    `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
@@ -563,6 +566,7 @@ lock connection cannot starve the writer work.
        --expected-permissions-current <dry-run-value> \
        --expected-record-inventory-current <dry-run-value> \
        --expected-projection-normalized-event-changes <dry-run-value> \
+       --expected-current-projection-replay-status <dry-run-value> \
        --expected-replay-cursor-rows <dry-run-value> \
        --expected-adapter-checkpoint-rows <dry-run-value> \
        --expected-adapter-checkpoint-item-rows <dry-run-value>

@@ -11,6 +11,8 @@ This document defines the shipped projection set, replay semantics, invalidation
 - Only projection workers write projection tables. Adapters never do. The partner identity
   reverse count/display sidecars are a bounded storage-trigger exception documented in
   [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md).
+  Ratified storage correction tooling may clear operational replay markers when
+  it deletes projection rows, as documented in [`storage.md`](storage.md).
 - Exact-name reads resolve `at`, `chain_positions`, `consistency` first; the selected positions then key one coherent join across `name_current`, `address_names_current`, `permissions_current`, `record_inventory_current`, `resolver_current`.
 - A reader fails closed when the selected positions can't be served from current rows. It does not patch a missing snapshot from raw facts, adapter internals, or a newer projection row.
 - A row with an older stored chain-position context may serve a later snapshot only when the reader can prove no newer canonical input exists for the row's keys through those positions. Stored rows may include auxiliary chain positions outside the selected snapshot; the selected chains must still be covered by matching or provably fresh stored positions. Otherwise the worker rebuilds it.

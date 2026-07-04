@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, ensure};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
     BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BaseNormalizedRederiveCounts, checkpoint_adapters,
-    cursor_kinds, reverse_claim_derivation_kind, reverse_claim_source_families,
-    subregistry_derivation_kinds, subregistry_source_families, unwrapped_authority_derivation_kind,
-    unwrapped_authority_source_families,
+    current_projection_replay_status_projections, cursor_kinds, reverse_claim_derivation_kind,
+    reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
+    unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
 };
 
-pub(super) async fn refuse_if_bigname_runtime_sessions(pool: &PgPool) -> Result<()> {
+pub(super) async fn refuse_if_bigname_runtime_sessions(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
     let rows = sqlx::query(
         r#"
         SELECT pid, application_name, state
@@ -24,7 +26,7 @@ pub(super) async fn refuse_if_bigname_runtime_sessions(pool: &PgPool) -> Result<
         "bigname-indexer".to_owned(),
         "bigname-worker".to_owned(),
     ])
-    .fetch_all(pool)
+    .fetch_all(&mut **transaction)
     .await
     .context("failed to inspect PostgreSQL sessions before Base normalized-event rederive")?;
     ensure!(
@@ -188,6 +190,8 @@ pub(super) async fn delete_scoped_rows_and_reset_replay(
     let permissions_current = delete_count(transaction, "DELETE FROM permissions_current p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_resources s WHERE s.resource_id = p.resource_id)").await?;
     let record_inventory_current = delete_count(transaction, "DELETE FROM record_inventory_current p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_resources s WHERE s.resource_id = p.resource_id)").await?;
     let projection_normalized_event_changes = delete_count(transaction, "DELETE FROM projection_normalized_event_changes p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_normalized_events s WHERE s.normalized_event_id = p.normalized_event_id)").await?;
+    let current_projection_replay_status =
+        delete_current_projection_replay_status(transaction).await?;
     let normalized_events = delete_count(transaction, "DELETE FROM normalized_events p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_normalized_events s WHERE s.normalized_event_id = p.normalized_event_id)").await?;
     let surface_bindings = delete_count(transaction, "DELETE FROM surface_bindings p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_surface_bindings s WHERE s.surface_binding_id = p.surface_binding_id)").await?;
     let resources = delete_count(transaction, "DELETE FROM resources p WHERE EXISTS (SELECT 1 FROM base_rederive_scope_resources s WHERE s.resource_id = p.resource_id)").await?;
@@ -211,10 +215,27 @@ pub(super) async fn delete_scoped_rows_and_reset_replay(
         permissions_current,
         record_inventory_current,
         projection_normalized_event_changes,
+        current_projection_replay_status,
         replay_cursor_rows,
         adapter_checkpoint_rows,
         adapter_checkpoint_item_rows,
     })
+}
+
+async fn delete_current_projection_replay_status(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM current_projection_replay_status
+        WHERE projection = ANY($1::TEXT[])
+        "#,
+    )
+    .bind(current_projection_replay_status_projections())
+    .execute(&mut **transaction)
+    .await
+    .context("failed to delete affected current projection replay markers")?;
+    i64::try_from(result.rows_affected()).context("delete count overflowed i64")
 }
 
 async fn delete_replay_checkpoint_items(
