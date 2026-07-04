@@ -232,9 +232,13 @@ pair lacks currently active Base replay adapter/source-family target ranges
 whose union covers the ratified closure boundary through the validated replay
 target with no block gap, or if any in-scope log-derived row was emitted by an
 address outside the current active replay target set for that row's source
-family at the event block. These are hard stops because the correction may only
-delete rows that current full-closure replay can recreate from retained raw
-facts.
+family at the event block. `ens_v1_unwrapped_authority` raw-block boundary rows
+(`transaction_hash` and `log_index` are null and `raw_fact_ref.kind` is
+`raw_block`) are checked against adapter-level Base closure coverage rather than
+same-source-family target coverage, because the closure pass recreates those
+rows from the adapter's ordered Base history and block boundaries. These are
+hard stops because the correction may only delete rows that current full-closure
+replay can recreate from retained raw facts.
 The completed run records both the reviewed active replay target/range snapshot
 and the full active Base manifest snapshot, including active manifest payloads
 and manifest-linked contract/discovery rows. While the reset cursor is still

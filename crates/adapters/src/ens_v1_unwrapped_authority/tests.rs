@@ -1661,6 +1661,83 @@ fn preload_registry_history_recovers_binding_manifest_provenance() -> Result<()>
 }
 
 #[test]
+fn preload_registry_history_uses_basenames_registry_family_for_basenames_boundaries() -> Result<()>
+{
+    for provenance in [
+        json!({
+            "authority_kind": "registry_only",
+            "authority_key": "registry-only:base-mainnet:0xmissing-source-family",
+            "logical_name_id": "basenames:based1.base.eth",
+        }),
+        json!({
+            "authority_kind": "registry_only",
+            "authority_key": "registry-only:base-mainnet:0xstale-source-family",
+            "binding_source_family": SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "logical_name_id": "basenames:based1.base.eth",
+        }),
+    ] {
+        let name = observe_registrar_name_with_version(
+            "based1",
+            AuthorityProfile::Basenames,
+            ENS_NORMALIZER_VERSION,
+        )?;
+        let labelhash = name.labelhashes[0].clone();
+        let registry_ref = BoundaryRef {
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 46_606_106,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(1_760_000_000)?,
+            canonicality_state: CanonicalityState::Finalized,
+            namespace: "basenames".to_owned(),
+        };
+        let next_ref = BoundaryRef {
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            block_number: 46_606_107,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(1_760_000_012)?,
+            canonicality_state: CanonicalityState::Finalized,
+            namespace: "basenames".to_owned(),
+        };
+        let mut history = empty_preloaded_history(labelhash, Some(name));
+
+        preload_registry_history(
+            &mut history,
+            &provenance,
+            &registry_ref,
+            Uuid::from_u128(0x41321),
+            Uuid::from_u128(0x51321),
+            None,
+        );
+
+        let before_anchor = history
+            .open_binding
+            .as_ref()
+            .map(|binding| binding.authority.clone());
+        transition_authority(
+            &mut history,
+            before_anchor,
+            None,
+            &next_ref,
+            next_ref.block_timestamp,
+        )?;
+
+        let surface_unbound = history
+            .events
+            .iter()
+            .find(|event| event.event_kind == EVENT_KIND_SURFACE_UNBOUND)
+            .context("preloaded Basenames registry binding should emit SurfaceUnbound")?;
+        assert_eq!(
+            surface_unbound.source_family,
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn transition_authority_emits_surface_unbound_for_zero_length_binding() -> Result<()> {
     let name = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let labelhash = name.labelhashes[0].clone();

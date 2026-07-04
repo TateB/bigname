@@ -146,18 +146,34 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
             'ens_v1_unwrapped_authority'::TEXT AS replay_adapter
         FROM unnest($7::TEXT[]) AS source_families(source_family)
     ),
-    delete_scope_pairs AS (
-        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+    delete_scope_rows AS (
+        SELECT
+            pair.derivation_kind,
+            pair.source_family,
+            pair.replay_adapter,
+            NOT (
+                pair.replay_adapter = 'ens_v1_unwrapped_authority'
+                AND event.transaction_hash IS NULL
+                AND event.log_index IS NULL
+                AND event.raw_fact_ref ->> 'kind' = 'raw_block'
+            ) AS requires_source_family_coverage
         FROM scope_rule_pairs pair
-        WHERE EXISTS (
-            SELECT 1
-            FROM normalized_events event
-            WHERE event.chain_id = 'base-mainnet'
-              AND event.block_number BETWEEN 17571485 AND $1
-              AND event.block_hash IS NOT NULL
-              AND event.derivation_kind = pair.derivation_kind
-              AND event.source_family = pair.source_family
-        )
+        JOIN normalized_events event
+          ON event.chain_id = 'base-mainnet'
+         AND event.block_number BETWEEN 17571485 AND $1
+         AND event.block_hash IS NOT NULL
+         AND event.derivation_kind = pair.derivation_kind
+         AND event.source_family = pair.source_family
+    ),
+    log_derived_delete_scope_pairs AS (
+        SELECT DISTINCT derivation_kind, source_family, replay_adapter
+        FROM delete_scope_rows
+        WHERE requires_source_family_coverage
+    ),
+    closure_boundary_delete_scope_pairs AS (
+        SELECT DISTINCT derivation_kind, source_family, replay_adapter
+        FROM delete_scope_rows
+        WHERE NOT requires_source_family_coverage
     ),
     active_targets AS (
         SELECT
@@ -200,15 +216,57 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
                ),
                FALSE
            )
+    ),
+    ordered_active_adapter_targets AS (
+        SELECT
+            replay_adapter,
+            from_block,
+            to_block,
+            MAX(to_block) OVER (
+                PARTITION BY replay_adapter
+                ORDER BY from_block, to_block
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prior_max_to_block
+        FROM active_targets
+    ),
+    covered_replay_adapters AS (
+        SELECT replay_adapter
+        FROM ordered_active_adapter_targets
+        GROUP BY replay_adapter
+        HAVING MIN(from_block) <= 17571485
+           AND MAX(to_block) >= $1
+           AND NOT COALESCE(
+               BOOL_OR(
+                   prior_max_to_block IS NOT NULL
+                   AND from_block > prior_max_to_block + 1
+               ),
+               FALSE
+           )
+    ),
+    inactive_log_pairs AS (
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM log_derived_delete_scope_pairs pair
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM covered_replay_pairs covered
+            WHERE covered.replay_adapter = pair.replay_adapter
+              AND covered.source_family = pair.source_family
+        )
+    ),
+    inactive_closure_boundary_pairs AS (
+        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+        FROM closure_boundary_delete_scope_pairs pair
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM covered_replay_adapters covered
+            WHERE covered.replay_adapter = pair.replay_adapter
+        )
     )
     SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
-    FROM delete_scope_pairs pair
-    WHERE NOT EXISTS (
-        SELECT 1
-        FROM covered_replay_pairs covered
-        WHERE covered.replay_adapter = pair.replay_adapter
-          AND covered.source_family = pair.source_family
-    )
-    ORDER BY pair.derivation_kind, pair.source_family
+    FROM inactive_log_pairs pair
+    UNION
+    SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
+    FROM inactive_closure_boundary_pairs pair
+    ORDER BY derivation_kind, source_family
     "#
 }

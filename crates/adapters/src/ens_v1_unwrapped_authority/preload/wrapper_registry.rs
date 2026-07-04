@@ -384,15 +384,19 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registry_history(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("registry-only:{}:{}", binding_ref.chain_id, labelhash));
-    let source_family = authority_profile_for_source_family(
-        provenance
-            .get("binding_source_family")
-            .or_else(|| provenance.get("source_family"))
-            .and_then(Value::as_str)
-            .unwrap_or(SOURCE_FAMILY_ENS_V1_REGISTRY_L1),
-    )
-    .map(|profile| profile.registry_source_family().to_owned())
-    .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned());
+    let source_family = if binding_ref.namespace == AuthorityProfile::Basenames.namespace() {
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned()
+    } else {
+        authority_profile_for_source_family(
+            provenance
+                .get("binding_source_family")
+                .or_else(|| provenance.get("source_family"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| default_registry_source_family(&binding_ref.namespace)),
+        )
+        .map(|profile| profile.registry_source_family().to_owned())
+        .unwrap_or_else(|| default_registry_source_family(&binding_ref.namespace).to_owned())
+    };
     let source_manifest_id = provenance
         .get("binding_manifest_id")
         .and_then(Value::as_i64)

@@ -139,25 +139,44 @@ pub(super) async fn materialize_authority_histories(
         }
 
         if let Some(registry_anchor) = finalized.registry_resource_anchor.as_ref() {
+            let registry_authority_key = format!("registry-only:{}:{}", chain, name.namehash);
+            let registry_resource_id =
+                deterministic_uuid(&format!("resource:{registry_authority_key}"));
+            let registry_binding = finalized.bindings.iter().find(|segment| {
+                segment.authority.kind == AuthorityKind::RegistryOnly
+                    && segment.authority.resource_id == registry_resource_id
+            });
+            let mut provenance = json!({
+                "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+                "authority_kind": "registry_only",
+                "authority_key": registry_authority_key,
+                "logical_name_id": name.logical_name_id,
+                "namehash": name.namehash,
+                "labelhash": finalized.labelhash,
+                "current_registry_owner": finalized.current_registry_owner,
+            });
+            if let (Some(object), Some(segment)) = (provenance.as_object_mut(), registry_binding) {
+                object.insert(
+                    "binding_source_family".to_owned(),
+                    Value::String(segment.authority.binding_source_family.clone()),
+                );
+                object.insert(
+                    "binding_manifest_version".to_owned(),
+                    Value::Number(segment.authority.binding_manifest_version.into()),
+                );
+                object.insert(
+                    "binding_manifest_id".to_owned(),
+                    Value::Number(segment.authority.binding_manifest_id.into()),
+                );
+            }
             identity.push_resource(
                 build_resource(
                     pool,
-                    deterministic_uuid(&format!(
-                        "resource:registry-only:{}:{}",
-                        chain, name.namehash
-                    )),
+                    registry_resource_id,
                     None,
                     &registry_anchor.chain_id,
                     registry_anchor,
-                    json!({
-                        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-                        "authority_kind": "registry_only",
-                        "authority_key": format!("registry-only:{}:{}", chain, name.namehash),
-                        "logical_name_id": name.logical_name_id,
-                        "namehash": name.namehash,
-                        "labelhash": finalized.labelhash,
-                        "current_registry_owner": finalized.current_registry_owner,
-                    }),
+                    provenance,
                 )
                 .await?,
             );

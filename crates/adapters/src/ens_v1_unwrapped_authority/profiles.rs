@@ -65,6 +65,13 @@ pub(super) fn default_registrar_source_family(namespace: &str) -> &'static str {
     }
 }
 
+pub(super) fn default_registry_source_family(namespace: &str) -> &'static str {
+    match namespace {
+        "basenames" => SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+        _ => SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+    }
+}
+
 pub(super) fn authority_profile_for_source_family(source_family: &str) -> Option<AuthorityProfile> {
     match source_family {
         SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
