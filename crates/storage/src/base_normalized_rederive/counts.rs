@@ -3,12 +3,12 @@ use sqlx::{PgPool, Row};
 
 use super::{
     BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
-    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BaseNormalizedRederiveCounts,
-    BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
-    BaseNormalizedRederiveRawFactCompleteness, checkpoint_adapters, cursor_kinds,
-    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
-    subregistry_source_families, unwrapped_authority_derivation_kind,
-    unwrapped_authority_source_families,
+    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+    BaseNormalizedRederiveCounts, BaseNormalizedRederiveCursorCensus,
+    BaseNormalizedRederiveDerivationKindCensus, BaseNormalizedRederiveRawFactCompleteness,
+    checkpoint_adapters, cursor_kinds, reverse_claim_derivation_kind,
+    reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
+    unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
 };
 
 pub(super) async fn load_counts(
@@ -155,6 +155,68 @@ pub(super) async fn load_raw_fact_completeness_from(
     raw_fact_completeness_from_row(&row)
 }
 
+pub(super) async fn load_max_affected_block(
+    pool: &PgPool,
+    canonical_raw_log_head: i64,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(max_affected_block_sql())
+        .bind(canonical_raw_log_head)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
+        .fetch_one(pool)
+        .await
+        .context("failed to load Base normalized-event rederive max affected block")
+}
+
+pub(super) async fn load_max_affected_block_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    canonical_raw_log_head: i64,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(max_affected_block_sql())
+        .bind(canonical_raw_log_head)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive max affected block")
+}
+
+pub(super) async fn load_reset_replay_cursor_target_block(
+    pool: &PgPool,
+    deployment_profile: &str,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(reset_replay_cursor_target_block_sql())
+        .bind(deployment_profile)
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+        .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+        .fetch_one(pool)
+        .await
+        .context("failed to load Base normalized-event rederive reset replay cursor target")
+}
+
+pub(super) async fn load_reset_replay_cursor_target_block_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(reset_replay_cursor_target_block_sql())
+        .bind(deployment_profile)
+        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+        .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+        .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive reset replay cursor target")
+}
+
 fn counts_sql() -> &'static str {
     r#"
     WITH
@@ -221,8 +283,8 @@ fn counts_sql() -> &'static str {
         (SELECT COUNT(*)::BIGINT FROM record_inventory_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS record_inventory_current,
         (SELECT COUNT(*)::BIGINT FROM projection_normalized_event_changes p WHERE EXISTS (SELECT 1 FROM scoped_events s WHERE s.normalized_event_id = p.normalized_event_id)) AS projection_normalized_event_changes,
         (SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[])) AS replay_cursor_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = 'raw_fact_normalized_events' AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_item_rows
+        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_rows,
+        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_item_rows
     FROM (SELECT 1) AS one
     "#
 }
@@ -394,6 +456,33 @@ fn raw_fact_completeness_sql() -> &'static str {
         (SELECT min_block_number FROM canonical_raw_log_bounds) AS canonical_raw_log_min_block,
         (SELECT max_block_number FROM canonical_raw_log_bounds) AS canonical_raw_log_max_block,
         (SELECT head_block FROM canonical_raw_log_head) AS canonical_raw_log_head_block
+    "#
+}
+
+fn max_affected_block_sql() -> &'static str {
+    r#"
+    SELECT MAX(block_number)::BIGINT
+    FROM normalized_events
+    WHERE chain_id = 'base-mainnet'
+      AND block_number BETWEEN 17571485 AND $1
+      AND block_hash IS NOT NULL
+      AND (
+          (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
+          OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
+          OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
+      )
+    "#
+}
+
+fn reset_replay_cursor_target_block_sql() -> &'static str {
+    r#"
+    SELECT MAX(target_block_number)::BIGINT
+    FROM normalized_replay_cursors
+    WHERE deployment_profile = $1
+      AND chain_id = $2
+      AND cursor_kind = $3
+      AND range_start_block_number = $4
+      AND COALESCE(last_completed_block_number, range_start_block_number - 1) < target_block_number
     "#
 }
 

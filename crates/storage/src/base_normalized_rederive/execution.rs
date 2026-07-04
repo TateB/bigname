@@ -227,7 +227,7 @@ async fn delete_replay_checkpoint_items(
         DELETE FROM normalized_replay_adapter_checkpoint_items
         WHERE deployment_profile = $1
           AND chain_id = $2
-          AND cursor_kind = $3
+          AND cursor_kind = ANY($3::TEXT[])
           AND adapter = ANY($4::TEXT[])
         "#,
         deployment_profile,
@@ -245,7 +245,7 @@ async fn delete_replay_checkpoints(
         DELETE FROM normalized_replay_adapter_checkpoints
         WHERE deployment_profile = $1
           AND chain_id = $2
-          AND cursor_kind = $3
+          AND cursor_kind = ANY($3::TEXT[])
           AND adapter = ANY($4::TEXT[])
         "#,
         deployment_profile,
@@ -350,7 +350,7 @@ async fn delete_count_bound(
     let result = sqlx::query(sql)
         .bind(deployment_profile)
         .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+        .bind(cursor_kinds())
         .bind(checkpoint_adapters())
         .execute(&mut **transaction)
         .await

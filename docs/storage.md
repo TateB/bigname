@@ -123,7 +123,7 @@ correction command cannot execute concurrently with updated bigname writers.
 The normalized-event scope is:
 
 - `chain_id = 'base-mainnet'`
-- `block_number BETWEEN 17571485 AND <validated canonical raw-log head>`
+- `block_number BETWEEN 17571485 AND <validated replay target>`
 - `block_hash IS NOT NULL`
 - a re-derivable derivation/source-family pair emitted by the selected Base
   closure replay adapters:
@@ -163,7 +163,7 @@ After the data drop, the same transaction clears
 `normalized_replay_cursors` row for
 `mainnet/base-mainnet/raw_fact_normalized_events` to
 `range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated canonical raw-log head>`.
+`target_block_number = <validated replay target>`.
 
 The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
 `raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
@@ -171,9 +171,15 @@ Before execution it proves that the scoped log-derived normalized events still
 join retained non-orphaned `raw_logs`, scoped boundary events still join retained
 non-orphaned `chain_lineage`, and the canonical raw-log range inside the
 ratified replay window spans the closure boundary and validated replay target.
-Dry-run defaults the target to the live canonical Base raw-log head. Execute
-requires an explicitly provided `--replay-target-block`, and that reviewed value
-is accepted only when it matches the current canonical raw-log head. It also
+Dry-run defaults the target to the live canonical Base raw-log head and reports
+the maximum affected normalized-event block plus the effective replay target
+floor. The floor is the greater of the maximum affected block and any pending
+closure-boundary raw-fact replay cursor target from an earlier drop, so neither
+idempotent nor partial-replay reruns can shrink the intended replay range while
+replay is still pending. Execute requires an explicitly provided
+`--replay-target-block`; that reviewed value is accepted when it is not above the
+current canonical raw-log head and not below the reported replay target floor.
+Raw-fact completeness is recomputed for the requested target. The command also
 refuses if any normalized event outside the delete scope still references an
 identity row that the correction would drop. If any proof fails, no write is
 allowed.

@@ -519,11 +519,15 @@ takes the exclusive form of that lock and also refuses visible
    re-derivable delete count and explicitly kept nonreplay pairs such as
    `raw_log_preimage_observation` and non-closure source families;
    identity/projection/change-log delete counts; raw-fact completeness proof;
-   both replay cursor counts; and the replay reset target
-   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated canonical raw-log head>`.
+   both replay cursor counts; max affected block; replay target floor; and the replay reset target
+   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
 4. Execute only after review, passing the dry-run counts back as exact
-   `--expected-*` arguments and the printed `--replay-target-block` so the tool
-   refuses drift between review and write:
+   `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
+   refuses drift between review and write. Use the dry-run's reported head, or
+   another reviewed value that is at least the printed replay target floor and
+   not above the current canonical raw-log head. On a rerun after the drop, the
+   floor includes any still-pending prior reset raw replay cursor target, so the
+   target cannot be shrunk while replay is still pending:
 
    ```sh
    docker compose --env-file .env.server \

@@ -7,8 +7,9 @@ mod execution;
 
 use counts::{
     load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
-    load_derivation_kind_census, load_derivation_kind_census_from, load_raw_fact_completeness,
-    load_raw_fact_completeness_from,
+    load_derivation_kind_census, load_derivation_kind_census_from, load_max_affected_block,
+    load_max_affected_block_from, load_raw_fact_completeness, load_raw_fact_completeness_from,
+    load_reset_replay_cursor_target_block, load_reset_replay_cursor_target_block_from,
 };
 use execution::{
     create_scope_tables, delete_scoped_rows_and_reset_replay, refuse_if_bigname_runtime_sessions,
@@ -98,7 +99,9 @@ impl BaseNormalizedRederiveRawFactCompleteness {
             && self.missing_boundary_lineage_count == 0
             && self.canonical_raw_log_min_block == Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
             && self.canonical_raw_log_max_block == Some(self.replay_target_block)
-            && self.canonical_raw_log_head_block == Some(self.replay_target_block)
+            && self
+                .canonical_raw_log_head_block
+                .is_some_and(|head| head >= self.replay_target_block)
     }
 }
 
@@ -106,6 +109,8 @@ impl BaseNormalizedRederiveRawFactCompleteness {
 pub struct BaseNormalizedRederivePlan {
     pub deployment_profile: String,
     pub replay_target_block: i64,
+    pub max_affected_block: Option<i64>,
+    pub replay_target_floor_block: Option<i64>,
     pub derivation_kind_census: Vec<BaseNormalizedRederiveDerivationKindCensus>,
     pub cursor_census: BaseNormalizedRederiveCursorCensus,
     pub counts: BaseNormalizedRederiveCounts,
@@ -150,9 +155,10 @@ pub async fn load_base_normalized_rederive_plan(
     requested_replay_target_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
-    let replay_target_block = resolve_replay_target_block(pool, requested_replay_target_block)
-        .await
-        .context("failed to resolve Base normalized-event rederive replay target")?;
+    let (replay_target_block, max_affected_block, replay_target_floor_block) =
+        resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
+            .await
+            .context("failed to resolve Base normalized-event rederive replay target")?;
     let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
     let cursor_census = load_cursor_census(pool, deployment_profile).await?;
     let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
@@ -160,6 +166,8 @@ pub async fn load_base_normalized_rederive_plan(
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
         replay_target_block,
+        max_affected_block,
+        replay_target_floor_block,
         derivation_kind_census,
         cursor_census,
         counts,
@@ -194,13 +202,23 @@ pub async fn execute_base_normalized_rederive_drop(
     );
     refuse_if_bigname_runtime_sessions(pool).await?;
 
-    let replay_target_block =
-        resolve_replay_target_block_from(&mut transaction, requested_replay_target_block)
-            .await
-            .context("failed to resolve Base normalized-event rederive replay target")?;
+    let (replay_target_block, max_affected_block, replay_target_floor_block) =
+        resolve_replay_target_block_from(
+            &mut transaction,
+            deployment_profile,
+            requested_replay_target_block,
+        )
+        .await
+        .context("failed to resolve Base normalized-event rederive replay target")?;
     create_scope_tables(&mut transaction, replay_target_block).await?;
-    let plan =
-        load_plan_in_transaction(&mut transaction, deployment_profile, replay_target_block).await?;
+    let plan = load_plan_in_transaction(
+        &mut transaction,
+        deployment_profile,
+        replay_target_block,
+        max_affected_block,
+        replay_target_floor_block,
+    )
+    .await?;
     ensure!(
         plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event rederive raw-fact completeness check failed: {:?}",
@@ -231,6 +249,8 @@ async fn load_plan_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
     replay_target_block: i64,
+    max_affected_block: Option<i64>,
+    replay_target_floor_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
     let derivation_kind_census =
@@ -242,6 +262,8 @@ async fn load_plan_in_transaction(
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
         replay_target_block,
+        max_affected_block,
+        replay_target_floor_block,
         derivation_kind_census,
         cursor_census,
         counts,
@@ -251,18 +273,47 @@ async fn load_plan_in_transaction(
 
 async fn resolve_replay_target_block(
     pool: &PgPool,
+    deployment_profile: &str,
     requested_replay_target_block: Option<i64>,
-) -> Result<i64> {
-    let head = load_canonical_raw_log_head(pool).await?;
-    validate_replay_target_block(head, requested_replay_target_block)
+) -> Result<(i64, Option<i64>, Option<i64>)> {
+    let head = validate_canonical_raw_log_head(load_canonical_raw_log_head(pool).await?)?;
+    let max_affected_block = load_max_affected_block(pool, head).await?;
+    let reset_replay_cursor_target_block =
+        load_pending_reset_replay_cursor_target_block(pool, deployment_profile).await?;
+    let target = validate_replay_target_block(
+        head,
+        max_affected_block,
+        reset_replay_cursor_target_block,
+        requested_replay_target_block,
+    )?;
+    Ok((
+        target,
+        max_affected_block,
+        target_floor_block(max_affected_block, reset_replay_cursor_target_block),
+    ))
 }
 
 async fn resolve_replay_target_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
     requested_replay_target_block: Option<i64>,
-) -> Result<i64> {
-    let head = load_canonical_raw_log_head_from(transaction).await?;
-    validate_replay_target_block(head, requested_replay_target_block)
+) -> Result<(i64, Option<i64>, Option<i64>)> {
+    let head =
+        validate_canonical_raw_log_head(load_canonical_raw_log_head_from(transaction).await?)?;
+    let max_affected_block = load_max_affected_block_from(transaction, head).await?;
+    let reset_replay_cursor_target_block =
+        load_pending_reset_replay_cursor_target_block_from(transaction, deployment_profile).await?;
+    let target = validate_replay_target_block(
+        head,
+        max_affected_block,
+        reset_replay_cursor_target_block,
+        requested_replay_target_block,
+    )?;
+    Ok((
+        target,
+        max_affected_block,
+        target_floor_block(max_affected_block, reset_replay_cursor_target_block),
+    ))
 }
 
 async fn load_canonical_raw_log_head(pool: &PgPool) -> Result<Option<i64>> {
@@ -304,10 +355,7 @@ fn canonical_raw_log_head_sql() -> &'static str {
     "#
 }
 
-fn validate_replay_target_block(
-    canonical_raw_log_head: Option<i64>,
-    requested_replay_target_block: Option<i64>,
-) -> Result<i64> {
+fn validate_canonical_raw_log_head(canonical_raw_log_head: Option<i64>) -> Result<i64> {
     let Some(head) = canonical_raw_log_head else {
         bail!(
             "Base normalized-event rederive cannot resolve replay target: no canonical raw logs for {}",
@@ -319,13 +367,64 @@ fn validate_replay_target_block(
         "Base normalized-event rederive canonical raw-log head {head} is before closure boundary {}",
         BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
     );
-    if let Some(requested) = requested_replay_target_block {
+    Ok(head)
+}
+
+fn validate_replay_target_block(
+    canonical_raw_log_head: i64,
+    max_affected_block: Option<i64>,
+    reset_replay_cursor_target_block: Option<i64>,
+    requested_replay_target_block: Option<i64>,
+) -> Result<i64> {
+    let target = requested_replay_target_block.unwrap_or(canonical_raw_log_head);
+    ensure!(
+        target >= BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+        "Base normalized-event rederive requested replay target block {target} is before closure boundary {}",
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
+    );
+    ensure!(
+        target <= canonical_raw_log_head,
+        "Base normalized-event rederive requested replay target block {target} must not exceed canonical raw-log head {canonical_raw_log_head}"
+    );
+    if let Some(max_affected) = max_affected_block {
         ensure!(
-            requested == head,
-            "Base normalized-event rederive requested replay target block {requested} must match canonical raw-log head {head}"
+            target >= max_affected,
+            "Base normalized-event rederive requested replay target block {target} is before max affected normalized-event block {max_affected}"
         );
     }
-    Ok(head)
+    if let Some(reset_target) = reset_replay_cursor_target_block {
+        ensure!(
+            target >= reset_target,
+            "Base normalized-event rederive requested replay target block {target} is before max required replay target block {reset_target}"
+        );
+    }
+    Ok(target)
+}
+
+async fn load_pending_reset_replay_cursor_target_block(
+    pool: &PgPool,
+    deployment_profile: &str,
+) -> Result<Option<i64>> {
+    load_reset_replay_cursor_target_block(pool, deployment_profile).await
+}
+
+async fn load_pending_reset_replay_cursor_target_block_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<Option<i64>> {
+    load_reset_replay_cursor_target_block_from(transaction, deployment_profile).await
+}
+
+fn target_floor_block(
+    max_affected_block: Option<i64>,
+    reset_replay_cursor_target_block: Option<i64>,
+) -> Option<i64> {
+    match (max_affected_block, reset_replay_cursor_target_block) {
+        (Some(max_affected), Some(reset_target)) => Some(max_affected.max(reset_target)),
+        (Some(max_affected), None) => Some(max_affected),
+        (None, Some(reset_target)) => Some(reset_target),
+        (None, None) => None,
+    }
 }
 
 pub fn base_normalized_rederive_scope_rules() -> &'static [BaseNormalizedRederiveScopeRule] {

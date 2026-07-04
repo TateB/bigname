@@ -149,6 +149,12 @@ fn render_plan(plan: &BaseNormalizedRederivePlan, dry_run: bool) -> String {
         BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
         plan.replay_target_block
     ));
+    output.push_str(&format!(
+        "target_validation: max_affected_block={:?} replay_target_floor_block={:?} canonical_raw_log_head={:?}\n",
+        plan.max_affected_block,
+        plan.replay_target_floor_block,
+        plan.raw_fact_completeness.canonical_raw_log_head_block
+    ));
     output.push_str("derivation_kind_partition:\n");
     for census in plan
         .derivation_kind_census
@@ -330,6 +336,8 @@ mod tests {
         let plan = BaseNormalizedRederivePlan {
             deployment_profile: "mainnet".to_owned(),
             replay_target_block: target_block,
+            max_affected_block: Some(target_block),
+            replay_target_floor_block: Some(target_block),
             derivation_kind_census: vec![
                 bigname_storage::BaseNormalizedRederiveDerivationKindCensus {
                     derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
@@ -382,5 +390,7 @@ mod tests {
         ));
         assert!(output.contains("clear_cursor=post_replay_live_adapter_backlog"));
         assert!(output.contains(&format!("target_block={target_block}")));
+        assert!(output.contains(&format!("max_affected_block=Some({target_block})")));
+        assert!(output.contains(&format!("replay_target_floor_block=Some({target_block})")));
     }
 }

@@ -47,6 +47,11 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     .await?;
 
     assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK);
+    assert_eq!(plan.max_affected_block, Some(FIXTURE_REPLAY_TARGET_BLOCK));
+    assert_eq!(
+        plan.replay_target_floor_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
     assert_eq!(explicit_target_plan.counts, plan.counts);
     assert_eq!(plan.counts.normalized_events, 6);
     assert_eq!(plan.counts.resources, 1);
@@ -60,8 +65,8 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     assert_eq!(plan.counts.record_inventory_current, 1);
     assert_eq!(plan.counts.projection_normalized_event_changes, 6);
     assert_eq!(plan.counts.replay_cursor_rows, 2);
-    assert_eq!(plan.counts.adapter_checkpoint_rows, 3);
-    assert_eq!(plan.counts.adapter_checkpoint_item_rows, 3);
+    assert_eq!(plan.counts.adapter_checkpoint_rows, 6);
+    assert_eq!(plan.counts.adapter_checkpoint_item_rows, 6);
     assert_eq!(plan.cursor_census.raw_fact_replay_cursor_rows, 1);
     assert_eq!(
         plan.cursor_census
@@ -388,6 +393,11 @@ async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()
 
     assert_eq!(count_table(database.pool(), "raw_logs").await?, 4);
     assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK + 10);
+    assert_eq!(plan.max_affected_block, Some(FIXTURE_REPLAY_TARGET_BLOCK));
+    assert_eq!(
+        plan.replay_target_floor_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
     assert_eq!(
         plan.raw_fact_completeness.canonical_raw_log_min_block,
         Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
@@ -403,19 +413,51 @@ async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()
 }
 
 #[tokio::test]
-async fn dry_run_refuses_requested_target_that_lags_canonical_raw_log_head() -> Result<()> {
+async fn dry_run_validates_requested_target_range() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
-    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
 
-    let error = load_base_normalized_rederive_plan(
+    let above_head = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK + 1),
+    )
+    .await
+    .expect_err("requested replay target above the actual raw-log head must fail");
+    assert!(format!("{above_head:?}").contains("must not exceed canonical raw-log head"));
+
+    seed_retained_raw_logs_around_fixture_target(database.pool()).await?;
+    mark_raw_replay_cursor_completed_from_closure(database.pool()).await?;
+
+    let below_max_affected = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK - 1),
+    )
+    .await
+    .expect_err("requested replay target below affected rows must fail");
+    assert!(
+        format!("{below_max_affected:?}").contains("is before max affected normalized-event block")
+    );
+
+    let plan = load_base_normalized_rederive_plan(
         database.pool(),
         DEPLOYMENT_PROFILE,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
     )
-    .await
-    .expect_err("requested replay target must match the actual raw-log head");
-    assert!(format!("{error:?}").contains("must match canonical raw-log head"));
+    .await?;
+
+    assert_eq!(plan.replay_target_block, FIXTURE_REPLAY_TARGET_BLOCK);
+    assert_eq!(plan.max_affected_block, Some(FIXTURE_REPLAY_TARGET_BLOCK));
+    assert_eq!(
+        plan.replay_target_floor_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
+    assert_eq!(
+        plan.raw_fact_completeness.canonical_raw_log_head_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK + 10)
+    );
+    assert!(plan.raw_fact_completeness.is_complete_for_rerun());
 
     database.cleanup().await?;
     Ok(())
@@ -462,6 +504,20 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     assert_eq!(second_plan.counts.normalized_events, 0);
     assert_eq!(second_plan.counts.resources, 0);
     assert_eq!(second_plan.counts.replay_cursor_rows, 1);
+    assert_eq!(second_plan.max_affected_block, None);
+    assert_eq!(
+        second_plan.replay_target_floor_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
+    let shrink_error = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK - 1),
+    )
+    .await
+    .expect_err("post-drop rerun must not shrink the replay target below the prior reset target");
+    assert!(format!("{shrink_error:?}").contains("is before max required replay target block"));
+
     let second = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
@@ -474,6 +530,28 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     assert_eq!(second.deleted.normalized_events, 0);
     assert_eq!(second.deleted.resources, 0);
     assert_eq!(second.deleted.replay_cursor_rows, 1);
+
+    seed_partially_rederived_scoped_event(database.pool()).await?;
+    let partial_plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    assert_eq!(
+        partial_plan.max_affected_block,
+        Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1)
+    );
+    assert_eq!(
+        partial_plan.replay_target_floor_block,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK)
+    );
+    let partial_shrink_error = load_base_normalized_rederive_plan(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1),
+    )
+    .await
+    .expect_err("partial post-drop rerun must not shrink below the prior reset target");
+    assert!(
+        format!("{partial_shrink_error:?}").contains("is before max required replay target block")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -733,6 +811,26 @@ async fn seed_normalized_events(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn seed_partially_rederived_scoped_event(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity, namespace, event_kind, source_family, manifest_version,
+            source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref,
+            derivation_kind, canonicality_state
+        )
+        VALUES ('partial-rederived-boundary', 'basenames', 'RecordChanged',
+                'basenames_base_registry', 1, NULL, 'base-mainnet', $1, '0xbase-mid',
+                '{}'::jsonb, 'ens_v1_unwrapped_authority', 'canonical')
+        "#,
+    )
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1)
+    .execute(pool)
+    .await
+    .context("failed to seed partially rederived scoped event")?;
+    Ok(())
+}
+
 async fn seed_identity_and_projection_rows(pool: &PgPool) -> Result<FixtureIds> {
     let token_lineage_id = Uuid::from_u128(0x100);
     let resource_id = Uuid::from_u128(0x200);
@@ -959,54 +1057,83 @@ async fn seed_replay_state(pool: &PgPool) -> Result<()> {
     .bind(DEPLOYMENT_PROFILE)
     .execute(pool)
     .await?;
-    for (adapter, item_kind, item_key) in [
-        (
-            BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
-            "reverse_claim",
-            "alice",
-        ),
-        (
-            BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-            "registry_edge",
-            "alice",
-        ),
-        (
-            BASE_NORMALIZED_REDERIVE_ADAPTER,
-            "name_history",
-            "alice.base.eth",
-        ),
+    for cursor_kind in [
+        BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
+        BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
     ] {
-        sqlx::query(
-            r#"
-            INSERT INTO normalized_replay_adapter_checkpoints (
-                deployment_profile, chain_id, cursor_kind, adapter, checkpoint_scope,
-                replay_start_block_number, replay_target_block_number
+        for (adapter, item_kind, item_key) in [
+            (
+                BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
+                "reverse_claim",
+                "alice",
+            ),
+            (
+                BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
+                "registry_edge",
+                "alice",
+            ),
+            (
+                BASE_NORMALIZED_REDERIVE_ADAPTER,
+                "name_history",
+                "alice.base.eth",
+            ),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO normalized_replay_adapter_checkpoints (
+                    deployment_profile, chain_id, cursor_kind, adapter, checkpoint_scope,
+                    replay_start_block_number, replay_target_block_number
+                )
+                VALUES ($1, 'base-mainnet', $2,
+                        $3, 'full_closure', 100, 300)
+                "#,
             )
-            VALUES ($1, 'base-mainnet', 'raw_fact_normalized_events',
-                    $2, 'full_closure', 100, 300)
-            "#,
-        )
-        .bind(DEPLOYMENT_PROFILE)
-        .bind(adapter)
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO normalized_replay_adapter_checkpoint_items (
-                deployment_profile, chain_id, cursor_kind, adapter, checkpoint_scope,
-                item_kind, item_key
+            .bind(DEPLOYMENT_PROFILE)
+            .bind(cursor_kind)
+            .bind(adapter)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO normalized_replay_adapter_checkpoint_items (
+                    deployment_profile, chain_id, cursor_kind, adapter, checkpoint_scope,
+                    item_kind, item_key
+                )
+                VALUES ($1, 'base-mainnet', $2,
+                        $3, 'full_closure', $4, $5)
+                "#,
             )
-            VALUES ($1, 'base-mainnet', 'raw_fact_normalized_events',
-                    $2, 'full_closure', $3, $4)
-            "#,
-        )
-        .bind(DEPLOYMENT_PROFILE)
-        .bind(adapter)
-        .bind(item_kind)
-        .bind(item_key)
-        .execute(pool)
-        .await?;
+            .bind(DEPLOYMENT_PROFILE)
+            .bind(cursor_kind)
+            .bind(adapter)
+            .bind(item_kind)
+            .bind(item_key)
+            .execute(pool)
+            .await?;
+        }
     }
+    Ok(())
+}
+
+async fn mark_raw_replay_cursor_completed_from_closure(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET range_start_block_number = $2,
+            next_block_number = $3 + 1,
+            target_block_number = $3,
+            last_completed_block_number = $3
+        WHERE deployment_profile = $1
+          AND chain_id = 'base-mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK + 10)
+    .execute(pool)
+    .await
+    .context("failed to mark raw replay cursor completed from closure")?;
     Ok(())
 }
 
