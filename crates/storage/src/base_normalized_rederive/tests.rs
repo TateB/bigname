@@ -33,10 +33,15 @@ fn delete_predicate_pairs_match_scope_rule_pairs() {
 
 #[test]
 fn replay_active_guard_sql_stays_pair_granularity() {
-    let sql = guards::delete_scope_pairs_sql();
+    let sql = guards::inactive_delete_scope_pairs_sql();
     assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("delete_scope_pairs"));
+    assert!(sql.contains("active_targets"));
+    assert!(sql.contains("ordered_active_targets"));
+    assert!(sql.contains("covered_replay_pairs"));
+    assert!(sql.contains("prior_max_to_block"));
     assert!(sql.contains("WHERE EXISTS"));
+    assert!(sql.contains("$8::TEXT[]"));
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("raw_logs"));
     assert!(!sql.contains("log_index"));
@@ -52,6 +57,8 @@ fn orphaned_emitter_guard_sql_is_bounded_and_uses_active_target_arrays() {
     assert!(sql.contains("NOT EXISTS"));
     assert!(sql.contains("LIMIT 10"));
     assert!(sql.contains("$8::TEXT[]"));
+    assert!(sql.contains("target.from_block <= event.block_number"));
+    assert!(sql.contains("target.to_block >= event.block_number"));
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("watched_targets"));
     assert!(!sql.contains("manifest_declared_targets"));
@@ -1021,6 +1028,62 @@ async fn dry_run_refuses_pair_when_replay_target_does_not_cover_full_range() -> 
     );
     assert!(
         format!("{error:?}").contains("ens_v1_reverse_claim/basenames_base_primary"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_accepts_split_replay_target_ranges_when_union_covers_full_range() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let successor_address = seed_split_active_replay_target(
+        database.pool(),
+        4,
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 1,
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 2,
+    )
+    .await?;
+    seed_successor_emitter_scoped_event(database.pool(), &successor_address).await?;
+
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    assert!(
+        plan.active_replay_target_snapshot.iter().any(|target| {
+            target.source_family == "basenames_base_registry"
+                && target.from_block == BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 2
+                && target.to_block == FIXTURE_REPLAY_TARGET_BLOCK
+        }),
+        "split successor replay target must be present in reviewed snapshot"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_split_replay_target_ranges_with_coverage_gap() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    seed_split_active_replay_target(
+        database.pool(),
+        4,
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+        BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK + 2,
+    )
+    .await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("gapped replay target union must stop dry-run");
+    assert!(
+        format!("{error:?}").contains("current full-closure replay will not re-emit"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("basenames_base_registry"),
         "unexpected error: {error:?}"
     );
 
@@ -2031,6 +2094,102 @@ async fn seed_extra_active_replay_target(pool: &PgPool, manifest_id: i64) -> Res
     .bind(format!("extra_replay_target_{manifest_id}"))
     .bind(contract_instance_id)
     .bind(address)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_split_active_replay_target(
+    pool: &PgPool,
+    manifest_id: i64,
+    current_active_to_block: i64,
+    successor_active_from_block: i64,
+) -> Result<String> {
+    let contract_instance_id = Uuid::from_u128(0xB000_u128 + manifest_id as u128);
+    let address = format!("0x000000000000000000000000000000000000b{manifest_id:03x}");
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = $2
+        WHERE source_manifest_id = $1
+          AND active_to_block_number IS NULL
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(current_active_to_block)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id, chain_id, contract_kind, provenance
+        )
+        VALUES ($1, 'base-mainnet', 'test_replay_target_split', '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address, active_from_block_number,
+            source_manifest_id, provenance
+        )
+        VALUES ($1, 'base-mainnet', $2, $3, $4, '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(&address)
+    .bind(successor_active_from_block)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id, declaration_kind, declaration_name, contract_instance_id,
+            declared_address, role
+        )
+        VALUES ($1, 'contract', $2, $3, $4, $2)
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(format!("split_replay_target_{manifest_id}"))
+    .bind(contract_instance_id)
+    .bind(&address)
+    .execute(pool)
+    .await?;
+    Ok(address)
+}
+
+async fn seed_successor_emitter_scoped_event(pool: &PgPool, emitting_address: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, log_index, emitting_address, canonicality_state
+        )
+        VALUES ('base-mainnet', '0xbase-target', $1, '0xtx-target', 0, 10, $2, 'canonical')
+        "#,
+    )
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .bind(emitting_address)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity, namespace, event_kind, source_family, manifest_version,
+            source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
+            log_index, raw_fact_ref, derivation_kind, canonicality_state
+        )
+        VALUES ('split-successor-scoped-log', 'basenames', 'RecordChanged',
+                'basenames_base_registry', 1, 4, 'base-mainnet', $1, '0xbase-target',
+                '0xtx-target', 10, '{}'::jsonb, 'ens_v1_unwrapped_authority', 'canonical')
+        "#,
+    )
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
     .execute(pool)
     .await?;
     Ok(())

@@ -228,12 +228,13 @@ It also proves that the retained canonical Base raw-log floor itself equals the
 ratified closure boundary, block `17571485`.
 It also refuses if any row in the delete scope is above the retained canonical
 raw-log head, or if any present delete-scope `(derivation_kind, source_family)`
-pair lacks a currently active Base replay adapter/source family whose replay
-target range covers the ratified closure boundary through the validated replay
-target, or if any in-scope log-derived row was emitted by an address outside
-the current active replay target set for that row's source family at the event
-block. These are hard stops because the correction may only delete rows that
-current full-closure replay can recreate from retained raw facts.
+pair lacks currently active Base replay adapter/source-family target ranges
+whose union covers the ratified closure boundary through the validated replay
+target with no block gap, or if any in-scope log-derived row was emitted by an
+address outside the current active replay target set for that row's source
+family at the event block. These are hard stops because the correction may only
+delete rows that current full-closure replay can recreate from retained raw
+facts.
 The completed run records both the reviewed active replay target/range snapshot
 and the full active Base manifest snapshot, including active manifest payloads
 and manifest-linked contract/discovery rows. While the reset cursor is still

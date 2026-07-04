@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result, bail, ensure};
 use sqlx::{PgPool, Row};
 
@@ -11,9 +9,13 @@ use super::{
 };
 
 mod emitter;
+mod pairs;
 
 use emitter::{
     ensure_delete_scope_emitters_replay_active, ensure_delete_scope_emitters_replay_active_from,
+};
+use pairs::{
+    ensure_delete_scope_pairs_replay_active, ensure_delete_scope_pairs_replay_active_from,
 };
 
 pub(super) async fn ensure_canonical_raw_log_floor(pool: &PgPool) -> Result<()> {
@@ -41,25 +43,12 @@ pub(super) async fn ensure_delete_scope_replay_active(
     replay_target_block: i64,
     active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    let rows = sqlx::query(delete_scope_pairs_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_all(pool)
-        .await
-        .context(
-            "failed to validate Base delete-scope source families against active replay manifests",
-        )?;
-    let pairs = delete_scope_pairs_from_rows(rows)?;
-    ensure_inactive_delete_scope_pairs_empty(inactive_delete_scope_pairs(
-        &pairs,
-        active_replay_target_snapshot,
+    ensure_delete_scope_pairs_replay_active(
+        pool,
         replay_target_block,
-    ))?;
+        active_replay_target_snapshot,
+    )
+    .await?;
     ensure_delete_scope_emitters_replay_active(
         pool,
         replay_target_block,
@@ -73,25 +62,12 @@ pub(super) async fn ensure_delete_scope_replay_active_from(
     replay_target_block: i64,
     active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    let rows = sqlx::query(delete_scope_pairs_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_all(&mut **transaction)
-        .await
-        .context(
-            "failed to validate Base delete-scope source families against active replay manifests",
-        )?;
-    let pairs = delete_scope_pairs_from_rows(rows)?;
-    ensure_inactive_delete_scope_pairs_empty(inactive_delete_scope_pairs(
-        &pairs,
-        active_replay_target_snapshot,
+    ensure_delete_scope_pairs_replay_active_from(
+        transaction,
         replay_target_block,
-    ))?;
+        active_replay_target_snapshot,
+    )
+    .await?;
     ensure_delete_scope_emitters_replay_active_from(
         transaction,
         replay_target_block,
@@ -164,75 +140,6 @@ pub(super) async fn ensure_no_affected_rows_above_raw_log_head_from(
         .await
         .context("failed to validate Base affected rows against retained raw-log head")?;
     ensure_no_rows_above_raw_log_head(canonical_raw_log_head, count)
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct DeleteScopePair {
-    derivation_kind: String,
-    source_family: String,
-    replay_adapter: String,
-}
-
-fn ensure_inactive_delete_scope_pairs_empty(missing_pairs: Vec<DeleteScopePair>) -> Result<()> {
-    if missing_pairs.is_empty() {
-        return Ok(());
-    }
-
-    let missing = missing_pairs
-        .into_iter()
-        .map(|pair| {
-            format!(
-                "{derivation_kind}/{source_family} adapter={}",
-                pair.replay_adapter,
-                derivation_kind = pair.derivation_kind,
-                source_family = pair.source_family,
-            )
-        })
-        .collect::<Vec<_>>();
-    bail!(
-        "Base normalized-event rederive delete scope contains rows current full-closure replay will not re-emit: {}",
-        missing.join(", ")
-    );
-}
-
-fn delete_scope_pairs_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<DeleteScopePair>> {
-    rows.into_iter()
-        .map(|row| {
-            Ok(DeleteScopePair {
-                derivation_kind: row.try_get("derivation_kind")?,
-                source_family: row.try_get("source_family")?,
-                replay_adapter: row.try_get("replay_adapter")?,
-            })
-        })
-        .collect()
-}
-
-fn inactive_delete_scope_pairs(
-    delete_scope_pairs: &[DeleteScopePair],
-    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
-    replay_target_block: i64,
-) -> Vec<DeleteScopePair> {
-    let active_pairs = active_replay_target_snapshot
-        .iter()
-        .filter(|target| {
-            target.from_block <= BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
-                && target.to_block >= replay_target_block
-        })
-        .map(|target| {
-            (
-                target.replay_adapter.as_str(),
-                target.source_family.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-
-    delete_scope_pairs
-        .iter()
-        .filter(|pair| {
-            !active_pairs.contains(&(pair.replay_adapter.as_str(), pair.source_family.as_str()))
-        })
-        .cloned()
-        .collect()
 }
 
 fn ensure_no_rows_above_raw_log_head(canonical_raw_log_head: i64, count: i64) -> Result<()> {
@@ -450,49 +357,9 @@ fn canonical_raw_log_floor_sql() -> &'static str {
     "#
 }
 
-pub(super) fn delete_scope_pairs_sql() -> &'static str {
-    r#"
-    WITH scope_rule_pairs AS (
-        SELECT
-            $2::TEXT AS derivation_kind,
-            source_family,
-            'ens_v1_reverse_claim'::TEXT AS replay_adapter
-        FROM unnest($3::TEXT[]) AS source_families(source_family)
-
-        UNION ALL
-
-        SELECT
-            derivation_kind,
-            source_family,
-            'ens_v1_subregistry_discovery'::TEXT AS replay_adapter
-        FROM unnest($4::TEXT[]) AS derivation_kinds(derivation_kind)
-        CROSS JOIN unnest($5::TEXT[]) AS source_families(source_family)
-
-        UNION ALL
-
-        SELECT
-            $6::TEXT AS derivation_kind,
-            source_family,
-            'ens_v1_unwrapped_authority'::TEXT AS replay_adapter
-        FROM unnest($7::TEXT[]) AS source_families(source_family)
-    ),
-    delete_scope_pairs AS (
-        SELECT pair.derivation_kind, pair.source_family, pair.replay_adapter
-        FROM scope_rule_pairs pair
-        WHERE EXISTS (
-            SELECT 1
-            FROM normalized_events event
-            WHERE event.chain_id = 'base-mainnet'
-              AND event.block_number BETWEEN 17571485 AND $1
-              AND event.block_hash IS NOT NULL
-              AND event.derivation_kind = pair.derivation_kind
-              AND event.source_family = pair.source_family
-        )
-    )
-    SELECT derivation_kind, source_family, replay_adapter
-    FROM delete_scope_pairs pair
-    ORDER BY pair.derivation_kind, pair.source_family
-    "#
+#[cfg(test)]
+pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
+    pairs::inactive_delete_scope_pairs_sql()
 }
 
 #[cfg(test)]
