@@ -496,6 +496,68 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+The 2026-07-03 ratified Base normalized-event corpus correction is supervised
+and off by default. It exists only for the comprehensive Basenames Base
+drop-and-full-closure-rederive window documented in [`storage.md`](storage.md).
+Do not run it against a live indexer or worker process, and do not treat it as a
+projection rebuild. Updated indexer and worker runtimes and write-capable
+one-shot commands hold a shared advisory lock while running; the execute path
+takes the exclusive form of that lock and also refuses visible
+`bigname-indexer`/`bigname-worker` sessions before it writes.
+
+1. Stop the indexer and worker services, leaving PostgreSQL online.
+2. Run the dry-run census and capture stdout for maintainer review:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     exec -T indexer bigname-indexer drop-and-rederive-base-normalized-events \
+       --deployment-profile mainnet
+   ```
+
+3. Review the printed manifest-id confirmation, per-family normalized-event
+   counts, identity/projection/change-log delete counts, raw-fact completeness
+   proof, and the replay reset target
+   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=46954147`.
+4. Execute only after review, passing the dry-run counts back as exact
+   `--expected-*` arguments so the tool refuses drift between review and write:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     exec -T indexer bigname-indexer drop-and-rederive-base-normalized-events \
+       --deployment-profile mainnet \
+       --execute \
+       --confirm-ratified-2026-07-03 \
+       --expected-normalized-events <dry-run-value> \
+       --expected-resources <dry-run-value> \
+       --expected-token-lineages <dry-run-value> \
+       --expected-name-surfaces <dry-run-value> \
+       --expected-surface-bindings <dry-run-value> \
+       --expected-name-current <dry-run-value> \
+       --expected-address-names-current <dry-run-value> \
+       --expected-children-current <dry-run-value> \
+       --expected-permissions-current <dry-run-value> \
+       --expected-record-inventory-current <dry-run-value> \
+       --expected-projection-normalized-event-changes <dry-run-value> \
+       --expected-replay-cursor-rows <dry-run-value> \
+       --expected-adapter-checkpoint-rows <dry-run-value> \
+       --expected-adapter-checkpoint-item-rows <dry-run-value>
+   ```
+
+5. Start the indexer with normalized replay catch-up enabled so the reset cursor
+   runs full-closure replay from block `17571485` through `46954147`.
+6. After normalized replay completes, rebuild all current projections:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     exec -T worker bigname-worker replay all-current-projections
+   ```
+
+7. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
+   and the identity-10k sample before restoring normal service.
+
 Operational catch-up to finalized head should be run as bounded idempotent
 backfill chunks. Before every chunk starts range work, check current Postgres
 size, writable free disk, and any configured object-cache budget. Capacity

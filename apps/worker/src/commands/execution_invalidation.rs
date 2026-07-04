@@ -29,7 +29,12 @@ pub(super) async fn execution_command(args: ExecutionArgs) -> Result<()> {
 async fn invalidate_verified_resolution_manifest(
     args: InvalidateVerifiedResolutionManifestArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let summary = execution::invalidate_verified_resolution_manifest_version(
         &pool,
         &execution::VerifiedResolutionManifestInvalidation {
@@ -57,7 +62,12 @@ async fn invalidate_verified_resolution_manifest(
 async fn invalidate_verified_resolution_topology_boundary(
     args: InvalidateVerifiedResolutionBoundaryArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let invalidation = execution::VerifiedResolutionBoundaryInvalidation {
         namespace: args.namespace.clone(),
         logical_name_id: args.logical_name_id.clone(),
@@ -89,7 +99,12 @@ async fn invalidate_verified_resolution_topology_boundary(
 async fn invalidate_verified_resolution_record_boundary(
     args: InvalidateVerifiedResolutionBoundaryArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let invalidation = execution::VerifiedResolutionBoundaryInvalidation {
         namespace: args.namespace.clone(),
         logical_name_id: args.logical_name_id.clone(),
@@ -121,7 +136,12 @@ async fn invalidate_verified_resolution_record_boundary(
 async fn invalidate_verified_primary_name_manifest(
     args: InvalidateVerifiedPrimaryNameManifestArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let summary = execution::invalidate_verified_primary_name_manifest_version(
         &pool,
         &execution::VerifiedPrimaryNameManifestInvalidation {
@@ -153,7 +173,12 @@ async fn invalidate_verified_primary_name_manifest(
 async fn invalidate_verified_primary_name_topology_boundary(
     args: InvalidateVerifiedPrimaryNameBoundaryArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let invalidation = execution::VerifiedPrimaryNameBoundaryInvalidation {
         namespace: args.namespace.clone(),
         address: args.address.clone(),
@@ -189,7 +214,12 @@ async fn invalidate_verified_primary_name_topology_boundary(
 async fn invalidate_verified_primary_name_record_boundary(
     args: InvalidateVerifiedPrimaryNameBoundaryArgs,
 ) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let invalidation = execution::VerifiedPrimaryNameBoundaryInvalidation {
         namespace: args.namespace.clone(),
         address: args.address.clone(),

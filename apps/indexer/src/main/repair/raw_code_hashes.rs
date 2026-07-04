@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use bigname_storage::{
     RawCodeHashAddressVariant, RawCodeHashCorrectionBatchOutcome, RawCodeHashCorrectionCandidate,
     RawCodeHashCorrectionUpdate, apply_raw_code_hash_corrections,
+    connect_with_base_normalized_rederive_writer_guard as connect_writer,
     count_raw_code_hash_correction_candidates, count_raw_code_hash_correction_orphaned_skips,
     load_raw_code_hash_address_variants, load_raw_code_hash_correction_page,
 };
@@ -25,7 +26,6 @@ mod args;
 mod tests;
 #[path = "raw_code_hashes/verification.rs"]
 mod verification;
-
 use args::{parse_single_chain_source, parse_timestamp_arg};
 use verification::{
     PROOF_SPOT_CHECK_TIMEOUT_SECS, derive_code_hashes, verify_rpc_code_sample,
@@ -271,7 +271,7 @@ pub(crate) async fn repair_raw_code_hashes_command(args: RepairRawCodeHashesArgs
         args.chain
     );
 
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) = connect_writer(&args.database, "bigname-indexer").await?;
     let reth = ChainProvider::RethDb(RethDbProvider::new(&args.chain, &reth_datadir)?);
     let rpc = JsonRpcProvider::new_with_request_timeout(
         &rpc_url,

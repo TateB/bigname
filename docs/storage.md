@@ -96,6 +96,67 @@ rows reported, recorded `eth_getProof` spot-check status, and the env-widened
 live verification test green table-wide, including
 `reth_db_provider_latest_rows_match_consensus`.
 
+### 2026-07-03 Base normalized-event drop-and-rederive correction
+
+The maintainer ratified a supervised corpus correction on 2026-07-03 for Base
+Basenames normalized events and adapter-owned identity rows that accumulated
+conflicting payloads across multiple derivation and manifest changes during the
+outage window. The approved method is drop plus full-closure re-derive from
+retained canonical raw facts. This is an exception to normal replay behavior:
+the ordinary raw-fact normalized-event replay path remains upsert-only and does
+not delete stale rows.
+
+The implementation owner is the indexer command
+`bigname-indexer drop-and-rederive-base-normalized-events`. Its dry run is the
+maintainer review gate: it prints the exact live census by table, source family,
+block range, raw-fact completeness, and replay reset target without writing. The
+execute mode requires the explicit `--execute --confirm-ratified-2026-07-03`
+flags, records a structured correction-event log line, takes a PostgreSQL
+exclusive advisory transaction lock, refuses concurrent `bigname-indexer` or
+`bigname-worker` sessions that are visible in `pg_stat_activity`, and fails
+closed unless the reviewed expected counts still match. Indexer and worker
+runtime processes and write-capable one-shot commands also hold the
+corresponding shared advisory lock while they run, so the correction command
+cannot execute concurrently with updated bigname writers.
+
+The normalized-event scope is:
+
+- `chain_id = 'base-mainnet'`
+- `source_manifest_id IN (1, 2, 4, 5)`, after confirming those live manifest ids
+  map exactly to `basenames_base_registry`, `basenames_base_registrar`,
+  `basenames_base_resolver`, and `basenames_base_primary` on `base-mainnet`
+- `block_number BETWEEN 17571485 AND 46954147`
+- `block_hash IS NOT NULL`
+- `derivation_kind NOT IN ('manifest_sync', 'manifest_alert')`
+
+The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
+`surface_bindings` where `chain_id = 'base-mainnet'` and
+`provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
+removes dependent current-projection rows and `projection_normalized_event_changes`
+rows only to satisfy foreign keys and to force the later projection rebuild to
+publish from the re-derived event stream. It does not rebuild projections.
+
+The delete order is FK-safe: current projections keyed by scoped identity rows,
+then `projection_normalized_event_changes`, then scoped `normalized_events`,
+then `surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
+After the data drop, the same transaction clears
+`normalized_replay_adapter_checkpoint_items` and
+`normalized_replay_adapter_checkpoints` for
+`ens_v1_subregistry_discovery` and `ens_v1_unwrapped_authority`, then resets the
+`normalized_replay_cursors` row for `mainnet/base-mainnet/raw_fact_normalized_events`
+to `range_start_block_number = next_block_number = 17571485` and
+`target_block_number = 46954147`.
+
+The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
+`raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
+Before execution it proves that the scoped log-derived normalized events still
+join retained non-orphaned `raw_logs`, scoped boundary events still join retained
+non-orphaned `chain_lineage`, and the canonical raw-log range inside the
+ratified replay window spans the closure boundary and replay target. It also
+refuses if any normalized event outside the delete scope still references an
+identity row that the correction would drop. If any proof fails, no write is
+allowed.
+
 ## Storage layers
 
 The system of record splits into six layers.

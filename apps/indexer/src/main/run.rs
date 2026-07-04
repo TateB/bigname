@@ -26,7 +26,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     log_manifest_summary(&manifest_summary);
     ensure_manifest_root_ready(&manifest_summary)?;
 
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _runtime_rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-indexer",
+        )
+        .await?;
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);

@@ -24,7 +24,12 @@ pub(crate) struct RewindOutcome {
 }
 
 pub(crate) async fn run_rewind(args: RewindArgs) -> Result<RewindOutcome> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-indexer",
+        )
+        .await?;
     rewind_to_exact_ancestor(
         &pool,
         args.deployment_profile,

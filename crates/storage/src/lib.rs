@@ -1,8 +1,11 @@
 //! Shared PostgreSQL bootstrap utilities.
 
+use std::str::FromStr;
+
 mod address_names;
 mod audit;
 mod backfill_jobs;
+mod base_normalized_rederive;
 mod checkpoints;
 mod children;
 mod evm_primitives;
@@ -31,7 +34,11 @@ mod time;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool, Postgres,
+    pool::PoolConnection,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use tracing::info;
 
 pub use address_names::{
@@ -66,6 +73,16 @@ pub use backfill_jobs::{
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
     create_backfill_job, fail_backfill_job, fail_backfill_range, load_backfill_job,
     load_backfill_ranges, reserve_backfill_range,
+};
+pub use base_normalized_rederive::{
+    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+    BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
+    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REPLAY_TARGET_BLOCK,
+    BaseNormalizedRederiveCounts, BaseNormalizedRederiveExecutionOutcome,
+    BaseNormalizedRederiveExpectedCounts, BaseNormalizedRederiveFamilyCensus,
+    BaseNormalizedRederiveManifest, BaseNormalizedRederivePlan,
+    BaseNormalizedRederiveRawFactCompleteness, execute_base_normalized_rederive_drop,
+    hold_base_normalized_rederive_runtime_shared_lock, load_base_normalized_rederive_plan,
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
@@ -280,17 +297,51 @@ pub const fn default_database_url() -> &'static str {
 
 /// Open a PostgreSQL connection pool using the shared bootstrap settings.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
+    connect_inner(config, None).await
+}
+
+/// Open a PostgreSQL connection pool with an application name visible in
+/// `pg_stat_activity`.
+pub async fn connect_with_application_name(
+    config: &DatabaseConfig,
+    application_name: &str,
+) -> Result<PgPool> {
+    connect_inner(config, Some(application_name)).await
+}
+
+/// Open a named PostgreSQL pool and hold the shared operational guard that
+/// prevents the Base normalized-event correction from running concurrently.
+pub async fn connect_with_base_normalized_rederive_writer_guard(
+    config: &DatabaseConfig,
+    application_name: &str,
+) -> Result<(PgPool, PoolConnection<Postgres>)> {
+    let pool = connect_with_application_name(config, application_name).await?;
+    let guard = hold_base_normalized_rederive_runtime_shared_lock(&pool, application_name).await?;
+    Ok((pool, guard))
+}
+
+async fn connect_inner(config: &DatabaseConfig, application_name: Option<&str>) -> Result<PgPool> {
     let database_url = config
         .database_url
         .clone()
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| default_database_url().to_owned());
 
-    PgPoolOptions::new()
-        .max_connections(config.max_connections)
-        .connect(&database_url)
-        .await
-        .context("failed to connect to PostgreSQL")
+    let pool_options = PgPoolOptions::new().max_connections(config.max_connections);
+    if let Some(application_name) = application_name {
+        let options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse PostgreSQL database URL")?
+            .application_name(application_name);
+        pool_options
+            .connect_with(options)
+            .await
+            .context("failed to connect to PostgreSQL")
+    } else {
+        pool_options
+            .connect(&database_url)
+            .await
+            .context("failed to connect to PostgreSQL")
+    }
 }
 
 /// Apply all checked-in migrations.

@@ -11,7 +11,12 @@ use crate::inspect;
 
 pub(crate) async fn audit(args: ManifestDriftAuditArgs) -> Result<()> {
     let _emit_json = args.json;
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-worker",
+        )
+        .await?;
     let live_audit =
         bigname_storage::ManifestDriftAlertInspection::compute_live_manifest_drift_audit(&pool)
             .await?;

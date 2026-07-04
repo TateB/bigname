@@ -8,6 +8,8 @@ mod backfill_tests;
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]
 mod cli;
+#[path = "main/drop_rederive.rs"]
+mod drop_rederive;
 #[path = "main/ens_v1_resolver.rs"]
 mod ens_v1_resolver;
 #[path = "main/healthcheck.rs"]
@@ -71,6 +73,7 @@ use cli::{
     BackfillArgs, Cli, Command, HealthcheckArgs, OpsCatchupArgs, RepairArgs, RepairCommand,
     ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
 };
+use drop_rederive::drop_and_rederive_base_normalized_events_command;
 #[allow(unused_imports)]
 use provider::{
     ChainProviderKind, JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry,
@@ -103,6 +106,9 @@ async fn main() -> Result<()> {
         Command::Replay(args) => run_replay(args).await,
         Command::Rewind(args) => run_rewind(args).await.map(|_| ()),
         Command::Repair(args) => run_repair(args).await,
+        Command::DropAndRederiveBaseNormalizedEvents(args) => {
+            drop_and_rederive_base_normalized_events_command(args).await
+        }
     }
 }
 
@@ -117,7 +123,12 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     log_manifest_summary(&manifest_summary);
     ensure_manifest_root_ready(&manifest_summary)?;
 
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-indexer",
+        )
+        .await?;
     let selector = backfill_source_selector(&args)?;
     let needs_full_runtime_plan =
         matches!(selector, WatchedSourceSelector::WholeActiveWatchedChain);
@@ -303,7 +314,12 @@ async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {
     log_manifest_summary(&manifest_summary);
     ensure_manifest_root_ready(&manifest_summary)?;
 
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-indexer",
+        )
+        .await?;
     let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("ops-catchup", &manifest_runtime_state.watched_chain_plan);
@@ -355,7 +371,12 @@ async fn run_rewind(args: RewindArgs) -> Result<rewind::RewindOutcome> {
 async fn run_repair(args: RepairArgs) -> Result<()> {
     match args.command {
         RepairCommand::EnsV1TextRecords(args) => {
-            let pool = bigname_storage::connect(&args.database).await?;
+            let (pool, _rederive_guard) =
+                bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+                    &args.database,
+                    "bigname-indexer",
+                )
+                .await?;
             let provider_registry =
                 ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
             let provider = provider_registry.provider_for(&args.chain).with_context(|| {
@@ -393,7 +414,12 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
             Ok(())
         }
         RepairCommand::NameSurfaceNormalization(args) => {
-            let pool = bigname_storage::connect(&args.database).await?;
+            let (pool, _rederive_guard) =
+                bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+                    &args.database,
+                    "bigname-indexer",
+                )
+                .await?;
             let outcome = repair_name_surface_normalization(
                 &pool,
                 NameSurfaceNormalizationRepairConfig {
@@ -425,7 +451,12 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
 
 async fn run_replay_normalized_events(args: ReplayNormalizedEventsArgs) -> Result<()> {
     let selection = replay_normalized_events_selection(&args)?;
-    let pool = bigname_storage::connect(&args.database).await?;
+    let (pool, _rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &args.database,
+            "bigname-indexer",
+        )
+        .await?;
     let outcome = replay_raw_fact_normalized_events(
         &pool,
         RawFactNormalizedEventReplayRequest {

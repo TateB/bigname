@@ -52,6 +52,7 @@ pub(crate) enum Command {
     Replay(ReplayArgs),
     Rewind(RewindArgs),
     Repair(RepairArgs),
+    DropAndRederiveBaseNormalizedEvents(DropAndRederiveBaseNormalizedEventsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -416,6 +417,52 @@ pub(crate) struct RewindArgs {
     pub(crate) ancestor_block_hash: String,
     #[arg(long)]
     pub(crate) from_block_hash: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DropAndRederiveBaseNormalizedEventsArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE",
+        default_value = "mainnet"
+    )]
+    pub(crate) deployment_profile: String,
+    #[arg(long, conflicts_with = "execute")]
+    pub(crate) dry_run: bool,
+    #[arg(long)]
+    pub(crate) execute: bool,
+    #[arg(long = "confirm-ratified-2026-07-03", requires = "execute")]
+    pub(crate) confirm_ratified_2026_07_03: bool,
+    #[arg(long = "expected-normalized-events")]
+    pub(crate) expected_normalized_events: Option<i64>,
+    #[arg(long = "expected-resources")]
+    pub(crate) expected_resources: Option<i64>,
+    #[arg(long = "expected-token-lineages")]
+    pub(crate) expected_token_lineages: Option<i64>,
+    #[arg(long = "expected-name-surfaces")]
+    pub(crate) expected_name_surfaces: Option<i64>,
+    #[arg(long = "expected-surface-bindings")]
+    pub(crate) expected_surface_bindings: Option<i64>,
+    #[arg(long = "expected-name-current")]
+    pub(crate) expected_name_current: Option<i64>,
+    #[arg(long = "expected-address-names-current")]
+    pub(crate) expected_address_names_current: Option<i64>,
+    #[arg(long = "expected-children-current")]
+    pub(crate) expected_children_current: Option<i64>,
+    #[arg(long = "expected-permissions-current")]
+    pub(crate) expected_permissions_current: Option<i64>,
+    #[arg(long = "expected-record-inventory-current")]
+    pub(crate) expected_record_inventory_current: Option<i64>,
+    #[arg(long = "expected-projection-normalized-event-changes")]
+    pub(crate) expected_projection_normalized_event_changes: Option<i64>,
+    #[arg(long = "expected-replay-cursor-rows")]
+    pub(crate) expected_replay_cursor_rows: Option<i64>,
+    #[arg(long = "expected-adapter-checkpoint-rows")]
+    pub(crate) expected_adapter_checkpoint_rows: Option<i64>,
+    #[arg(long = "expected-adapter-checkpoint-item-rows")]
+    pub(crate) expected_adapter_checkpoint_item_rows: Option<i64>,
 }
 
 #[derive(Subcommand, Debug)]

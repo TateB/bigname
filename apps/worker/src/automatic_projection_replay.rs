@@ -47,7 +47,12 @@ pub(crate) fn all_current_projections_database_config(
 
 pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     let database = all_current_projections_database_config(args.database);
-    let pool = bigname_storage::connect(&database).await?;
+    let (pool, _runtime_rederive_guard) =
+        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+            &database,
+            "bigname-worker",
+        )
+        .await?;
     let text_hydration_config =
         record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
             &args.chain_rpc_urls,
