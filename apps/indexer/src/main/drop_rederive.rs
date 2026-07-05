@@ -309,6 +309,24 @@ fn render_plan(
     if !kept_any {
         output.push_str("  keep none rows=0\n");
     }
+    output.push_str("ratified_dropped_orphan_emitters:\n");
+    if plan.ratified_dropped_orphan_emitter_census.is_empty() {
+        output.push_str("  none rows=0\n");
+    } else {
+        for census in &plan.ratified_dropped_orphan_emitter_census {
+            output.push_str(&format!(
+                "  drop_not_rederived ratification={} derivation_kind={} source_family={} emitting_address={} rows={} min_block={:?} max_block={:?} reason={}\n",
+                census.ratification,
+                census.derivation_kind,
+                census.source_family,
+                census.emitting_address,
+                census.row_count,
+                census.min_block_number,
+                census.max_block_number,
+                census.reason
+            ));
+        }
+    }
     output.push_str(&format!(
         "cursor_census: {}={} {}={} expected_replay_cursor_rows={}\n",
         BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
@@ -393,6 +411,11 @@ fn log_plan(
         )?,
         active_replay_target_rows = plan.active_replay_target_snapshot.len(),
         active_manifest_rows = plan.active_manifest_snapshot.len(),
+        ratified_dropped_orphan_emitter_rows = plan
+            .ratified_dropped_orphan_emitter_census
+            .iter()
+            .map(|census| census.row_count)
+            .sum::<i64>(),
         raw_fact_safety_checks_deferred = plan.raw_fact_safety_checks_deferred,
         raw_fact_complete = plan.raw_fact_completeness.is_complete_for_rerun(),
         "Base normalized-event drop-and-rederive census"
@@ -409,6 +432,22 @@ fn log_plan(
             max_block = census.max_block_number,
             rederivable = census.rederivable,
             "Base normalized-event drop-and-rederive derivation-kind census"
+        );
+    }
+    for census in &plan.ratified_dropped_orphan_emitter_census {
+        info!(
+            service = "indexer",
+            command = "drop-and-rederive-base-normalized-events",
+            dry_run,
+            derivation_kind = %census.derivation_kind,
+            source_family = %census.source_family,
+            emitting_address = %census.emitting_address,
+            row_count = census.row_count,
+            min_block = census.min_block_number,
+            max_block = census.max_block_number,
+            ratification = %census.ratification,
+            reason = %census.reason,
+            "Base normalized-event drop-and-rederive ratified dropped orphan-emitter census"
         );
     }
     for step in batch_plan.steps {

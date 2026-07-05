@@ -540,11 +540,26 @@ held advisory lock connection cannot starve the writer work.
    `raw_log_preimage_observation` and non-closure source families;
    identity/projection/change-log delete counts; raw-fact completeness proof,
    including that the retained canonical Base raw-log floor is exactly block
-   `17571485`; active replay target snapshot row count and digest; active
-   manifest snapshot row count and digest; both replay cursor counts; affected
-   current-projection replay marker count; run id, batch size, batch count/order;
-   max affected block; replay target floor; and the replay reset target
+   `17571485`; the `ratified_dropped_orphan_emitters` line, which must report
+   exactly 3,939,502 legacy Basenames `ReverseRegistrar`
+   `0x79ea96012eea67a83431f1701b3dff7e37f9e282` rows under
+   `2026-07-05 option A` for `ens_v1_reverse_claim` /
+   `basenames_base_primary` with `ReverseChanged` / `BaseReverseClaimed`,
+   coin type `60`, and blocks `17575714..46903158`
+   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
+   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f);
+   active replay target snapshot row count and digest;
+   active manifest snapshot row count and digest; both replay cursor counts;
+   affected current-projection replay marker count; run id, batch size, batch
+   count/order; max affected block; replay target floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
+   That ratified dropped-emitter class remains part of the normalized-event
+   delete count and is deliberately not re-derived; any other orphaned emitter
+   still indicates an unsafe dry run and must hard-stop before execute.
 4. Execute only after review, passing the dry-run counts back as exact
    `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
    refuses drift between review and write. Use the dry-run's reported head, or
@@ -651,8 +666,16 @@ held advisory lock connection cannot starve the writer work.
    `17571485`; catch-up repeats that check while the reset cursor is pending, so
    normal cursor refresh cannot widen this correction replay below the delete
    boundary on the reviewed deployment. The command also clears any stale
-   `post_replay_live_adapter_backlog` cursor for the same Base deployment. This
-   mode can re-enable live adapter sync after replay catches up, so do not let it
+   `post_replay_live_adapter_backlog` cursor for the same Base deployment. The
+   2026-07-05 option A dropped legacy Basenames reverse-registrar rows are not
+   expected to return during this replay; after the following projection rebuild,
+   `primary_names_current` should reflect only the ENS Base `L2ReverseRegistrar`
+   declared primary-name authority for Base
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f).
+   This mode can re-enable live
+   adapter sync after replay catches up, so do not let it
    overlap the projection rebuild:
 
    ```sh

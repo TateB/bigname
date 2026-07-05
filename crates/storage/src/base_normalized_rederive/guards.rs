@@ -3,9 +3,10 @@ use sqlx::{PgConnection, PgPool, Row};
 
 use super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-    BaseNormalizedRederiveReplayTargetSnapshot, reverse_claim_derivation_kind,
-    reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
-    unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
+    BaseNormalizedRederiveRatifiedDroppedEmitterCensus, BaseNormalizedRederiveReplayTargetSnapshot,
+    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
+    subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 mod emitter;
@@ -57,6 +58,14 @@ pub(super) async fn ensure_delete_scope_replay_active_from(
     ensure_active_replay_target_snapshot_table(transaction, replay_target_block).await?;
     ensure_delete_scope_pairs_replay_active_from(transaction, replay_target_block).await?;
     ensure_delete_scope_emitters_replay_active_from(transaction, replay_target_block).await
+}
+
+pub(super) async fn load_ratified_dropped_orphan_emitter_census_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replay_target_block: i64,
+) -> Result<Vec<BaseNormalizedRederiveRatifiedDroppedEmitterCensus>> {
+    emitter::load_ratified_dropped_orphan_emitter_census_from(transaction, replay_target_block)
+        .await
 }
 
 pub(super) async fn load_active_replay_target_snapshot(
@@ -478,8 +487,13 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
 }
 
 #[cfg(test)]
-pub(super) fn orphaned_delete_scope_emitters_sql() -> &'static str {
+pub(super) fn orphaned_delete_scope_emitters_sql() -> String {
     emitter::orphaned_delete_scope_emitters_sql()
+}
+
+#[cfg(test)]
+pub(super) fn ratified_dropped_orphan_emitter_census_sql() -> String {
+    emitter::ratified_dropped_orphan_emitter_census_sql()
 }
 
 fn affected_rows_above_raw_log_head_sql() -> &'static str {

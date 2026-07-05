@@ -23,6 +23,7 @@ use counts::{
 use guards::{
     ensure_canonical_raw_log_floor_from, ensure_delete_scope_replay_active_from,
     ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot_from,
+    load_ratified_dropped_orphan_emitter_census_from,
 };
 pub use manifest_snapshot::BaseNormalizedRederiveActiveManifestSnapshot;
 use manifest_snapshot::load_active_manifest_snapshot_from;
@@ -80,6 +81,18 @@ pub struct BaseNormalizedRederiveReplayTargetSnapshot {
     pub address: String,
     pub from_block: i64,
     pub to_block: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BaseNormalizedRederiveRatifiedDroppedEmitterCensus {
+    pub derivation_kind: String,
+    pub source_family: String,
+    pub emitting_address: String,
+    pub row_count: i64,
+    pub min_block_number: Option<i64>,
+    pub max_block_number: Option<i64>,
+    pub ratification: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,6 +171,9 @@ pub struct BaseNormalizedRederivePlan {
     pub replay_target_floor_block: Option<i64>,
     pub derivation_kind_census: Vec<BaseNormalizedRederiveDerivationKindCensus>,
     #[serde(default)]
+    pub ratified_dropped_orphan_emitter_census:
+        Vec<BaseNormalizedRederiveRatifiedDroppedEmitterCensus>,
+    #[serde(default)]
     pub active_replay_target_snapshot: Vec<BaseNormalizedRederiveReplayTargetSnapshot>,
     #[serde(default)]
     pub active_manifest_snapshot: Vec<BaseNormalizedRederiveActiveManifestSnapshot>,
@@ -216,6 +232,9 @@ pub async fn load_base_normalized_rederive_plan(
     .await?;
     let derivation_kind_census =
         load_derivation_kind_census_from(&mut transaction, replay_target_block).await?;
+    let ratified_dropped_orphan_emitter_census =
+        load_ratified_dropped_orphan_emitter_census_from(&mut transaction, replay_target_block)
+            .await?;
     let active_manifest_snapshot = load_active_manifest_snapshot_from(&mut transaction).await?;
     let cursor_census = load_cursor_census_from(&mut transaction, deployment_profile).await?;
     let counts =
@@ -235,6 +254,7 @@ pub async fn load_base_normalized_rederive_plan(
         max_affected_block,
         replay_target_floor_block,
         derivation_kind_census,
+        ratified_dropped_orphan_emitter_census,
         active_replay_target_snapshot,
         active_manifest_snapshot,
         raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof::default(),
@@ -335,6 +355,8 @@ pub(super) async fn load_plan_in_transaction(
     validate_base_deployment_profile_owns_chain_from(transaction, deployment_profile).await?;
     let derivation_kind_census =
         load_derivation_kind_census_from(transaction, replay_target_block).await?;
+    let ratified_dropped_orphan_emitter_census =
+        load_ratified_dropped_orphan_emitter_census_from(transaction, replay_target_block).await?;
     let active_manifest_snapshot = load_active_manifest_snapshot_from(transaction).await?;
     let raw_fact_range_proof =
         load_raw_fact_range_proof_from(transaction, replay_target_block).await?;
@@ -348,6 +370,7 @@ pub(super) async fn load_plan_in_transaction(
         max_affected_block,
         replay_target_floor_block,
         derivation_kind_census,
+        ratified_dropped_orphan_emitter_census,
         active_replay_target_snapshot,
         active_manifest_snapshot,
         raw_fact_range_proof,

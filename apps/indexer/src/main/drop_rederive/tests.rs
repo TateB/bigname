@@ -124,6 +124,18 @@ fn render_plan_reports_source_family_partition_and_both_cursors() {
                 rederivable: false,
             },
         ],
+        ratified_dropped_orphan_emitter_census: vec![
+            bigname_storage::BaseNormalizedRederiveRatifiedDroppedEmitterCensus {
+                derivation_kind: "ens_v1_reverse_claim".to_owned(),
+                source_family: "basenames_base_primary".to_owned(),
+                emitting_address: "0x79ea96012eea67a83431f1701b3dff7e37f9e282".to_owned(),
+                row_count: 3_939_502,
+                min_block_number: Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
+                max_block_number: Some(46_903_158),
+                ratification: "2026-07-05 option A".to_owned(),
+                reason: "deprecated legacy Basenames ReverseRegistrar superseded by ENS Base L2ReverseRegistrar; rows deliberately dropped, not re-derived".to_owned(),
+            },
+        ],
         cursor_census: bigname_storage::BaseNormalizedRederiveCursorCensus {
             raw_fact_replay_cursor_rows: 1,
             post_replay_live_adapter_backlog_cursor_rows: 1,
@@ -155,6 +167,9 @@ fn render_plan_reports_source_family_partition_and_both_cursors() {
     assert!(output.contains(
         "keep derivation_kind=raw_log_preimage_observation source_family=basenames_l1_compat"
     ));
+    assert!(output.contains("ratified_dropped_orphan_emitters:"));
+    assert!(output.contains("drop_not_rederived ratification=2026-07-05 option A derivation_kind=ens_v1_reverse_claim source_family=basenames_base_primary emitting_address=0x79ea96012eea67a83431f1701b3dff7e37f9e282 rows=3939502"));
+    assert!(output.contains("max_block=Some(46903158)"));
     assert!(output.contains("clear_cursor=post_replay_live_adapter_backlog"));
     assert!(output.contains(&format!("target_block={target_block}")));
     assert!(output.contains(&format!("max_affected_block=Some({target_block})")));

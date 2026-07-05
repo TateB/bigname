@@ -167,6 +167,28 @@ in the same block-backed range and reports it as kept. In particular,
 non-replay source families are not in the delete scope because this supervised
 Base closure replay does not re-derive them.
 
+The 2026-07-05 maintainer-ratified option A adds one deliberate-drop class
+inside that delete scope: 3,939,502 `ens_v1_reverse_claim` /
+`basenames_base_primary` log-derived rows emitted by the legacy Basenames
+`ReverseRegistrar` `0x79ea96012eea67a83431f1701b3dff7e37f9e282`, with event
+and source-event shape `ReverseChanged` / `BaseReverseClaimed`, coin type `60`,
+and block range `17575714..46903158`. The Basenames `ReverseRegistrar` can establish primary
+records upstream, but bigname's declared Base primary-name value authority for
+`basenames_base_primary` is the ENSv1 Base `L2ReverseRegistrar`
+`0x0000000000D8e504002cC26E3Ec46D81971C1664`, keyed by
+`NameForAddrChanged(address,string)` and Base coin type `2147492101`.[^bn-revreg-l12][^bn-revreg-l150][^bn-revreg-l193][^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event]
+The reviewed live manifest state also had the legacy
+`0x79ea96012eea67a83431f1701b3dff7e37f9e282` path deprecated behind a
+deactivated `manifest_successor` edge to the ENS
+`0x0000000000D8e504002cC26E3Ec46D81971C1664` authority. These 3,939,502 rows
+remain in the delete census and are not re-created by the full-closure replay;
+after replay and projection rebuild, Base primary names sourced only from the
+legacy Basenames reverse registrar are removed and `primary_names_current`
+reflects the ENS Base L2 reverse-registrar authority. Dry-run prints the
+ratified dropped-emitter count separately from the ordinary delete/keep
+partition so maintainers can confirm the deliberately dropped class before
+execute.
+
 The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
 `surface_bindings` where `chain_id = 'base-mainnet'` and
 `provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
@@ -232,16 +254,21 @@ pair lacks currently active Base replay adapter/source-family target ranges
 whose union covers the ratified closure boundary through the validated replay
 target with no block gap, or if any in-scope log-derived row was emitted by an
 address outside the current active replay target set for that row's source
-family at the event block. `ens_v1_unwrapped_authority` raw-block boundary rows
+family at the event block. The only exception is the 2026-07-05 option A
+allowlist class
+`(ens_v1_reverse_claim, basenames_base_primary, 0x79ea96012eea67a83431f1701b3dff7e37f9e282,
+ReverseChanged, BaseReverseClaimed, coin_type=60, blocks=17575714..46903158)`;
+that exact class is deliberately dropped and not re-derived, and any other
+orphaned emitter remains a hard stop. `ens_v1_unwrapped_authority` raw-block boundary rows
 (`transaction_hash` and `log_index` are null and `raw_fact_ref.kind` is
 explicitly `raw_block`) are checked against coverage for the source family that
 will rederive the boundary row rather than blindly against the stored source
 family. For Basenames registry boundary rows whose stored family is the legacy
 `ens_v1_registry_l1` drift, that rederive family is `basenames_base_registry`.
 Rows missing the explicit `raw_block` marker remain subject to strict
-same-source-family coverage. These are hard stops because the correction may
-only delete rows that current full-closure replay can recreate from retained raw
-facts.
+same-source-family coverage. Apart from the explicit 2026-07-05 deliberate-drop
+class, these are hard stops because the correction may only delete rows that
+current full-closure replay can recreate from retained raw facts.
 The completed run records both the reviewed active replay target/range snapshot
 and the full active Base manifest snapshot, including active manifest payloads
 and manifest-linked contract/discovery rows. While the reset cursor is still
@@ -803,6 +830,7 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 [^bn-readme-base-revreg]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
 [^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 [^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+[^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
 [^ens-subgraph-label-null]: (upstream: .refs/ens_subgraph/src/utils.ts:L76 @ ens_subgraph@723f1b6)
 [^ens-subgraph-name-null]: (upstream: .refs/ens_subgraph/src/resolver.ts:L85 @ ens_subgraph@723f1b6)
 [^ensnode-null-label]: (upstream: .refs/ensnode/packages/enssdk/src/lib/types/ens.ts:L92 @ ensnode@2017ae6)

@@ -69,6 +69,15 @@ fn orphaned_emitter_guard_sql_is_bounded_and_uses_temp_active_targets() {
     assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("active_targets"));
     assert!(sql.contains("delete_scope_log_events"));
+    assert!(sql.contains("ratified_dropped_orphan_emitters"));
+    assert!(sql.contains("0x79ea96012eea67a83431f1701b3dff7e37f9e282"));
+    assert!(sql.contains("ratified.derivation_kind = event.derivation_kind"));
+    assert!(sql.contains("ratified.source_family = event.source_family"));
+    assert!(sql.contains("ratified.emitting_address = raw_log.emitting_address"));
+    assert!(sql.contains("event.block_number BETWEEN ratified.from_block AND ratified.to_block"));
+    assert!(sql.contains("ratified.event_kind = event.event_kind"));
+    assert!(sql.contains("ratified.source_event = event.after_state ->> 'source_event'"));
+    assert!(sql.contains("ratified.coin_type = event.after_state ->> 'coin_type'"));
     assert!(sql.contains("base_rederive_active_replay_targets"));
     assert!(sql.contains("JOIN LATERAL"));
     assert!(sql.contains("FROM raw_logs raw_log"));
@@ -83,6 +92,22 @@ fn orphaned_emitter_guard_sql_is_bounded_and_uses_temp_active_targets() {
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("watched_targets"));
     assert!(!sql.contains("manifest_declared_targets"));
+}
+
+#[test]
+fn ratified_dropped_orphan_emitter_census_sql_is_exact_allowlist() {
+    let sql = guards::ratified_dropped_orphan_emitter_census_sql();
+    assert!(sql.contains("ratified_dropped_orphan_emitters"));
+    assert!(sql.contains("2026-07-05 option A"));
+    assert!(sql.contains("ens_v1_reverse_claim"));
+    assert!(sql.contains("basenames_base_primary"));
+    assert!(sql.contains("0x79ea96012eea67a83431f1701b3dff7e37f9e282"));
+    assert!(sql.contains("ReverseChanged"));
+    assert!(sql.contains("BaseReverseClaimed"));
+    assert!(sql.contains("event.block_number BETWEEN ratified.from_block"));
+    assert!(sql.contains("event.after_state ->> 'coin_type' = ratified.coin_type"));
+    assert!(sql.contains("COUNT(*)::BIGINT AS row_count"));
+    assert!(sql.contains("LOWER(raw_log.emitting_address) = ratified.emitting_address"));
 }
 
 #[test]
@@ -141,6 +166,7 @@ async fn dry_run_census_matches_seeded_fixture() -> Result<()> {
     assert_eq!(explicit_target_plan.counts, plan.counts);
     assert_eq!(plan.active_replay_target_snapshot.len(), 5);
     assert_eq!(plan.active_manifest_snapshot.len(), 4);
+    assert!(plan.ratified_dropped_orphan_emitter_census.is_empty());
     assert_eq!(plan.counts.normalized_events, 6);
     assert_eq!(plan.counts.resources, 1);
     assert_eq!(plan.counts.token_lineages, 1);
@@ -1247,7 +1273,79 @@ async fn dry_run_refuses_split_replay_target_ranges_with_coverage_gap() -> Resul
 }
 
 #[tokio::test]
-async fn dry_run_refuses_orphaned_emitter_not_in_active_targets() -> Result<()> {
+async fn dry_run_allows_ratified_legacy_reverse_registrar_orphan_and_counts_drop() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    seed_legacy_reverse_registrar_orphan_event(
+        database.pool(),
+        "ratified-legacy-reverse-registrar-log",
+        "ReverseChanged",
+        "BaseReverseClaimed",
+        "60",
+    )
+    .await?;
+
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    assert_eq!(plan.counts.normalized_events, 7);
+    assert_eq!(
+        plan.derivation_kind_census
+            .iter()
+            .find(|census| {
+                census.derivation_kind == "ens_v1_reverse_claim"
+                    && census.source_family == "basenames_base_primary"
+            })
+            .map(|census| (census.rederivable, census.row_count)),
+        Some((true, 2))
+    );
+    assert_eq!(plan.ratified_dropped_orphan_emitter_census.len(), 1);
+    let census = &plan.ratified_dropped_orphan_emitter_census[0];
+    assert_eq!(census.derivation_kind, "ens_v1_reverse_claim");
+    assert_eq!(census.source_family, "basenames_base_primary");
+    assert_eq!(
+        census.emitting_address,
+        "0x79ea96012eea67a83431f1701b3dff7e37f9e282"
+    );
+    assert_eq!(census.row_count, 1);
+    assert_eq!(census.min_block_number, Some(46_903_158));
+    assert_eq!(census.max_block_number, Some(46_903_158));
+    assert_eq!(census.ratification, "2026-07-05 option A");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_same_legacy_reverse_registrar_when_class_not_ratified() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    seed_legacy_reverse_registrar_orphan_event(
+        database.pool(),
+        "non-ratified-legacy-reverse-registrar-log",
+        "ReverseChanged",
+        "BaseReverseClaimed",
+        "2147492101",
+    )
+    .await?;
+
+    let error = load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None)
+        .await
+        .expect_err("same emitter with non-ratified coin type must stop dry-run");
+    assert!(
+        format!("{error:?}").contains("addresses not in the current active replay target set"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("0x79ea96012eea67a83431f1701b3dff7e37f9e282"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_refuses_non_ratified_orphaned_emitter_not_in_active_targets() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     sqlx::query(
@@ -2345,6 +2443,101 @@ async fn seed_successor_emitter_scoped_event(pool: &PgPool, emitting_address: &s
         "#,
     )
     .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_legacy_reverse_registrar_orphan_event(
+    pool: &PgPool,
+    event_identity: &str,
+    event_kind: &str,
+    source_event: &str,
+    coin_type: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ('base-mainnet', $1, '0xbase-mid', 46903158,
+                '2026-07-03T00:00:00Z', 'canonical')
+        "#,
+    )
+    .bind(format!("0xblock-{event_identity}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, log_index, emitting_address, canonicality_state
+        )
+        VALUES (
+            'base-mainnet',
+            $1,
+            46903158,
+            $2,
+            0,
+            12,
+            '0x79ea96012eea67a83431f1701b3dff7e37f9e282',
+            'canonical'
+        )
+        "#,
+    )
+    .bind(format!("0xblock-{event_identity}"))
+    .bind(format!("0xtx-{event_identity}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity, namespace, event_kind, source_family, manifest_version,
+            source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
+            log_index, raw_fact_ref, derivation_kind, canonicality_state, after_state
+        )
+        VALUES (
+            $1,
+            'basenames',
+            $2,
+            'basenames_base_primary',
+            1,
+            1,
+            'base-mainnet',
+            46903158,
+            $3,
+            $4,
+            12,
+            jsonb_build_object(
+                'kind', 'raw_log',
+                'chain_id', 'base-mainnet',
+                'block_hash', $3,
+                'block_number', 46903158,
+                'transaction_hash', $4,
+                'log_index', 12,
+                'emitting_address', '0x79ea96012eea67a83431f1701b3dff7e37f9e282'
+            ),
+            'ens_v1_reverse_claim',
+            'canonical',
+            jsonb_build_object(
+                'source_event', $5,
+                'address', '0x7e50c29692e8d701a375bf53de93b62f9aa47af8',
+                'coin_type', $6,
+                'namespace', 'basenames',
+                'reverse_name',
+                    '7e50c29692e8d701a375bf53de93b62f9aa47af8.80002105.reverse',
+                'reverse_node',
+                    '0x76097049b6146b77e9cd73ee786c29ae4eefb49e4772d0a3cefd99f7087760c5'
+            )
+        )
+        "#,
+    )
+    .bind(event_identity)
+    .bind(event_kind)
+    .bind(format!("0xblock-{event_identity}"))
+    .bind(format!("0xtx-{event_identity}"))
+    .bind(source_event)
+    .bind(coin_type)
     .execute(pool)
     .await?;
     Ok(())
