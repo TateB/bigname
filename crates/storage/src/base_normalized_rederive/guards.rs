@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
 use super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
@@ -11,21 +11,8 @@ use super::{
 mod emitter;
 mod pairs;
 
-use emitter::{
-    ensure_delete_scope_emitters_replay_active, ensure_delete_scope_emitters_replay_active_from,
-};
-use pairs::{
-    ensure_delete_scope_pairs_replay_active, ensure_delete_scope_pairs_replay_active_from,
-};
-
-pub(super) async fn ensure_canonical_raw_log_floor(pool: &PgPool) -> Result<()> {
-    let floor = sqlx::query_scalar::<_, Option<i64>>(canonical_raw_log_floor_sql())
-        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .fetch_one(pool)
-        .await
-        .context("failed to validate Base retained canonical raw-log floor")?;
-    ensure_canonical_raw_log_floor_matches(floor)
-}
+use emitter::ensure_delete_scope_emitters_replay_active_from;
+use pairs::ensure_delete_scope_pairs_replay_active_from;
 
 pub(super) async fn ensure_canonical_raw_log_floor_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -38,23 +25,27 @@ pub(super) async fn ensure_canonical_raw_log_floor_from(
     ensure_canonical_raw_log_floor_matches(floor)
 }
 
+#[cfg(test)]
 pub(super) async fn ensure_delete_scope_replay_active(
     pool: &PgPool,
     replay_target_block: i64,
     active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    ensure_delete_scope_pairs_replay_active(
-        pool,
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open Base active replay target guard transaction")?;
+    ensure_delete_scope_replay_active_from(
+        &mut transaction,
         replay_target_block,
         active_replay_target_snapshot,
     )
     .await?;
-    ensure_delete_scope_emitters_replay_active(
-        pool,
-        replay_target_block,
-        active_replay_target_snapshot,
-    )
-    .await
+    transaction
+        .commit()
+        .await
+        .context("failed to close Base active replay target guard transaction")?;
+    Ok(())
 }
 
 pub(super) async fn ensure_delete_scope_replay_active_from(
@@ -62,66 +53,39 @@ pub(super) async fn ensure_delete_scope_replay_active_from(
     replay_target_block: i64,
     active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
-    ensure_delete_scope_pairs_replay_active_from(
-        transaction,
-        replay_target_block,
-        active_replay_target_snapshot,
-    )
-    .await?;
-    ensure_delete_scope_emitters_replay_active_from(
-        transaction,
-        replay_target_block,
-        active_replay_target_snapshot,
-    )
-    .await
+    let _ = active_replay_target_snapshot;
+    ensure_active_replay_target_snapshot_table(transaction, replay_target_block).await?;
+    ensure_delete_scope_pairs_replay_active_from(transaction, replay_target_block).await?;
+    ensure_delete_scope_emitters_replay_active_from(transaction, replay_target_block).await
 }
 
 pub(super) async fn load_active_replay_target_snapshot(
     pool: &PgPool,
     replay_target_block: i64,
 ) -> Result<Vec<BaseNormalizedRederiveReplayTargetSnapshot>> {
-    let rows = sqlx::query(active_replay_target_snapshot_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_source_families())
-        .fetch_all(pool)
+    let mut transaction = pool
+        .begin()
         .await
-        .context("failed to load Base active replay target snapshot")?;
-    replay_target_snapshot_from_rows(rows)
+        .context("failed to open Base active replay target snapshot transaction")?;
+    let snapshot =
+        load_active_replay_target_snapshot_from(&mut transaction, replay_target_block).await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to close Base active replay target snapshot transaction")?;
+    Ok(snapshot)
 }
 
 pub(super) async fn load_active_replay_target_snapshot_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
 ) -> Result<Vec<BaseNormalizedRederiveReplayTargetSnapshot>> {
-    let rows = sqlx::query(active_replay_target_snapshot_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_source_families())
+    ensure_active_replay_target_snapshot_table(transaction, replay_target_block).await?;
+    let rows = sqlx::query(active_replay_target_snapshot_table_sql())
         .fetch_all(&mut **transaction)
         .await
         .context("failed to load Base active replay target snapshot")?;
     replay_target_snapshot_from_rows(rows)
-}
-
-pub(super) async fn ensure_no_affected_rows_above_raw_log_head(
-    pool: &PgPool,
-    canonical_raw_log_head: i64,
-) -> Result<()> {
-    let count = sqlx::query_scalar::<_, i64>(affected_rows_above_raw_log_head_sql())
-        .bind(canonical_raw_log_head)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_one(pool)
-        .await
-        .context("failed to validate Base affected rows against retained raw-log head")?;
-    ensure_no_rows_above_raw_log_head(canonical_raw_log_head, count)
 }
 
 pub(super) async fn ensure_no_affected_rows_above_raw_log_head_from(
@@ -166,6 +130,126 @@ fn replay_target_snapshot_from_rows(
         .collect()
 }
 
+async fn ensure_active_replay_target_snapshot_table(
+    connection: &mut PgConnection,
+    replay_target_block: i64,
+) -> Result<()> {
+    let meta_table: Option<String> = sqlx::query_scalar(
+        "SELECT to_regclass('pg_temp.base_rederive_active_replay_target_snapshot_meta')::TEXT",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to inspect Base active replay target snapshot temp table")?;
+    if meta_table.is_some() {
+        let existing_target = sqlx::query_scalar::<_, Option<i64>>(
+            r#"
+            SELECT replay_target_block
+            FROM pg_temp.base_rederive_active_replay_target_snapshot_meta
+            LIMIT 1
+            "#,
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to inspect Base active replay target snapshot temp metadata")?;
+        if existing_target == Some(replay_target_block) {
+            return Ok(());
+        }
+    }
+
+    drop_active_replay_target_snapshot_table(connection).await?;
+    execute(
+        connection,
+        r#"
+        CREATE TEMP TABLE base_rederive_active_replay_targets (
+            replay_adapter TEXT NOT NULL,
+            source_family TEXT NOT NULL,
+            address TEXT NOT NULL,
+            from_block BIGINT NOT NULL,
+            to_block BIGINT NOT NULL
+        ) ON COMMIT DROP
+        "#,
+    )
+    .await?;
+
+    // The guards join this temp table instead of rebinding the reviewed snapshot;
+    // base-mainnet discovery targets can exceed one million rows.
+    let insert_sql = active_replay_target_snapshot_insert_sql();
+    sqlx::query(&insert_sql)
+        .bind(replay_target_block)
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_source_families())
+        .execute(&mut *connection)
+        .await
+        .context("failed to materialize Base active replay target snapshot temp table")?;
+
+    execute(
+        connection,
+        r#"
+        CREATE INDEX base_rederive_active_replay_targets_scope_idx
+        ON base_rederive_active_replay_targets (
+            source_family,
+            address,
+            from_block,
+            to_block
+        )
+        "#,
+    )
+    .await?;
+    execute(
+        connection,
+        r#"
+        CREATE INDEX base_rederive_active_replay_targets_pair_idx
+        ON base_rederive_active_replay_targets (
+            replay_adapter,
+            source_family,
+            from_block,
+            to_block
+        )
+        "#,
+    )
+    .await?;
+    execute(connection, "ANALYZE base_rederive_active_replay_targets").await?;
+    execute(
+        connection,
+        r#"
+        CREATE TEMP TABLE base_rederive_active_replay_target_snapshot_meta (
+            replay_target_block BIGINT NOT NULL
+        ) ON COMMIT DROP
+        "#,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO base_rederive_active_replay_target_snapshot_meta (replay_target_block) VALUES ($1)",
+    )
+    .bind(replay_target_block)
+    .execute(&mut *connection)
+    .await
+    .context("failed to record Base active replay target snapshot temp metadata")?;
+    Ok(())
+}
+
+async fn drop_active_replay_target_snapshot_table(connection: &mut PgConnection) -> Result<()> {
+    execute(
+        connection,
+        "DROP TABLE IF EXISTS pg_temp.base_rederive_active_replay_target_snapshot_meta",
+    )
+    .await?;
+    execute(
+        connection,
+        "DROP TABLE IF EXISTS pg_temp.base_rederive_active_replay_targets",
+    )
+    .await
+}
+
+async fn execute(connection: &mut PgConnection, sql: &str) -> Result<()> {
+    sqlx::query(sql)
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("failed to execute Base active replay target SQL: {sql}"))?;
+    Ok(())
+}
+
 fn ensure_canonical_raw_log_floor_matches(floor: Option<i64>) -> Result<()> {
     let Some(floor) = floor else {
         bail!(
@@ -181,8 +265,38 @@ fn ensure_canonical_raw_log_floor_matches(floor: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-fn active_replay_target_snapshot_sql() -> &'static str {
+fn active_replay_target_snapshot_insert_sql() -> String {
+    format!(
+        r#"
+        INSERT INTO base_rederive_active_replay_targets (
+            replay_adapter,
+            source_family,
+            address,
+            from_block,
+            to_block
+        )
+        {}
+        "#,
+        active_replay_target_snapshot_sql(false)
+    )
+}
+
+fn active_replay_target_snapshot_table_sql() -> &'static str {
     r#"
+    SELECT replay_adapter, source_family, address, from_block, to_block
+    FROM base_rederive_active_replay_targets
+    ORDER BY replay_adapter, source_family, address, from_block, to_block
+    "#
+}
+
+fn active_replay_target_snapshot_sql(ordered: bool) -> String {
+    let order_by = if ordered {
+        "ORDER BY replay_adapter, source_family, address, from_block, to_block"
+    } else {
+        ""
+    };
+    format!(
+        r#"
     WITH manifest_declared_targets AS (
         SELECT
             mv.chain,
@@ -332,8 +446,9 @@ fn active_replay_target_snapshot_sql() -> &'static str {
     FROM adapter_targets
     WHERE from_block <= $1
       AND to_block >= 17571485
-    ORDER BY replay_adapter, source_family, address, from_block, to_block
+    {order_by}
     "#
+    )
 }
 
 fn canonical_raw_log_floor_sql() -> &'static str {

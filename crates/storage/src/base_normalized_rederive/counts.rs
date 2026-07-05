@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use super::{
     BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
@@ -11,29 +11,6 @@ use super::{
     subregistry_source_families, unwrapped_authority_derivation_kind,
     unwrapped_authority_source_families,
 };
-
-pub(super) async fn load_counts(
-    pool: &PgPool,
-    deployment_profile: &str,
-    replay_target_block: i64,
-) -> Result<BaseNormalizedRederiveCounts> {
-    let row = sqlx::query(counts_sql())
-        .bind(deployment_profile)
-        .bind(checkpoint_adapters())
-        .bind(cursor_kinds())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .bind(current_projection_replay_status_projections())
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive census")?;
-    counts_from_row(&row)
-}
 
 pub(super) async fn load_counts_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -58,24 +35,6 @@ pub(super) async fn load_counts_from(
     counts_from_row(&row)
 }
 
-pub(super) async fn load_derivation_kind_census(
-    pool: &PgPool,
-    replay_target_block: i64,
-) -> Result<Vec<BaseNormalizedRederiveDerivationKindCensus>> {
-    let rows = sqlx::query(derivation_kind_census_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_all(pool)
-        .await
-        .context("failed to load Base normalized-event rederive derivation-kind census")?;
-    derivation_kind_census_rows(rows)
-}
-
 pub(super) async fn load_derivation_kind_census_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
@@ -92,20 +51,6 @@ pub(super) async fn load_derivation_kind_census_from(
         .await
         .context("failed to load Base normalized-event rederive derivation-kind census")?;
     derivation_kind_census_rows(rows)
-}
-
-pub(super) async fn load_cursor_census(
-    pool: &PgPool,
-    deployment_profile: &str,
-) -> Result<BaseNormalizedRederiveCursorCensus> {
-    let rows = sqlx::query(cursor_census_sql())
-        .bind(deployment_profile)
-        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .bind(cursor_kinds())
-        .fetch_all(pool)
-        .await
-        .context("failed to load Base normalized-event rederive cursor census")?;
-    cursor_census_rows(rows)
 }
 
 pub(super) async fn load_cursor_census_from(
@@ -140,23 +85,6 @@ pub(super) async fn load_raw_fact_completeness_from(
     raw_fact_completeness_from_row(&row)
 }
 
-pub(super) async fn load_max_affected_block(
-    pool: &PgPool,
-    canonical_raw_log_head: i64,
-) -> Result<Option<i64>> {
-    sqlx::query_scalar(max_affected_block_sql())
-        .bind(canonical_raw_log_head)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive max affected block")
-}
-
 pub(super) async fn load_max_affected_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     canonical_raw_log_head: i64,
@@ -172,20 +100,6 @@ pub(super) async fn load_max_affected_block_from(
         .fetch_one(&mut **transaction)
         .await
         .context("failed to load Base normalized-event rederive max affected block")
-}
-
-pub(super) async fn load_reset_replay_cursor_target_block(
-    pool: &PgPool,
-    deployment_profile: &str,
-) -> Result<Option<i64>> {
-    sqlx::query_scalar(reset_replay_cursor_target_block_sql())
-        .bind(deployment_profile)
-        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
-        .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive reset replay cursor target")
 }
 
 pub(super) async fn load_reset_replay_cursor_target_block_from(

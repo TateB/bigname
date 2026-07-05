@@ -32,7 +32,7 @@ fn delete_predicate_pairs_match_scope_rule_pairs() {
 }
 
 #[test]
-fn replay_active_guard_sql_stays_pair_granularity() {
+fn replay_active_guard_sql_stays_pair_granularity_with_temp_active_targets() {
     let sql = guards::inactive_delete_scope_pairs_sql();
     assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("WHERE EXISTS"));
@@ -48,7 +48,11 @@ fn replay_active_guard_sql_stays_pair_granularity() {
     assert!(sql.contains("prior_max_to_block"));
     assert!(sql.contains("raw_fact_ref ->> 'kind' IS NOT DISTINCT FROM 'raw_block'"));
     assert!(sql.contains("covered.source_family = pair.boundary_rederive_source_family"));
-    assert!(sql.contains("$8::TEXT[]"));
+    assert!(sql.contains("base_rederive_active_replay_targets"));
+    assert!(!sql.contains("$8::TEXT[]"));
+    assert!(!sql.contains("$9::TEXT[]"));
+    assert!(!sql.contains("$10::BIGINT[]"));
+    assert!(!sql.contains("$11::BIGINT[]"));
     assert!(!sql.contains("delete_scope_rows"));
     assert!(!sql.contains("JOIN normalized_events event"));
     assert!(!sql.contains("SELECT DISTINCT"));
@@ -60,15 +64,22 @@ fn replay_active_guard_sql_stays_pair_granularity() {
 }
 
 #[test]
-fn orphaned_emitter_guard_sql_is_bounded_and_uses_active_target_arrays() {
+fn orphaned_emitter_guard_sql_is_bounded_and_uses_temp_active_targets() {
     let sql = guards::orphaned_delete_scope_emitters_sql();
+    assert!(sql.contains("scope_rule_pairs"));
     assert!(sql.contains("active_targets"));
-    assert!(sql.contains("JOIN raw_logs raw_log"));
+    assert!(sql.contains("delete_scope_log_events"));
+    assert!(sql.contains("base_rederive_active_replay_targets"));
+    assert!(sql.contains("JOIN LATERAL"));
+    assert!(sql.contains("FROM raw_logs raw_log"));
     assert!(sql.contains("NOT EXISTS"));
     assert!(sql.contains("LIMIT 10"));
-    assert!(sql.contains("$8::TEXT[]"));
     assert!(sql.contains("target.from_block <= event.block_number"));
     assert!(sql.contains("target.to_block >= event.block_number"));
+    assert!(!sql.contains("$8::TEXT[]"));
+    assert!(!sql.contains("$9::TEXT[]"));
+    assert!(!sql.contains("$10::BIGINT[]"));
+    assert!(!sql.contains("$11::BIGINT[]"));
     assert!(!sql.contains("normalized_event_id"));
     assert!(!sql.contains("watched_targets"));
     assert!(!sql.contains("manifest_declared_targets"));

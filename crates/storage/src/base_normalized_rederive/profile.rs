@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, ensure};
-use sqlx::PgPool;
 
 use super::{BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND};
 
@@ -9,20 +8,6 @@ pub(super) fn validate_deployment_profile(deployment_profile: &str) -> Result<()
         "Base normalized-event rederive deployment profile must not be empty"
     );
     Ok(())
-}
-
-pub(super) async fn validate_base_deployment_profile_owns_chain(
-    pool: &PgPool,
-    deployment_profile: &str,
-) -> Result<()> {
-    let raw_fact_cursor_rows = sqlx::query_scalar::<_, i64>(profile_ownership_sql())
-        .bind(deployment_profile)
-        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
-        .fetch_one(pool)
-        .await
-        .context("failed to validate Base normalized-event rederive deployment profile")?;
-    ensure_base_deployment_profile_owns_chain(deployment_profile, raw_fact_cursor_rows)
 }
 
 pub(super) async fn validate_base_deployment_profile_owns_chain_from(

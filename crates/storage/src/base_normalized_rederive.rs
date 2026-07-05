@@ -16,22 +16,17 @@ mod scope;
 use batch::execute_base_normalized_rederive_drop_batched;
 pub use batch_plan::{BaseNormalizedRederiveBatchPlan, BaseNormalizedRederiveBatchPlanStep};
 use counts::{
-    load_counts, load_counts_from, load_cursor_census, load_cursor_census_from,
-    load_derivation_kind_census, load_derivation_kind_census_from, load_max_affected_block,
+    load_counts_from, load_cursor_census_from, load_derivation_kind_census_from,
     load_max_affected_block_from, load_raw_fact_completeness_from,
-    load_reset_replay_cursor_target_block, load_reset_replay_cursor_target_block_from,
+    load_reset_replay_cursor_target_block_from,
 };
 use guards::{
-    ensure_canonical_raw_log_floor, ensure_canonical_raw_log_floor_from,
-    ensure_delete_scope_replay_active, ensure_no_affected_rows_above_raw_log_head,
-    ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot,
+    ensure_canonical_raw_log_floor_from, ensure_delete_scope_replay_active_from,
+    ensure_no_affected_rows_above_raw_log_head_from, load_active_replay_target_snapshot_from,
 };
 pub use manifest_snapshot::BaseNormalizedRederiveActiveManifestSnapshot;
-use manifest_snapshot::{load_active_manifest_snapshot, load_active_manifest_snapshot_from};
-use profile::{
-    validate_base_deployment_profile_owns_chain, validate_base_deployment_profile_owns_chain_from,
-    validate_deployment_profile,
-};
+use manifest_snapshot::load_active_manifest_snapshot_from;
+use profile::{validate_base_deployment_profile_owns_chain_from, validate_deployment_profile};
 use proof::load_raw_fact_range_proof_from;
 pub use proof::{BaseNormalizedRederiveRawFactRangeProof, base_normalized_rederive_json_digest};
 pub use runtime_guard::{
@@ -194,28 +189,46 @@ pub async fn load_base_normalized_rederive_plan(
     requested_replay_target_block: Option<i64>,
 ) -> Result<BaseNormalizedRederivePlan> {
     validate_deployment_profile(deployment_profile)?;
-    validate_base_deployment_profile_owns_chain(pool, deployment_profile).await?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open Base normalized-event rederive dry-run transaction")?;
+    validate_base_deployment_profile_owns_chain_from(&mut transaction, deployment_profile).await?;
     let (
         replay_target_block,
         max_affected_block,
         replay_target_floor_block,
         canonical_raw_log_head,
-    ) = resolve_replay_target_block(pool, deployment_profile, requested_replay_target_block)
-        .await
-        .context("failed to resolve Base normalized-event rederive replay target")?;
+    ) = resolve_replay_target_block_from(
+        &mut transaction,
+        deployment_profile,
+        requested_replay_target_block,
+    )
+    .await
+    .context("failed to resolve Base normalized-event rederive replay target")?;
     let active_replay_target_snapshot =
-        load_active_replay_target_snapshot(pool, replay_target_block).await?;
-    ensure_delete_scope_replay_active(pool, replay_target_block, &active_replay_target_snapshot)
-        .await?;
-    let derivation_kind_census = load_derivation_kind_census(pool, replay_target_block).await?;
-    let active_manifest_snapshot = load_active_manifest_snapshot(pool).await?;
-    let cursor_census = load_cursor_census(pool, deployment_profile).await?;
-    let counts = load_counts(pool, deployment_profile, replay_target_block).await?;
+        load_active_replay_target_snapshot_from(&mut transaction, replay_target_block).await?;
+    ensure_delete_scope_replay_active_from(
+        &mut transaction,
+        replay_target_block,
+        &active_replay_target_snapshot,
+    )
+    .await?;
+    let derivation_kind_census =
+        load_derivation_kind_census_from(&mut transaction, replay_target_block).await?;
+    let active_manifest_snapshot = load_active_manifest_snapshot_from(&mut transaction).await?;
+    let cursor_census = load_cursor_census_from(&mut transaction, deployment_profile).await?;
+    let counts =
+        load_counts_from(&mut transaction, deployment_profile, replay_target_block).await?;
     let raw_fact_completeness =
         BaseNormalizedRederiveRawFactCompleteness::deferred_to_execute_start(
             replay_target_block,
             canonical_raw_log_head,
         );
+    transaction
+        .commit()
+        .await
+        .context("failed to close Base normalized-event rederive dry-run transaction")?;
     Ok(BaseNormalizedRederivePlan {
         deployment_profile: deployment_profile.to_owned(),
         replay_target_block,
@@ -345,31 +358,6 @@ pub(super) async fn load_plan_in_transaction(
     })
 }
 
-async fn resolve_replay_target_block(
-    pool: &PgPool,
-    deployment_profile: &str,
-    requested_replay_target_block: Option<i64>,
-) -> Result<(i64, Option<i64>, Option<i64>, i64)> {
-    let head = validate_canonical_raw_log_head(load_canonical_raw_log_head(pool).await?)?;
-    ensure_canonical_raw_log_floor(pool).await?;
-    ensure_no_affected_rows_above_raw_log_head(pool, head).await?;
-    let max_affected_block = load_max_affected_block(pool, head).await?;
-    let reset_replay_cursor_target_block =
-        load_pending_reset_replay_cursor_target_block(pool, deployment_profile).await?;
-    let target = validate_replay_target_block(
-        head,
-        max_affected_block,
-        reset_replay_cursor_target_block,
-        requested_replay_target_block,
-    )?;
-    Ok((
-        target,
-        max_affected_block,
-        target_floor_block(max_affected_block, reset_replay_cursor_target_block),
-        head,
-    ))
-}
-
 pub(super) async fn resolve_replay_target_block_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deployment_profile: &str,
@@ -394,14 +382,6 @@ pub(super) async fn resolve_replay_target_block_from(
         target_floor_block(max_affected_block, reset_replay_cursor_target_block),
         head,
     ))
-}
-
-async fn load_canonical_raw_log_head(pool: &PgPool) -> Result<Option<i64>> {
-    sqlx::query_scalar(canonical_raw_log_head_sql())
-        .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base canonical raw-log head")
 }
 
 async fn load_canonical_raw_log_head_from(
@@ -479,13 +459,6 @@ fn validate_replay_target_block(
         );
     }
     Ok(target)
-}
-
-async fn load_pending_reset_replay_cursor_target_block(
-    pool: &PgPool,
-    deployment_profile: &str,
-) -> Result<Option<i64>> {
-    load_reset_replay_cursor_target_block(pool, deployment_profile).await
 }
 
 async fn load_pending_reset_replay_cursor_target_block_from(

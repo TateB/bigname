@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use super::super::{
-    BaseNormalizedRederiveReplayTargetSnapshot, reverse_claim_derivation_kind,
-    reverse_claim_source_families, subregistry_derivation_kinds, subregistry_source_families,
-    unwrapped_authority_derivation_kind, unwrapped_authority_source_families,
+    reverse_claim_derivation_kind, reverse_claim_source_families, subregistry_derivation_kinds,
+    subregistry_source_families, unwrapped_authority_derivation_kind,
+    unwrapped_authority_source_families,
 };
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -14,33 +14,13 @@ struct DeleteScopePair {
     replay_adapter: String,
 }
 
-pub(super) async fn ensure_delete_scope_pairs_replay_active(
-    pool: &PgPool,
-    replay_target_block: i64,
-    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
-) -> Result<()> {
-    let rows = bind_inactive_delete_scope_pairs(
-        sqlx::query(inactive_delete_scope_pairs_sql()),
-        replay_target_block,
-        active_replay_target_snapshot,
-    )
-    .fetch_all(pool)
-    .await
-    .context(
-        "failed to validate Base delete-scope source families against active replay manifests",
-    )?;
-    ensure_inactive_delete_scope_pairs_empty(delete_scope_pairs_from_rows(rows)?)
-}
-
 pub(super) async fn ensure_delete_scope_pairs_replay_active_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
-    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> Result<()> {
     let rows = bind_inactive_delete_scope_pairs(
         sqlx::query(inactive_delete_scope_pairs_sql()),
         replay_target_block,
-        active_replay_target_snapshot,
     )
     .fetch_all(&mut **transaction)
     .await
@@ -53,25 +33,7 @@ pub(super) async fn ensure_delete_scope_pairs_replay_active_from(
 fn bind_inactive_delete_scope_pairs<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     replay_target_block: i64,
-    active_replay_target_snapshot: &[BaseNormalizedRederiveReplayTargetSnapshot],
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    let replay_adapters = active_replay_target_snapshot
-        .iter()
-        .map(|target| target.replay_adapter.clone())
-        .collect::<Vec<_>>();
-    let source_families = active_replay_target_snapshot
-        .iter()
-        .map(|target| target.source_family.clone())
-        .collect::<Vec<_>>();
-    let from_blocks = active_replay_target_snapshot
-        .iter()
-        .map(|target| target.from_block)
-        .collect::<Vec<_>>();
-    let to_blocks = active_replay_target_snapshot
-        .iter()
-        .map(|target| target.to_block)
-        .collect::<Vec<_>>();
-
     query
         .bind(replay_target_block)
         .bind(reverse_claim_derivation_kind())
@@ -80,10 +42,6 @@ fn bind_inactive_delete_scope_pairs<'q>(
         .bind(subregistry_source_families())
         .bind(unwrapped_authority_derivation_kind())
         .bind(unwrapped_authority_source_families())
-        .bind(replay_adapters)
-        .bind(source_families)
-        .bind(from_blocks)
-        .bind(to_blocks)
 }
 
 fn ensure_inactive_delete_scope_pairs_empty(missing_pairs: Vec<DeleteScopePair>) -> Result<()> {
@@ -175,12 +133,7 @@ pub(super) fn inactive_delete_scope_pairs_sql() -> &'static str {
             source_family,
             GREATEST(from_block, 17571485) AS from_block,
             LEAST(to_block, $1) AS to_block
-        FROM unnest(
-            $8::TEXT[],
-            $9::TEXT[],
-            $10::BIGINT[],
-            $11::BIGINT[]
-        ) AS target(replay_adapter, source_family, from_block, to_block)
+        FROM base_rederive_active_replay_targets
         WHERE from_block <= $1
           AND to_block >= 17571485
     ),
