@@ -132,6 +132,71 @@ fn base_rederive_scope_index_migration_is_no_transaction() {
     }
 }
 
+#[test]
+fn scoped_event_count_sql_is_split_by_rederivable_pair_family() {
+    let sql = counts::scoped_event_count_sql();
+
+    assert!(sql.contains("UNION ALL"));
+    assert!(sql.contains("derivation_kind = $2"));
+    assert!(sql.contains("derivation_kind = ANY($4::TEXT[])"));
+    assert!(sql.contains("derivation_kind = $6"));
+    assert!(!sql.contains(" OR "));
+}
+
+#[test]
+fn projection_change_count_sql_drives_from_scoped_events() {
+    let sql = counts::projection_change_count_sql();
+
+    assert!(sql.contains("WITH scoped_events AS"));
+    assert!(sql.contains("JOIN projection_normalized_event_changes change"));
+    assert!(sql.contains("ON change.normalized_event_id = event.normalized_event_id"));
+    assert!(!sql.contains("EXISTS"));
+}
+
+#[test]
+fn identity_projection_count_sql_is_scope_joined_and_deduped() {
+    for sql in [
+        counts::name_current_count_sql(),
+        counts::address_names_current_count_sql(),
+    ] {
+        assert!(sql.contains("WITH scoped_projection_keys AS"));
+        assert!(sql.contains("FROM resources identity_scope"));
+        assert!(sql.contains("FROM token_lineages identity_scope"));
+        assert!(sql.contains("FROM name_surfaces identity_scope"));
+        assert!(sql.contains("FROM surface_bindings identity_scope"));
+        assert!(sql.contains("UNION"));
+        assert!(sql.contains("identity_scope.provenance->>'adapter'"));
+        assert!(!sql.contains(" OR "));
+        assert!(!sql.contains("EXISTS"));
+    }
+}
+
+#[test]
+fn children_count_sql_uses_parent_and_child_name_surface_indexes() {
+    let sql = counts::children_current_count_sql();
+
+    assert!(sql.contains("FROM name_surfaces identity_scope"));
+    assert!(sql.contains("projection.parent_logical_name_id = identity_scope.logical_name_id"));
+    assert!(sql.contains("projection.child_logical_name_id = identity_scope.logical_name_id"));
+    assert!(sql.contains("UNION"));
+    assert!(!sql.contains(" IN "));
+    assert!(!sql.contains(" OR "));
+}
+
+#[test]
+fn resource_projection_count_sql_joins_from_scoped_resources() {
+    for sql in [
+        counts::permissions_current_count_sql(),
+        counts::record_inventory_current_count_sql(),
+    ] {
+        assert!(sql.contains("FROM resources identity_scope"));
+        assert!(sql.contains("projection.resource_id = identity_scope.resource_id"));
+        assert!(sql.contains("identity_scope.provenance->>'adapter'"));
+        assert!(!sql.contains(" OR "));
+        assert!(!sql.contains("EXISTS"));
+    }
+}
+
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_storage_base_rederive_test")
@@ -141,6 +206,21 @@ async fn test_database() -> Result<TestDatabase> {
         "failed to apply migrations for Base rederive tests",
     )
     .await
+}
+
+#[tokio::test]
+async fn dry_run_repeatable_read_helper_sets_transaction_isolation() -> Result<()> {
+    let database = test_database().await?;
+    let mut transaction = database.pool().begin().await?;
+
+    set_base_normalized_rederive_repeatable_read_from(&mut transaction, "test").await?;
+
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut *transaction)
+        .await?;
+    assert_eq!(isolation, "repeatable read");
+    transaction.rollback().await?;
+    Ok(())
 }
 
 #[tokio::test]

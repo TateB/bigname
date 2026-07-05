@@ -178,6 +178,9 @@ fn render_plan_reports_source_family_partition_and_both_cursors() {
     assert!(output.contains("expected_active_replay_target_snapshot_digest=keccak256:"));
     assert!(output.contains("active_manifest_snapshot: rows=0"));
     assert!(output.contains("expected_active_manifest_snapshot_digest=keccak256:"));
+    assert!(output.contains("count_contract: exact_expected_gated=[normalized_events,resources"));
+    assert!(output.contains("informational=[derivation_kind_partition"));
+    assert!(output.contains("rebuild_reset_only=[resolver_current,primary_names_current]"));
     assert!(output.contains("batch_plan:"));
     assert!(output.contains("step=normalized_events rows=56040812 estimated_batches=561"));
 }

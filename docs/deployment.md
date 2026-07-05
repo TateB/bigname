@@ -538,9 +538,9 @@ held advisory lock connection cannot starve the writer work.
 3. Review the printed derivation-kind/source-family partition, including the
    re-derivable delete count and explicitly kept nonreplay pairs such as
    `raw_log_preimage_observation` and non-closure source families;
-   identity/projection/change-log delete counts; raw-fact completeness proof,
-   including that the retained canonical Base raw-log floor is exactly block
-   `17571485`; the `ratified_dropped_orphan_emitters` line, which must report
+   identity/projection/change-log delete counts; deferred raw-fact safety line,
+   including that its canonical Base raw-log head is the reviewed replay target;
+   the `ratified_dropped_orphan_emitters` line, which must report
    exactly 3,939,502 legacy Basenames `ReverseRegistrar`
    `0x79ea96012eea67a83431f1701b3dff7e37f9e282` rows under
    `2026-07-05 option A` for `ens_v1_reverse_claim` /
@@ -557,6 +557,14 @@ held advisory lock connection cannot starve the writer work.
    affected current-projection replay marker count; run id, batch size, batch
    count/order; max affected block; replay target floor; and the replay reset target
    `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
+   The `delete_census` fields are exact and execute-gated by the matching
+   `--expected-*` arguments. The derivation-kind/source-family partition,
+   ratified dropped-emitter section, cursor-census breakdown, estimated batch
+   counts, and deferred raw-fact safety line are informational review aids.
+   `resolver_current` and `primary_names_current` are not per-row projection
+   delete counts for this correction; they are covered by the exact
+   `current_projection_replay_status` reset count because the later
+   all-current-projections replay rebuilds those families.
    That ratified dropped-emitter class remains part of the normalized-event
    delete count and is deliberately not re-derived; any other orphaned emitter
    still indicates an unsafe dry run and must hard-stop before execute.

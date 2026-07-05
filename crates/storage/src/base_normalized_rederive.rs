@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 mod batch;
 mod batch_plan;
@@ -63,6 +63,8 @@ pub const DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE: i64 = 100_000;
 
 pub(super) const BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY: &str =
     "bigname:indexer:drop-and-rederive-base-normalized-events:2026-07-03";
+const BASE_NORMALIZED_REDERIVE_REPEATABLE_READ_SQL: &str =
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseNormalizedRederiveDerivationKindCensus {
@@ -209,6 +211,7 @@ pub async fn load_base_normalized_rederive_plan(
         .begin()
         .await
         .context("failed to open Base normalized-event rederive dry-run transaction")?;
+    set_base_normalized_rederive_repeatable_read_from(&mut transaction, "dry-run").await?;
     validate_base_deployment_profile_owns_chain_from(&mut transaction, deployment_profile).await?;
     let (
         replay_target_block,
@@ -263,6 +266,19 @@ pub async fn load_base_normalized_rederive_plan(
         counts,
         raw_fact_completeness,
     })
+}
+
+async fn set_base_normalized_rederive_repeatable_read_from(
+    transaction: &mut Transaction<'_, Postgres>,
+    phase: &str,
+) -> Result<()> {
+    sqlx::query(BASE_NORMALIZED_REDERIVE_REPEATABLE_READ_SQL)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| {
+            format!("failed to set Base normalized-event rederive {phase} transaction isolation")
+        })?;
+    Ok(())
 }
 
 pub async fn execute_base_normalized_rederive_drop(

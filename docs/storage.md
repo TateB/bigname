@@ -111,6 +111,14 @@ The implementation owner is the indexer command
 maintainer review gate: it prints the exact live census by table,
 derivation-kind/source-family delete/keep partition, block range, active replay
 target and manifest snapshot digests, and replay reset target without writing.
+Every `delete_census` field is an exact execute gate: execute requires the
+corresponding `--expected-*` value and refuses review-to-write drift. The
+derivation-kind/source-family partition, ratified dropped-emitter section,
+cursor-census breakdown, estimated batch counts, and deferred raw-fact safety
+line are review visibility only. `resolver_current` and
+`primary_names_current` have no identity foreign key in this correction; they
+are represented by the exact gated `current_projection_replay_status` reset
+count instead of by per-row projection delete counts.
 The heavyweight raw-fact completeness anti-join and retained raw-log byte proof
 are intentionally deferred from dry-run and recomputed by execute-start under
 the advisory lock before any delete. The execute mode

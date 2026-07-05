@@ -336,6 +336,7 @@ fn render_plan(
             .post_replay_live_adapter_backlog_cursor_rows,
         plan.cursor_census.total_cursor_rows()
     ));
+    output.push_str(count_contract_line());
     output.push_str(&format!("delete_census: {:?}\n", plan.counts));
     output.push_str("batch_plan:\n");
     for step in batch_plan.steps {
@@ -355,6 +356,18 @@ fn render_plan(
         ));
     }
     Ok(output)
+}
+
+fn count_contract_line() -> &'static str {
+    concat!(
+        "count_contract: exact_expected_gated=[normalized_events,resources,token_lineages,",
+        "name_surfaces,surface_bindings,name_current,address_names_current,children_current,",
+        "permissions_current,record_inventory_current,projection_normalized_event_changes,",
+        "current_projection_replay_status,replay_cursor_rows,adapter_checkpoint_rows,",
+        "adapter_checkpoint_item_rows] informational=[derivation_kind_partition,",
+        "ratified_dropped_orphan_emitters,cursor_census_breakdown,batch_plan_estimated_batches,",
+        "raw_fact_safety] rebuild_reset_only=[resolver_current,primary_names_current]\n"
+    )
 }
 
 fn render_scope_rules() -> String {

@@ -17,22 +17,66 @@ pub(super) async fn load_counts_from(
     deployment_profile: &str,
     replay_target_block: i64,
 ) -> Result<BaseNormalizedRederiveCounts> {
-    let row = sqlx::query(counts_sql())
-        .bind(deployment_profile)
-        .bind(checkpoint_adapters())
-        .bind(cursor_kinds())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .bind(current_projection_replay_status_projections())
-        .fetch_one(&mut **transaction)
-        .await
-        .context("failed to load Base normalized-event rederive census")?;
-    counts_from_row(&row)
+    Ok(BaseNormalizedRederiveCounts {
+        normalized_events: load_scoped_event_count_from(transaction, replay_target_block).await?,
+        resources: load_count_from(transaction, resource_count_sql(), "resources").await?,
+        token_lineages: load_count_from(transaction, token_lineage_count_sql(), "token_lineages")
+            .await?,
+        name_surfaces: load_count_from(transaction, name_surface_count_sql(), "name_surfaces")
+            .await?,
+        surface_bindings: load_count_from(
+            transaction,
+            surface_binding_count_sql(),
+            "surface_bindings",
+        )
+        .await?,
+        name_current: load_count_from(transaction, name_current_count_sql(), "name_current")
+            .await?,
+        address_names_current: load_count_from(
+            transaction,
+            address_names_current_count_sql(),
+            "address_names_current",
+        )
+        .await?,
+        children_current: load_count_from(
+            transaction,
+            children_current_count_sql(),
+            "children_current",
+        )
+        .await?,
+        permissions_current: load_count_from(
+            transaction,
+            permissions_current_count_sql(),
+            "permissions_current",
+        )
+        .await?,
+        record_inventory_current: load_count_from(
+            transaction,
+            record_inventory_current_count_sql(),
+            "record_inventory_current",
+        )
+        .await?,
+        projection_normalized_event_changes: load_projection_change_count_from(
+            transaction,
+            replay_target_block,
+        )
+        .await?,
+        current_projection_replay_status: load_current_projection_replay_status_count_from(
+            transaction,
+        )
+        .await?,
+        replay_cursor_rows: load_replay_cursor_count_from(transaction, deployment_profile).await?,
+        adapter_checkpoint_rows: load_adapter_checkpoint_count_from(
+            transaction,
+            deployment_profile,
+        )
+        .await?,
+        adapter_checkpoint_item_rows: load_adapter_checkpoint_item_count_from(
+            transaction,
+            deployment_profile,
+        )
+        .await?,
+    })
 }
 
 pub(super) async fn load_derivation_kind_census_from(
@@ -116,119 +160,268 @@ pub(super) async fn load_reset_replay_cursor_target_block_from(
         .context("failed to load Base normalized-event rederive reset replay cursor target")
 }
 
-fn counts_sql() -> &'static str {
-    r#"
-    WITH
-    scoped_events AS (
-        SELECT normalized_event_id
-        FROM normalized_events
-        WHERE chain_id = 'base-mainnet'
-          AND block_number BETWEEN 17571485 AND $4
-          AND block_hash IS NOT NULL
-          AND (
-              (derivation_kind = $5 AND source_family = ANY($6::TEXT[]))
-              OR (derivation_kind = ANY($7::TEXT[]) AND source_family = ANY($8::TEXT[]))
-              OR (derivation_kind = $9 AND source_family = ANY($10::TEXT[]))
-          )
-    ),
-    scoped_resources AS (
-        SELECT resource_id
-        FROM resources
-        WHERE chain_id = 'base-mainnet'
-          AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'
-    ),
-    scoped_token_lineages AS (
-        SELECT token_lineage_id
-        FROM token_lineages
-        WHERE chain_id = 'base-mainnet'
-          AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'
-    ),
-    scoped_name_surfaces AS (
-        SELECT logical_name_id
-        FROM name_surfaces
-        WHERE chain_id = 'base-mainnet'
-          AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'
-    ),
-    scoped_surface_bindings AS (
-        SELECT surface_binding_id
-        FROM surface_bindings
-        WHERE chain_id = 'base-mainnet'
-          AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'
-    )
-    SELECT
-        (SELECT COUNT(*)::BIGINT FROM scoped_events) AS normalized_events,
-        (SELECT COUNT(*)::BIGINT FROM scoped_resources) AS resources,
-        (SELECT COUNT(*)::BIGINT FROM scoped_token_lineages) AS token_lineages,
-        (SELECT COUNT(*)::BIGINT FROM scoped_name_surfaces) AS name_surfaces,
-        (SELECT COUNT(*)::BIGINT FROM scoped_surface_bindings) AS surface_bindings,
-        (
-            SELECT COUNT(*)::BIGINT
-            FROM name_current p
-            WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)
-               OR EXISTS (SELECT 1 FROM scoped_token_lineages s WHERE s.token_lineage_id = p.token_lineage_id)
-               OR EXISTS (SELECT 1 FROM scoped_name_surfaces s WHERE s.logical_name_id = p.logical_name_id)
-               OR EXISTS (SELECT 1 FROM scoped_surface_bindings s WHERE s.surface_binding_id = p.surface_binding_id)
-        ) AS name_current,
-        (
-            SELECT COUNT(*)::BIGINT
-            FROM address_names_current p
-            WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)
-               OR EXISTS (SELECT 1 FROM scoped_token_lineages s WHERE s.token_lineage_id = p.token_lineage_id)
-               OR EXISTS (SELECT 1 FROM scoped_name_surfaces s WHERE s.logical_name_id = p.logical_name_id)
-               OR EXISTS (SELECT 1 FROM scoped_surface_bindings s WHERE s.surface_binding_id = p.surface_binding_id)
-        ) AS address_names_current,
-        (SELECT COUNT(*)::BIGINT FROM children_current p WHERE EXISTS (SELECT 1 FROM scoped_name_surfaces s WHERE s.logical_name_id IN (p.parent_logical_name_id, p.child_logical_name_id))) AS children_current,
-        (SELECT COUNT(*)::BIGINT FROM permissions_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS permissions_current,
-        (SELECT COUNT(*)::BIGINT FROM record_inventory_current p WHERE EXISTS (SELECT 1 FROM scoped_resources s WHERE s.resource_id = p.resource_id)) AS record_inventory_current,
-        (SELECT COUNT(*)::BIGINT FROM projection_normalized_event_changes p WHERE EXISTS (SELECT 1 FROM scoped_events s WHERE s.normalized_event_id = p.normalized_event_id)) AS projection_normalized_event_changes,
-        (SELECT COUNT(*)::BIGINT FROM current_projection_replay_status WHERE projection = ANY($11::TEXT[])) AS current_projection_replay_status,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[])) AS replay_cursor_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_rows,
-        (SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($3::TEXT[]) AND adapter = ANY($2::TEXT[])) AS adapter_checkpoint_item_rows
-    FROM (SELECT 1) AS one
-    "#
+async fn load_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sql: impl AsRef<str>,
+    count_name: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(sql.as_ref())
+        .fetch_one(&mut **transaction)
+        .await
+        .with_context(|| {
+            format!("failed to load Base normalized-event rederive {count_name} count")
+        })
 }
 
-fn counts_from_row(row: &sqlx::postgres::PgRow) -> Result<BaseNormalizedRederiveCounts> {
-    Ok(BaseNormalizedRederiveCounts {
-        normalized_events: row.try_get("normalized_events")?,
-        resources: row.try_get("resources")?,
-        token_lineages: row.try_get("token_lineages")?,
-        name_surfaces: row.try_get("name_surfaces")?,
-        surface_bindings: row.try_get("surface_bindings")?,
-        name_current: row.try_get("name_current")?,
-        address_names_current: row.try_get("address_names_current")?,
-        children_current: row.try_get("children_current")?,
-        permissions_current: row.try_get("permissions_current")?,
-        record_inventory_current: row.try_get("record_inventory_current")?,
-        projection_normalized_event_changes: row.try_get("projection_normalized_event_changes")?,
-        current_projection_replay_status: row.try_get("current_projection_replay_status")?,
-        replay_cursor_rows: row.try_get("replay_cursor_rows")?,
-        adapter_checkpoint_rows: row.try_get("adapter_checkpoint_rows")?,
-        adapter_checkpoint_item_rows: row.try_get("adapter_checkpoint_item_rows")?,
-    })
+async fn load_scoped_event_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replay_target_block: i64,
+) -> Result<i64> {
+    sqlx::query_scalar(scoped_event_count_sql())
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive normalized_events count")
+}
+
+async fn load_projection_change_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replay_target_block: i64,
+) -> Result<i64> {
+    let sql = projection_change_count_sql();
+    sqlx::query_scalar(&sql)
+        .bind(replay_target_block)
+        .bind(reverse_claim_derivation_kind())
+        .bind(reverse_claim_source_families())
+        .bind(subregistry_derivation_kinds())
+        .bind(subregistry_source_families())
+        .bind(unwrapped_authority_derivation_kind())
+        .bind(unwrapped_authority_source_families())
+        .fetch_one(&mut **transaction)
+        .await
+        .context(
+            "failed to load Base normalized-event rederive projection_normalized_event_changes count",
+        )
+}
+
+async fn load_current_projection_replay_status_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<i64> {
+    sqlx::query_scalar(current_projection_replay_status_count_sql())
+        .bind(current_projection_replay_status_projections())
+        .fetch_one(&mut **transaction)
+        .await
+        .context(
+            "failed to load Base normalized-event rederive current_projection_replay_status count",
+        )
+}
+
+async fn load_replay_cursor_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(replay_cursor_count_sql())
+        .bind(deployment_profile)
+        .bind(cursor_kinds())
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive replay_cursor_rows count")
+}
+
+async fn load_adapter_checkpoint_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(adapter_checkpoint_count_sql())
+        .bind(deployment_profile)
+        .bind(cursor_kinds())
+        .bind(checkpoint_adapters())
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive adapter_checkpoint_rows count")
+}
+
+async fn load_adapter_checkpoint_item_count_from(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deployment_profile: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(adapter_checkpoint_item_count_sql())
+        .bind(deployment_profile)
+        .bind(cursor_kinds())
+        .bind(checkpoint_adapters())
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to load Base normalized-event rederive adapter_checkpoint_item_rows count")
+}
+
+pub(super) fn scoped_event_count_sql() -> &'static str {
+    r#"SELECT COALESCE(SUM(row_count), 0)::BIGINT FROM (
+        SELECT COUNT(*)::BIGINT AS row_count FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = $2 AND source_family = ANY($3::TEXT[])
+        UNION ALL
+        SELECT COUNT(*)::BIGINT AS row_count FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[])
+        UNION ALL
+        SELECT COUNT(*)::BIGINT AS row_count FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = $6 AND source_family = ANY($7::TEXT[])
+    ) scoped_pair_counts"#
+}
+
+fn scoped_events_sql() -> &'static str {
+    r#"SELECT normalized_event_id FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = $2 AND source_family = ANY($3::TEXT[])
+    UNION ALL SELECT normalized_event_id FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[])
+    UNION ALL SELECT normalized_event_id FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND derivation_kind = $6 AND source_family = ANY($7::TEXT[])"#
+}
+
+pub(super) fn projection_change_count_sql() -> String {
+    format!(
+        "WITH scoped_events AS ({}) SELECT COUNT(*)::BIGINT FROM scoped_events event JOIN projection_normalized_event_changes change ON change.normalized_event_id = event.normalized_event_id",
+        scoped_events_sql()
+    )
+}
+
+fn scoped_identity_predicate_for(alias: &str) -> String {
+    format!(
+        "{alias}.chain_id = 'base-mainnet' AND {alias}.provenance->>'adapter' = 'ens_v1_unwrapped_authority'"
+    )
+}
+
+fn resource_count_sql() -> String {
+    scoped_identity_count_sql("resources")
+}
+
+fn token_lineage_count_sql() -> String {
+    scoped_identity_count_sql("token_lineages")
+}
+
+fn name_surface_count_sql() -> String {
+    scoped_identity_count_sql("name_surfaces")
+}
+
+fn surface_binding_count_sql() -> String {
+    scoped_identity_count_sql("surface_bindings")
+}
+
+fn scoped_identity_count_sql(table: &str) -> String {
+    format!(
+        "SELECT COUNT(*)::BIGINT FROM {table} WHERE chain_id = 'base-mainnet' AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'"
+    )
+}
+
+pub(super) fn name_current_count_sql() -> String {
+    identity_projection_count_sql(
+        "name_current",
+        &["projection.logical_name_id"],
+        &[
+            ("resources", RESOURCE_IDENTITY_JOIN),
+            ("token_lineages", TOKEN_LINEAGE_IDENTITY_JOIN),
+            ("name_surfaces", LOGICAL_NAME_IDENTITY_JOIN),
+            ("surface_bindings", SURFACE_BINDING_IDENTITY_JOIN),
+        ],
+    )
+}
+
+pub(super) fn address_names_current_count_sql() -> String {
+    identity_projection_count_sql(
+        "address_names_current",
+        &[
+            "projection.address",
+            "projection.logical_name_id",
+            "projection.relation",
+        ],
+        &[
+            ("resources", RESOURCE_IDENTITY_JOIN),
+            ("token_lineages", TOKEN_LINEAGE_IDENTITY_JOIN),
+            ("name_surfaces", LOGICAL_NAME_IDENTITY_JOIN),
+            ("surface_bindings", SURFACE_BINDING_IDENTITY_JOIN),
+        ],
+    )
+}
+
+pub(super) fn children_current_count_sql() -> String {
+    identity_projection_count_sql(
+        "children_current",
+        &[
+            "projection.parent_logical_name_id",
+            "projection.child_logical_name_id",
+            "projection.surface_class",
+        ],
+        &[
+            ("name_surfaces", PARENT_LOGICAL_NAME_IDENTITY_JOIN),
+            ("name_surfaces", CHILD_LOGICAL_NAME_IDENTITY_JOIN),
+        ],
+    )
+}
+
+const RESOURCE_IDENTITY_JOIN: &str = "projection.resource_id = identity_scope.resource_id";
+const TOKEN_LINEAGE_IDENTITY_JOIN: &str =
+    "projection.token_lineage_id = identity_scope.token_lineage_id";
+const LOGICAL_NAME_IDENTITY_JOIN: &str =
+    "projection.logical_name_id = identity_scope.logical_name_id";
+const SURFACE_BINDING_IDENTITY_JOIN: &str =
+    "projection.surface_binding_id = identity_scope.surface_binding_id";
+const PARENT_LOGICAL_NAME_IDENTITY_JOIN: &str =
+    "projection.parent_logical_name_id = identity_scope.logical_name_id";
+const CHILD_LOGICAL_NAME_IDENTITY_JOIN: &str =
+    "projection.child_logical_name_id = identity_scope.logical_name_id";
+
+fn identity_projection_count_sql(
+    projection_table: &str,
+    key_columns: &[&str],
+    branches: &[(&str, &str)],
+) -> String {
+    let key_select = key_columns.join(", ");
+    let scope_predicate = scoped_identity_predicate_for("identity_scope");
+    let union_branches = branches
+        .iter()
+        .map(|(scope_table, join_predicate)| {
+            format!(
+                "SELECT {key_select} FROM {scope_table} identity_scope JOIN {projection_table} projection ON {join_predicate} WHERE {scope_predicate}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\nUNION\n");
+    format!(
+        "WITH scoped_projection_keys AS ({union_branches}) SELECT COUNT(*)::BIGINT FROM scoped_projection_keys"
+    )
+}
+
+pub(super) fn permissions_current_count_sql() -> String {
+    resource_projection_count_sql("permissions_current")
+}
+
+pub(super) fn record_inventory_current_count_sql() -> String {
+    resource_projection_count_sql("record_inventory_current")
+}
+
+fn resource_projection_count_sql(projection_table: &str) -> String {
+    format!(
+        "SELECT COUNT(*)::BIGINT FROM resources identity_scope JOIN {projection_table} projection ON projection.resource_id = identity_scope.resource_id WHERE {}",
+        scoped_identity_predicate_for("identity_scope")
+    )
+}
+
+fn current_projection_replay_status_count_sql() -> &'static str {
+    "SELECT COUNT(*)::BIGINT FROM current_projection_replay_status WHERE projection = ANY($1::TEXT[])"
+}
+
+fn replay_cursor_count_sql() -> &'static str {
+    "SELECT COUNT(*)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($2::TEXT[])"
+}
+
+fn adapter_checkpoint_count_sql() -> &'static str {
+    "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($2::TEXT[]) AND adapter = ANY($3::TEXT[])"
+}
+
+fn adapter_checkpoint_item_count_sql() -> &'static str {
+    "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items WHERE deployment_profile = $1 AND chain_id = 'base-mainnet' AND cursor_kind = ANY($2::TEXT[]) AND adapter = ANY($3::TEXT[])"
 }
 
 fn derivation_kind_census_sql() -> &'static str {
-    r#"
-    SELECT
-        derivation_kind,
-        source_family,
-        COUNT(*)::BIGINT AS row_count,
-        MIN(block_number)::BIGINT AS min_block_number,
-        MAX(block_number)::BIGINT AS max_block_number,
-        (
-            (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
-            OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
-            OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
-        ) AS rederivable
-    FROM normalized_events
-    WHERE chain_id = 'base-mainnet'
-      AND block_number BETWEEN 17571485 AND $1
-      AND block_hash IS NOT NULL
-    GROUP BY derivation_kind, source_family, rederivable
-    ORDER BY rederivable DESC, derivation_kind, source_family
-    "#
+    r#"SELECT derivation_kind, source_family, COUNT(*)::BIGINT AS row_count, MIN(block_number)::BIGINT AS min_block_number, MAX(block_number)::BIGINT AS max_block_number, ((derivation_kind = $2 AND source_family = ANY($3::TEXT[])) OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[])) OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))) AS rederivable FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL GROUP BY derivation_kind, source_family, rederivable ORDER BY rederivable DESC, derivation_kind, source_family"#
 }
 
 fn derivation_kind_census_rows(
@@ -249,15 +442,7 @@ fn derivation_kind_census_rows(
 }
 
 fn cursor_census_sql() -> &'static str {
-    r#"
-    SELECT cursor_kind, COUNT(*)::BIGINT AS row_count
-    FROM normalized_replay_cursors
-    WHERE deployment_profile = $1
-      AND chain_id = $2
-      AND cursor_kind = ANY($3::TEXT[])
-    GROUP BY cursor_kind
-    ORDER BY cursor_kind
-    "#
+    "SELECT cursor_kind, COUNT(*)::BIGINT AS row_count FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = $2 AND cursor_kind = ANY($3::TEXT[]) GROUP BY cursor_kind ORDER BY cursor_kind"
 }
 
 fn cursor_census_rows(
@@ -365,30 +550,11 @@ fn raw_fact_completeness_sql() -> &'static str {
 }
 
 fn max_affected_block_sql() -> &'static str {
-    r#"
-    SELECT MAX(block_number)::BIGINT
-    FROM normalized_events
-    WHERE chain_id = 'base-mainnet'
-      AND block_number BETWEEN 17571485 AND $1
-      AND block_hash IS NOT NULL
-      AND (
-          (derivation_kind = $2 AND source_family = ANY($3::TEXT[]))
-          OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[]))
-          OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[]))
-      )
-    "#
+    r#"SELECT MAX(block_number)::BIGINT FROM normalized_events WHERE chain_id = 'base-mainnet' AND block_number BETWEEN 17571485 AND $1 AND block_hash IS NOT NULL AND ((derivation_kind = $2 AND source_family = ANY($3::TEXT[])) OR (derivation_kind = ANY($4::TEXT[]) AND source_family = ANY($5::TEXT[])) OR (derivation_kind = $6 AND source_family = ANY($7::TEXT[])))"#
 }
 
 fn reset_replay_cursor_target_block_sql() -> &'static str {
-    r#"
-    SELECT MAX(target_block_number)::BIGINT
-    FROM normalized_replay_cursors
-    WHERE deployment_profile = $1
-      AND chain_id = $2
-      AND cursor_kind = $3
-      AND range_start_block_number = $4
-      AND COALESCE(last_completed_block_number, range_start_block_number - 1) < target_block_number
-    "#
+    "SELECT MAX(target_block_number)::BIGINT FROM normalized_replay_cursors WHERE deployment_profile = $1 AND chain_id = $2 AND cursor_kind = $3 AND range_start_block_number = $4 AND COALESCE(last_completed_block_number, range_start_block_number - 1) < target_block_number"
 }
 
 fn raw_fact_completeness_from_row(
