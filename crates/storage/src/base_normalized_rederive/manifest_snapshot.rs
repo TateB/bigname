@@ -66,6 +66,263 @@ fn active_manifest_snapshot_from_rows(
 
 fn active_manifest_snapshot_sql() -> &'static str {
     r#"
+    WITH active_base_manifests AS (
+        SELECT
+            mv.manifest_id,
+            mv.manifest_version,
+            mv.namespace,
+            mv.source_family,
+            mv.chain,
+            mv.deployment_epoch,
+            mv.normalizer_version,
+            mv.file_path,
+            mv.manifest_payload
+        FROM manifest_versions mv
+        WHERE mv.rollout_status = 'active'::manifest_rollout_status
+          AND mv.chain = 'base-mainnet'
+    ),
+    manifest_snapshot_rows AS (
+        SELECT
+            mcf.manifest_id,
+            'capability_flags'::TEXT AS collection_name,
+            mcf.capability_name AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(mcf.capability_name, mcf.status::TEXT, mcf.notes)::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM manifest_capability_flags mcf
+        JOIN active_base_manifests mv ON mv.manifest_id = mcf.manifest_id
+
+        UNION ALL
+
+        SELECT
+            mdr.manifest_id,
+            'discovery_rules'::TEXT AS collection_name,
+            concat_ws('|', mdr.edge_kind, mdr.from_role, mdr.admission, mdr.rule_payload::TEXT)
+                AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(
+                        mdr.edge_kind,
+                        mdr.from_role,
+                        mdr.admission,
+                        mdr.rule_payload
+                    )::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM manifest_discovery_rules mdr
+        JOIN active_base_manifests mv ON mv.manifest_id = mdr.manifest_id
+
+        UNION ALL
+
+        SELECT
+            mci.manifest_id,
+            'contract_instances'::TEXT AS collection_name,
+            'manifest_contract_instance:' || mci.manifest_contract_instance_id::TEXT AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(
+                        'manifest_contract_instance',
+                        mci.manifest_contract_instance_id,
+                        mci.declaration_kind,
+                        mci.declaration_name,
+                        mci.contract_instance_id::TEXT,
+                        lower(mci.declared_address),
+                        mci.code_hash,
+                        mci.abi_ref,
+                        mci.role,
+                        mci.proxy_kind,
+                        mci.implementation_contract_instance_id::TEXT,
+                        lower(mci.declared_implementation_address)
+                    )::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM manifest_contract_instances mci
+        JOIN active_base_manifests mv ON mv.manifest_id = mci.manifest_id
+
+        UNION ALL
+
+        SELECT
+            cia.source_manifest_id AS manifest_id,
+            'contract_instances'::TEXT AS collection_name,
+            'active_address:' || cia.contract_instance_address_id::TEXT AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(
+                        'active_address',
+                        cia.contract_instance_address_id,
+                        cia.contract_instance_id::TEXT,
+                        cia.chain_id,
+                        lower(cia.address),
+                        cia.active_from_block_number,
+                        cia.active_from_block_hash,
+                        cia.active_to_block_number,
+                        cia.active_to_block_hash,
+                        cia.source_manifest_id,
+                        cia.provenance
+                    )::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM contract_instance_addresses cia
+        JOIN active_base_manifests mv ON mv.manifest_id = cia.source_manifest_id
+        WHERE cia.deactivated_at IS NULL
+
+        UNION ALL
+
+        SELECT
+            mci.manifest_id,
+            'contract_instances'::TEXT AS collection_name,
+            'active_address:' || cia.contract_instance_address_id::TEXT AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(
+                        'active_address',
+                        cia.contract_instance_address_id,
+                        cia.contract_instance_id::TEXT,
+                        cia.chain_id,
+                        lower(cia.address),
+                        cia.active_from_block_number,
+                        cia.active_from_block_hash,
+                        cia.active_to_block_number,
+                        cia.active_to_block_hash,
+                        cia.source_manifest_id,
+                        cia.provenance
+                    )::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM manifest_contract_instances mci
+        JOIN active_base_manifests mv ON mv.manifest_id = mci.manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+        WHERE cia.deactivated_at IS NULL
+          AND cia.source_manifest_id IS DISTINCT FROM mci.manifest_id
+
+        UNION ALL
+
+        SELECT
+            de.source_manifest_id AS manifest_id,
+            'discovery_edges'::TEXT AS collection_name,
+            de.discovery_edge_id::TEXT AS row_key,
+            encode(
+                sha256(convert_to(
+                    jsonb_build_array(
+                        de.discovery_edge_id,
+                        de.chain_id,
+                        de.edge_kind,
+                        de.from_contract_instance_id::TEXT,
+                        de.to_contract_instance_id::TEXT,
+                        de.discovery_source,
+                        de.source_manifest_id,
+                        de.admission,
+                        de.active_from_block_number,
+                        de.active_from_block_hash,
+                        de.active_to_block_number,
+                        de.active_to_block_hash,
+                        de.provenance
+                    )::TEXT,
+                    'UTF8'
+                )),
+                'hex'
+            ) AS row_hash
+        FROM discovery_edges de
+        JOIN active_base_manifests mv ON mv.manifest_id = de.source_manifest_id
+        WHERE de.deactivated_at IS NULL
+    ),
+    manifest_snapshot_row_hash_limbs AS (
+        SELECT
+            manifest_id,
+            collection_name,
+            row_key,
+            (('x' || substr(row_hash, 1, 8))::BIT(32)::BIGINT) AS limb_0,
+            (('x' || substr(row_hash, 9, 8))::BIT(32)::BIGINT) AS limb_1,
+            (('x' || substr(row_hash, 17, 8))::BIT(32)::BIGINT) AS limb_2,
+            (('x' || substr(row_hash, 25, 8))::BIT(32)::BIGINT) AS limb_3,
+            (('x' || substr(row_hash, 33, 8))::BIT(32)::BIGINT) AS limb_4,
+            (('x' || substr(row_hash, 41, 8))::BIT(32)::BIGINT) AS limb_5,
+            (('x' || substr(row_hash, 49, 8))::BIT(32)::BIGINT) AS limb_6,
+            (('x' || substr(row_hash, 57, 8))::BIT(32)::BIGINT) AS limb_7
+        FROM manifest_snapshot_rows
+    ),
+    manifest_snapshot_collection_summaries AS (
+        SELECT
+            manifest_id,
+            collection_name,
+            jsonb_build_object(
+                'digest_kind', 'base_active_manifest_collection_digest_v1',
+                'hash_algorithm', 'sha256',
+                'combine', 'count-min-max-sum-xor-u32-limbs',
+                'collection', collection_name,
+                'row_count', COUNT(*)::BIGINT,
+                'row_key_min', MIN(row_key),
+                'row_key_max', MAX(row_key),
+                'sha256_limb_sums', jsonb_build_array(
+                    COALESCE(SUM(limb_0::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_1::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_2::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_3::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_4::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_5::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_6::NUMERIC), 0)::TEXT,
+                    COALESCE(SUM(limb_7::NUMERIC), 0)::TEXT
+                ),
+                'sha256_limb_xors', jsonb_build_array(
+                    COALESCE(bit_xor(limb_0), 0)::TEXT,
+                    COALESCE(bit_xor(limb_1), 0)::TEXT,
+                    COALESCE(bit_xor(limb_2), 0)::TEXT,
+                    COALESCE(bit_xor(limb_3), 0)::TEXT,
+                    COALESCE(bit_xor(limb_4), 0)::TEXT,
+                    COALESCE(bit_xor(limb_5), 0)::TEXT,
+                    COALESCE(bit_xor(limb_6), 0)::TEXT,
+                    COALESCE(bit_xor(limb_7), 0)::TEXT
+                )
+            ) AS rows
+        FROM manifest_snapshot_row_hash_limbs
+        GROUP BY manifest_id, collection_name
+    ),
+    manifest_snapshot_empty_collections AS (
+        SELECT mv.manifest_id, collection.collection_name
+        FROM active_base_manifests mv
+        CROSS JOIN (
+            VALUES
+                ('capability_flags'::TEXT),
+                ('discovery_rules'::TEXT),
+                ('contract_instances'::TEXT),
+                ('discovery_edges'::TEXT)
+        ) AS collection(collection_name)
+    ),
+    manifest_snapshot_summaries AS (
+        SELECT
+            empty.manifest_id,
+            empty.collection_name,
+            COALESCE(summary.rows, jsonb_build_object(
+                'digest_kind', 'base_active_manifest_collection_digest_v1',
+                'hash_algorithm', 'sha256',
+                'combine', 'count-min-max-sum-xor-u32-limbs',
+                'collection', empty.collection_name,
+                'row_count', 0,
+                'row_key_min', NULL,
+                'row_key_max', NULL,
+                'sha256_limb_sums',
+                    jsonb_build_array('0', '0', '0', '0', '0', '0', '0', '0'),
+                'sha256_limb_xors',
+                    jsonb_build_array('0', '0', '0', '0', '0', '0', '0', '0')
+            )) AS rows
+        FROM manifest_snapshot_empty_collections empty
+        LEFT JOIN manifest_snapshot_collection_summaries summary
+          ON summary.manifest_id = empty.manifest_id
+         AND summary.collection_name = empty.collection_name
+    )
     SELECT
         mv.manifest_id,
         mv.manifest_version,
@@ -76,116 +333,23 @@ fn active_manifest_snapshot_sql() -> &'static str {
         mv.normalizer_version,
         mv.file_path,
         mv.manifest_payload,
-        COALESCE(capability_flags.rows, '[]'::jsonb) AS capability_flags,
-        COALESCE(discovery_rules.rows, '[]'::jsonb) AS discovery_rules,
-        COALESCE(contract_instances.rows, '[]'::jsonb) AS contract_instances,
-        COALESCE(discovery_edges.rows, '[]'::jsonb) AS discovery_edges
-    FROM manifest_versions mv
-    LEFT JOIN LATERAL (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'capability_name', mcf.capability_name,
-                'status', mcf.status::text,
-                'notes', mcf.notes
-            )
-            ORDER BY mcf.capability_name, mcf.status::text, mcf.notes
-        ) AS rows
-        FROM manifest_capability_flags mcf
-        WHERE mcf.manifest_id = mv.manifest_id
-    ) capability_flags ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'edge_kind', mdr.edge_kind,
-                'from_role', mdr.from_role,
-                'admission', mdr.admission,
-                'rule_payload', mdr.rule_payload
-            )
-            ORDER BY mdr.edge_kind, mdr.from_role, mdr.admission, mdr.rule_payload::text
-        ) AS rows
-        FROM manifest_discovery_rules mdr
-        WHERE mdr.manifest_id = mv.manifest_id
-    ) discovery_rules ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'manifest_contract_instance_id', mci.manifest_contract_instance_id,
-                'declaration_kind', mci.declaration_kind,
-                'declaration_name', mci.declaration_name,
-                'contract_instance_id', mci.contract_instance_id::text,
-                'declared_address', lower(mci.declared_address),
-                'code_hash', mci.code_hash,
-                'abi_ref', mci.abi_ref,
-                'role', mci.role,
-                'proxy_kind', mci.proxy_kind,
-                'implementation_contract_instance_id', mci.implementation_contract_instance_id::text,
-                'declared_implementation_address', lower(mci.declared_implementation_address),
-                'active_addresses', COALESCE(active_addresses.rows, '[]'::jsonb)
-            )
-            ORDER BY mci.declaration_kind,
-                     mci.declaration_name,
-                     lower(mci.declared_address),
-                     mci.contract_instance_id::text,
-                     mci.manifest_contract_instance_id
-        ) AS rows
-        FROM manifest_contract_instances mci
-        LEFT JOIN LATERAL (
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'contract_instance_address_id', cia.contract_instance_address_id,
-                    'chain_id', cia.chain_id,
-                    'address', lower(cia.address),
-                    'active_from_block_number', cia.active_from_block_number,
-                    'active_from_block_hash', cia.active_from_block_hash,
-                    'active_to_block_number', cia.active_to_block_number,
-                    'active_to_block_hash', cia.active_to_block_hash,
-                    'source_manifest_id', cia.source_manifest_id,
-                    'provenance', cia.provenance
-                )
-                ORDER BY cia.chain_id,
-                         lower(cia.address),
-                         cia.active_from_block_number,
-                         cia.active_to_block_number,
-                         cia.source_manifest_id,
-                         cia.contract_instance_address_id
-            ) AS rows
-            FROM contract_instance_addresses cia
-            WHERE cia.contract_instance_id = mci.contract_instance_id
-              AND cia.deactivated_at IS NULL
-        ) active_addresses ON TRUE
-        WHERE mci.manifest_id = mv.manifest_id
-    ) contract_instances ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'discovery_edge_id', de.discovery_edge_id,
-                'chain_id', de.chain_id,
-                'edge_kind', de.edge_kind,
-                'from_contract_instance_id', de.from_contract_instance_id::text,
-                'to_contract_instance_id', de.to_contract_instance_id::text,
-                'discovery_source', de.discovery_source,
-                'source_manifest_id', de.source_manifest_id,
-                'admission', de.admission,
-                'active_from_block_number', de.active_from_block_number,
-                'active_from_block_hash', de.active_from_block_hash,
-                'active_to_block_number', de.active_to_block_number,
-                'active_to_block_hash', de.active_to_block_hash,
-                'provenance', de.provenance
-            )
-            ORDER BY de.chain_id,
-                     de.edge_kind,
-                     de.from_contract_instance_id::text,
-                     de.to_contract_instance_id::text,
-                     de.active_from_block_number,
-                     de.active_to_block_number,
-                     de.discovery_edge_id
-        ) AS rows
-        FROM discovery_edges de
-        WHERE de.source_manifest_id = mv.manifest_id
-          AND de.deactivated_at IS NULL
-    ) discovery_edges ON TRUE
-    WHERE mv.rollout_status = 'active'::manifest_rollout_status
-      AND mv.chain = 'base-mainnet'
+        capability_flags.rows AS capability_flags,
+        discovery_rules.rows AS discovery_rules,
+        contract_instances.rows AS contract_instances,
+        discovery_edges.rows AS discovery_edges
+    FROM active_base_manifests mv
+    JOIN manifest_snapshot_summaries capability_flags
+      ON capability_flags.manifest_id = mv.manifest_id
+     AND capability_flags.collection_name = 'capability_flags'
+    JOIN manifest_snapshot_summaries discovery_rules
+      ON discovery_rules.manifest_id = mv.manifest_id
+     AND discovery_rules.collection_name = 'discovery_rules'
+    JOIN manifest_snapshot_summaries contract_instances
+      ON contract_instances.manifest_id = mv.manifest_id
+     AND contract_instances.collection_name = 'contract_instances'
+    JOIN manifest_snapshot_summaries discovery_edges
+      ON discovery_edges.manifest_id = mv.manifest_id
+     AND discovery_edges.collection_name = 'discovery_edges'
     ORDER BY mv.namespace,
              mv.source_family,
              mv.deployment_epoch,

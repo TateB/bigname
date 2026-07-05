@@ -270,18 +270,22 @@ same-source-family coverage. Apart from the explicit 2026-07-05 deliberate-drop
 class, these are hard stops because the correction may only delete rows that
 current full-closure replay can recreate from retained raw facts.
 The completed run records both the reviewed active replay target/range snapshot
-and the full active Base manifest snapshot, including active manifest payloads
-and manifest-linked contract/discovery rows. While the reset cursor is still
-pending replay, the catch-up replay path checks the current active snapshots
-against those reviewed snapshots and refuses to replay if a different manifest
-image was synced after review, even when the replay target addresses and ranges
-would otherwise be unchanged. Repository manifest sync is skipped while the
-reviewed completed run's reset cursor is still pending; the indexer builds
-runtime state from the already-stored reviewed manifest snapshot so another
-indexer cannot rotate the stored active manifest state between the replay guard
-and the full-closure adapter reads. A skipped repository refresh remains marked
-for retry, so the same long-running indexer syncs the repository normally once
-the pending reset replay cursor completes.
+and the reviewed active Base manifest snapshot. Active manifest payloads remain
+stored directly; manifest-linked capability flags, discovery rules, contract
+instances, active addresses, and active discovery edges are stored as
+deterministic compact row-summary digests rather than full row arrays, so the
+review pin detects manifest-linked row additions, removals, and modifications
+without materializing the live discovery graph as one JSON value. While the
+reset cursor is still pending replay, the catch-up replay path checks the
+current active snapshots against those reviewed snapshots and refuses to replay
+if a different manifest image was synced after review, even when the replay
+target addresses and ranges would otherwise be unchanged. Repository manifest
+sync is skipped while the reviewed completed run's reset cursor is still
+pending; the indexer builds runtime state from the already-stored reviewed
+manifest snapshot so another indexer cannot rotate the stored active manifest
+state between the replay guard and the full-closure adapter reads. A skipped
+repository refresh remains marked for retry, so the same long-running indexer
+syncs the repository normally once the pending reset replay cursor completes.
 Because the delete scope is global for `base-mainnet` while replay reset is
 profile-scoped, dry-run and execute also require the requested deployment
 profile to own an existing `base-mainnet/raw_fact_normalized_events` replay

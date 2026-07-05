@@ -1895,6 +1895,152 @@ async fn execute_refuses_remaining_normalized_event_identity_anchors() -> Result
 }
 
 #[tokio::test]
+async fn active_manifest_snapshot_uses_compact_digests_and_tracks_edge_changes() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+
+    let first = active_manifest_snapshot_digest(database.pool()).await?;
+    let repeat = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_eq!(repeat, first);
+
+    let plan =
+        load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
+    let manifest = plan
+        .active_manifest_snapshot
+        .iter()
+        .find(|manifest| manifest.manifest_id == 1)
+        .expect("fixture manifest exists");
+    for collection in [
+        &manifest.capability_flags,
+        &manifest.discovery_rules,
+        &manifest.contract_instances,
+        &manifest.discovery_edges,
+    ] {
+        assert!(!collection.is_array());
+        assert_eq!(
+            collection
+                .get("digest_kind")
+                .and_then(serde_json::Value::as_str),
+            Some("base_active_manifest_collection_digest_v1")
+        );
+        assert_eq!(
+            collection
+                .get("hash_algorithm")
+                .and_then(serde_json::Value::as_str),
+            Some("sha256")
+        );
+    }
+    assert_eq!(
+        manifest
+            .discovery_edges
+            .get("row_count")
+            .and_then(serde_json::Value::as_i64),
+        Some(0)
+    );
+
+    // Scale guard: active discovery edges stay represented by a bounded digest
+    // object, not by a jsonb_agg array that grows with every live edge.
+    let edge_id = seed_manifest_snapshot_discovery_edge(database.pool(), 1).await?;
+    let inserted = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(inserted, first);
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET admission = 'modified_manifest_snapshot_admission'
+        WHERE discovery_edge_id = $1
+        "#,
+    )
+    .bind(edge_id)
+    .execute(database.pool())
+    .await?;
+    let modified = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(modified, inserted);
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE discovery_edge_id = $1
+        "#,
+    )
+    .bind(edge_id)
+    .execute(database.pool())
+    .await?;
+    let removed = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(removed, modified);
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_capability_flags (manifest_id, capability_name, status, notes)
+        VALUES (1, 'manifest_snapshot_scale_test', 'shadow', 'digest coverage')
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let capability_changed = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(capability_changed, removed);
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_discovery_rules (
+            manifest_id, edge_kind, from_role, admission, rule_payload
+        )
+        VALUES (
+            1,
+            'manifest_snapshot_scale_test',
+            'replay_target_1',
+            'reachable_from_root',
+            jsonb_build_object('digest', 'coverage')
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let rule_changed = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(rule_changed, capability_changed);
+
+    sqlx::query(
+        r#"
+        UPDATE manifest_contract_instances
+        SET code_hash = '0xmanifest-snapshot-scale-test'
+        WHERE manifest_id = 1
+          AND declaration_kind = 'contract'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let contract_instance_changed = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(contract_instance_changed, rule_changed);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_manifest_snapshot_digest_tracks_active_address_changes() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let before = active_manifest_snapshot_digest(database.pool()).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET provenance = jsonb_build_object('manifest_snapshot_scale_test', true)
+        WHERE source_manifest_id = 1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let after = active_manifest_snapshot_digest(database.pool()).await?;
+    assert_ne!(after, before);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn dry_run_defaults_replay_target_to_canonical_raw_log_head() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -2151,6 +2297,11 @@ async fn reviewed_counts(pool: &PgPool) -> Result<BaseNormalizedRederiveExpected
     expected_from_plan(&plan)
 }
 
+async fn active_manifest_snapshot_digest(pool: &PgPool) -> Result<String> {
+    let plan = load_base_normalized_rederive_plan(pool, DEPLOYMENT_PROFILE, None).await?;
+    base_normalized_rederive_json_digest(&plan.active_manifest_snapshot)
+}
+
 fn expected_from_plan(
     plan: &BaseNormalizedRederivePlan,
 ) -> Result<BaseNormalizedRederiveExpectedCounts> {
@@ -2350,6 +2501,72 @@ async fn seed_extra_active_replay_target(pool: &PgPool, manifest_id: i64) -> Res
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn seed_manifest_snapshot_discovery_edge(pool: &PgPool, manifest_id: i64) -> Result<i64> {
+    let from_contract_instance_id = Uuid::from_u128(0x9000_u128 + manifest_id as u128);
+    let to_contract_instance_id = Uuid::from_u128(0xD000_u128 + manifest_id as u128);
+    let address = format!("0x000000000000000000000000000000000000d{manifest_id:03x}");
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id, chain_id, contract_kind, provenance
+        )
+        VALUES ($1, 'base-mainnet', 'test_manifest_snapshot_discovery', '{}'::jsonb)
+        "#,
+    )
+    .bind(to_contract_instance_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address, active_from_block_number,
+            source_manifest_id, provenance
+        )
+        VALUES ($1, 'base-mainnet', $2, $3, $4, '{}'::jsonb)
+        "#,
+    )
+    .bind(to_contract_instance_id)
+    .bind(&address)
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let edge_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            provenance
+        )
+        VALUES (
+            'base-mainnet',
+            'migration',
+            $1,
+            $2,
+            'manifest_snapshot_scale_test',
+            $3,
+            'manifest_successor',
+            $4,
+            jsonb_build_object('test', 'manifest_snapshot_scale')
+        )
+        RETURNING discovery_edge_id
+        "#,
+    )
+    .bind(from_contract_instance_id)
+    .bind(to_contract_instance_id)
+    .bind(manifest_id)
+    .bind(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK)
+    .fetch_one(pool)
+    .await?;
+    Ok(edge_id)
 }
 
 async fn seed_split_active_replay_target(

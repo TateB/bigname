@@ -653,15 +653,17 @@ held advisory lock connection cannot starve the writer work.
    replay from block `17571485` through the reviewed target block. Keep the API
    drained. Run this from the same reviewed manifest image/root used for dry-run
    and execute. The catch-up path compares both the current active Base replay
-   target/range snapshot and the full active manifest snapshot with the
-   completed run's reviewed snapshots before replaying; if either differs, it
-   bails before re-emitting rows. While this completed correction reset cursor
-   is still pending replay, the indexer skips repository manifest sync and
-   builds runtime state from the already-stored reviewed manifest snapshot, so
-   a second indexer cannot rotate the stored manifest snapshot during
-   full-closure re-derivation. The skipped repository refresh remains marked for
-   retry, so the same long-running indexer syncs normally once the pending reset
-   replay cursor completes. The final reset already
+   target/range snapshot and the active manifest snapshot with the completed
+   run's reviewed snapshots before replaying; the active manifest snapshot
+   stores manifest payloads directly and manifest-linked row collections as
+   deterministic compact summaries. If either snapshot differs, catch-up bails
+   before re-emitting rows. While this completed correction reset cursor is
+   still pending replay, the indexer skips repository manifest sync and builds
+   runtime state from the already-stored reviewed manifest snapshot, so a second
+   indexer cannot rotate the stored manifest snapshot during full-closure
+   re-derivation. The skipped repository refresh remains marked for retry, so
+   the same long-running indexer syncs normally once the pending reset replay
+   cursor completes. The final reset already
    validated that the retained canonical Base raw-log floor equals block
    `17571485`; catch-up repeats that check while the reset cursor is pending, so
    normal cursor refresh cannot widen this correction replay below the delete
