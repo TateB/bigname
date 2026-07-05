@@ -3,12 +3,13 @@ use std::{collections::BTreeSet, str::FromStr, time::Duration};
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use sqlx::{
-    ConnectOptions, PgPool,
+    ConnectOptions, PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use super::run_snapshot;
 use super::*;
 
 const DEPLOYMENT_PROFILE: &str = "mainnet";
@@ -130,6 +131,61 @@ fn base_rederive_scope_index_migration_is_no_transaction() {
             "migration {version} must not use a DDL transaction"
         );
     }
+}
+
+#[test]
+fn run_state_plan_snapshot_uses_digests_for_large_active_targets() -> Result<()> {
+    let active_replay_target_snapshot = (0..10_000)
+        .map(|index| BaseNormalizedRederiveReplayTargetSnapshot {
+            replay_adapter: "ens_v1_unwrapped_authority".to_owned(),
+            source_family: "basenames_base_registry".to_owned(),
+            address: format!("0x{index:040x}"),
+            from_block: BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+            to_block: FIXTURE_REPLAY_TARGET_BLOCK,
+        })
+        .collect::<Vec<_>>();
+    let plan = BaseNormalizedRederivePlan {
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
+        replay_target_block: FIXTURE_REPLAY_TARGET_BLOCK,
+        max_affected_block: Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        replay_target_floor_block: Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        derivation_kind_census: Vec::new(),
+        ratified_dropped_orphan_emitter_census: Vec::new(),
+        active_replay_target_snapshot,
+        active_manifest_snapshot: Vec::new(),
+        raw_fact_range_proof: BaseNormalizedRederiveRawFactRangeProof::default(),
+        raw_fact_safety_checks_deferred: false,
+        cursor_census: BaseNormalizedRederiveCursorCensus::default(),
+        counts: BaseNormalizedRederiveCounts::default(),
+        raw_fact_completeness: BaseNormalizedRederiveRawFactCompleteness {
+            replay_target_block: FIXTURE_REPLAY_TARGET_BLOCK,
+            log_derived_event_count: 0,
+            missing_log_derived_raw_fact_count: 0,
+            boundary_event_count: 0,
+            missing_boundary_lineage_count: 0,
+            canonical_raw_log_min_block: Some(BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK),
+            canonical_raw_log_max_block: Some(FIXTURE_REPLAY_TARGET_BLOCK),
+            canonical_raw_log_head_block: Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        },
+    };
+
+    let snapshot = run_snapshot::BaseNormalizedRederiveRunPlanSnapshot::from_plan(&plan)?;
+    let value = run_snapshot::run_state_json_bind_value("plan_snapshot", &snapshot)?;
+    let full_plan_bytes = run_snapshot::serialized_json_size_bytes(&plan)?;
+    let bytes = run_snapshot::serialized_json_value_size_bytes(&value)?;
+    println!("large_snapshot_full_plan_bytes={full_plan_bytes} digest_plan_snapshot_bytes={bytes}");
+
+    assert!(
+        bytes < 16 * 1024,
+        "digest-only plan_snapshot should be KB-scale, got {bytes} bytes"
+    );
+    assert!(bytes < run_snapshot::MAX_RUN_STATE_JSON_BIND_BYTES);
+    assert!(bytes < run_snapshot::POSTGRES_BINARY_PROTOCOL_VALUE_LIMIT_BYTES);
+    assert!(value.get("active_replay_target_snapshot").is_none());
+    assert!(value.get("active_manifest_snapshot").is_none());
+    assert!(value.get("active_replay_target_snapshot_digest").is_some());
+    assert!(value.get("active_manifest_snapshot_digest").is_some());
+    Ok(())
 }
 
 #[test]
@@ -486,6 +542,148 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
 }
 
 #[tokio::test]
+async fn run_state_insert_persists_digest_only_plan_snapshot_and_resume_validates_it() -> Result<()>
+{
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    let created = execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        0,
+    )
+    .await?;
+    assert_eq!(created.deleted, BaseNormalizedRederiveCounts::default());
+    assert_eq!(
+        count_text_table(
+            database.pool(),
+            "normalized_events",
+            "event_identity",
+            "scoped-log",
+        )
+        .await?,
+        1
+    );
+
+    let row = sqlx::query(
+        r#"
+        SELECT plan_snapshot,
+               octet_length(run_id::TEXT)::BIGINT AS run_id_bytes,
+               octet_length(deployment_profile::TEXT)::BIGINT AS deployment_profile_bytes,
+               octet_length(chain_id::TEXT)::BIGINT AS chain_id_bytes,
+               octet_length(current_step::TEXT)::BIGINT AS current_step_bytes,
+               8::BIGINT AS replay_target_block_bytes,
+               8::BIGINT AS batch_size_bytes,
+               octet_length(expected_counts::TEXT)::BIGINT AS expected_counts_bytes,
+               octet_length(deleted_counts::TEXT)::BIGINT AS deleted_counts_bytes,
+               octet_length(plan_snapshot::TEXT)::BIGINT AS plan_snapshot_bytes
+        FROM base_normalized_rederive_runs
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .fetch_one(database.pool())
+    .await?;
+    let plan_snapshot: serde_json::Value = row.try_get("plan_snapshot")?;
+    assert!(plan_snapshot.get("active_replay_target_snapshot").is_none());
+    assert!(plan_snapshot.get("active_manifest_snapshot").is_none());
+    assert!(
+        plan_snapshot
+            .get("active_replay_target_snapshot_digest")
+            .is_some()
+    );
+    assert!(
+        plan_snapshot
+            .get("active_manifest_snapshot_digest")
+            .is_some()
+    );
+    assert!(plan_snapshot.get("raw_fact_range_proof").is_some());
+
+    let bind_sizes = [
+        (
+            "run_id",
+            row.try_get::<i64, _>("run_id_bytes")?,
+            run_snapshot::MAX_RUN_STATE_TEXT_BIND_BYTES as i64,
+        ),
+        (
+            "deployment_profile",
+            row.try_get::<i64, _>("deployment_profile_bytes")?,
+            run_snapshot::MAX_RUN_STATE_TEXT_BIND_BYTES as i64,
+        ),
+        (
+            "chain_id",
+            row.try_get::<i64, _>("chain_id_bytes")?,
+            run_snapshot::MAX_RUN_STATE_TEXT_BIND_BYTES as i64,
+        ),
+        (
+            "current_step",
+            row.try_get::<i64, _>("current_step_bytes")?,
+            run_snapshot::MAX_RUN_STATE_TEXT_BIND_BYTES as i64,
+        ),
+        (
+            "replay_target_block",
+            row.try_get::<i64, _>("replay_target_block_bytes")?,
+            run_snapshot::POSTGRES_BINARY_PROTOCOL_VALUE_LIMIT_BYTES as i64,
+        ),
+        (
+            "batch_size",
+            row.try_get::<i64, _>("batch_size_bytes")?,
+            run_snapshot::POSTGRES_BINARY_PROTOCOL_VALUE_LIMIT_BYTES as i64,
+        ),
+        (
+            "expected_counts",
+            row.try_get::<i64, _>("expected_counts_bytes")?,
+            run_snapshot::MAX_RUN_STATE_JSON_BIND_BYTES as i64,
+        ),
+        (
+            "deleted_counts",
+            row.try_get::<i64, _>("deleted_counts_bytes")?,
+            run_snapshot::MAX_RUN_STATE_JSON_BIND_BYTES as i64,
+        ),
+        (
+            "plan_snapshot",
+            row.try_get::<i64, _>("plan_snapshot_bytes")?,
+            run_snapshot::MAX_RUN_STATE_JSON_BIND_BYTES as i64,
+        ),
+    ];
+    println!(
+        "run_state_insert_bind_sizes_bytes {}",
+        bind_sizes
+            .iter()
+            .map(|(label, bytes, _)| format!("{label}={bytes}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    for (label, bytes, max) in bind_sizes {
+        assert!(
+            bytes < max,
+            "{label} bind should stay bounded below protocol limits, got {bytes} bytes"
+        );
+    }
+    assert!(row.try_get::<i64, _>("plan_snapshot_bytes")? < 16 * 1024);
+
+    let resumed = execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        100,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+        0,
+    )
+    .await?;
+    assert_eq!(resumed.deleted, BaseNormalizedRederiveCounts::default());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn batched_execute_resumes_without_resetting_cursors_mid_run() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
@@ -589,6 +787,58 @@ async fn batched_resume_refuses_census_mismatch() -> Result<()> {
     .await
     .expect_err("resume must stop when live+deleted census no longer matches review");
     assert!(format!("{error:?}").contains("resume census mismatch for resources"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_resume_refuses_stored_active_replay_target_digest_mismatch() -> Result<()> {
+    let database = test_database().await?;
+    seed_rederive_fixture(database.pool()).await?;
+    let expected = reviewed_counts(database.pool()).await?;
+
+    execute_base_normalized_rederive_drop_with_batch_limit(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected.clone(),
+        1,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE base_normalized_rederive_runs
+        SET plan_snapshot = jsonb_set(
+            plan_snapshot,
+            '{active_replay_target_snapshot_digest}',
+            to_jsonb('keccak256:tampered'::TEXT),
+            true
+        )
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(RESUME_RUN_ID)
+    .execute(database.pool())
+    .await?;
+
+    let error = execute_base_normalized_rederive_drop(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        RESUME_RUN_ID,
+        1,
+        Some(FIXTURE_REPLAY_TARGET_BLOCK),
+        expected,
+    )
+    .await
+    .expect_err("resume must reject stored active-target digest mismatch");
+    assert!(
+        format!("{error:?}").contains("active replay target snapshot digest mismatch"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(count_table(database.pool(), "name_current").await?, 1);
 
     database.cleanup().await?;
     Ok(())
@@ -797,7 +1047,10 @@ async fn batched_resume_refuses_legacy_guard_snapshot_drift_before_event_delete(
     sqlx::query(
         r#"
         UPDATE base_normalized_rederive_runs
-        SET plan_snapshot = plan_snapshot - 'active_replay_target_snapshot' - 'raw_fact_range_proof'
+        SET plan_snapshot = plan_snapshot
+            - 'active_replay_target_snapshot_digest'
+            - 'active_replay_target_snapshot'
+            - 'raw_fact_range_proof'
         WHERE run_id = $1
         "#,
     )
@@ -845,7 +1098,10 @@ async fn batched_resume_upgrades_legacy_guard_snapshot_before_event_delete() -> 
     sqlx::query(
         r#"
         UPDATE base_normalized_rederive_runs
-        SET plan_snapshot = plan_snapshot - 'active_replay_target_snapshot' - 'raw_fact_range_proof'
+        SET plan_snapshot = plan_snapshot
+            - 'active_replay_target_snapshot_digest'
+            - 'active_replay_target_snapshot'
+            - 'raw_fact_range_proof'
         WHERE run_id = $1
         "#,
     )
@@ -865,7 +1121,8 @@ async fn batched_resume_upgrades_legacy_guard_snapshot_before_event_delete() -> 
     assert_eq!(completed.deleted, expected.counts);
     let persisted_upgrade = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT plan_snapshot ? 'active_replay_target_snapshot'
+        SELECT plan_snapshot ? 'active_replay_target_snapshot_digest'
+           AND NOT plan_snapshot ? 'active_replay_target_snapshot'
            AND plan_snapshot ? 'raw_fact_range_proof'
         FROM base_normalized_rederive_runs
         WHERE run_id = $1
@@ -2300,6 +2557,25 @@ async fn execute_is_idempotent_after_initial_drop() -> Result<()> {
     )
     .await?;
     assert_eq!(completed_repeat.deleted, expected.counts);
+    assert!(
+        !completed_repeat
+            .plan
+            .active_replay_target_snapshot
+            .is_empty()
+    );
+    assert!(!completed_repeat.plan.active_manifest_snapshot.is_empty());
+    assert_eq!(
+        Some(base_normalized_rederive_json_digest(
+            &completed_repeat.plan.active_replay_target_snapshot
+        )?),
+        expected.active_replay_target_snapshot_digest
+    );
+    assert_eq!(
+        Some(base_normalized_rederive_json_digest(
+            &completed_repeat.plan.active_manifest_snapshot
+        )?),
+        expected.active_manifest_snapshot_digest
+    );
     assert_eq!(
         count_run_batches(database.pool(), RUN_ID).await?,
         completed_batch_count

@@ -10,6 +10,7 @@ mod guards;
 mod manifest_snapshot;
 mod profile;
 mod proof;
+mod run_snapshot;
 mod runtime_guard;
 mod scope;
 

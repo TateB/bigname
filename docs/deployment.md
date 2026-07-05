@@ -636,8 +636,9 @@ held advisory lock connection cannot starve the writer work.
    `--replay-target-block`, and expected counts. The command resumes only when
    recorded deleted counts plus the remaining live census still equal the
    reviewed dry-run census, the current active replay target/range snapshot
-   and active manifest snapshot still match the reviewed run snapshots, and
-   retained raw facts remain complete and unchanged for the stored target.
+   and active manifest snapshot still hash to the reviewed digests stored in
+   the run row, and retained raw facts remain complete and unchanged for the
+   stored target.
    Do not run replay until the run row is `status='completed'`; before that
    final state, replay cursors and projection markers are intentionally
    untouched. Normal indexer, worker, and guarded one-shot writers also refuse
@@ -660,18 +661,16 @@ held advisory lock connection cannot starve the writer work.
    `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
    replay from block `17571485` through the reviewed target block. Keep the API
    drained. Run this from the same reviewed manifest image/root used for dry-run
-   and execute. The catch-up path compares both the current active Base replay
-   target/range snapshot and the active manifest snapshot with the completed
-   run's reviewed snapshots before replaying; the active manifest snapshot
-   stores manifest payloads directly and manifest-linked row collections as
-   deterministic compact summaries. If either snapshot differs, catch-up bails
-   before re-emitting rows. While this completed correction reset cursor is
-   still pending replay, the indexer skips repository manifest sync and builds
-   runtime state from the already-stored reviewed manifest snapshot, so a second
-   indexer cannot rotate the stored manifest snapshot during full-closure
-   re-derivation. The skipped repository refresh remains marked for retry, so
-   the same long-running indexer syncs normally once the pending reset replay
-   cursor completes. The final reset already
+   and execute. The catch-up path rebuilds the current active Base replay
+   target/range snapshot and active manifest snapshot, then compares their
+   digests with the reviewed digests stored in the completed run row before
+   replaying. If either digest differs, catch-up bails before re-emitting rows.
+   While this completed correction reset cursor is still pending replay, the
+   indexer skips repository manifest sync, so normal repository sync cannot
+   rotate the active manifest tables during full-closure re-derivation. The
+   skipped repository refresh remains marked for retry, so the same
+   long-running indexer syncs normally once the pending reset replay cursor
+   completes. The final reset already
    validated that the retained canonical Base raw-log floor equals block
    `17571485`; catch-up repeats that check while the reset cursor is pending, so
    normal cursor refresh cannot widen this correction replay below the delete

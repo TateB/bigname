@@ -3,6 +3,10 @@ use serde_json::Value;
 use sqlx::Row;
 
 use super::super::counts::load_counts_from;
+use super::super::run_snapshot::{
+    BaseNormalizedRederiveRunPlanSnapshot, ensure_run_state_text_bind_size,
+    run_state_json_bind_value,
+};
 use super::super::{
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BaseNormalizedRederiveCounts, BaseNormalizedRederivePlan,
 };
@@ -21,7 +25,7 @@ pub(super) struct RunState {
     pub(super) current_step: String,
     pub(super) expected_counts: BaseNormalizedRederiveCounts,
     pub(super) deleted_counts: BaseNormalizedRederiveCounts,
-    pub(super) plan_snapshot: BaseNormalizedRederivePlan,
+    pub(super) plan_snapshot: BaseNormalizedRederiveRunPlanSnapshot,
 }
 
 impl RunState {
@@ -259,6 +263,14 @@ pub(super) async fn insert_run(
     plan: &BaseNormalizedRederivePlan,
 ) -> Result<RunState> {
     let deleted_counts = BaseNormalizedRederiveCounts::default();
+    let plan_snapshot = BaseNormalizedRederiveRunPlanSnapshot::from_plan(plan)?;
+    ensure_run_state_text_bind_size("run_id", run_id)?;
+    ensure_run_state_text_bind_size("deployment_profile", deployment_profile)?;
+    ensure_run_state_text_bind_size("chain_id", BASE_NORMALIZED_REDERIVE_CHAIN_ID)?;
+    ensure_run_state_text_bind_size("current_step", Step::first().as_str())?;
+    let expected_counts_value = run_state_json_bind_value("expected_counts", expected_counts)?;
+    let deleted_counts_value = run_state_json_bind_value("deleted_counts", &deleted_counts)?;
+    let plan_snapshot_value = run_state_json_bind_value("plan_snapshot", &plan_snapshot)?;
     sqlx::query(
         r#"
         INSERT INTO base_normalized_rederive_runs (
@@ -274,9 +286,9 @@ pub(super) async fn insert_run(
     .bind(replay_target_block)
     .bind(batch_size)
     .bind(Step::first().as_str())
-    .bind(serde_json::to_value(expected_counts)?)
-    .bind(serde_json::to_value(&deleted_counts)?)
-    .bind(serde_json::to_value(plan)?)
+    .bind(expected_counts_value)
+    .bind(deleted_counts_value)
+    .bind(plan_snapshot_value)
     .execute(&mut **transaction)
     .await
     .context("failed to create Base normalized-event rederive run state")?;
@@ -289,7 +301,7 @@ pub(super) async fn insert_run(
         current_step: Step::first().as_str().to_owned(),
         expected_counts: expected_counts.clone(),
         deleted_counts,
-        plan_snapshot: plan.clone(),
+        plan_snapshot,
     })
 }
 
@@ -312,8 +324,14 @@ pub(super) async fn update_run_state(
     .bind(&state.run_id)
     .bind(&state.status)
     .bind(&state.current_step)
-    .bind(serde_json::to_value(&state.deleted_counts)?)
-    .bind(serde_json::to_value(&state.plan_snapshot)?)
+    .bind(run_state_json_bind_value(
+        "deleted_counts",
+        &state.deleted_counts,
+    )?)
+    .bind(run_state_json_bind_value(
+        "plan_snapshot",
+        &state.plan_snapshot,
+    )?)
     .execute(&mut **transaction)
     .await
     .context("failed to update Base normalized-event rederive run state")?;

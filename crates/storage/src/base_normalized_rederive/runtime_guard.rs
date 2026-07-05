@@ -4,12 +4,12 @@ use tracing::info;
 
 use super::guards::load_active_replay_target_snapshot;
 use super::manifest_snapshot::load_active_manifest_snapshot;
+use super::run_snapshot::BaseNormalizedRederiveRunPlanSnapshot;
 use super::{
     BASE_NORMALIZED_REDERIVE_ADVISORY_LOCK_KEY, BASE_NORMALIZED_REDERIVE_CHAIN_ID,
     BASE_NORMALIZED_REDERIVE_CURSOR_KIND, BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
-    BaseNormalizedRederiveReplayTargetSnapshot, base_normalized_rederive_json_digest,
+    base_normalized_rederive_json_digest,
 };
-use crate::BaseNormalizedRederiveActiveManifestSnapshot;
 
 pub async fn hold_base_normalized_rederive_runtime_shared_lock(
     pool: &PgPool,
@@ -51,8 +51,7 @@ pub async fn ensure_base_normalized_rederive_replay_manifest_snapshot_current(
         r#"
         SELECT run_id,
                replay_target_block,
-               plan_snapshot -> 'active_replay_target_snapshot' AS target_snapshot,
-               plan_snapshot -> 'active_manifest_snapshot' AS manifest_snapshot
+               plan_snapshot
         FROM base_normalized_rederive_runs
         WHERE chain_id = $1
           AND deployment_profile = $2
@@ -76,37 +75,42 @@ pub async fn ensure_base_normalized_rederive_replay_manifest_snapshot_current(
         reviewed_target == replay_target_block,
         "Base normalized-event rederive replay target {replay_target_block} does not match reviewed completed run {run_id:?} target {reviewed_target}; rerun dry-run/execute review before replay"
     );
-    let reviewed_target_snapshot: Vec<BaseNormalizedRederiveReplayTargetSnapshot> =
-        serde_json::from_value(row.try_get("target_snapshot")?).with_context(|| {
+    let plan_snapshot: BaseNormalizedRederiveRunPlanSnapshot =
+        serde_json::from_value(row.try_get("plan_snapshot")?).with_context(|| {
             format!(
-                "completed Base normalized-event rederive run {run_id:?} has invalid reviewed replay target snapshot"
+                "completed Base normalized-event rederive run {run_id:?} has invalid reviewed plan snapshot"
             )
         })?;
-    let reviewed_target_digest = base_normalized_rederive_json_digest(&reviewed_target_snapshot)?;
+    let reviewed_target_digest = plan_snapshot
+        .stored_active_replay_target_snapshot_digest()?
+        .with_context(|| {
+            format!(
+                "completed Base normalized-event rederive run {run_id:?} lacks reviewed replay target snapshot digest"
+            )
+        })?;
     let current_snapshot = load_active_replay_target_snapshot(pool, replay_target_block)
         .await
         .context("failed to load current Base replay manifest snapshot")?;
     let current_target_digest = base_normalized_rederive_json_digest(&current_snapshot)?;
     ensure!(
         current_target_digest == reviewed_target_digest,
-        "Base normalized-event rederive replay target snapshot changed since reviewed run {run_id:?}: reviewed {reviewed_target_digest}, current {current_target_digest}; pin replay to the reviewed stored manifest or repeat dry-run/execute review"
+        "Base normalized-event rederive replay target snapshot changed since reviewed run {run_id:?}: reviewed {reviewed_target_digest}, current {current_target_digest}; restore the reviewed active replay target state or repeat dry-run/execute review"
     );
 
-    let reviewed_manifest_snapshot: Vec<BaseNormalizedRederiveActiveManifestSnapshot> =
-        serde_json::from_value(row.try_get("manifest_snapshot")?).with_context(|| {
+    let reviewed_manifest_digest = plan_snapshot
+        .stored_active_manifest_snapshot_digest()?
+        .with_context(|| {
             format!(
-                "completed Base normalized-event rederive run {run_id:?} has invalid reviewed active manifest snapshot"
+                "completed Base normalized-event rederive run {run_id:?} lacks reviewed active manifest snapshot digest"
             )
         })?;
-    let reviewed_manifest_digest =
-        base_normalized_rederive_json_digest(&reviewed_manifest_snapshot)?;
     let current_manifest_snapshot = load_active_manifest_snapshot(pool)
         .await
         .context("failed to load current Base active manifest snapshot")?;
     let current_manifest_digest = base_normalized_rederive_json_digest(&current_manifest_snapshot)?;
     ensure!(
         current_manifest_digest == reviewed_manifest_digest,
-        "Base normalized-event rederive active manifest snapshot changed since reviewed run {run_id:?}: reviewed {reviewed_manifest_digest}, current {current_manifest_digest}; pin replay to the reviewed stored manifest or repeat dry-run/execute review"
+        "Base normalized-event rederive active manifest snapshot changed since reviewed run {run_id:?}: reviewed {reviewed_manifest_digest}, current {current_manifest_digest}; restore the reviewed active manifest state or repeat dry-run/execute review"
     );
     Ok(())
 }

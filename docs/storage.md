@@ -137,19 +137,21 @@ re-invocation with the same run id, target block, batch size, and expected
 census resumes incomplete work; if the live census plus recorded deleted counts
 does not equal the reviewed census, it refuses to continue. Resume also reruns
 the re-runnable replay-coverage and raw-fact completeness guards before any
-additional batch is deleted. The reviewed plan stored in the run row includes a
-snapshot of the active Base replay targets/ranges, and resume requires the
-current active target set to match that snapshot, so the check remains
-non-vacuous even after the scoped `normalized_events` rows have already been
-deleted. Execute also requires the dry-run's active target snapshot digest and
-active manifest snapshot digest as expected values, so review-to-write
-replay-target or manifest drift cannot become the stored run snapshot. The run
-row also stores a compact retained raw-fact range proof over canonical raw-log
-identity, payload fields, and lineage rows, and resume requires the current
-retained raw-log and lineage proof to match it; this keeps raw-fact drift
-detection non-vacuous after event rows are deleted. A long-paused run cannot
-continue after the active replay targets, active manifests, or retained raw
-facts have drifted out of the reviewed safe state.
+additional batch is deleted. The reviewed plan stored in the run row includes
+the active Base replay target/range digest, active manifest digest, reviewed
+census, target, progress, and compact raw-fact range proof; it does not store
+the full active target rows. Resume rebuilds the active target snapshot and
+active manifest snapshot and requires their digests to match the stored
+reviewed digests, so the check remains non-vacuous even after the scoped
+`normalized_events` rows have already been deleted. Execute also requires the
+dry-run's active target snapshot digest and active manifest snapshot digest as
+expected values, so review-to-write replay-target or manifest drift cannot
+become the stored run snapshot. The run row's retained raw-fact range proof
+covers canonical raw-log identity, payload fields, and lineage rows, and resume
+requires the current retained raw-log and lineage proof to match it; this keeps
+raw-fact drift detection non-vacuous after event rows are deleted. A long-paused
+run cannot continue after the active replay targets, active manifests, or
+retained raw facts have drifted out of the reviewed safe state.
 
 The normalized-event scope is:
 
@@ -277,23 +279,22 @@ Rows missing the explicit `raw_block` marker remain subject to strict
 same-source-family coverage. Apart from the explicit 2026-07-05 deliberate-drop
 class, these are hard stops because the correction may only delete rows that
 current full-closure replay can recreate from retained raw facts.
-The completed run records both the reviewed active replay target/range snapshot
-and the reviewed active Base manifest snapshot. Active manifest payloads remain
-stored directly; manifest-linked capability flags, discovery rules, contract
-instances, active addresses, and active discovery edges are stored as
-deterministic compact row-summary digests rather than full row arrays, so the
-review pin detects manifest-linked row additions, removals, and modifications
-without materializing the live discovery graph as one JSON value. While the
-reset cursor is still pending replay, the catch-up replay path checks the
-current active snapshots against those reviewed snapshots and refuses to replay
-if a different manifest image was synced after review, even when the replay
-target addresses and ranges would otherwise be unchanged. Repository manifest
-sync is skipped while the reviewed completed run's reset cursor is still
-pending; the indexer builds runtime state from the already-stored reviewed
-manifest snapshot so another indexer cannot rotate the stored active manifest
-state between the replay guard and the full-closure adapter reads. A skipped
-repository refresh remains marked for retry, so the same long-running indexer
-syncs the repository normally once the pending reset replay cursor completes.
+The completed run records the reviewed active replay target/range digest and
+the reviewed active Base manifest digest. The active manifest digest is computed
+from manifest payloads plus deterministic compact row-summary digests for
+manifest-linked capability flags, discovery rules, contract instances, active
+addresses, and active discovery edges, so the review pin detects
+manifest-linked row additions, removals, and modifications without storing the
+live discovery graph in the run row. While the reset cursor is still pending
+replay, the catch-up replay path rebuilds the current active snapshots,
+compares their digests with those reviewed digests, and refuses to replay if a
+different manifest image was synced after review, even when the replay target
+addresses and ranges would otherwise be unchanged. Repository manifest sync is
+skipped while the reviewed completed run's reset cursor is still pending, so
+the active manifest tables cannot be rotated by normal repository sync between
+the replay guard and the full-closure adapter reads. A skipped repository
+refresh remains marked for retry, so the same long-running indexer syncs the
+repository normally once the pending reset replay cursor completes.
 Because the delete scope is global for `base-mainnet` while replay reset is
 profile-scoped, dry-run and execute also require the requested deployment
 profile to own an existing `base-mainnet/raw_fact_normalized_events` replay
