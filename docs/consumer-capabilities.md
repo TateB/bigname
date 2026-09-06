@@ -234,11 +234,26 @@ verified and auto records follow the ordinary lookup capability; direct
 subnames include a read-only row only while a current nonzero event-linked
 resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
-address-name relations, and owner-derived permissions stay absent. A resolver
-selection observed only before the name surface and never repeated remains out
-of scope under the documented #613 caveat. The GraphQL compatibility surface
-uses the same serving resource for its resolver record fields; it does not infer
-registration or control from that read path.
+address-name relations, and owner-derived permissions stay absent. When the
+latest nonzero registry resolver selection predates the [name surface](glossary.md#surface-name-surface), the event that first makes the surface active
+links it to the retained serving resource without
+requiring a repeated selection; a latest zero-address selection remains a
+clear. The GraphQL compatibility surface uses the same serving resource for its
+resolver record fields; it does not infer registration or control from that
+read path.
+
+For the fallback registry, a current-registry `NewOwner` or `Transfer` creates
+the current record and ends any resolver pointer inherited from the old
+registry. That [registry fallback handoff](glossary.md#registry-fallback-handoff) is retained across replay even for a same-owner
+`Transfer`; linked zero-resolver events retract an inherited pointer that had
+already become readable from every linked registry, registrar, or wrapper
+resource. An old-registry `Transfer` does not affect a resolver
+selected from the current registry.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness

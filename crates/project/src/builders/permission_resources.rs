@@ -15,7 +15,9 @@ pub(super) async fn build_registry_binding(
                         ELSE lower(event.after_state ->> 'owner_getter') END AS registry_owner,
                    lower(CASE WHEN event.source_family IN (
                                       'ens_v1_registrar_l1', 'basenames_base_registrar'
-                                  ) THEN event.after_state ->> 'registry_contract'
+                                  ) OR (event.event_kind = 'SurfaceBound'
+                                      AND event.after_state @> '{"state_derived":true,"authority_kind":"registry_only"}')
+                                   THEN event.after_state ->> 'registry_contract'
                               ELSE COALESCE(event.raw_fact_ref ->> 'emitting_address',
                                             event.after_state ->> 'registry_contract') END)
                        AS registry_contract,

@@ -1,3 +1,4 @@
+mod authority_transition;
 mod reconcile_support;
 mod registrar;
 mod registry;
@@ -8,16 +9,62 @@ pub(in crate::schema_v2) mod unmasked_word;
 mod upgrade;
 mod wrapper;
 
+use std::collections::HashMap;
+
 use anyhow::bail;
 
 use super::Interpreted;
 use crate::schema_v2::{
     catalog::Selected,
+    common::hash_hex,
     model::{BatchOutput, NormalizedEvent, RawLogInput},
     seam::{INTERPRETER_STATE_KEY, STATE_SCOPE_KEY},
     state::State,
     state_key::interpreter_state_key,
 };
+
+pub(in crate::schema_v2) fn materialize_wrapper_surface(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+    interpreted: &mut Interpreted,
+) -> anyhow::Result<()> {
+    if selected.source.source_family != "ens_v1_wrapper_l1" {
+        return Ok(());
+    }
+    let surfaces = interpreted
+        .names
+        .iter()
+        .filter_map(|name| {
+            Some((
+                name.namehash.clone(),
+                name.labels.first()?.clone(),
+                format!("{}:{}", selected.source.namespace, name.namehash),
+                name.authority_arm.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (namehash, label, logical_name_id, authority_arm) in surfaces {
+        let materialization = state.materialize_v1_active_surface(
+            &selected.source.namespace,
+            &namehash,
+            &logical_name_id,
+            &hash_hex(label.as_bytes()),
+        )?;
+        authority_transition::append_surface_materialization_for_trigger(
+            interpreted,
+            &authority_arm,
+            &materialization,
+            raw,
+            "NameWrapped",
+        );
+    }
+    Ok(())
+}
+
+fn is_registry_ownership_event(name: &str) -> bool {
+    matches!(name, "NewOwner" | "Transfer")
+}
 
 pub(super) fn interpret(
     selected: &Selected,
@@ -45,7 +92,40 @@ pub(super) fn interpret(
 }
 
 pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
+    let event_order = output
+        .normalized_events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| (event.event_identity.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let fallback_handoffs = output
+        .normalized_events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.after_state["registry_fallback_handoff"] == true)
+        .map(|(index, event)| (index, event.clone()))
+        .collect::<Vec<_>>();
     reconcile_support::reconcile(output);
+    for (handoff_index, handoff) in fallback_handoffs {
+        if let Some(event) = output
+            .normalized_events
+            .iter_mut()
+            .find(|event| event.event_identity == handoff.event_identity)
+        {
+            *event = handoff;
+            continue;
+        }
+        let insert_at = output
+            .normalized_events
+            .iter()
+            .position(|event| {
+                event_order
+                    .get(&event.event_identity)
+                    .is_some_and(|index| *index > handoff_index)
+            })
+            .unwrap_or(output.normalized_events.len());
+        output.normalized_events.insert(insert_at, handoff);
+    }
 }
 
 fn authority_arm(namespace: &str) -> &'static str {

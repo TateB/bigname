@@ -205,6 +205,9 @@ pub(super) async fn build(
         controller_source AS (
             SELECT * FROM project_authority_events
             WHERE event_kind IN ('AuthorityTransferred', 'PermissionChanged')
+               OR (event_kind = 'SurfaceBound'
+                   AND after_state ->> 'state_derived' = 'true'
+                   AND after_state ->> 'authority_kind' = 'registry_only')
             UNION ALL
             SELECT * FROM registry_only_authority_transfers
         ),
@@ -223,7 +226,7 @@ pub(super) async fn build(
                                 event.normalized_event_id
                    ) AS event_order,
                    CASE
-                       WHEN event.event_kind = 'AuthorityTransferred'
+                       WHEN event.event_kind IN ('AuthorityTransferred', 'SurfaceBound')
                            THEN 'set'
                        WHEN event.event_kind = 'PermissionChanged'
                         AND event.resource_id = name.resource_id
@@ -262,6 +265,7 @@ pub(super) async fn build(
                                event.after_state ->> 'owner'
                            )
                        END
+                       WHEN 'SurfaceBound' THEN event.after_state ->> 'owner'
                        WHEN 'PermissionChanged'
                            THEN event.after_state ->> 'subject'
                    END) AS subject

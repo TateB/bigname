@@ -3,7 +3,7 @@ use serde_json::json;
 use super::{
     catalog::Selected,
     common::{derivation_kind, raw_fact_ref},
-    manifest::ManifestSource,
+    manifest::{ManifestProvenance, ManifestSource},
     model::{BatchOutput, NormalizedEvent, RawBlockInput, RawLogInput},
     protocol::EventDraft,
     seam::PREIMAGE_OBSERVATION_EVENT_KIND,
@@ -23,6 +23,17 @@ pub(super) fn materialize(
 
 pub(super) fn materialize_for_source(
     source: &ManifestSource,
+    raw: &RawLogInput,
+    events: Vec<EventDraft>,
+    state: &mut State,
+    output: &mut BatchOutput,
+) {
+    let provenance = ManifestProvenance::from_source(source);
+    materialize_for_provenance(&provenance, raw, events, state, output);
+}
+
+pub(super) fn materialize_for_provenance(
+    source: &ManifestProvenance,
     raw: &RawLogInput,
     events: Vec<EventDraft>,
     state: &mut State,

@@ -6,6 +6,7 @@ use super::{State, StateCacheCapacity, StateResidency};
 use crate::schema_v2::{model::PriorEventInput, state_key::interpreter_state_key};
 
 impl State {
+    #[cfg(test)]
     pub(in crate::schema_v2) fn new(
         prior: Vec<PriorEventInput>,
         v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
@@ -13,10 +14,20 @@ impl State {
         Self::with_cache_capacity(prior, v2_suffix_anchors, StateCacheCapacity::Unlimited)
     }
 
-    pub(in crate::schema_v2) fn with_cache_capacity(
+    #[cfg(test)]
+    fn with_cache_capacity(
         prior: Vec<PriorEventInput>,
         v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
         cache_capacity: StateCacheCapacity,
+    ) -> Self {
+        Self::with_cache_capacity_and_manifest_ids(prior, v2_suffix_anchors, cache_capacity, None)
+    }
+
+    pub(in crate::schema_v2) fn with_cache_capacity_and_manifest_ids(
+        prior: Vec<PriorEventInput>,
+        v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
+        cache_capacity: StateCacheCapacity,
+        known_source_manifest_ids: Option<OrdSet<i64>>,
     ) -> Self {
         let mut state = Self {
             values: StateResidency::new(cache_capacity),
@@ -37,6 +48,9 @@ impl State {
             v1_registry_read_anchors: OrdMap::new(),
             v1_resolvers: OrdMap::new(),
             v1_resolver_links: OrdMap::new(),
+            v1_resolver_linked_resources: OrdMap::new(),
+            known_source_manifest_ids,
+            restore_error: None,
             v1_migrated_nodes: OrdSet::new(),
             v1_materialized_surfaces: OrdSet::new(),
             known_surfaces: OrdSet::new(),
@@ -107,6 +121,7 @@ impl State {
         self.v1_registry_read_anchors = replayed.v1_registry_read_anchors;
         self.v1_resolvers = replayed.v1_resolvers;
         self.v1_resolver_links = replayed.v1_resolver_links;
+        self.v1_resolver_linked_resources = replayed.v1_resolver_linked_resources;
         self.v1_migrated_nodes = replayed.v1_migrated_nodes;
         self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
     }

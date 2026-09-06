@@ -168,6 +168,7 @@ impl Engine {
         let prior_cache = loaded.prior_cache;
         let expected_orphaning_epoch = prior_cache.validated_orphaning_epoch;
         let adapter_session = loaded.adapter_session;
+        let provenance_manifests = loaded.provenance_manifests;
         let input = loaded.input;
         let loaded_markers = input
             .blocks
@@ -183,8 +184,9 @@ impl Engine {
         }
         write_lineage.extend(loaded_markers.iter().cloned());
         let phase_started = Instant::now();
-        let prepared = bigname_adapters::prepare_schema_v2_batch_incremental(
+        let prepared = bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
             input,
+            provenance_manifests,
             adapter_session,
             self.state_cache_capacity,
         )

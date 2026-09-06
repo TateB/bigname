@@ -2,13 +2,14 @@ use bigname_adapters::SchemaV2AdapterSession;
 use bigname_adapters::schema_v2::seam::{ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
+    RawLogInput, StateCacheCapacity,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{InterpretError, Result};
 
 mod cache;
+mod manifests;
 mod migration;
 mod prior;
 mod resume;
@@ -23,12 +24,12 @@ pub(crate) struct CachedPrior {
 
 pub(crate) struct LoadedBatch {
     pub input: BatchInput,
+    pub provenance_manifests: Vec<ManifestInput>,
     pub prior_cache: PriorCache,
     pub adapter_session: Option<SchemaV2AdapterSession>,
     pub restored_event_count: usize,
 }
 
-type ManifestRow = (i64, i64, String, String, String, String, String, String);
 type RawLogRow = (
     String,
     String,
@@ -80,7 +81,7 @@ pub(crate) async fn batch_input(
         }
         None => None,
     };
-    let manifests = load_manifests(&mut transaction, chain_id).await?;
+    let (manifests, provenance_manifests) = manifests::load(&mut transaction, chain_id).await?;
     if manifests.is_empty() {
         return Err(InterpretError::configuration(format!(
             "chain {chain_id} has no active manifests for interpretation"
@@ -94,9 +95,10 @@ pub(crate) async fn batch_input(
     let (prior_cache, adapter_session, restored_event_count) = match cached {
         Some((prior_cache, adapter_session)) => (prior_cache, adapter_session, 0),
         None => {
-            let mut restore = begin_schema_v2_adapter_restore(
+            let mut restore = bigname_adapters::begin_schema_v2_adapter_restore_with_provenance(
                 chain_id.to_owned(),
                 manifests.clone(),
+                provenance_manifests.clone(),
                 discovery_rules.clone(),
                 admissions.clone(),
                 state_cache_capacity,
@@ -130,6 +132,7 @@ pub(crate) async fn batch_input(
             raw_logs,
             manifests,
         },
+        provenance_manifests,
         prior_cache,
         adapter_session: Some(adapter_session),
         restored_event_count,
@@ -290,56 +293,6 @@ fn require_unique_live_heights<'a>(
         }
     }
     Ok(())
-}
-
-async fn load_manifests(
-    connection: &mut PgConnection,
-    chain_id: &str,
-) -> Result<Vec<ManifestInput>> {
-    let rows: Vec<ManifestRow> = sqlx::query_as(
-        "
-        SELECT manifest_id,
-               manifest_version,
-               namespace,
-               source_family,
-               chain_id,
-               deployment_label,
-               normalizer_version,
-               manifest_payload::text
-        FROM manifest_versions
-        WHERE chain_id = $1
-          AND rollout_status = 'active'
-        ORDER BY namespace, source_family, manifest_version, manifest_id
-        ",
-    )
-    .bind(chain_id)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|error| InterpretError::database("failed to load active manifests", error))?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                manifest_id,
-                manifest_version,
-                namespace,
-                source_family,
-                chain_id,
-                deployment_label,
-                normalizer_version,
-                payload_json,
-            )| ManifestInput {
-                manifest_id,
-                manifest_version,
-                namespace,
-                source_family,
-                chain_id,
-                deployment_label,
-                normalizer_version,
-                payload_json,
-            },
-        )
-        .collect())
 }
 
 async fn load_discovery_rules(

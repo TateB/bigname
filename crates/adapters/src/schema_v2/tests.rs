@@ -8,6 +8,9 @@ use super::*;
 
 mod migration;
 
+#[path = "tests/v1_pre_surface_resolver.rs"]
+mod v1_pre_surface_resolver;
+
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -7679,7 +7682,7 @@ fn ownerless_registry_resolver_uses_retained_anchor_without_reopening_control() 
 }
 
 #[test]
-fn pre_surface_ownerless_resolver_remains_unlinked_for_613() -> anyhow::Result<()> {
+fn pre_surface_ownerless_resolver_is_unlinked_before_surface() -> anyhow::Result<()> {
     const REGISTRY: &str = "0x0000000000000000000000000000000000000075";
     const RESOLVER: &str = "0x0000000000000000000000000000000000000076";
     let node = B256::repeat_byte(0x76);

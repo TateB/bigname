@@ -1476,6 +1476,13 @@ event kinds which update one logical value stream. For example, registrar
 grants, renewals, releases, and reservations share the `registration` facet;
 permission grants and revocations share the `permission` facet.
 
+<a id="state-derived-normalized-event"></a>
+## State-derived normalized event
+
+an additive normalized event emitted at a later raw position from deterministic
+interpreter state, retaining the manifest provenance of the state being
+surfaced and never requiring a provider read.
+
 <a id="logical-discovery-edge-identity"></a>
 ## Logical discovery-edge identity (`logical_edge_identity`)
 
@@ -1634,6 +1641,11 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
+## Pre-surface
+
+a name whose registry events were observed before any plaintext [name
+surface](#surface-name-surface) bound those facts to its logical name identity.
+
 ## Projection
 
 a disposable read-model table whose event-derived serving fields are rebuilt
@@ -1754,6 +1766,21 @@ resolver getter behavior that Project copies into the current resolver
 classification and then into record-inventory read rules. It authorizes a
 deterministic indexed read from projected records; it does not create record
 events, synthetic selectors, or reusable provider results.
+
+<a id="registry-fallback-handoff"></a>
+## Registry fallback handoff
+
+the replayed transition at the first current ENS registry ownership record for
+a node. That record ends delegation to `ENSRegistryOld`, suppresses later old-
+registry input for the node, and retracts an old-registry resolver pointer from
+every retained [serving resource](#serving-resource) to which it was linked. The
+root resolver is the documented exception: current-registry ownership neither
+retracts that pointer nor prevents later old-registry root-resolver updates.
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L243-L248 @ ens_subgraph@723f1b6a)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
 
 ## Resolution divergence ledger
 

@@ -7,6 +7,7 @@ mod ens_v2_live_poll;
 mod lifecycle;
 mod lifecycle_divergence;
 mod perturbations;
+mod pre_surface_resolver;
 mod provider_faults;
 mod record_families;
 mod register_eth_name;

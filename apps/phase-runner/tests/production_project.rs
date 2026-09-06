@@ -13706,8 +13706,8 @@ async fn assert_registrar_transfer_matches_full_rebuild(
             .await?;
     }
 
-    let resolver_permissions: Vec<(Value, Value, String, Option<String>)> = sqlx::query_as(
-        "SELECT before_state, after_state, source_family,
+    let resolver_permissions: Vec<(Uuid, Value, Value, String, Option<String>)> = sqlx::query_as(
+        "SELECT resource_id, before_state, after_state, source_family,
                 raw_fact_ref ->> 'emitting_address'
          FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13724,41 +13724,51 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     assert_eq!(
         resolver_permissions.len(),
         2,
-        "transfer must emit one resolver revoke and one resolver grant"
+        "authority change must emit one resolver revoke and one resolver grant"
     );
-    assert!(resolver_permissions.iter().all(|(_, _, family, emitter)| {
-        family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
-    }));
+    assert!(
+        resolver_permissions
+            .iter()
+            .all(|(_, _, _, family, emitter)| {
+                family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
+            })
+    );
     let revoke = resolver_permissions
         .iter()
-        .find(|(before, _, _, _)| before.pointer("/subject").and_then(Value::as_str) == Some(OWNER))
-        .expect("old-owner resolver revoke");
+        .find(|(_, before, _, _, _)| {
+            before.pointer("/subject").and_then(Value::as_str) == Some(OWNER)
+        })
+        .expect("old-authority resolver revoke");
     assert_eq!(
-        revoke.0.pointer("/scope/resolver_address"),
+        revoke.1.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
-    assert_eq!(
-        revoke.0.pointer("/effective_powers"),
-        Some(&json!(["resolver_control"]))
-    );
+    assert_eq!(revoke.1["effective_powers"], json!(["resolver_control"]));
+    assert_eq!(revoke.2["effective_powers"], json!([]));
+    let expected_grantee = if include_registry_owner {
+        OWNER
+    } else {
+        TRANSFER_OWNER
+    };
     let grant = resolver_permissions
         .iter()
-        .find(|(_, after, _, _)| {
-            after.pointer("/subject").and_then(Value::as_str) == Some(TRANSFER_OWNER)
+        .find(|(_, _, after, _, _)| {
+            after.pointer("/subject").and_then(Value::as_str) == Some(expected_grantee)
+                && after["effective_powers"] == json!(["resolver_control"])
         })
-        .expect("new-owner resolver grant");
+        .expect("new-authority resolver grant");
     assert_eq!(
-        grant.1.pointer("/scope/resolver_address"),
+        grant.2.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
     assert_eq!(
-        grant.1.pointer("/grant_source/source_event_kind"),
+        grant.2.pointer("/grant_source/source_event_kind"),
         Some(&json!("TokenControlTransferred"))
     );
-    assert!(resolver_permissions.iter().all(|(before, after, _, _)| {
+    assert_eq!(revoke.0 == grant.0, !include_registry_owner);
+    assert!(resolver_permissions.iter().all(|(_, before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
-
     let surface_event_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13810,22 +13820,35 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     run_project(full.pool(), chain, None, RunMode::Normal, 0, 5).await?;
 
     for pool in [incremental.pool(), full.pool()] {
-        let current_permission: (String, Option<String>) = sqlx::query_as(
-            "SELECT subject, grant_source ->> 'source_event_kind'
+        let current_permission: (Uuid, String, Option<String>, bool) = sqlx::query_as(
+            "SELECT resource_id, subject, grant_source ->> 'source_event_kind', (NOT EXISTS (
+                 SELECT 1 FROM permissions_current retired WHERE retired.resource_id = $2
+                   AND lower(retired.subject) = lower($3)
+                   AND retired.effective_powers ? 'resource_control') AND EXISTS (
+                 SELECT 1 FROM permissions_current active
+                 WHERE active.resource_id = permissions_current.resource_id
+                   AND lower(active.subject) = lower(permissions_current.subject)
+                   AND active.effective_powers ? 'resource_control'))
              FROM permissions_current
              WHERE scope_kind = 'resolver'
+               AND resource_id = (
+                   SELECT resource_id FROM name_current
+                   WHERE raw_name = 'alice.base.eth'
+               )
                AND lower(scope_detail ->> 'resolver_address') = lower($1)",
         )
         .bind(RESOLVER)
+        .bind(revoke.0)
+        .bind(OWNER)
         .fetch_one(pool)
         .await?;
-        assert_eq!(
-            current_permission,
-            (
-                TRANSFER_OWNER.into(),
-                Some("TokenControlTransferred".into())
-            )
+        let expected_permission = (
+            grant.0,
+            expected_grantee.into(),
+            Some("TokenControlTransferred".into()),
+            true,
         );
+        assert_eq!(current_permission, expected_permission);
     }
 
     let incremental_resolver = resolver_permission_summary(incremental.pool(), chain).await?;
@@ -13833,7 +13856,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     for summary in [&incremental_resolver, &full_resolver] {
         assert_eq!(
             summary.pointer("/permissions/items/0/subject"),
-            Some(&json!(TRANSFER_OWNER))
+            Some(&json!(expected_grantee))
         );
         assert_eq!(
             summary.pointer("/permissions/items/0/grant_source/source_event_kind"),
@@ -13841,7 +13864,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
         );
         assert_eq!(
             summary.pointer("/role_holders/items/0/subject"),
-            Some(&json!(TRANSFER_OWNER))
+            Some(&json!(expected_grantee))
         );
     }
 

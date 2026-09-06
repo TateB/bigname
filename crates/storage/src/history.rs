@@ -1,5 +1,6 @@
 mod address_matches;
 mod decoders;
+mod duplicates;
 mod event_page;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;

@@ -104,7 +104,18 @@ may consequently enter name-filtered diagnostics and product history. An
 outstanding cursor has no continuation guarantee across this behavior-changing
 boundary and may be rejected. Consumers must discard pre-#348/#529 cursors and
 restart from the first page; fresh post-publication cursors continue normally.
-This boundary does not claim fresh/resumed parity for the known pre-existing
+
+The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
+keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
+then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
+first active [name surface](glossary.md#surface-name-surface) is learned. Product
+events or name history may therefore gain one historical resolver row, while
+diagnostics may gain each linked resource copy. A cursor issued before this
+change has no continuation guarantee and may be rejected. Consumers must
+discard pre-#613 cursors and restart from the first page; fresh post-publication
+cursors continue normally.
+
+These boundaries do not claim fresh/resumed parity for the known pre-existing
 exception: when a resolver-emitted resource equals `namehash(N)`,
 named-resource and alias preimages can share one retained [interpreter state
 key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
@@ -653,12 +664,11 @@ Field ownership:
   and the resolver's version-, node-, and key-scoped text storage
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
   Once that inventory exists, a key's absence is therefore absence from the
-  retained attributable history rather than an unfinished build. The known
-  case documented in [`projections.md`](projections.md#resolver-and-records),
-  where resolver selection predates the
-  [name surface](glossary.md#surface-name-surface) and is never repeated,
-  produces no inventory instead of treating an interpretation-time linking gap
-  as authoritative absence. The row's
+  retained attributable history rather than an unfinished build. When an
+  ENSv1 registry resolver selection predates the
+  [name surface](glossary.md#surface-name-surface), first-surface
+  materialization supplies the linked pointer without requiring a repeated
+  selection; a latest zero-address selection remains a clear. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
   Node-keyed `ens_v1_resolver_l1` records written before the name surface
@@ -725,12 +735,6 @@ Field ownership:
   state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
   the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
   or registry-self alone therefore does not produce `inventory_not_available`.
-  When current authority is projected but inventory is missing because resolver
-  selection predates the [name surface](glossary.md#surface-name-surface) and
-  was never repeated, `source=indexed` reports requested keys as
-  `status=unsupported` with `inventory_not_available`. `source=auto` follows
-  its ordinary verified-lookup fallback rules when that execution path is
-  available.
   Direct verified lookup compares against the same exact-or-derived indexed
   evaluator before the guarded resolution-divergence-ledger write. Agreement
   can therefore clear an older exact-key false miss; provider output remains
@@ -907,7 +911,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
   A V1 ownerless row linked only to the registry resource retained for reads is
   visible through name history with `registration_id=null` when it carries the
-  name's `logical_name_id`. Name history returns a pre-surface owner row on a
+  name's `logical_name_id`. Name history returns a
+  [pre-surface](glossary.md#pre-surface) owner row on a
   registry resource that was ever bound to the name under `scope=both` or
   `scope=registration`, even when the row was stored before the
   [name surface](glossary.md#surface-name-surface) existed and carries no name

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{
     common::contract_id,
-    manifest::{self, ManifestEvent, ManifestSource},
+    manifest::{self, ManifestEvent, ManifestProvenance, ManifestSource},
     model::{AddressAdmissionInput, DiscoveryRuleInput, ManifestInput, RawLogInput},
     protocol,
     seam::MIGRATION_REGISTRY_ASSOCIATION_KIND,
@@ -25,6 +25,7 @@ pub(super) struct Selected {
 pub(super) struct Catalog {
     manifests: Vec<ManifestSource>,
     by_id: BTreeMap<i64, usize>,
+    provenance_by_id: BTreeMap<i64, ManifestProvenance>,
     rules: Vec<DiscoveryRuleInput>,
     admissions: Vec<AddressAdmissionInput>,
 }
@@ -41,6 +42,28 @@ impl Catalog {
         rules: Vec<DiscoveryRuleInput>,
         admissions: Vec<AddressAdmissionInput>,
     ) -> anyhow::Result<Self> {
+        let provenance = manifests.clone();
+        Self::new_with_provenance(manifests, provenance, rules, admissions)
+    }
+
+    pub(super) fn new_with_provenance(
+        manifests: Vec<ManifestInput>,
+        provenance: Vec<ManifestInput>,
+        rules: Vec<DiscoveryRuleInput>,
+        admissions: Vec<AddressAdmissionInput>,
+    ) -> anyhow::Result<Self> {
+        let mut provenance_by_id = BTreeMap::new();
+        for source in provenance.iter().chain(manifests.iter()) {
+            let candidate = ManifestProvenance::from_input(source);
+            if let Some(previous) = provenance_by_id.insert(source.manifest_id, candidate.clone())
+                && previous != candidate
+            {
+                bail!(
+                    "manifest {} has conflicting provenance metadata",
+                    source.manifest_id
+                );
+            }
+        }
         let mut manifests = manifests
             .into_iter()
             .map(manifest::decode)
@@ -60,6 +83,7 @@ impl Catalog {
         Ok(Self {
             manifests,
             by_id,
+            provenance_by_id,
             rules,
             admissions,
         })
@@ -286,6 +310,14 @@ impl Catalog {
         self.by_id
             .get(&manifest_id)
             .and_then(|index| self.manifests.get(*index))
+    }
+
+    pub(super) fn provenance(&self, manifest_id: i64) -> Option<&ManifestProvenance> {
+        self.provenance_by_id.get(&manifest_id)
+    }
+
+    pub(super) fn provenance_ids(&self) -> imbl::OrdSet<i64> {
+        self.provenance_by_id.keys().copied().collect()
     }
 
     pub(super) fn source_for_family(&self, source_family: &str) -> Option<&ManifestSource> {

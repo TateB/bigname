@@ -177,11 +177,13 @@
       "before_state": {
         "authority_key": "registrar:ethereum-mainnet:1:0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369:0x11e70bab4f9b74d3165e082545cf07423774bfee75e9ccb101318b061148b3d9:101",
         "authority_kind": "registrar",
+        "owner": "0xad25744f626d59079e7788617daa87e68486debe",
         "source_event": "RegistrationReleased"
       },
       "after_state": {
         "authority_key": "registry-only:ethereum-mainnet:0x4e170399560e4ac2aa15f173565ddd572f7dc55acc67304d8dfcd81f97c45e02",
         "authority_kind": "registry_only",
+        "owner": "0xad25744f626d59079e7788617daa87e68486debe",
         "source_event": "RegistrationReleased"
       }
     }

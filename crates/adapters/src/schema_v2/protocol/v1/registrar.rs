@@ -5,9 +5,10 @@ use serde_json::{Value, json};
 
 use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
-    permissions::{v1_grant_states, v1_revoke_states},
+    permissions::v1_grant_states,
 };
-use super::registry::append_authority_transition;
+use super::authority_transition::{append_authority_transition, append_surface_materialization};
+use super::registry::push_permission_change;
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{
@@ -21,7 +22,9 @@ mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
 
 mod decode;
+mod transfer_permissions;
 mod wrapper_renewal;
+use transfer_permissions::append_transfer_permissions;
 
 mod transfer {
     use super::*;
@@ -120,7 +123,7 @@ fn transfer(
         wrapper_fallback = true;
         fallback_active_from = Some(unwrapped_at);
     }
-    let Some((before, linked)) =
+    let Some((_, linked)) =
         state.transfer_v1_registrar_owner(&selected.source.namespace, &raw_namehash, to.clone())
     else {
         return Ok(Interpreted::new());
@@ -205,10 +208,17 @@ fn transfer(
     });
     append_transfer_permissions(
         &mut output,
-        &before,
+        &from,
         &linked,
+        previous_active.as_ref(),
+        active_after.as_ref(),
         state.v1_resolver(&selected.source.namespace, &raw_namehash),
         &raw.chain_id,
+    );
+    let linked_resolver = state.v1_resolver_for_activation(
+        &selected.source.namespace,
+        &raw_namehash,
+        active_after.as_ref(),
     );
     append_authority_transition(
         &mut output,
@@ -218,68 +228,10 @@ fn transfer(
         state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
         raw,
         &json!({"source_event":"Transfer"}),
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        linked_resolver,
         fallback_active_from,
     );
     Ok(output)
-}
-
-fn append_transfer_permissions(
-    output: &mut Interpreted,
-    before: &crate::schema_v2::state::V1NameState,
-    after: &crate::schema_v2::state::V1NameState,
-    resolver: Option<String>,
-    chain_id: &str,
-) {
-    let (Some(from), Some(to), Some(authority_key)) = (
-        before.owner.as_deref(),
-        after.owner.as_deref(),
-        after.authority_key.as_deref(),
-    ) else {
-        return;
-    };
-    if from.eq_ignore_ascii_case(to) {
-        return;
-    }
-    let mut scopes = vec![(json!({"kind":"resource"}), "resource_control")];
-    if let Some(resolver) = resolver {
-        scopes.push((
-            json!({"kind":"resolver","chain_id":chain_id,"resolver_address":resolver}),
-            "resolver_control",
-        ));
-    }
-    for (index, (scope, power)) in scopes.into_iter().enumerate() {
-        for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-            let (before_state, after_state) = if grant {
-                v1_grant_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "registrar",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            } else {
-                v1_revoke_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "registrar",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            };
-            output.events.push(EventDraft {
-                event_kind: "PermissionChanged".to_owned(),
-                logical_name_id: Some(after.logical_name_id.clone()),
-                resource_id: Some(after.resource_id),
-                identity_suffix: format!("PermissionChanged:transfer:{index}:{action}:{subject}"),
-                explicit_before: Some(before_state),
-                after_state,
-                state_scope: String::new(),
-            });
-        }
-    }
 }
 
 fn name_event(
@@ -350,12 +302,23 @@ fn name_event(
             .as_ref()
             .and_then(|state| state.authority_key.clone())
     });
-    let make_current = state
-        .v1_name(&selected.source.namespace, &raw_namehash)
-        .is_none_or(|current| {
-            let same_family = current.authority_source_family == selected.source.source_family;
-            current.authority_source_family != "ens_v1_wrapper_l1" && (registration || same_family)
+    let ens_v1_registrar = selected.source.source_family.starts_with("ens_v1_");
+    let explicit_ownerless_registry = ens_v1_registrar
+        && state.v1_explicit_ownerless_registry_evidence(&selected.source.namespace, &raw_namehash);
+    let refresh_current_registrar = !registration
+        && existing.is_some()
+        && previous_active.as_ref().is_some_and(|current| {
+            current.resource_id == resource_id
+                && current.authority_source_family == selected.source.source_family
         });
+    let make_current = refresh_current_registrar
+        || (!explicit_ownerless_registry
+            && previous_active.as_ref().is_none_or(|current| {
+                let same_family = current.authority_source_family == selected.source.source_family;
+                current.authority_source_family != "ens_v1_wrapper_l1"
+                    && (registration || same_family)
+            }));
+    let labelhash = format!("{explicit_labelhash:#x}");
     state.observe_v1_registrar(
         &selected.source.namespace,
         &raw_namehash,
@@ -365,13 +328,32 @@ fn name_event(
         token_lineage_id,
         selected.source.source_family.clone(),
         Some(selected.source.manifest_id),
-        Some(format!("{explicit_labelhash:#x}")),
+        Some(labelhash.clone()),
         expiry,
         owner.clone(),
         retained_authority_key.clone(),
         false,
         make_current,
     );
+    if !ens_v1_registrar {
+        state.sync_registry_surface_from_registrar(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+            surface_known,
+            Some(&labelhash),
+        );
+    }
+    let surface_materialization = if surface_known && ens_v1_registrar {
+        Some(state.materialize_or_sync_v1_active_surface(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+            &labelhash,
+        )?)
+    } else {
+        None
+    };
     let wrapper_renewal = wrapper_renewal::event(
         selected,
         state,
@@ -396,6 +378,9 @@ fn name_event(
         Value::String(format!("{explicit_labelhash:#x}")),
     );
     after_object.insert("token_lineage_id".to_owned(), json!(token_lineage_id));
+    if explicit_ownerless_registry && refresh_current_registrar {
+        after_object.insert("authority_current".to_owned(), Value::Bool(true));
+    }
     if let Some(owner) = owner.as_ref() {
         after_object
             .entry("registrant")
@@ -430,6 +415,15 @@ fn name_event(
         after.clone(),
     );
     output.events.extend(wrapper_renewal);
+    if let Some(materialization) = surface_materialization.as_ref() {
+        append_surface_materialization(
+            &mut output,
+            super::authority_arm(&selected.source.namespace),
+            materialization,
+            raw,
+            &selected.event.name,
+        );
+    }
     if registration || synthetic_grant {
         if let Some(grant) = output
             .events
@@ -439,7 +433,7 @@ fn name_event(
             // Retain the live owner because compacted registry facts can restore after this anchor.
             grant.after_state["authority_owner"] = json!(owner);
             grant.explicit_before = Some(json!({
-                "authority_kind":previous_active.as_ref().map(super::registry::authority_kind),
+                "authority_kind":previous_active.as_ref().map(super::authority_transition::authority_kind),
                 "registrant":prior_registrar.as_ref().and_then(|state| state.owner.clone()),
             }));
         }
@@ -514,6 +508,11 @@ fn name_event(
     }
     let active_after = state.v1_name(&selected.source.namespace, &raw_namehash);
     if registration || synthetic_grant {
+        let linked_resolver = state.v1_resolver_for_activation(
+            &selected.source.namespace,
+            &raw_namehash,
+            active_after.as_ref(),
+        );
         append_authority_transition(
             &mut output,
             super::authority_arm(&selected.source.namespace),
@@ -522,7 +521,7 @@ fn name_event(
             state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
             raw,
             &after,
-            state.v1_resolver(&selected.source.namespace, &raw_namehash),
+            linked_resolver,
             None,
         );
     }

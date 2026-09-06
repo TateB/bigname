@@ -1,9 +1,171 @@
 use imbl::ordset::OrdSet;
+use serde_json::json;
 use uuid::Uuid;
 
-use super::{State, V1RegistryReadAnchor, V1Release, v1_registration_is_live};
+use super::{State, V1NameState, V1RegistryReadAnchor, V1Release, v1_key, v1_registration_is_live};
+use crate::schema_v2::model::PriorEventInput;
 
 const NAMESPACE: &str = "test";
+
+#[test]
+fn resolver_linked_resources_only_tracks_old_registry_selection() {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+
+    state.set_v1_resolver_link(
+        NAMESPACE,
+        "current-node",
+        Some(RESOLVER.to_owned()),
+        Some(Uuid::from_u128(1)),
+        Some("test:current-node".to_owned()),
+        Some("registry".to_owned()),
+    );
+    assert!(
+        !state
+            .v1_resolver_linked_resources
+            .contains_key("test:current-node"),
+        "current-registry selection must not allocate old-registry fan-out state"
+    );
+
+    state.set_v1_resolver_link(
+        NAMESPACE,
+        "old-node",
+        Some(RESOLVER.to_owned()),
+        Some(Uuid::from_u128(2)),
+        Some("test:old-node".to_owned()),
+        Some("registry_old".to_owned()),
+    );
+    assert_eq!(
+        state
+            .v1_resolver_linked_resources
+            .get("test:old-node")
+            .map(|links| links.len()),
+        Some(1),
+        "old-registry selection must retain its linked resource for fallback handoff"
+    );
+}
+
+#[test]
+fn restore_keys_authority_derived_resolver_links_by_child() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    let event = PriorEventInput {
+        retained_state_key: "derived-resolver".to_owned(),
+        chain_id: "test-chain".to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        logical_name_id: Some("test:child".to_owned()),
+        resource_id: Some(Uuid::from_u128(1)),
+        event_kind: "ResolverChanged".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: Some(1),
+        emitting_address: None,
+        state_scope: None,
+        block_timestamp: None,
+        after_state: json!({
+            "source_event": "AuthorityEpochChanged",
+            "node": "parent",
+            "child_node": "child",
+            "resolver": "0x0000000000000000000000000000000000000001",
+            "resolver_source_role": "registry_old",
+        }),
+    };
+    crate::schema_v2::state_restore::v1(&mut state, &event);
+    assert_eq!(
+        state
+            .v1_resolver_linked_resources
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["test:child"],
+        "authority-derived resolver row was not keyed only by the affected child name",
+    );
+}
+
+#[test]
+fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.remember_v1_registry_authority(
+        NAMESPACE,
+        NODE,
+        V1NameState {
+            logical_name_id: "test:unknown".to_owned(),
+            surface_known: false,
+            resource_id: Uuid::from_u128(1),
+            token_lineage_id: None,
+            authority_source_family: "ens_v1_registry_l1".to_owned(),
+            source_manifest_id: Some(1),
+            labelhash: None,
+            expiry: None,
+            owner: Some(OWNER.to_owned()),
+            registry_contract: None,
+            authority_key: Some("registry-only:node".to_owned()),
+            wrapper_fallback: false,
+        },
+    );
+    state.remember_v1_registry_read_anchor(
+        NAMESPACE,
+        NODE,
+        V1RegistryReadAnchor {
+            logical_name_id: "test:unknown".to_owned(),
+            resource_id: Uuid::from_u128(1),
+            surface_known: false,
+            source_family: "ens_v1_registry_l1".to_owned(),
+            source_manifest_id: Some(1),
+            registry_contract: None,
+        },
+    );
+    state.set_v1_registry_owner_views(NAMESPACE, NODE, OWNER.to_owned(), OWNER.to_owned(), None);
+    state.activate_v1_authority(
+        NAMESPACE,
+        NODE,
+        Some(V1NameState {
+            logical_name_id: "test:node".to_owned(),
+            surface_known: true,
+            resource_id: Uuid::from_u128(2),
+            token_lineage_id: Some(Uuid::from_u128(3)),
+            authority_source_family: "ens_v1_wrapper_l1".to_owned(),
+            source_manifest_id: Some(2),
+            labelhash: Some(crate::schema_v2::common::hash_hex(b"pointer")),
+            expiry: Some(9_999),
+            owner: Some(OWNER.to_owned()),
+            registry_contract: None,
+            authority_key: Some("wrapper:node".to_owned()),
+            wrapper_fallback: false,
+        }),
+    );
+    let event = PriorEventInput {
+        retained_state_key: "wrapper-preimage".to_owned(),
+        chain_id: "test-chain".to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        logical_name_id: Some("test:node".to_owned()),
+        resource_id: None,
+        event_kind: "PreimageObserved".to_owned(),
+        source_family: "ens_v1_wrapper_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: Some(2),
+        emitting_address: None,
+        state_scope: None,
+        block_timestamp: None,
+        after_state: json!({
+            "namehash": NODE,
+            "raw_name": "pointer.eth",
+            "raw_labels": ["pointer", "eth"],
+        }),
+    };
+
+    crate::schema_v2::state_restore::v1_surface::restore_preimage(&mut state, &event);
+
+    let expected_labelhash = crate::schema_v2::common::hash_hex(b"pointer");
+    assert_eq!(
+        state
+            .v1_registry_authorities
+            .get(&v1_key(NAMESPACE, NODE))
+            .and_then(|authority| authority.labelhash.as_deref()),
+        Some(expected_labelhash.as_str())
+    );
+}
 
 #[test]
 fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {

@@ -310,8 +310,10 @@
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'AuthorityEpochChanged'
+              AND (
+                    event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
+                 OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
+                     '{"state_derived":true,"authority_kind":"registry_only"}')
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -477,8 +479,10 @@
                    END) AS registry_owner
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
-              AND event.event_kind IN (
-                  'AuthorityTransferred', 'AuthorityEpochChanged'
+              AND (
+                    event.event_kind IN ('AuthorityTransferred', 'AuthorityEpochChanged')
+                 OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
+                     '{"state_derived":true,"authority_kind":"registry_only"}')
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,

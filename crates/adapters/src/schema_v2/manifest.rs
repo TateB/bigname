@@ -18,6 +18,34 @@ pub(super) struct ManifestSource {
     pub events: Vec<ManifestEvent>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ManifestProvenance {
+    pub manifest_id: i64,
+    pub manifest_version: i64,
+    pub namespace: String,
+    pub source_family: String,
+}
+
+impl ManifestProvenance {
+    pub(super) fn from_input(input: &ManifestInput) -> Self {
+        Self {
+            manifest_id: input.manifest_id,
+            manifest_version: input.manifest_version,
+            namespace: input.namespace.clone(),
+            source_family: input.source_family.clone(),
+        }
+    }
+
+    pub(super) fn from_source(source: &ManifestSource) -> Self {
+        Self {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ManifestEvent {
     pub name: String,

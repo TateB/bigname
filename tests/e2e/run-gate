@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=90
-expected_runnable=87
+expected_total=92
+expected_runnable=89
 expected_ignored=3
-expected_shard_1_runnable=43
+expected_shard_1_runnable=44
 expected_shard_1_ignored=2
-expected_shard_1_filtered=45
-expected_shard_1_predicted_seconds=1162.561
-expected_shard_2_runnable=44
+expected_shard_1_filtered=46
+expected_shard_1_predicted_seconds=1185.199
+expected_shard_2_runnable=45
 expected_shard_2_ignored=1
-expected_shard_2_filtered=45
-expected_shard_2_predicted_seconds=1331.053
+expected_shard_2_filtered=46
+expected_shard_2_predicted_seconds=1373.503
 
 expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
@@ -43,6 +43,7 @@ shard_1_tests=(
     "scenarios::perturbations::pre_surface_records_converge_fresh_incremental_and_restored"
     "scenarios::perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable"
     "scenarios::perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts"
+    "scenarios::pre_surface_resolver::ownerless_pre_surface_resolver_records_serve_after_late_renewal_without_reselection"
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
     "scenarios::provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control"
     "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
@@ -101,6 +102,7 @@ shard_2_tests=(
     "scenarios::lifecycle::renew_and_transfer_keep_identity"
     "scenarios::perturbations::rich_chain_live_reorg_converges_to_winning_branch"
     "scenarios::perturbations::rich_chain_successive_fixture_replays_match_single_pass"
+    "scenarios::pre_surface_resolver::owned_pre_surface_resolver_records_serve_after_late_renewal_without_reselection"
     "scenarios::record_families::remaining_record_families_derive_normalized_but_stay_unenumerated"
     "scenarios::register_eth_name::register_eth_name_end_to_end"
     "scenarios::registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst"

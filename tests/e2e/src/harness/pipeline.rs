@@ -1821,15 +1821,15 @@ impl ProjectionReader {
         name: &str,
         path: &str,
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let current: Option<(Option<String>, Value)> = sqlx::query_as(
-            "SELECT resource_id::text, declared_summary
+        let current: Option<(Option<String>, Option<String>, Value)> = sqlx::query_as(
+            "SELECT resource_id::text, serving_resource_id::text, declared_summary
              FROM name_current WHERE namespace = $1 AND raw_name = $2",
         )
         .bind(namespace)
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((resource_id, declared_summary)) = current else {
+        let Some((resource_id, serving_resource_id, declared_summary)) = current else {
             return Ok((
                 reqwest::StatusCode::NOT_FOUND,
                 serde_json::json!({"error":{"code":"not_found"}}),
@@ -1840,7 +1840,7 @@ impl ProjectionReader {
             .cloned()
             .unwrap_or(Value::Null);
         let inventory: Option<(Value, Value, Value, String, Option<String>)> =
-            if let Some(resource_id) = resource_id {
+            if let Some(resource_id) = serving_resource_id.or(resource_id) {
                 sqlx::query_as(
                     "SELECT entries, selectors, record_version_boundary,
                             support_status, unsupported_reason

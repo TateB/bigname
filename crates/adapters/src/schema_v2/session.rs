@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use super::{
     BatchInput, BatchOutput, RawLogInput, catalog::Catalog, seam::INTERPRETER_STATE_KEY,
-    state::State, state_residency::StateCacheCapacity,
+    sourced_events::prepare_v1_state_derived_events as prepare_v1, state::State,
+    state_residency::StateCacheCapacity,
 };
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
@@ -19,6 +20,14 @@ pub struct AdapterSession {
 impl AdapterSession {
     pub(super) fn has_v1_registry_authority(&self, namespace: &str, namehash: &str) -> bool {
         self.state.has_v1_registry_authority(namespace, namehash)
+    }
+
+    pub(super) fn v1_name(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<super::state::V1NameState> {
+        self.state.v1_name(namespace, namehash)
     }
 }
 
@@ -60,6 +69,7 @@ impl AdapterSessionRestore {
             );
         }
         self.state.restore_prior_event_chunk(events);
+        self.state.ensure_restore_succeeded()?;
         Ok(())
     }
 
@@ -84,10 +94,35 @@ pub fn begin_schema_v2_adapter_restore(
     admissions: Vec<super::AddressAdmissionInput>,
     cache_capacity: StateCacheCapacity,
 ) -> anyhow::Result<AdapterSessionRestore> {
-    let catalog = Catalog::new(manifests, discovery_rules, admissions)?;
+    let provenance_manifests = manifests.clone();
+    begin_schema_v2_adapter_restore_with_provenance(
+        chain_id,
+        manifests,
+        provenance_manifests,
+        discovery_rules,
+        admissions,
+        cache_capacity,
+    )
+}
+
+pub fn begin_schema_v2_adapter_restore_with_provenance(
+    chain_id: String,
+    manifests: Vec<super::ManifestInput>,
+    provenance_manifests: Vec<super::ManifestInput>,
+    discovery_rules: Vec<super::DiscoveryRuleInput>,
+    admissions: Vec<super::AddressAdmissionInput>,
+    cache_capacity: StateCacheCapacity,
+) -> anyhow::Result<AdapterSessionRestore> {
+    let catalog =
+        Catalog::new_with_provenance(manifests, provenance_manifests, discovery_rules, admissions)?;
     Ok(AdapterSessionRestore {
         chain_id,
-        state: State::with_cache_capacity(Vec::new(), catalog.v2_suffix_anchors(), cache_capacity),
+        state: State::with_cache_capacity_and_manifest_ids(
+            Vec::new(),
+            catalog.v2_suffix_anchors(),
+            cache_capacity,
+            Some(catalog.provenance_ids()),
+        ),
     })
 }
 
@@ -128,6 +163,7 @@ impl PreparedAdapterBatch {
             &self.blocks,
         )?;
         self.committed_state.apply_prior_event_delta(delta);
+        self.committed_state.ensure_restore_succeeded()?;
         if let Some(block) = self.blocks.last() {
             self.committed_state
                 .commit_v2_batch_boundary(block.block_timestamp.unix_timestamp());
@@ -179,7 +215,13 @@ fn interpret_fresh(input: BatchInput) -> anyhow::Result<BatchOutput> {
         ..
     } = input;
     let mut catalog = Catalog::new(manifests, discovery_rules, admissions)?;
-    let mut state = State::new(prior_events, catalog.v2_suffix_anchors());
+    let mut state = State::with_cache_capacity_and_manifest_ids(
+        prior_events,
+        catalog.v2_suffix_anchors(),
+        StateCacheCapacity::Unlimited,
+        Some(catalog.provenance_ids()),
+    );
+    state.ensure_restore_succeeded()?;
     let mut output = interpret_loaded(&mut catalog, &blocks, raw_logs, &mut state)?;
     let (prior_tails, missing) = required_prior_tails(&mut state, &output);
     debug_assert!(
@@ -196,6 +238,21 @@ pub fn prepare_schema_v2_batch_incremental(
     session: Option<AdapterSession>,
     cache_capacity: StateCacheCapacity,
 ) -> anyhow::Result<PreparedAdapterBatch> {
+    let provenance_manifests = input.manifests.clone();
+    prepare_schema_v2_batch_incremental_with_provenance(
+        input,
+        provenance_manifests,
+        session,
+        cache_capacity,
+    )
+}
+
+pub fn prepare_schema_v2_batch_incremental_with_provenance(
+    input: BatchInput,
+    provenance_manifests: Vec<super::ManifestInput>,
+    session: Option<AdapterSession>,
+    cache_capacity: StateCacheCapacity,
+) -> anyhow::Result<PreparedAdapterBatch> {
     super::validate_order(&input)?;
     let BatchInput {
         chain_id,
@@ -206,7 +263,8 @@ pub fn prepare_schema_v2_batch_incremental(
         blocks,
         raw_logs,
     } = input;
-    let mut catalog = Catalog::new(manifests, discovery_rules, admissions)?;
+    let mut catalog =
+        Catalog::new_with_provenance(manifests, provenance_manifests, discovery_rules, admissions)?;
     let suffix_anchors = catalog.v2_suffix_anchors();
     let mut committed_state = match session {
         Some(session) => {
@@ -220,11 +278,18 @@ pub fn prepare_schema_v2_batch_incremental(
                 bail!("a resumed adapter session cannot also receive restored prior events");
             }
             let mut state = session.state;
+            state.replace_known_source_manifest_ids(catalog.provenance_ids());
             state.replace_v2_suffix_anchors(suffix_anchors);
             state
         }
-        None => State::with_cache_capacity(prior_events, suffix_anchors, cache_capacity),
+        None => State::with_cache_capacity_and_manifest_ids(
+            prior_events,
+            suffix_anchors,
+            cache_capacity,
+            Some(catalog.provenance_ids()),
+        ),
     };
+    committed_state.ensure_restore_succeeded()?;
     // Reconciliation can discard provisional transitions. Interpret on a structurally shared
     // branch, then advance the retained state with only the normalized events that survived.
     let mut state = committed_state.clone();
@@ -419,11 +484,9 @@ fn interpret_raw(
     } else {
         None
     };
-    // Some protocol paths advance time-derived state before reaching their event-specific
-    // decoder. Interpret each log on a structurally shared candidate and commit it only after the
-    // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
+    // Interpret on a structurally shared candidate so a malformed log cannot retain partial state.
     let mut candidate_state = state.clone();
-    let interpreted = match super::protocol::interpret(
+    let mut interpreted = match super::protocol::interpret(
         &selected,
         raw,
         &mut candidate_state,
@@ -457,8 +520,17 @@ fn interpret_raw(
             });
         }
     };
+    prepare_v1(&selected, raw, &mut interpreted, &mut candidate_state)?;
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
+    super::sourced_events::materialize(
+        catalog,
+        &selected.source.namespace,
+        raw,
+        interpreted.sourced_events.clone(),
+        state,
+        output,
+    )?;
     super::normalized::materialize_boundary(
         &selected.source,
         &super::model::RawBlockInput {
@@ -502,9 +574,16 @@ fn assert_restores_exactly(
         &output.normalized_events,
         &input.blocks,
     )?;
+    let restored_state = State::with_cache_capacity_and_manifest_ids(
+        prior,
+        catalog.v2_suffix_anchors(),
+        StateCacheCapacity::Unlimited,
+        Some(catalog.provenance_ids()),
+    );
+    restored_state.ensure_restore_succeeded()?;
     let mut restored = AdapterSession {
         chain_id: input.chain_id,
-        state: State::new(prior, catalog.v2_suffix_anchors()),
+        state: restored_state,
     };
     if let Some(block) = input.blocks.last() {
         restored

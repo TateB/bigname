@@ -48,6 +48,7 @@ pub(super) struct V1ResolverLink {
     pub resolver_address: String,
     pub resource_id: Option<Uuid>,
     pub logical_name_id: Option<String>,
+    pub source_role: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct V1WrapperData {
@@ -70,6 +71,7 @@ mod v2_pointers;
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
 
+pub(in crate::schema_v2) use self::surfaces::V1SurfaceMaterialization;
 pub(in crate::schema_v2) use self::topology::v2_expiry_is_live;
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
 #[cfg(test)]
@@ -107,6 +109,9 @@ pub(super) struct State {
     v1_registry_read_anchors: OrdMap<String, V1RegistryReadAnchor>,
     v1_resolvers: OrdMap<String, String>,
     v1_resolver_links: OrdMap<String, V1ResolverLink>,
+    v1_resolver_linked_resources: OrdMap<String, OrdMap<Uuid, V1ResolverLink>>,
+    known_source_manifest_ids: Option<OrdSet<i64>>,
+    restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
     known_surfaces: OrdSet<String>,
@@ -160,14 +165,6 @@ impl State {
             self.remember_known_surface(logical_name_id.clone());
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
-        }
-        if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
-            registry.logical_name_id = logical_name_id.clone();
-            registry.surface_known = surface_known;
-        }
-        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
-            anchor.logical_name_id = logical_name_id.clone();
-            anchor.surface_known |= surface_known;
         }
         self.v1_names.insert(
             key,
@@ -233,15 +230,6 @@ impl State {
             .insert(key.clone(), value.clone())
             .and_then(|state| state.expiry);
         self.update_v1_expiry_index(&key, previous_expiry, expiry);
-        if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
-            registry.logical_name_id = value.logical_name_id.clone();
-            registry.surface_known = surface_known;
-            registry.labelhash = value.labelhash.clone();
-        }
-        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
-            anchor.logical_name_id = value.logical_name_id.clone();
-            anchor.surface_known |= surface_known;
-        }
         if make_current {
             self.v1_names.insert(key, value);
         }
@@ -250,6 +238,7 @@ impl State {
         self.v1_names.get(&v1_key(namespace, namehash)).cloned()
     }
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn observe_v1_registry(
         &mut self,
         namespace: &str,
@@ -348,9 +337,8 @@ impl State {
         previous
     }
 
-    /// Forgets the registry owner of record and any remembered registry-direct authority for
-    /// a node whose logged owner word was unmasked: the word names no authenticatable owner,
-    /// and the on-chain write ended the previous registry-direct authority with it.
+    /// Forgets registry owner state after an unmasked word names no authenticatable owner and
+    /// ends the previous registry-direct authority.
     pub(super) fn forget_v1_registry_owner(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
         self.v1_registry_owners.remove(&key);
@@ -412,10 +400,6 @@ impl State {
         previous
     }
 
-    pub(super) fn mark_v1_migrated(&mut self, namespace: &str, namehash: &str) {
-        self.v1_migrated_nodes.insert(v1_key(namespace, namehash));
-    }
-
     pub(super) fn v1_is_migrated(&self, namespace: &str, namehash: &str) -> bool {
         self.v1_migrated_nodes
             .contains(&v1_key(namespace, namehash))
@@ -441,39 +425,6 @@ impl State {
         Some((before, after))
     }
 
-    pub(super) fn converge_v1_registrar_transfer(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        at_unix_timestamp: i64,
-    ) -> Option<V1NameState> {
-        let current = self.v1_name(namespace, namehash);
-        if current
-            .as_ref()
-            .is_some_and(|authority| authority.authority_source_family == "ens_v1_wrapper_l1")
-        {
-            return current;
-        }
-        let registrar = self.v1_registrar(namespace, namehash)?;
-        let registry_owner = self.v1_registry_owner(namespace, namehash);
-        let registrar_matches_registry = registry_owner.as_deref().is_none_or(|owner| {
-            owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-                || registrar
-                    .owner
-                    .as_deref()
-                    .is_some_and(|registrant| registrant.eq_ignore_ascii_case(owner))
-        });
-        let next = if registrar_matches_registry
-            && v1_registration_is_live(registrar.expiry, at_unix_timestamp)
-        {
-            Some(registrar)
-        } else {
-            self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
-        };
-        self.activate_v1_authority(namespace, namehash, next.clone());
-        next
-    }
-
     pub(super) fn transfer_v1_wrapper_owner(
         &mut self,
         namespace: &str,
@@ -488,46 +439,6 @@ impl State {
         let before = current.clone();
         current.owner = Some(owner);
         Some((before, current.clone()))
-    }
-
-    pub(super) fn set_v1_resolver_link(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        resolver: Option<String>,
-        resource_id: Option<Uuid>,
-        logical_name_id: Option<String>,
-    ) -> Option<V1ResolverLink> {
-        let key = v1_key(namespace, namehash);
-        let previous = self.v1_resolver_links.remove(&key);
-        self.v1_resolvers.remove(&key);
-        if let Some(resolver_address) = resolver {
-            self.v1_resolvers
-                .insert(key.clone(), resolver_address.clone());
-            self.v1_resolver_links.insert(
-                key,
-                V1ResolverLink {
-                    resolver_address,
-                    resource_id,
-                    logical_name_id,
-                },
-            );
-        }
-        previous
-    }
-
-    pub(super) fn v1_resolver_link(
-        &self,
-        namespace: &str,
-        namehash: &str,
-    ) -> Option<V1ResolverLink> {
-        self.v1_resolver_links
-            .get(&v1_key(namespace, namehash))
-            .cloned()
-    }
-
-    pub(super) fn v1_resolver(&self, namespace: &str, namehash: &str) -> Option<String> {
-        self.v1_resolvers.get(&v1_key(namespace, namehash)).cloned()
     }
 
     pub(super) fn reactivate_v1_registrar(
