@@ -724,6 +724,19 @@ request, the target route's served snapshot scope can be narrower than that
 chain scope; every additional in-scope chain is reported under
 `meta.as_of_completeness` and is not added to the token.
 
+Chain-position timestamps are RFC 3339 instants. Inputs and stored projection
+positions may use `Z` or a numeric UTC offset (`+HH:MM` or `-HH:MM`) and may
+carry one to nine fractional-second digits; readers normalize the instant to
+UTC before comparison. Because `+` is decoded as a space in query strings,
+clients must percent-encode it as `%2B` in an `at=` query value. For example,
+`at=2025-06-15T17:37:42%2B02:30` selects the same instant as
+`at=2025-06-15T15:07:42Z`. Different accepted spellings of the same instant do
+not make a projection stale.
+
+Successful v2 metadata and snapshot tokens serialize timestamps in UTC with
+`Z`. They retain non-zero fractional seconds; whole-second timestamps keep the
+existing `YYYY-MM-DDTHH:MM:SSZ` spelling.
+
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`. Every selection is available only when the current

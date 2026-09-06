@@ -1162,6 +1162,17 @@ to one concrete set of phase chain positions. Current head, safe, and finalized
 positions come from `chain_heads`; timestamp and historical selection use
 readable `chain_lineage` rows.
 
+Projection `chain_positions` timestamps are decoded as RFC 3339 instants.
+PostgreSQL JSON may spell UTC as `+00:00`; request selectors or retained rows
+may carry other numeric UTC offsets and one to nine fractional-second digits.
+Snapshot selection normalizes these values to UTC before comparing the
+timestamp component of a chain-position identity. Storage reserializes the
+normalized instant with `Z` and preserves non-zero fractional seconds. Invalid
+timestamp syntax remains unusable projection state; a valid alternate offset
+spelling is not stale state. This is a serving-boundary compatibility rule and
+does not change which stored projection rows are authoritative or when they are
+rebuilt.
+
 Every selection also requires the current Project generation to be complete at
 the newest stored head with the API's compiled interpreter content hash. The
 API reads only projections eligible for the selected positions and revalidates

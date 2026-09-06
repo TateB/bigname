@@ -263,18 +263,64 @@ fn skip_whitespace(raw: &str, mut index: usize) -> usize {
 }
 
 pub fn parse_rfc3339_utc_timestamp(value: &str) -> SnapshotSelectionResult<OffsetDateTime> {
-    if value.len() != 20
-        || !matches!(value.as_bytes().get(4), Some(b'-'))
-        || !matches!(value.as_bytes().get(7), Some(b'-'))
-        || !matches!(value.as_bytes().get(10), Some(b'T'))
-        || !matches!(value.as_bytes().get(13), Some(b':'))
-        || !matches!(value.as_bytes().get(16), Some(b':'))
-        || !matches!(value.as_bytes().get(19), Some(b'Z'))
-    {
-        return Err(SnapshotSelectionError::invalid_input(format!(
-            "timestamp {value} must use RFC 3339 UTC seconds format"
-        )));
+    let invalid_format = || {
+        SnapshotSelectionError::invalid_input(format!(
+            "timestamp {value} must use RFC 3339 with `Z` or a numeric offset"
+        ))
+    };
+    if !value.is_ascii() {
+        return Err(invalid_format());
     }
+
+    let (local, offset_seconds) = if let Some(local) = value.strip_suffix('Z') {
+        (local, 0_i64)
+    } else if value.len() >= 6 {
+        let zone_start = value.len() - 6;
+        let zone = &value.as_bytes()[zone_start..];
+        if !matches!(zone.first(), Some(b'+' | b'-')) || zone.get(3) != Some(&b':') {
+            return Err(invalid_format());
+        }
+        let offset_hour = parse_digits_u8(value, zone_start + 1, zone_start + 3, "offset hour")?;
+        let offset_minute =
+            parse_digits_u8(value, zone_start + 4, zone_start + 6, "offset minute")?;
+        if offset_hour > 23 || offset_minute > 59 {
+            return Err(SnapshotSelectionError::invalid_input(format!(
+                "timestamp {value} has invalid numeric offset"
+            )));
+        }
+        let magnitude = i64::from(offset_hour) * 3_600 + i64::from(offset_minute) * 60;
+        let signed_offset = if zone[0] == b'+' {
+            magnitude
+        } else {
+            -magnitude
+        };
+        (&value[..zone_start], signed_offset)
+    } else {
+        return Err(invalid_format());
+    };
+
+    if local.len() < 19
+        || !matches!(local.as_bytes().get(4), Some(b'-'))
+        || !matches!(local.as_bytes().get(7), Some(b'-'))
+        || !matches!(local.as_bytes().get(10), Some(b'T'))
+        || !matches!(local.as_bytes().get(13), Some(b':'))
+        || !matches!(local.as_bytes().get(16), Some(b':'))
+    {
+        return Err(invalid_format());
+    }
+
+    let nanosecond = match local.len() {
+        19 => 0,
+        21..=29 if local.as_bytes().get(19) == Some(&b'.') => {
+            let fraction = &local[20..];
+            if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_format());
+            }
+            let digits = fraction.parse::<u32>().map_err(|_| invalid_format())?;
+            digits * 10_u32.pow(9 - fraction.len() as u32)
+        }
+        _ => return Err(invalid_format()),
+    };
 
     let year = parse_digits_i32(value, 0, 4, "year")?;
     let month = parse_digits_u8(value, 5, 7, "month")?;
@@ -290,7 +336,7 @@ pub fn parse_rfc3339_utc_timestamp(value: &str) -> SnapshotSelectionResult<Offse
         )))
     } else {
         let days = days_from_civil(year, month, day);
-        let seconds = days
+        let local_seconds = days
             .checked_mul(86_400)
             .and_then(|value| value.checked_add(i64::from(hour) * 3_600))
             .and_then(|value| value.checked_add(i64::from(minute) * 60))
@@ -300,11 +346,18 @@ pub fn parse_rfc3339_utc_timestamp(value: &str) -> SnapshotSelectionResult<Offse
                     "timestamp {value} is outside the supported range"
                 ))
             })?;
-        OffsetDateTime::from_unix_timestamp(seconds).map_err(|_| {
+        let seconds = local_seconds.checked_sub(offset_seconds).ok_or_else(|| {
             SnapshotSelectionError::invalid_input(format!(
                 "timestamp {value} is outside the supported range"
             ))
-        })
+        })?;
+        OffsetDateTime::from_unix_timestamp(seconds)
+            .and_then(|timestamp| timestamp.replace_nanosecond(nanosecond))
+            .map_err(|_| {
+                SnapshotSelectionError::invalid_input(format!(
+                    "timestamp {value} is outside the supported range"
+                ))
+            })
     }
 }
 
@@ -314,7 +367,13 @@ fn parse_digits_i32(
     end: usize,
     part: &str,
 ) -> SnapshotSelectionResult<i32> {
-    value[start..end]
+    let digits = &value[start..end];
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SnapshotSelectionError::invalid_input(format!(
+            "timestamp has invalid {part}"
+        )));
+    }
+    digits
         .parse::<i32>()
         .map_err(|_| SnapshotSelectionError::invalid_input(format!("timestamp has invalid {part}")))
 }
@@ -325,7 +384,13 @@ fn parse_digits_u8(
     end: usize,
     part: &str,
 ) -> SnapshotSelectionResult<u8> {
-    value[start..end]
+    let digits = &value[start..end];
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SnapshotSelectionError::invalid_input(format!(
+            "timestamp has invalid {part}"
+        )));
+    }
+    digits
         .parse::<u8>()
         .map_err(|_| SnapshotSelectionError::invalid_input(format!("timestamp has invalid {part}")))
 }
