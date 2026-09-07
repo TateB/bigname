@@ -82,7 +82,7 @@ else
 fi
 
 for attempt in $(seq 1 60); do
-  if docker exec "$container" pg_isready -U "$user" -d "$database" >/dev/null 2>&1; then
+  if docker exec "$container" pg_isready -h 127.0.0.1 -p 5432 -U "$user" -d "$database" >/dev/null 2>&1; then
     break
   fi
 
