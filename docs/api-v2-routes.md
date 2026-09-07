@@ -833,8 +833,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
   data-integrity failure instead of silently hiding relations. A child whose
-  arms disagree with no authority proof is omitted entirely. On Mainnet, an
-  ENSv1 relation that survives parent reachability and
+  arms disagree with no authority proof is omitted entirely. On every ENS
+  [deployment profile](glossary.md#deployment-profile) (Mainnet and Sepolia), an ENSv1 relation that survives
+  parent reachability and
   was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
   though a positive ENSv2 registration in a locked parent's migration registry
@@ -843,9 +844,6 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   an unmigrated parent can expose this contradiction, but no ordinary on-chain
   parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
   migration-registry history are applied.
-  Sepolia publishes the proof-selected child relation; extending the
-  publication guardrail there is deferred until the connected Interpret→Project
-  path is proven.
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
   This route therefore never chooses one

@@ -2,7 +2,7 @@
 
 This runbook is for the on-call operator responding when the
 [Project phase](../glossary.md#projection-generation) refuses to publish on
-Mainnet for either dual-current invariant. An exact-name halt means
+Mainnet or Sepolia for either dual-current invariant. An exact-name halt means
 both ENSv1 and ENSv2 [authority arms](../glossary.md#authority-epoch) retain a
 current [surface binding](../glossary.md#surface-name-surface) after a proven,
 activated [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary).
@@ -98,7 +98,8 @@ long-running supervisor. The audit signature is the same in all three cases.
    ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 
-4. `GET /v2/status` reports the affected Mainnet chain (`data.chains["1"]`) as
+4. `GET /v2/status` reports the affected chain (`data.chains["1"]` for Mainnet
+   or `data.chains["11155111"]` for Sepolia) as
    `status: "stale"` and keeps `indexed_block` at the most recent successful
    Project publication. A failed Project phase maps directly to `stale`
    ([`apps/api/src/v2/status.rs:175-226`](../../apps/api/src/v2/status.rs#L175-L226)).
@@ -982,8 +983,8 @@ event rows
 
 ## Deployment-profile scope
 
-Both exact-name and child assertions apply only to the Mainnet
-[deployment profile](../glossary.md#deployment-profile). They remain gated by
+Both exact-name and child assertions apply to the configured Mainnet and Sepolia
+ENS [deployment profiles](../glossary.md#deployment-profile). They remain gated by
 an admitted proof: exact-name failures require an activated
 `migration_authority_transition`, and child failures require the selected
 ENSv2 authority and its admitted proof
@@ -1022,18 +1023,14 @@ The unlocked-wrapped path instead clears the wrapper resolver, unwraps the name
 to the Graveyard, and then performs the same ENSv2 injection
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L160 @ ens_v2@a971bd64).
 Only a proven per-name boundary derived from such admitted evidence connects the
-two arms. If Sepolia has that proof while both bindings remain open, Project
-still publishes the proof-selected ENSv2 row in `name_current`; the retained
-ENSv1 binding remains visible in `surface_bindings`. The equivalent child shape
-publishes the proof-selected ENSv2 relation in `children_current`, while its
-underlying relation events remain diagnostic history. Neither shape creates a
-`project_generation_failures` row, fails the Project phase, or makes
-`/v2/status` stale for this reason. This runbook therefore does not route a
-Sepolia incident through the Mainnet halt procedure. Extending the guardrail to
-Sepolia is deferred until [PR #852](https://github.com/ensdomains/bigname/pull/852),
-the #503 e2e harness, proves an Interpret-activated boundary through Project
-publication; [issue #851](https://github.com/ensdomains/bigname/issues/851)
-tracks re-applying the guardrail.
+two arms. If Sepolia has that proof and an open predecessor, treat the resulting
+`dual_current_exact_name_authority` failure as this runbook's incident and follow
+the same evidence-capture and repair procedure. A surviving post-epoch child
+contradiction follows the `dual_current_child_authority` procedure. The command
+examples above use Mainnet; substitute `ethereum-sepolia` and the affected
+Sepolia source descriptors without changing proof, lineage or publication checks.
+The coherent wrapped and locked publication paths are exercised by
+[PR #852](https://github.com/ensdomains/bigname/pull/852).
 
 ## Closure and escalation record
 

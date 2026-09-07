@@ -847,13 +847,11 @@ and the generated watch plans remain byte-for-byte unchanged. The new
 requires one complete retained-range Interpret re-walk followed by Project,
 with publication blocked until the completed generation is coherent. The
 dual-current integrity assertions apply to activated proofs on the configured
-Mainnet ENS deployment profile. Sepolia publishes a proof-selected result, and
-ordinary unproven Sepolia ENSv1/ENSv2 overlap remains a per-name refusal rather
-than a publication block. Extending the guardrail to Sepolia is deferred until
-[PR #852](https://github.com/ensdomains/bigname/pull/852), the #503 e2e harness,
-proves the connected Interpret→Project path;
-[issue #851](https://github.com/ensdomains/bigname/issues/851) tracks re-applying
-the guardrail. There is no production interval serving candidate-only data.
+Mainnet and Sepolia ENS deployment profiles. Ordinary unproven Sepolia
+ENSv1/ENSv2 overlap remains a per-name refusal rather than a publication block.
+[PR #852](https://github.com/ensdomains/bigname/pull/852) supplies the connected
+wrapped and locked Interpret-to-Project publication proof. There is no
+production interval serving candidate-only data.
 The ordinary announcement edge above remains a watch-plan input and this
 activation creates no ingest gap.
 

@@ -337,8 +337,8 @@ which sets a new registry owner rather than clearing the entry
 A migrated or positively registered child retains its ENSv1 relation only when
 parent reachability admits it. The slice 3B assertion, ordered after
 reachability and exact-name integrity, fails a
-[projection generation](glossary.md#projection-generation) on Mainnet when a
-child with an activated
+[projection generation](glossary.md#projection-generation) on either ENS
+deployment profile (Mainnet or Sepolia) when a child with an activated
 `migration_authority_transition` has a surviving ENSv1 relation asserted after
 its authority epoch began. An unmigrated parent can expose this contradiction;
 unwrapped, unlocked-wrapped, and emancipated-child paths cannot. Neither locked
@@ -348,9 +348,6 @@ migratable-child predicate filters the ENSv1 relation first. The query retains
 both proof kinds defensively, but the positive-proof form is unreachable under
 this contract. A surviving contradiction aborts with
 `dual_current_child_authority` through the post-rollback audit path below.
-Sepolia instead publishes the proof-selected child relation; extending this
-guardrail there is deferred until the connected Interpret→Project path is
-proven.
 
 The exact-name ownership rule consumes the activated proof. A
 name with an activated transition authority proof, or a current ENSv2 child
@@ -389,7 +386,7 @@ integrity assertion and durable failure audit run alongside the corresponding ch
 assertion. Those assertions run after transaction-level and then block-level
 reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
 cleans up the predecessor and establishes the successor does not fail a
-generation. On Mainnet, a name whose
+generation. On either ENS deployment profile (Mainnet or Sepolia), a name whose
 bindings remain current after the applicable proven activated boundary causes Project to abort
 before `publish::swap`,
 publishes no partial generation, and fails readiness for that target
@@ -426,11 +423,9 @@ across configured ENS deployment profiles.
 (upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
 Descendants, including `alice.addr.reverse`, are not exceptions. Existing ENSv1→ENSv2 migration proof, qualifying
 release, and deployment-wide ENSv2 release-threshold branches retain precedence.
-An ordinary no-proof overlap is refused rather than fatal. A dual-current
-contradiction after a proven activated boundary aborts projection generation on
-Mainnet; Sepolia publishes the proof-selected ENSv2 state, and extending the
-guardrail there is deferred until the connected Interpret→Project path is
-proven. Before the exact-name
+An ordinary no-proof overlap is refused rather than fatal; a dual-current contradiction
+after a proven activated boundary aborts projection generation for both
+configured Mainnet and Sepolia ENS deployment profiles. Before the exact-name
 slice, a corpus containing both families retained the historical
 `mixed_exact_name_corpus` product reason. The current per-name rule and its two
 reasons are the contracted replacement for that blanket refusal.

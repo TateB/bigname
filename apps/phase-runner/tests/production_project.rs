@@ -3671,26 +3671,20 @@ async fn a_basenames_child_publishes_under_its_own_authority_arm() -> Result<()>
     scratch.cleanup().await
 }
 
-// Sepolia selects the proven relation but does not run the Mainnet publication guardrail.
+// Sepolia applies the same proof-gated contradiction assertion as Mainnet.
 #[tokio::test]
-async fn a_sepolia_child_overlap_selects_without_blocking_publication() -> Result<()> {
+async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;
     seed_project_fixture(scratch.pool()).await?;
     seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
     declare_sepolia_post_audit_profile(scratch.pool(), CHAIN).await?;
 
-    run_project_phase(scratch.pool(), CHAIN, 5).await?;
-    assert_eq!(
-        child_relation(scratch.pool()).await?,
-        Some((None, Some(OWNER.to_owned()))),
-        "Sepolia still selects the proven ENSv2 relation"
-    );
-    assert!(
-        generation_failure_rows(scratch.pool(), CHAIN)
-            .await?
-            .is_empty(),
-        "Sepolia records no publication-blocking failure"
-    );
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the proven Sepolia child contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_CHILD_AUTHORITY);
     scratch.cleanup().await
 }
 
@@ -19789,7 +19783,7 @@ async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Res
 }
 
 #[tokio::test]
-async fn sepolia_profile_publishes_the_same_proven_dual_current_corpus() -> Result<()> {
+async fn sepolia_profile_blocks_the_same_proven_dual_current_corpus() -> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
     let chain = "project-dual-current-sepolia";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -19803,23 +19797,23 @@ async fn sepolia_profile_publishes_the_same_proven_dual_current_corpus() -> Resu
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped", None)
-        .await?;
+    // Construct this proof row as a pre-Project fixture.
+    // Connected activation is exercised by the #852 e2e scenarios.
+    insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unlocked_wrapped",
+        None,
+    )
+    .await?;
 
-    run_project_phase(scratch.pool(), chain, 5).await?;
-
-    let published: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(&logical_name_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(published, 1, "Sepolia keeps selecting past the boundary");
-    assert!(
-        generation_failure_rows(scratch.pool(), chain)
-            .await?
-            .is_empty(),
-        "the assertion is Mainnet-scoped"
-    );
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the proven Sepolia exact-name contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
 
     scratch.cleanup().await
 }
@@ -23888,10 +23882,11 @@ async fn seed_closed_predecessor_cross_arm_fixture(
 
 // An inert manifest whose deployment epoch makes Project classify the chain
 // under the [Sepolia deployment profile](../../../docs/glossary.md#deployment-profile).
-// Selector-only fixtures normally seed the intended closed-predecessor state;
-// dedicated Sepolia tests retain both arms to pin publication without the
-// Mainnet guardrail. Declare this before the first projection so a
-// deployment-profile-sensitive field cannot change mid-test.
+// A proven boundary with both authority arms still open is unpublishable on
+// every ENS deployment profile, so selector-only fixtures seed the closed
+// predecessor state that production Interpret writes. Declare this before the
+// first projection so a deployment-profile-sensitive field cannot change
+// mid-test.
 async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Result<()> {
     insert_namespaced_manifest(
         pool,

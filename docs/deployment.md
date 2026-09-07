@@ -673,14 +673,12 @@ profiles and generated watch plans do not change, so no historical fetch or
 manifest-authority attestation is introduced. Deploy the new phase runner,
 complete the retained-range Interpret redo under the new interpreter content
 hash, run the stamped Project range, and evaluate the proof-scoped integrity
-assertions for the Mainnet ENS deployment profile before `publish::swap`. Only
-after that Project generation publishes may the matching API be deployed.
-Sepolia still selects a proven boundary and refuses ordinary unproven overlap
-per name, but its publication guardrail is deferred until
-[PR #852](https://github.com/ensdomains/bigname/pull/852), the #503 e2e harness,
-proves the connected Interpret→Project path;
-[issue #851](https://github.com/ensdomains/bigname/issues/851) tracks re-applying
-the guardrail.
+assertions for both configured ENS deployment profiles (Mainnet and Sepolia)
+before `publish::swap`. Only after that Project generation publishes may the
+matching API be deployed. Independent unproven Sepolia ENSv1/ENSv2 overlap
+remains a per-name refusal rather than a generation failure. The connected
+wrapped and locked publication prerequisite is recorded in
+[PR #852](https://github.com/ensdomains/bigname/pull/852).
 An interrupted walk resumes only from its existing exact phase
 [redo-marker scope](glossary.md#redo-marker-scope). Interpret separately
 validates the normalized arm-wide replay preimage, keeps its named replacement
