@@ -46,9 +46,9 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    `18446744073709551615`). Reject zero operationally: it disables the configured
    reserve, although rendering and the unchanged CLI accept it. Do not copy a
    development host's free-space figure. The optional
-   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` must be absent when unused; remove
-   its assignment rather than writing an empty value. Empty, malformed and
-   overflowing values must fail the real CLI parser. Ceiling zero is a limit.
+   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` must be unset in operator inputs
+   when unused; remove its assignment instead of leaving it empty. Empty, malformed
+   and overflowing values must fail the real CLI parser. Ceiling zero is a limit.
 2. Select a dedicated, pre-created directory on the Docker daemon host as
    `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`. It must be absolute; Compose binds that
    same source and target read/write and does not create a missing host path.
@@ -92,10 +92,11 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    credentials before sharing. For each of server only, server/public,
    server/Reth and server/public/Reth, run the corresponding command above with
    both `config --format json` and `config --environment`. Require the exact floor
-   and path, an absent ceiling in the container when unset, and an exact decimal
-   ceiling when set. A null model key is unresolved, not an empty string; prove
-   omission by inspecting the actual container. Relative paths can also render;
-   their creation-time rejection remains a required control below.
+   and path, and an exact decimal ceiling assignment when set. A null model key
+   alone does not prove runtime behavior. Inspect the actual container: an unset
+   ceiling may appear as a bare variable name without `=`; `KEY=` is invalid empty.
+   Confirm no configured ceiling through the CLI control below. Relative paths
+   can render; their creation-time rejection remains a required control below.
    Require one dedicated read/write bind, identical absolute source/target and
    `create_host_path: false`. Both Reth sets must retain their separate read-only
    mount. No unrelated service environment, command, port, network or volume may
@@ -135,7 +136,7 @@ Run the following controls through the effective configuration and real service:
 | Relative path | Render or container creation rejects the nonabsolute target. |
 | Missing bind source | Container creation fails; the host directory is not created. |
 | Conflicting shell and env-file settings | Shell wins; effective values match the intended inputs. |
-| Ceiling unset | No ceiling environment entry or generated argument; reach the actual probe with no ceiling. |
+| Ceiling unset | Accept a bare variable name without `=` in Docker inspection; no ceiling assignment or generated argument. Reach the actual probe with no configured ceiling. |
 | Valid integer ceiling | Exact string forwarded; reach the actual database-size breach below. |
 | Empty/text/overflow ceiling or malformed/overflow floor | Actual CLI rejects that capacity input before unrelated prerequisites mask it. |
 | Floor zero | Render/parser accept it, but operational admission rejects it. |

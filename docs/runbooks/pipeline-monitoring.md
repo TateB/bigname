@@ -314,8 +314,8 @@ For `BignamePhaseRunnerCapacityPaused`:
    bound stopped work.
 2. If `breach_reasons` contains `database_size`, review actual storage headroom
    before increasing `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES`. Server Compose
-   forwards an explicitly configured ceiling; leaving it unset omits it and
-   disables that ceiling. Empty, malformed or overflowing values are invalid;
+   forwards an explicitly configured ceiling; leaving it unset configures
+   no ceiling. Empty, malformed or overflowing values are invalid;
    ceiling zero is a limit, not disabled protection. Recreate the runner after
    changing settings because they are read only at startup.
 3. For `free_disk`, free space on the filesystem containing the configured

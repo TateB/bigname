@@ -108,7 +108,8 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 
-The optional ceiling is omitted when unset; an explicitly empty value is invalid.
+An unset optional ceiling configures no limit; Docker inspection may show its bare
+variable name without `=`. An explicitly empty `KEY=` value is invalid.
 A configured ceiling must parse as an unsigned 64-bit integer; zero is a limit,
 not a way to disable it. The floor must also parse as an unsigned 64-bit integer.
 Operational admission rejects floor zero: Compose only enforces presence, and
