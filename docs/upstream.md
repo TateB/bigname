@@ -100,6 +100,29 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Stored zero address is served as absence**: bigname serves an exactly stored
+> 20-byte zero `addr:60` through an ENSv1 authority pointer or Basenames registry
+> pointer as `not_found`, including when a successful ENSIP-19 default exists.
+> Empty or missing eligible exact data retains permitted fallback.
+> **Upstream**: ENSv1 returns the selected coin-type bytes and consults the
+> default only when that payload is empty
+> `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L73-L85 @ ens_v1@91c966f)`;
+> its direct `addr(bytes32)` getter converts the selected coin-60 bytes to an
+> address
+> `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`.
+> The admitted Basenames resolver reads exact storage without default fallback
+> `(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L57-L62 @ basenames@1809bbc)`.
+> Its legacy getter returns the zero address for empty bytes and otherwise
+> converts the returned payload as an exact 20-byte address
+> `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc)`
+> `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)`.
+> **Our rule**: `docs/api-v2.md` § Resolver record answers and values,
+> `docs/api-v2-routes.md` resolver-record route, and `docs/projections.md` §
+> Resolver and records.
+> **Why**: classifying `address(0)` as absence keeps indexed and verified
+> answers aligned without changing retained normalized bytes.
+> **Since**: `2026-09-05`
+
 > **ENS no-proof overlap refusal versus chain-side era precedence** — For an ordinary logical name with current ENSv1 and ENSv2 candidates but no activated ENSv1→ENSv2 migration, release, or other admitted [authority proof](glossary.md#authority-proof), bigname refuses the name instead of inferring ENSv2. A chain-facing resolution path may nevertheless answer from one era according to its own era precedence. For the exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names, a current ENSv2 binding wins when ENSv1 evidence is current or historical; historical ENSv2 evidence without a current binding does not qualify. The maintainer ruling includes root, `eth`, `reverse`, and `addr.reverse`. The pinned ENSv2 deployment evidence covers root, `eth`, and `reverse`, not `addr.reverse`; `addr.reverse` is included by the ruling because the pinned ENSv1 contract defines it as the reverse registrar node and its deployment assigns that node directly on testnets. Bigname intentionally preserves this exact four-name classification across configured ENS [deployment profiles](glossary.md#deployment-profile). This is an exact-name exception, not a `.reverse` suffix rule. Configured ingest start blocks that omit proof events do not establish authority and do not weaken the refusal.
 > **Upstream**: the ENSv1 `.eth` resolver is updated to the ENSv2 resolver, which traverses the ENSv2 registry and retains an explicit ENSv1 override for `eth` `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L62-L80 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L23 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L49-L55 @ ens_v2@a971bd64)`. The ENSv2 deployment creates its root registry, registers and canonically parents `eth`, and registers or preserves `reverse` `(upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64)`. The ENSv1 reverse registrar uses the `addr.reverse` node and transfers an existing registrar's claim during replacement; its deployment writes the `addr.reverse` assignment only on testnets `(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/architecture.md` § “ENSv1→ENSv2 current authority” and `crates/project/src/builders/name_authority.rs`.

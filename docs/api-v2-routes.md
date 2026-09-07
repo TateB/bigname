@@ -633,7 +633,26 @@ Field ownership:
   recurses. A derived answer is normalized through the requested getter's
   verified decode: for coin type `60`, a 20-byte zero default becomes derived
   `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
-  an `ok` value. Exact stored records keep their existing behavior. Other
+  an `ok` value. Exact stored records retain their stored value except that an
+  ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes is normalized to `not_found`
+  before this derived rule runs. That covers an `AddressChanged(node,60,...)` payload of 20 zero
+  bytes and a retained
+  legacy-only normalized `AddrChanged(node,address(0))` behind an ENSv1 registry, registrar,
+  or wrapper resolver pointer, or a Basenames registry resolver pointer. ENSv2-origin
+  attribution, another coin type, another nonempty byte length, and nonzero addresses retain
+  their values. The exact entry remains but omits `value`. Indexed and auto
+  retain exact `not_found` even when an authorized nonzero default exists;
+  verified returns the same absence. `addresses["60"]`, `primary_address`, and
+  default derivation metadata remain absent. Empty or missing exact data keeps
+  permitted fallback. The private observation marker and inventory provenance
+  do not appear in product responses or record diagnostics.
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L99 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
+  Other
   default-source `ok` values yield the requested-key value, while authoritative
   absence yields derived `not_found`. An unsupported or
   non-authoritative source leaves auto unsatisfied and triggers ordinary

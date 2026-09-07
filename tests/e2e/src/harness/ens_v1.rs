@@ -948,6 +948,32 @@ pub async fn approve_resolver_delegate(
     .await
 }
 
+// These getters use each deployed resolver's actual ABI and storage behavior.
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40,L73-L85 @ ens_v1@91c966f)
+// (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L42,L57-L62 @ basenames@1809bbc)
+pub async fn read_addr_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    name: &str,
+    coin: Option<u64>,
+) -> Result<Vec<u8>> {
+    let (signature, arguments) = match coin {
+        Some(coin) => (
+            "addr(bytes32,uint256)",
+            (namehash(name), U256::from(coin)).abi_encode(),
+        ),
+        None => ("addr(bytes32)", (namehash(name),).abi_encode()),
+    };
+    let mut call = keccak256(signature)[..4].to_vec();
+    call.extend(arguments);
+    let response = rpc.eth_call(resolver, &call).await?;
+    Ok(if coin.is_some() {
+        Bytes::abi_decode(&response)?.to_vec()
+    } else {
+        Address::abi_decode(&response)?.as_slice().to_vec()
+    })
+}
+
 pub async fn set_addr_record(
     rpc: &RpcClient,
     resolver: Address,

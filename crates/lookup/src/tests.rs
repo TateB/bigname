@@ -348,9 +348,50 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
         }),
         "unsupported",
     )]);
+    let marker_value = "0x2222222222222222222222222222222222222222";
+    let marker_cases = [
+        ("marked absence", Some("not_found"), json!(["addr:60"])),
+        ("marked incomplete", Some("not_found"), json!(["addr:60"])),
+        ("unmarked absence", Some("not_found"), json!([])),
+        ("orphan marker", None, json!(["addr:60"])),
+        ("exact success", Some("success"), json!(["addr:60"])),
+        ("malformed marker", Some("not_found"), json!("addr:60")),
+        ("unrelated marker", Some("not_found"), json!(["addr:61"])),
+    ]
+    .into_iter()
+    .map(|(name, exact_status, marker)| {
+        let mut entries = vec![json!({
+            "record_key":"addr:2147483648", "record_family":"addr",
+            "selector_key":"2147483648", "status":"success", "value":marker_value
+        })];
+        if let Some(status) = exact_status {
+            let mut exact = json!({
+                "record_key":"addr:60", "record_family":"addr",
+                "selector_key":"60", "status":status
+            });
+            if status == "success" {
+                exact["value"] = json!(marker_value);
+            }
+            entries.push(exact);
+        }
+        (
+            name,
+            "addr:60".to_owned(),
+            json!(entries),
+            json!({
+                "read_rules":[{"kind":"ensip19_default_address",
+                    "source_record_key":"addr:2147483648"}],
+                "exact_nonempty_not_found_record_keys":marker
+            }),
+            json!({"status": if name == "marked incomplete" { "unsupported" } else { "projected" }}),
+            if name == "marked incomplete" { "unsupported" } else { "supported" },
+        )
+    });
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
 
-    for (case_name, record_key, entries, provenance, coverage, support_status) in cases {
+    for (case_name, record_key, entries, provenance, coverage, support_status) in
+        cases.chain(marker_cases)
+    {
         let selector = RecordSelector::parse(&record_key)?;
         let rust_answer = bigname_domain::resolver_read::evaluate_indexed_record(
             &entries,
@@ -417,6 +458,20 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
         .bind(&record_key)
         .fetch_one(fixture.pool())
         .await?;
+        if provenance
+            .get("exact_nonempty_not_found_record_keys")
+            .is_some()
+        {
+            let expected = if case_name == "marked incomplete" {
+                json!({"status":"unsupported"})
+            } else if case_name == "marked absence" {
+                json!({"status":"not_found"})
+            } else {
+                json!({"status":"success", "value":marker_value})
+            };
+            assert_eq!(sql_answer, expected, "SQL marker case: {case_name}");
+            assert_eq!(rust_answer, expected, "Rust marker case: {case_name}");
+        }
         assert_eq!(
             rust_answer, sql_answer,
             "derivation mismatch for {case_name}"

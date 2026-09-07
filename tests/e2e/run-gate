@@ -3,16 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=92
-expected_runnable=89
+expected_total=94
+expected_runnable=91
 expected_ignored=3
-expected_shard_1_runnable=44
+expected_shard_1_runnable=45
 expected_shard_1_ignored=2
-expected_shard_1_filtered=46
+expected_shard_1_filtered=47
+# These retained main forecasts exclude the newly composed zero-address scenarios.
 expected_shard_1_predicted_seconds=1185.199
-expected_shard_2_runnable=45
+expected_shard_2_runnable=46
 expected_shard_2_ignored=1
-expected_shard_2_filtered=46
+expected_shard_2_filtered=47
 expected_shard_2_predicted_seconds=1373.503
 
 expected_ignored_tests=(
@@ -33,6 +34,7 @@ shard_1_tests=(
     "harness::responses::tests::pointer_preserves_explicit_null"
     "harness::responses::tests::pointer_rejects_missing_path"
     "scenarios::basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones"
+    "scenarios::basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only"
     "scenarios::basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews"
     "scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage"
@@ -111,6 +113,7 @@ shard_2_tests=(
     "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
     "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
+    "scenarios::resolver_records::exact_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names"
     "scenarios::resolver_records::resolver_changes_follow_registry_and_zero_releases"
     "scenarios::resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported"
