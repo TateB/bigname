@@ -51,8 +51,44 @@ pub(crate) struct DomainEntityFilter {
     #[graphql(name = "id_not_in")]
     pub(crate) id_not_in: MaybeUndefined<Vec<ID>>,
     pub(crate) owner: Option<String>,
+    #[graphql(name = "owner_not")]
+    pub(crate) owner_not: MaybeUndefined<String>,
+    #[graphql(name = "owner_gt")]
+    pub(crate) owner_gt: MaybeUndefined<String>,
+    #[graphql(name = "owner_gte")]
+    pub(crate) owner_gte: MaybeUndefined<String>,
+    #[graphql(name = "owner_lt")]
+    pub(crate) owner_lt: MaybeUndefined<String>,
+    #[graphql(name = "owner_lte")]
+    pub(crate) owner_lte: MaybeUndefined<String>,
     #[graphql(name = "owner_in")]
     pub(crate) owner_in: Option<Vec<String>>,
+    #[graphql(name = "owner_not_in")]
+    pub(crate) owner_not_in: MaybeUndefined<Vec<String>>,
+    #[graphql(name = "owner_contains")]
+    pub(crate) owner_contains: MaybeUndefined<String>,
+    #[graphql(name = "owner_contains_nocase")]
+    pub(crate) owner_contains_nocase: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_contains")]
+    pub(crate) owner_not_contains: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_contains_nocase")]
+    pub(crate) owner_not_contains_nocase: MaybeUndefined<String>,
+    #[graphql(name = "owner_starts_with")]
+    pub(crate) owner_starts_with: MaybeUndefined<String>,
+    #[graphql(name = "owner_starts_with_nocase")]
+    pub(crate) owner_starts_with_nocase: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_starts_with")]
+    pub(crate) owner_not_starts_with: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_starts_with_nocase")]
+    pub(crate) owner_not_starts_with_nocase: MaybeUndefined<String>,
+    #[graphql(name = "owner_ends_with")]
+    pub(crate) owner_ends_with: MaybeUndefined<String>,
+    #[graphql(name = "owner_ends_with_nocase")]
+    pub(crate) owner_ends_with_nocase: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_ends_with")]
+    pub(crate) owner_not_ends_with: MaybeUndefined<String>,
+    #[graphql(name = "owner_not_ends_with_nocase")]
+    pub(crate) owner_not_ends_with_nocase: MaybeUndefined<String>,
     pub(crate) name: MaybeUndefined<String>,
     #[graphql(name = "name_not")]
     pub(crate) name_not: MaybeUndefined<String>,

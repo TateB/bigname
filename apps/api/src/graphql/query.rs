@@ -9,6 +9,7 @@ use crate::state::AppState;
 use super::account_queries::{
     account_entity_filter_to_storage, load_phase_graphql_account_page_offset, resolve_account,
 };
+use super::effective_owner_filter::domain_effective_owner_filter;
 use super::enums::{
     AccountOrderBy, DomainOrderBy, OrderDirection, ResolverOrderBy, SubgraphErrorPolicy,
     generated_order,
@@ -374,11 +375,14 @@ fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
 ) -> Result<(NameCurrentListFilter, GeneratedDomainFilter)> {
     let filter = filter.unwrap_or_default();
+    let generated_owner = domain_effective_owner_filter(&filter)?;
+    let owner = filter.owner.clone();
+    let owner_in = filter.owner_in.clone();
     let storage_filter = NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
         address: generated_address_membership(
-            filter.owner,
-            filter.owner_in,
+            owner.clone(),
+            owner_in.clone(),
             AddressNameRelation::EffectiveController,
         ),
         ..Default::default()
@@ -472,6 +476,7 @@ fn domain_entity_filter_to_storage(
                 std::convert::identity,
             )?,
         },
+        owner: generated_owner,
     };
     Ok((storage_filter, generated_filter))
 }

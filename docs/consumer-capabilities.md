@@ -616,9 +616,9 @@ hash-shaped ENS name from shadowing an entity ID; every other input takes the
 direct name lookup path. `Domain_filter.id` and `Domain_filter.id_in` match
 namehashes only.
 
-`Domain_filter` retains `owner` and `owner_in` and serves the complete generated
-ID family: `id`, `id_not`, `id_gt`, `id_gte`, `id_lt`, `id_lte`, `id_in`, and
-`id_not_in`. It also serves `name`, `name_not`, `name_gt`, `name_gte`, `name_lt`,
+`Domain_filter` serves the complete generated ID family: `id`, `id_not`,
+`id_gt`, `id_gte`, `id_lt`, `id_lte`, `id_in`, and `id_not_in`. It also serves
+`name`, `name_not`, `name_gt`, `name_gte`, `name_lt`,
 `name_lte`, `name_in`, `name_not_in`, and the `contains`, `starts_with`, and
 `ends_with` positive and negative forms, each with a distinct `_nocase` sibling.
 Graph Node generates these ID and String operator families (upstream:
@@ -669,7 +669,39 @@ graph_node@aefe173) (upstream:
 .refs/graph_node/store/postgres/src/relational_queries.rs:L1696-L1710 @
 graph_node@aefe173).
 
-`owner` and `owner_in` match the projected effective controller.
+The generated effective-controller owner family is `owner`, `owner_not`,
+`owner_gt`, `owner_gte`, `owner_lt`, `owner_lte`, `owner_in`, `owner_not_in`,
+`owner_contains`, `owner_contains_nocase`, `owner_not_contains`,
+`owner_not_contains_nocase`, `owner_starts_with`, `owner_starts_with_nocase`,
+`owner_not_starts_with`, `owner_not_starts_with_nocase`, `owner_ends_with`,
+`owner_ends_with_nocase`, `owner_not_ends_with`, and
+`owner_not_ends_with_nocase`. Equality and membership compare supplied
+ID-shaped text exactly. Ranges retain the supplied text, and patterns retain its
+text and case while adding the wildcard prefix or suffix required by the
+operator; `_nocase` retains its case-insensitive meaning. Graph Node likewise
+forwards
+generated equality and list inputs directly into store filters (upstream:
+.refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173).
+Every positive owner condition in one filter must match the same relation row.
+A negative condition rejects a name when any eligible
+relation row matches its positive counterpart. Thus, for multiple-controller
+names, `owner: A` plus `owner_contains: "abc"` cannot combine matches from rows A
+and C, while `owner: A` plus `owner_not_contains: "abc"` is rejected when row C
+matches `abc`.
+
+When `owner` or `owner_in` is present, SQL starts from indexed
+effective-controller addresses and evaluates every other owner member against
+those same relation rows. Without either anchor, SQL visits candidate names in
+the requested ID order and performs an indexed effective-controller lookup for
+each name. That lookup is page-driven only while matching rows occur early
+enough in the requested direction to fill the page. A rare owner, or matches
+late in the requested direction, can walk the complete ordered names relation.
+Non-ID orders also have linear cost because the relation lookup runs before
+sorting. Issue `#831` owns index support for those linear cases. Omitted and
+explicit-null `owner` or `owner_in` are equivalent. Each of the 18 other owner
+members rejects explicit null as `Domain_filter.<member> must not be null`;
+empty `owner_in` and `owner_not_in` lists both match no rows.
+
 The effective controller agrees with `Domain.owner` when the latest projected
 registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero
 address on a non-wrapper-authority name and no later resource-scoped
@@ -704,8 +736,8 @@ operation. Its `name` continues the existing ENS name lookup, and its
 `name_contains` continues ENSIP-15 normalization plus escaped-pattern behavior.
 In particular, `isMigrated` remains on `DomainFilter` and is not accepted by
 `Domain_filter`; task `#670/T10` remains outside this slice and is subject to the
-Manager constraint below. Owner operators beyond `owner`/`owner_in`, date and
-Resolver-ID filters, relation filters, `and`, `or`, and every other unclaimed
+Manager constraint below. Date and Resolver-ID filters, relation filters, `and`,
+`or`, and every other unclaimed
 upstream member remain absent and produce the existing unknown-input-field
 validation error.
 

@@ -8,6 +8,7 @@
 
 mod account_queries;
 mod convert;
+mod effective_owner_filter;
 mod enums;
 mod error;
 mod generated_filter_ops;

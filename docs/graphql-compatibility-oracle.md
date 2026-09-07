@@ -46,7 +46,8 @@ ownership rules above; the command-line capture and verification tool does not d
 Broader entity/event fixtures, the remaining filter matrix, historical reads,
 errors, and reports are deferred. The Domain point and name-equality responses
 remain the claimed response cases; schema coverage additionally claims the
-generated-style Domain roots and the 30-member partial `Domain_filter`.
+generated-style Domain roots and the 48-member partial `Domain_filter`. The complete effective-owner scalar family retains `owner` and `owner_in`, adds 18 exact `input:` claims, changes the total `Domain_filter` remainder from 197 to 179 and its `#670/T3` subset from 193 to 175, leaves four `#670/T10` entries, and changes no enum claim.
+Its four `#670/T5` disagreement classes remain wrapper-authority names, zero or masked registry owners, names without a projected ownership event, and state-derived effective-controller changes from resource-scoped `PermissionChanged` or owner-less `AuthorityEpochChanged`. The owner filters evaluate the relation rather than the served fallback: an absent relation admits neither a positive nor a negative member merely from that fallback, while a present but disagreeing relation can admit a positive match on the relation address or a negative comparison against the served owner.
 
 Coverage also claims the generated `account`, `accounts`, `resolver`, and
 `resolvers` roots and every argument in their captured signatures. It claims

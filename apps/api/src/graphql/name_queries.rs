@@ -11,6 +11,7 @@ use bigname_storage::{
 };
 
 use super::convert::ZERO_ADDRESS;
+use super::effective_owner_filter as owner;
 use super::generated_filter_ops::{GeneratedDomainFilter, push_generated_domain_filters};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhaseGraphqlNameListRow {
@@ -94,73 +95,11 @@ async fn load_one(
     row.map(decode_row).transpose()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn load_phase_graphql_name_list_page_offset(
-    pool: &PgPool,
-    filter: &NameCurrentListFilter,
-    snapshot_chain_ids: &[String],
-    generated_filter: &GeneratedDomainFilter,
-    sort: GeneratedDomainSort,
-    order: NameCurrentListOrder,
-    limit: u64,
-    offset: u64,
-) -> Result<Vec<PhaseGraphqlNameListRow>> {
-    let limit = i64::try_from(limit).context("GraphQL name limit exceeds SQL limit")?;
-    let offset = i64::try_from(offset).context("GraphQL name offset exceeds SQL limit")?;
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(
-        &mut builder,
-        filter,
-        None,
-        Some(generated_filter),
-        Some(snapshot_chain_ids),
-        indexed_page(sort, generated_filter),
-    );
-    builder.push(SELECT_NAMES);
-    push_order(&mut builder, sort, order);
-    builder.push(" LIMIT ");
-    builder.push_bind(limit);
-    builder.push(" OFFSET ");
-    builder.push_bind(offset);
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load schema-v2 GraphQL names for {filter:?}"))?;
-    rows.into_iter().map(decode_row).collect()
-}
-
+#[path = "owner_witness_validation.rs"]
+pub(super) mod owner_witness_validation;
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub async fn explain_phase_graphql_name_list_page(
-    pool: &PgPool,
-    snapshot_chain_ids: &[String],
-    filter: &GeneratedDomainFilter,
-    sort: GeneratedDomainSort,
-    order: NameCurrentListOrder,
-    limit: u64,
-    offset: u64,
-) -> Result<Value> {
-    let storage_filter = NameCurrentListFilter {
-        namespace: Some("ens".into()),
-        ..Default::default()
-    };
-    let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ");
-    push_filtered_names(
-        &mut builder,
-        &storage_filter,
-        None,
-        Some(filter),
-        Some(snapshot_chain_ids),
-        indexed_page(sort, filter),
-    );
-    builder.push(SELECT_NAMES);
-    push_order(&mut builder, sort, order);
-    builder.push(" LIMIT ").push_bind(i64::try_from(limit)?);
-    builder.push(" OFFSET ").push_bind(i64::try_from(offset)?);
-    let row = builder.build().fetch_one(pool).await?;
-    Ok(row.try_get(0)?)
-}
+pub use owner_witness_validation::explain_phase_graphql_name_list_page;
+pub use owner_witness_validation::load_phase_graphql_name_list_page_offset;
 
 fn indexed_page(sort: GeneratedDomainSort, filter: &GeneratedDomainFilter) -> bool {
     sort == GeneratedDomainSort::Id || filter.has_bounded_id_predicate()
@@ -254,7 +193,9 @@ pub(crate) fn push_filtered_names<'a>(
     indexed_page: bool,
 ) {
     builder.push("WITH ");
-    if let Some(address) = filter.address.as_ref() {
+    let owner_filter = owner::active_owner_filter(generated_filter);
+    owner::push_effective_owner_cte_predicates(builder, owner_filter, snapshot_chain_ids);
+    if let Some(address) = owner::legacy_address_filter(owner_filter, filter.address.as_ref()) {
         builder.push(
             "address_membership AS (SELECT anc.logical_name_id, \
              JSONB_AGG( \
@@ -369,12 +310,9 @@ pub(crate) fn push_filtered_names<'a>(
         r#") AS expiry_date,
            NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address,"#,
     );
-    if filter.address.is_some() {
-        builder.push(" address_membership.membership_targets");
-    } else {
-        builder.push(" '[]'::JSONB AS membership_targets");
-    }
+    owner::push_effective_owner_membership_targets(builder, owner_filter, filter.address.is_some());
     builder.push(" FROM bigname_phase.name_current nc ");
+    owner::push_effective_owner_lateral_join(builder, owner_filter);
     if indexed_page {
         builder.push(" JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface ");
     } else {
@@ -394,7 +332,7 @@ pub(crate) fn push_filtered_names<'a>(
         builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
         builder.push(" OFFSET 0) name_guard ON TRUE");
     }
-    if filter.address.is_some() {
+    if owner_filter.is_none() && filter.address.is_some() {
         builder.push(
             " JOIN address_membership \
                ON address_membership.logical_name_id = nc.logical_name_id",

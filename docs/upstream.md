@@ -206,7 +206,7 @@ to the applicable entries below.
 > **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
 > as an equality filter without a name fallback
-> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
+> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Why**: the local extension preserves bigname's existing name-string lookup convenience while keeping generated
 > namehash IDs authoritative.
@@ -216,15 +216,18 @@ to the applicable entries below.
 > supplied ID text without normalization, while generated `Domain_filter.name` members compare the supplied text with the
 > nullable human-readable name instead of converting it to an ENS namehash.
 > **Upstream**: Graph Node maps an equality filter to direct entity-field equality
-> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173), while the ENS subgraph declares
 > the human-readable `Domain.name` separately from the namehash `Domain.id`
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The separate legacy `DomainFilter` retains its ENS
 > name lookup and normalization behavior.
 > **Since**: `2026-09-03`
 
-> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
-> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> **Generated Domain owner filters depend on projected registry ownership** — the generated `Domain_filter` owner family compares the projected effective-controller relation rather than the served `Domain.owner` fallback.
+> Positive conditions in one filter must match the same relation row; each negative condition rejects the name when any eligible relation row matches its positive counterpart. Negative members require an eligible effective-controller relation row and use a name-correlated anti-semijoin, so a name cannot pass merely because the relation is absent. Filtered relation targets participate in snapshot revalidation.
+> Equality and membership compare supplied ID-shaped text exactly. Ranges retain the supplied text, and patterns retain its text and case while adding the wildcard prefix or suffix required by the operator; `_nocase` retains its case-insensitive meaning. Graph Node routes supplied equality and list values directly into store filters (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173).
+> Explicit null for retained `owner` and `owner_in` remains equivalent to omission. Graph Node emits `IS NULL` for null equality, maps `_not` null to `IS NOT NULL`, and rejects `_in` null because membership requires a list (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L337-L384 @ graph_node@aefe173) (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173) (upstream: .refs/graph_node/graphql/src/store/query.rs:L415-L436 @ graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1623 @ graph_node@aefe173). Locally, `owner_not: null` is rejected with the other newly served members. These deliberate null divergences are filed as `#862`. Every newly served owner member rejects explicit null as `Domain_filter.<member> must not be null`. Empty
+> `owner_in` and `owner_not_in` lists both return an empty page, while duplicate list entries are tolerated. A positive equality or membership starts from indexed effective-controller addresses. Without either anchor, the query visits candidate names and performs an indexed effective-controller lookup for each name. Under ID order or a bounded ID predicate this is page-driven only while matches occur early enough in the requested direction to fill the page; a rare owner or matches late in that direction walk the complete ordered names relation. Non-ID orders also perform the lookup before sorting and remain in the linear cost class owned by `#831`. The effective controller agrees with `Domain.owner`
 > when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
 > a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
 > A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
@@ -238,7 +241,7 @@ to the applicable entries below.
 > ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
 > which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
 > event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
-> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> there. This GraphQL section states each class explicitly and carries the served scalar-family contract.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
@@ -246,22 +249,57 @@ to the applicable entries below.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
 > **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
-> **Since**: `2026-09-02`
+> **Planner evidence**: the SQL-seeded owner fixture contains 5,006 eligible ordered names and 5,004 effective-controller relations. It asserts that all 5,004 eligible owner names retain distinct bindings, resources, and token lineages. The 5,000 padded names, two eligible sentinel names, and base owners form owner populations of 4,797, 201, and six. All seven participating tables are analyzed. These tests exercise the bound identity shape; they do not run Ingest, Interpret, or Project.
+> The earlier fixture cleared name bindings and shared a resource/lineage across padded controllers. Retaining distinct identities fails its former 8,192 full-buffer and 4,096 ascending anti-subtree ceilings. The reviewed replacement fixture ceilings are 12,288 shared hit/read blocks per zero-offset page, 10,240 per prefix validation, and 6,144 per ascending anti subtree. For `skip: 200, first: 200`, the page ceiling is 24,576 and the combined prefix-plus-page ceiling is 34,816. Each bounded-request statement must cost less than 100,000; their combined estimated cost must be below 200,000. These are regression-fixture envelopes with headroom, not a universal latency or scalability SLO.
+> PostgreSQL 16 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` measurements below use ID ascending and limit 200 unless labeled otherwise. Prefix rows are a single validation boolean; OFFSET page rows are the separate page statement. `outer` is name rows times loops, `max loops` spans every plan node, and `anti blocks` is the first anti subtree. All measurements have no JIT or temporary blocks. Representative OFFSET statements each visit at most 404 names/loops (prefix name visits at most 204); the rare descending case deliberately visits all 5,006 names and remains outside the bounded-page envelope.
+>
+> | statement/operator | total cost | rows | outer | max loops | anti blocks | full blocks |
+> | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+> | `NEGATIVE DESC` | 49,776.10 | 200 | 208 | 208 | 5,312 | 10,328 |
+> | `NEGATIVE owner_not` | 49,862.18 | 200 | 200 | 200 | 5,006 | 10,050 |
+> | `NEGATIVE owner_not_contains` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_contains_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_ends_with` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_ends_with_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_in` | 49,861.43 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_starts_with` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_starts_with_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `OFFSET PAGE owner` | 554.44 | 1 | 201 | 201 | 0 | 8,479 |
+> | `OFFSET PAGE owner_contains` | 38,861.92 | 200 | 400 | 400 | 0 | 17,248 |
+> | `OFFSET PAGE owner_in` | 554.19 | 1 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner` | 553.91 | 200 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner_contains` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_contains_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_ends_with` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_ends_with_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_gt` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_gte` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_in` | 553.66 | 200 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner_lt` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_lte` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_starts_with` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_starts_with_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `PREFIX owner` | 544.79 | 1 | 200 | 400 | 8,894 | 8,894 |
+> | `PREFIX owner_contains` | 58.13 | 1 | 200 | 400 | 9,418 | 9,418 |
+> | `PREFIX owner_in` | 544.54 | 1 | 200 | 400 | 8,873 | 8,873 |
+> | `RARE DESC` | 19,459.46 | 6 | 5,006 | 5,006 | 0 | 31,204 |
+> Combined `skip: 200, first: 200` work: `owner` 17,373 blocks / 1,099.23 estimated cost; `owner_in` 17,349 blocks / 1,098.73 estimated cost; `owner_contains` 26,666 blocks / 38,920.05 estimated cost. These sums cover both SQL statements, not elapsed request latency.
+> **Since**: `2026-09-05`
 
 > **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
 > end with `%` and otherwise gain `%` at both ends. Generated pattern input does not perform ENSIP-15 substring
 > normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
-> and escaped-pattern behavior.
-> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173).
+> and escaped-pattern behavior. These rules apply to both generated name patterns and generated owner-ID patterns:
+> starts-with appends `%`, ends-with prepends `%`, case-sensitive members use `LIKE`, and `_nocase` members use `ILIKE`.
+> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE` (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173), including ends-with variants (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1547-L1555 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Since**: `2026-09-03`
 
-> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
-> character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
-> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
-> leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
+> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, noncanonical ID ranges,
+> generated owner-ID ranges, and case-sensitive owner-ID patterns, but deliberately leaves fixed-width lowercase
+> hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
 > hexadecimal keys byte-lexically like C. Alpine/musl CI and default deployment images satisfy that rule by construction;
 > glibc deployments rely on the separately verified lowercase-hexadecimal property, while local C collation remains
@@ -284,9 +322,9 @@ to the applicable entries below.
 > Bigname also adds a same-direction namehash tie-break to `owner__id`; Graph Node's child-ID path adds no parent-ID
 > tie-break. For a mutable entity such as `Domain`, the default setting appends the internal block-range column after
 > that child ID (upstream: .refs/ens_subgraph/schema.graphql:L1 @ ens_subgraph@723f1b6) (upstream:
-> .refs/graph_node/store/postgres/src/relational_queries.rs:L3838-L3842 @ graph_node@aefe1737) (upstream:
-> .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4052 @ graph_node@aefe1737) (upstream:
-> .refs/graph_node/graph/src/env/store.rs:L299-L300 @ graph_node@aefe1737).
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L3838-L3842 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4052 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/graph/src/env/store.rs:L299-L300 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Divergence**: bigname lacks equivalent raw-name and expression indexes for name equality/range/prefix and the non-ID
 > order keys. Issue `#831` owns those names-projection indexes. They require a separate schema-migration slice and are not

@@ -40,6 +40,7 @@ pub struct StringFilter {
 pub struct GeneratedDomainFilter {
     pub id: IdFilter,
     pub name: StringFilter,
+    pub owner: StringFilter,
 }
 
 impl GeneratedDomainFilter {

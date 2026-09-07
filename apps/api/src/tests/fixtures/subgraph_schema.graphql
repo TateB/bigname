@@ -92,7 +92,25 @@ input Domain_filter {
 	id_in: [ID!]
 	id_not_in: [ID!]
 	owner: String
+	owner_not: String
+	owner_gt: String
+	owner_gte: String
+	owner_lt: String
+	owner_lte: String
 	owner_in: [String!]
+	owner_not_in: [String!]
+	owner_contains: String
+	owner_contains_nocase: String
+	owner_not_contains: String
+	owner_not_contains_nocase: String
+	owner_starts_with: String
+	owner_starts_with_nocase: String
+	owner_not_starts_with: String
+	owner_not_starts_with_nocase: String
+	owner_ends_with: String
+	owner_ends_with_nocase: String
+	owner_not_ends_with: String
+	owner_not_ends_with_nocase: String
 	name: String
 	name_not: String
 	name_gt: String
