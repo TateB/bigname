@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use alloy_primitives::{Address, U256, keccak256};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
-use super::support;
+use super::{resolver_records::V2Api, support};
 use crate::harness::responses::{exact_name, pointer, primary_name, selector_keys};
 use crate::harness::{anvil::Anvil, basenames, ens_v1, repo_root};
 
@@ -36,6 +36,127 @@ async fn compact_records(run: &support::PipelineRun, name: &str, query: &str) ->
         .await?;
     assert_eq!(status, 200, "Basenames records lookup failed: {body}");
     Ok(body)
+}
+
+async fn v2_records(api: &V2Api, name: &str, source: &str) -> Result<Value> {
+    let response = api
+        .client
+        .get(format!(
+            "{}/v2/names/{name}/records?namespace=basenames&source={source}&keys=addr:60",
+            api.base_url
+        ))
+        .send()
+        .await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    assert_eq!(status, 200, "v2 Basenames records lookup failed: {body}");
+    Ok(body)
+}
+
+fn assert_addr60_not_found(body: &Value) {
+    assert_eq!(
+        pointer(body, "/data/records/addr:60/status"),
+        "not_found",
+        "Basenames addr:60 should be absent: {body}"
+    );
+    assert!(body.pointer("/data/records/addr:60/value").is_none());
+    assert!(body.pointer("/data/addresses/60").is_none());
+    assert!(body.pointer("/data/primary_address").is_none());
+}
+
+fn addr60_observation(body: &Value) -> Value {
+    json!({
+        "record": {
+            "status": body.pointer("/data/records/addr:60/status"),
+            "value": body.pointer("/data/records/addr:60/value"),
+        },
+        "address": body.pointer("/data/addresses/60"),
+        "primary_address": body.pointer("/data/primary_address"),
+    })
+}
+
+async fn enable_basenames_verified_route(
+    run: &support::PipelineRun,
+    logical_name_id: &str,
+    l1_resolver: Address,
+) -> Result<()> {
+    let l1_resolver = format!("{l1_resolver:#x}");
+    // #857 workaround: without scenario topology/provenance, verified/auto are unsupported.
+    let topology = sqlx::query(
+        r#"
+        UPDATE name_current name
+        SET declared_summary = jsonb_set(
+                name.declared_summary,
+                '{topology}',
+                jsonb_build_object(
+                    'registry_path', jsonb_build_array(jsonb_build_object(
+                        'logical_name_id', name.logical_name_id,
+                        'namespace', name.namespace,
+                        'normalized_name', name.raw_name,
+                        'canonical_display_name', name.raw_name,
+                        'namehash', name.namehash,
+                        'resource_id', name.resource_id,
+                        'binding_kind', name.binding_kind
+                    )),
+                    'subregistry_path', '[]'::jsonb,
+                    'resolver_path', jsonb_build_array(jsonb_build_object(
+                        'logical_name_id', name.logical_name_id,
+                        'namespace', name.namespace,
+                        'normalized_name', name.raw_name,
+                        'canonical_display_name', name.raw_name,
+                        'resource_id', name.resource_id,
+                        'chain_id', name.declared_summary #>> '{resolver,chain_id}',
+                        'address', name.declared_summary #>> '{resolver,address}',
+                        'latest_event_kind',
+                            name.declared_summary #>> '{resolver,latest_event_kind}'
+                    )),
+                    'wildcard', jsonb_build_object(
+                        'source', NULL, 'matched_labels', '[]'::jsonb
+                    ),
+                    'alias', jsonb_build_object(
+                        'final_target', NULL, 'hops', '[]'::jsonb
+                    ),
+                    'version_boundaries', jsonb_build_object(
+                        'topology_version_boundary',
+                            inventory.record_version_boundary,
+                        'record_version_boundary',
+                            inventory.record_version_boundary
+                    ),
+                    'transport', jsonb_build_object(
+                        'source_chain_id', 'base-mainnet',
+                        'target_chain_id', 'ethereum-mainnet',
+                        'contract_address', $2,
+                        'latest_event_kind', NULL
+                    )
+                ),
+                true
+            ),
+            provenance = jsonb_set(
+                name.provenance,
+                '{manifest_versions}',
+                COALESCE(name.provenance -> 'manifest_versions', '[]'::jsonb) ||
+                    jsonb_build_array(jsonb_build_object(
+                        'source_family', 'basenames_execution',
+                        'manifest_version', 2,
+                        'chain', 'ethereum-mainnet',
+                        'deployment_epoch', 'basenames_v1'
+                    )),
+                true
+            )
+        FROM record_inventory_current inventory
+        WHERE name.logical_name_id = $1
+          AND inventory.resource_id = name.resource_id
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(l1_resolver)
+    .execute(&run.db.pool)
+    .await?;
+    ensure!(
+        topology.rows_affected() == 1,
+        "install Basenames verified topology for {logical_name_id}"
+    );
+    Ok(())
 }
 
 fn inventory_reason(body: &Value, section: &str, family: &str, field: &str) -> Option<String> {
@@ -1100,5 +1221,198 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
     assert_eq!(grants, 0);
 
     run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
+    let eth = Anvil::spawn().await?;
+    let l1_resolver =
+        Address::from_slice(&keccak256("bigname-e2e-placeholder:l1_resolver".as_bytes())[12..]);
+    // Fixed-answer verified transport stub; mine it before either chain advances.
+    eth.client()
+        .set_code(
+            l1_resolver,
+            &[
+                0x60, 0x20, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x20, 0x52, 0x60, 0x60, 0x60, 0x00,
+                0xf3,
+            ],
+        )
+        .await?;
+    eth.client().mine(1).await?;
+    let base = Anvil::spawn_base_mainnet().await?;
+    let rpc = base.client();
+    let ens_deployment = ens_v1::deploy_ens_v1(&eth.client(), &repo_root()).await?;
+    let deployment = basenames::deploy_basenames(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, nonzero) = (accounts[1], accounts[2]);
+    let name = "zero-address-682.base.eth";
+    let node = format!("{:#x}", ens_v1::namehash(name));
+    let logical_name_id = format!("basenames:{node}");
+
+    basenames::register_base_name(&rpc, &deployment, alice, "zero-address-682", alice, YEAR)
+        .await?;
+    basenames::set_base_registry_resolver(
+        &rpc,
+        &deployment,
+        alice,
+        name,
+        deployment.l2_resolver.address,
+    )
+    .await?;
+    basenames::set_addr_record(&rpc, &deployment, alice, name, nonzero).await?;
+    basenames::set_addr_record(&rpc, &deployment, alice, name, Address::ZERO).await?;
+    let resolver = deployment.l2_resolver.address;
+    ens_v1::set_multicoin_addr_record(&rpc, resolver, alice, name, 2147483648, nonzero.as_slice())
+        .await?;
+    for (coin, expected) in [
+        (None, Address::ZERO.as_slice()),
+        (Some(60), Address::ZERO.as_slice()),
+        (Some(2147483648), nonzero.as_slice()),
+        (Some(2147483649), &[]),
+    ] {
+        assert_eq!(
+            ens_v1::read_addr_record(&rpc, resolver, name, coin).await?,
+            expected
+        );
+    }
+    assert!(
+        ens_v1::read_addr_record(&rpc, resolver, "fresh-zero-control.base.eth", Some(60))
+            .await?
+            .is_empty()
+    );
+
+    let zero = format!("{:#x}", Address::ZERO);
+    let ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE after_state->>'node' = '{node}' \
+         AND event_kind = 'RecordChanged' AND after_state->>'record_key' = 'addr:60' \
+         AND after_state->>'value' = '{zero}' AND canonicality_state = 'canonical')"
+    );
+    let run = support::ingest_mainnet_composed_and_serve(
+        &eth,
+        &ens_deployment,
+        &base,
+        &deployment,
+        Some(&ready_sql),
+    )
+    .await?;
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT after_state->>'source_event', transaction_hash, log_index, after_state->>'value' \
+         FROM normalized_events WHERE after_state->>'node' = $1 AND event_kind = 'RecordChanged' \
+         AND after_state->>'record_key' = 'addr:60' AND after_state->>'value' = $2 \
+         AND canonicality_state = 'canonical' ORDER BY log_index",
+    )
+    .bind(&node)
+    .bind(&zero)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(rows.len(), 2, "zero transaction rows: {rows:?}");
+    assert_eq!(rows[0].0, "AddressChanged");
+    assert_eq!(rows[1].0, "AddrChanged");
+    assert_eq!(rows[0].1, rows[1].1);
+    assert_eq!(rows[1].2, rows[0].2 + 1);
+    assert!(rows.iter().all(|row| row.3 == zero));
+
+    assert_default_inventory(&run, &logical_name_id, false).await?;
+    enable_basenames_verified_route(&run, &logical_name_id, l1_resolver).await?;
+    super::resolver_records::normalize_v2_snapshot_timestamp(&run, &logical_name_id).await?;
+    let api = super::resolver_records::start_v2_api(
+        &run,
+        &[
+            ("base-mainnet", base.url.as_str()),
+            ("ethereum-mainnet", eth.url.as_str()),
+        ],
+    )
+    .await?;
+    let indexed = v2_records(&api, name, "indexed").await?;
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE cleared_at IS NULL) \
+         FROM resolution_divergences WHERE logical_name_id = $1 AND request_kind = 'addr:60'",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    let verified = v2_records(&api, name, "verified").await?;
+    let verified_repeat = v2_records(&api, name, "verified").await?;
+    let auto = v2_records(&api, name, "auto").await?;
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE cleared_at IS NULL) \
+         FROM resolution_divergences WHERE logical_name_id = $1 AND request_kind = 'addr:60'",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        json!({
+            "indexed": addr60_observation(&indexed),
+            "verified": addr60_observation(&verified),
+            "verified_repeat": addr60_observation(&verified_repeat),
+            "auto": addr60_observation(&auto),
+            "divergence_before": before, "divergence_after": after
+        }),
+        json!({
+            "indexed":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "verified":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "verified_repeat":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "auto":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "divergence_before":[0,0], "divergence_after":[0,0]
+        })
+    );
+    for body in [&indexed, &verified, &verified_repeat, &auto] {
+        assert_addr60_not_found(body);
+    }
+
+    super::resolver_records::assert_zero_api_shapes(
+        &run,
+        &api,
+        "basenames",
+        name,
+        &logical_name_id,
+    )
+    .await?;
+    drop(api);
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+pub(crate) async fn assert_default_inventory(
+    run: &support::PipelineRun,
+    logical_name: &str,
+    fallback: bool,
+) -> Result<()> {
+    let (classification, provenance, entries): (Value, Value, Value) = sqlx::query_as(
+        "SELECT resolver.declared_summary->'classification', inventory.provenance, inventory.entries
+        FROM record_inventory_current inventory JOIN resolver_current resolver
+        ON resolver.chain_id = inventory.provenance->>'chain_id'
+        AND resolver.resolver_address = inventory.provenance->>'resolver_address'
+        WHERE inventory.provenance->>'logical_name_id' = $1",
+    ).bind(logical_name).fetch_one(&run.db.pool).await?;
+    let features = if fallback {
+        vec!["ensip19_default_address"]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(classification["read_features"], json!(features));
+    assert_eq!(
+        provenance["read_rules"],
+        if fallback {
+            json!([{
+                "kind":"ensip19_default_address", "source_record_key":"addr:2147483648"
+            }])
+        } else {
+            json!([])
+        }
+    );
+    assert_eq!(
+        provenance["exact_nonempty_not_found_record_keys"],
+        json!(["addr:60"])
+    );
+    let default = entries
+        .as_array()
+        .context("produced entries")?
+        .iter()
+        .find(|entry| entry["record_key"] == "addr:2147483648")
+        .context("produced default")?;
+    assert_eq!(default["status"], "success");
     Ok(())
 }

@@ -407,6 +407,14 @@ BEGIN
     LIMIT 1;
 
     IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+       AND NOT COALESCE(
+           requested_record_key = 'addr:60'
+           AND indexed_entry ->> 'status' = 'not_found'
+           AND jsonb_typeof(compared_provenance -> 'exact_nonempty_not_found_record_keys') = 'array'
+           AND compared_provenance -> 'exact_nonempty_not_found_record_keys'
+               @> jsonb_build_array(requested_record_key),
+           false
+       )
        AND selector_family = 'addr'
        AND (
            selector_key = '60'

@@ -67,7 +67,16 @@ pub fn evaluate_indexed_record(
 ) -> IndexedRecordAnswer {
     if let Some(entry) = find_entry(entries, record_key, record_family, selector_key) {
         let exact = answer_from_entry(entry, record_family);
-        if exact.status != IndexedRecordStatus::NotFound {
+        if exact.status != IndexedRecordStatus::NotFound
+            || (record_key == "addr:60"
+                && provenance["exact_nonempty_not_found_record_keys"]
+                    .as_array()
+                    .is_some_and(|keys| keys.iter().any(|key| key.as_str() == Some(record_key))))
+        {
+            if exact.status == IndexedRecordStatus::NotFound && !coverage_is_authoritative(coverage)
+            {
+                return unsupported("indexed_record_inventory_not_authoritative");
+            }
             return exact;
         }
     }
@@ -292,6 +301,67 @@ mod tests {
             "kind": "ensip19_default_address",
             "source_record_key": ENSIP19_DEFAULT_RECORD_KEY
         }]})
+    }
+
+    #[test]
+    fn exact_nonempty_absence_marker_only_blocks_matching_derivation() {
+        use IndexedRecordStatus::{NotFound, Success, Unsupported};
+        for (exact, marker, expected, derived) in [
+            (None, json!([]), Success, true),
+            (Some("not_found"), json!([]), Success, true),
+            (Some("not_found"), json!(["addr:60"]), NotFound, false),
+            (None, json!(["addr:60"]), Success, true),
+            (Some("success"), json!(["addr:60"]), Success, false),
+            (Some("not_found"), json!("addr:60"), Success, true),
+        ] {
+            let mut entries = json!([{"record_key":ENSIP19_DEFAULT_RECORD_KEY,
+                "record_family":"addr", "selector_key":"2147483648", "status":"success",
+                "value":"0x1111111111111111111111111111111111111111"}]);
+            if let Some(status) = exact {
+                entries
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"record_key":"addr:60",
+                    "record_family":"addr", "selector_key":"60", "status":status,
+                    "value":"0x2222222222222222222222222222222222222222"}));
+            }
+            let mut provenance = rule();
+            provenance["exact_nonempty_not_found_record_keys"] = marker;
+            let answer = evaluate_indexed_record(
+                &entries,
+                &provenance,
+                &projected(),
+                "addr:60",
+                "addr",
+                Some("60"),
+            );
+            assert_eq!(answer.status, expected, "{entries}; {provenance}");
+            assert_eq!(answer.derivation.is_some(), derived);
+            let incomplete = evaluate_indexed_record(
+                &entries,
+                &provenance,
+                &json!({"status":"unsupported"}),
+                "addr:60",
+                "addr",
+                Some("60"),
+            );
+            if exact == Some("not_found")
+                && provenance["exact_nonempty_not_found_record_keys"] == json!(["addr:60"])
+            {
+                assert_eq!(
+                    incomplete.unsupported_reason.as_deref(),
+                    Some("indexed_record_inventory_not_authoritative")
+                );
+            }
+            assert_eq!(
+                incomplete.status,
+                if exact == Some("success") {
+                    Success
+                } else {
+                    Unsupported
+                }
+            );
+        }
     }
 
     #[test]

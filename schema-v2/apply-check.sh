@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=23
+expected_predecessor_shape_proof_count=24
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -379,7 +379,8 @@ for migration_file in \
     "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -417,6 +418,7 @@ report_timing empty-schema
 apply_baseline
 apply_baseline
 report_timing baseline-install
+
 
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -2599,10 +2601,16 @@ BEGIN
 END
 $$;
 
-BEGIN;
-
-DO $$
+CREATE FUNCTION assert_exact_zero_migration_behavior() RETURNS void
+LANGUAGE plpgsql AS $$
 DECLARE
+    zero_case text;
+    zero_step integer;
+    zero_expected jsonb;
+    zero_live jsonb;
+    zero_row jsonb;
+    zero_written jsonb;
+    zero_cleared jsonb;
     manifest_key bigint;
     transition_case record;
     violated_constraint text;
@@ -4278,6 +4286,62 @@ BEGIN
     THEN
         RAISE EXCEPTION 'CCIP result reached the divergence ledger';
     END IF;
+
+    -- These are SQL evaluator fixtures, separate from the Project component proof.
+    FOR zero_case IN SELECT unnest(ARRAY['marked', 'missing', 'empty']) LOOP
+        DELETE FROM resolution_divergences
+        WHERE logical_name_id = 'schema-v2-check:namehash-0' AND request_kind = 'addr:60';
+        UPDATE record_inventory_current
+        SET entries = '[{"record_key":"addr:2147483648","record_family":"addr",
+                "selector_key":"2147483648","status":"success",
+                "value":"0x2222222222222222222222222222222222222222"}]'::jsonb
+            || CASE WHEN zero_case = 'missing' THEN '[]'::jsonb ELSE
+                '[{"record_key":"addr:60","record_family":"addr",
+                  "selector_key":"60","status":"not_found"}]'::jsonb END,
+            provenance = '{"read_rules":[{"kind":"ensip19_default_address",
+                "source_record_key":"addr:2147483648"}]}'::jsonb
+                || CASE WHEN zero_case = 'marked' THEN
+                    '{"exact_nonempty_not_found_record_keys":["addr:60"]}'::jsonb
+                    ELSE '{}'::jsonb END
+        WHERE resource_id = '00000000-0000-0000-0000-000000000011';
+        SELECT xmin::text INTO STRICT divergence_guard_xmin FROM record_inventory_current
+        WHERE resource_id = '00000000-0000-0000-0000-000000000011';
+        zero_expected := CASE WHEN zero_case = 'marked' THEN '{"status":"not_found"}'::jsonb
+            ELSE '{"status":"success","value":"0x2222222222222222222222222222222222222222"}'::jsonb END;
+        FOR zero_step IN 1..3 LOOP
+            zero_live := CASE WHEN zero_step = 1 THEN
+                '{"status":"success","value":"0x1111111111111111111111111111111111111111"}'::jsonb
+                ELSE zero_expected END;
+            SELECT write_resolution_divergence(
+                '00000000-0000-0000-0000-000000000011', 'schema-v2-lookup-guard',
+                divergence_guard_xmin, 'schema-v2-check', 0, 'block-0',
+                divergence_execution_authority, 'schema-v2-check:namehash-0',
+                'schema-v2-check', 'resolver-address-guard', 'addr:60',
+                '{"resolver":{"chain_id":"schema-v2-check","block_hash":"block-0",
+                  "block_number":0,"timestamp":"2026-01-01T00:00:00Z"}}'::jsonb,
+                zero_live, false
+            ) INTO divergence_write_status;
+            IF divergence_write_status <> (ARRAY['written', 'cleared', 'agreement'])[zero_step] THEN
+                RAISE EXCEPTION 'exact-zero writer action mismatch: %, %, %', zero_case, zero_step, divergence_write_status;
+            END IF;
+            SELECT to_jsonb(ledger) INTO STRICT zero_row FROM resolution_divergences ledger
+            WHERE logical_name_id = 'schema-v2-check:namehash-0' AND request_kind = 'addr:60';
+            IF zero_row->'indexed_result' <> zero_expected
+                OR (zero_row->>'cleared_at' IS NULL) <> (zero_step = 1) THEN
+                RAISE EXCEPTION 'exact-zero durable answer or active state mismatch: %, %', zero_case, zero_step;
+            END IF;
+            IF zero_step = 1 THEN
+                zero_written := zero_row;
+            ELSIF zero_step = 2 THEN
+                IF zero_row - 'cleared_at' <> zero_written - 'cleared_at' THEN
+                    RAISE EXCEPTION 'exact-zero clear replaced or mutated the retained row';
+                END IF;
+                zero_cleared := zero_row;
+            ELSIF zero_row <> zero_cleared THEN
+                RAISE EXCEPTION 'exact-zero agreement mutated the retained cleared row';
+            END IF;
+        END LOOP;
+    END LOOP;
 
     DELETE FROM name_current
     WHERE logical_name_id = 'schema-v2-check:namehash-0';
@@ -6484,10 +6548,415 @@ BEGIN
     END IF;
 END
 $$;
-
-ROLLBACK;
 SQL
 } | run_psql
+
+# The independent predecessor body and ACL are copied from public #855 f95200b3.
+zero_default_migration="$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE FUNCTION exact_zero_writer_metadata() RETURNS jsonb LANGUAGE sql AS $$
+    SELECT jsonb_build_object(
+        'definition', replace(pg_get_functiondef(p.oid), current_schema(), '<phase>'),
+        'arguments', pg_get_function_identity_arguments(p.oid),
+        'return_type', pg_get_function_result(p.oid), 'owner', p.proowner,
+        'security_definer', p.prosecdef,
+        'config', replace(to_jsonb(p.proconfig)::text, current_schema(), '<phase>')::jsonb,
+        'acl', (SELECT jsonb_agg(jsonb_build_array(a.grantor, a.grantee,
+                    a.privilege_type, a.is_grantable) ORDER BY a.grantor, a.grantee,
+                    a.privilege_type, a.is_grantable)
+                FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a)
+    ) FROM pg_proc p
+    WHERE p.oid = 'write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'::regprocedure;
+$$;
+CREATE TEMP TABLE exact_zero_expected_writer AS SELECT exact_zero_writer_metadata() AS metadata;
+DO $$
+BEGIN
+    IF (SELECT metadata->>'security_definer' <> 'true'
+        OR metadata->>'return_type' <> 'text'
+        OR metadata->'config' <> '["search_path=pg_catalog, <phase>, pg_temp"]'::jsonb
+        FROM exact_zero_expected_writer)
+        OR EXISTS (SELECT 1 FROM pg_proc p,
+            LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+            WHERE p.oid = 'write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'::regprocedure
+              AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') THEN
+        RAISE EXCEPTION 'fresh exact-zero writer privilege envelope is invalid';
+    END IF;
+END
+$$;
+BEGIN;
+SELECT assert_exact_zero_migration_behavior();
+ROLLBACK;
+SQL
+    for pass in 1 2; do
+        emit_phase_migration "$zero_default_migration" baseline-first
+        cat <<'SQL'
+DO $$
+BEGIN
+    IF exact_zero_writer_metadata() <> (SELECT metadata FROM exact_zero_expected_writer) THEN
+        RAISE EXCEPTION 'exact-zero function definition, signature or privilege metadata diverged';
+    END IF;
+END
+$$;
+BEGIN;
+SELECT assert_exact_zero_migration_behavior();
+ROLLBACK;
+SQL
+    done
+    cat <<'SQL'
+CREATE OR REPLACE FUNCTION write_resolution_divergence(
+    compared_resource_id uuid,
+    compared_boundary_key text,
+    compared_row_xmin text,
+    requested_authoritative_chain_id text,
+    requested_authoritative_block_number bigint,
+    requested_authoritative_block_hash text,
+    compared_execution_authority jsonb,
+    requested_logical_name_id text,
+    requested_resolver_chain_id text,
+    requested_resolver_address text,
+    requested_record_key text,
+    compared_positions jsonb,
+    live_answer jsonb,
+    used_ccip_read boolean
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+DECLARE
+    guard_status text;
+    resolver_path jsonb;
+    compared_entries jsonb;
+    compared_provenance jsonb;
+    compared_support_status text;
+    selector_family text;
+    selector_key text;
+    indexed_entry jsonb;
+    default_entry jsonb;
+    indexed_status text;
+    indexed_value jsonb;
+    indexed_answer jsonb;
+BEGIN
+    IF used_ccip_read THEN
+        RETURN 'ccip_skipped';
+    END IF;
+
+    IF compared_execution_authority ->> 'logical_name_id'
+        IS DISTINCT FROM requested_logical_name_id
+    THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    guard_status := revalidate_resolution_lookup_state(
+        requested_authoritative_chain_id,
+        requested_authoritative_block_number,
+        requested_authoritative_block_hash,
+        compared_positions,
+        compared_execution_authority,
+        compared_resource_id,
+        compared_boundary_key,
+        compared_row_xmin
+    );
+
+    IF guard_status <> 'unchanged' THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    CASE
+        WHEN requested_record_key = 'avatar' THEN
+            selector_family := 'avatar';
+            selector_key := NULL;
+        WHEN requested_record_key = 'contenthash' THEN
+            selector_family := 'contenthash';
+            selector_key := NULL;
+        WHEN requested_record_key LIKE 'text:%'
+            AND length(substr(requested_record_key, 6)) > 0
+        THEN
+            selector_family := 'text';
+            selector_key := substr(requested_record_key, 6);
+        WHEN requested_record_key ~ '^addr:(0|[1-9][0-9]*)$' THEN
+            BEGIN
+                selector_key := substr(requested_record_key, 6);
+                IF selector_key::numeric > 18446744073709551615::numeric THEN
+                    RETURN 'guard_rejected';
+                END IF;
+                selector_family := 'addr';
+            EXCEPTION
+                WHEN data_exception THEN
+                    RETURN 'guard_rejected';
+            END;
+        ELSE
+            RETURN 'guard_rejected';
+    END CASE;
+
+    SELECT inventory.entries,
+           inventory.provenance,
+           inventory.support_status,
+           name.declared_summary #> '{topology,resolver_path}'
+    INTO compared_entries, compared_provenance, compared_support_status, resolver_path
+    FROM record_inventory_current AS inventory
+    JOIN name_current AS name
+      ON name.logical_name_id = requested_logical_name_id
+     AND name.support_status = 'supported'
+     AND name.declared_summary
+            #> '{topology,version_boundaries,record_version_boundary}' =
+         inventory.record_version_boundary
+    WHERE inventory.resource_id = compared_resource_id
+      AND inventory.record_version_boundary_key = compared_boundary_key
+      AND inventory.xmin::text = compared_row_xmin
+    FOR SHARE OF inventory, name;
+
+    IF NOT FOUND
+        OR jsonb_typeof(resolver_path) IS DISTINCT FROM 'array'
+        OR jsonb_array_length(resolver_path) = 0
+        OR resolver_path -> (jsonb_array_length(resolver_path) - 1)
+                ->> 'chain_id' <> requested_resolver_chain_id
+        OR lower(
+            resolver_path -> (jsonb_array_length(resolver_path) - 1)
+                ->> 'address'
+        ) <> lower(requested_resolver_address)
+    THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    SELECT candidate.entry
+    INTO indexed_entry
+    FROM jsonb_array_elements(compared_entries)
+        WITH ORDINALITY AS candidate(entry, ordinal)
+    WHERE candidate.entry ->> 'record_key' = requested_record_key
+       OR (
+            candidate.entry ->> 'record_family' = selector_family
+            AND (candidate.entry ->> 'selector_key')
+                IS NOT DISTINCT FROM selector_key
+       )
+       OR (
+            requested_record_key = 'avatar'
+            AND candidate.entry ->> 'record_key' = 'text:avatar'
+       )
+    ORDER BY CASE
+        WHEN candidate.entry ->> 'record_key' = 'text:avatar'
+            AND requested_record_key = 'avatar'
+        THEN 1
+        ELSE 0
+    END,
+    candidate.ordinal
+    LIMIT 1;
+
+    IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+       AND selector_family = 'addr'
+       AND (
+           selector_key = '60'
+           OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
+       )
+       AND EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(COALESCE(
+               compared_provenance -> 'read_rules', '[]'::jsonb
+           )) rule
+           WHERE rule ->> 'kind' = 'ensip19_default_address'
+             AND rule ->> 'source_record_key' = 'addr:2147483648'
+       )
+    THEN
+        IF compared_support_status <> 'supported' THEN
+            indexed_entry := jsonb_build_object('status', 'unsupported');
+        ELSE
+            SELECT candidate.entry
+            INTO default_entry
+            FROM jsonb_array_elements(compared_entries)
+                WITH ORDINALITY AS candidate(entry, ordinal)
+            WHERE candidate.entry ->> 'record_key' = 'addr:2147483648'
+               OR (
+                    candidate.entry ->> 'record_family' = 'addr'
+                    AND candidate.entry ->> 'selector_key' = '2147483648'
+               )
+            ORDER BY candidate.ordinal
+            LIMIT 1;
+
+            IF default_entry IS NULL THEN
+                indexed_entry := jsonb_build_object('status', 'not_found');
+            ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
+                -- Match the requested getter's verified decode. addr(bytes32) converts
+                -- the coin-60 bytes to address(0); multicoin addr(bytes32,uint256)
+                -- preserves non-empty bytes, including 20 zero bytes.
+                -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+                -- (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+                IF selector_key = '60'
+                   AND default_entry ->> 'status' = 'success'
+                   AND lower(COALESCE(
+                       default_entry #>> '{value,value}',
+                       default_entry #>> '{value,bytes}',
+                       default_entry ->> 'value'
+                   )) = '0x0000000000000000000000000000000000000000'
+                THEN
+                    indexed_entry := jsonb_build_object('status', 'not_found');
+                ELSE
+                    indexed_entry := default_entry;
+                END IF;
+            ELSE
+                indexed_entry := jsonb_build_object('status', 'unsupported');
+            END IF;
+        END IF;
+    ELSIF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+          AND compared_support_status <> 'supported'
+    THEN
+        indexed_entry := jsonb_build_object('status', 'unsupported');
+    END IF;
+
+    IF indexed_entry IS NULL THEN
+        indexed_answer := jsonb_build_object('status', 'not_found');
+    ELSE
+        indexed_status := CASE COALESCE(
+            indexed_entry ->> 'status',
+            'unsupported'
+        )
+            WHEN 'failed' THEN 'execution_failed'
+            ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
+        END;
+        indexed_answer := jsonb_build_object('status', indexed_status);
+        IF indexed_status = 'success' THEN
+            indexed_value := COALESCE(
+                indexed_entry #> '{value,value}',
+                indexed_entry #> '{value,bytes}',
+                indexed_entry -> 'value'
+            );
+            IF jsonb_typeof(indexed_value) = 'string' THEN
+                indexed_answer := indexed_answer || jsonb_build_object(
+                    'value',
+                    CASE
+                        WHEN selector_family = 'addr'
+                            THEN lower(indexed_value #>> '{}')
+                        ELSE indexed_value #>> '{}'
+                    END
+                );
+            ELSE
+                indexed_answer := jsonb_build_object('status', 'unsupported');
+            END IF;
+        END IF;
+    END IF;
+
+    IF indexed_answer = live_answer THEN
+        UPDATE resolution_divergences
+        SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+        WHERE logical_name_id = requested_logical_name_id
+          AND resolver_chain_id = requested_resolver_chain_id
+          AND lower(resolver_address) = lower(requested_resolver_address)
+          AND request_kind_hash =
+              public.digest(requested_record_key, 'sha256')
+          AND request_kind = requested_record_key
+          AND cleared_at IS NULL;
+        IF FOUND THEN
+            RETURN 'cleared';
+        END IF;
+        RETURN 'agreement';
+    END IF;
+
+    UPDATE resolution_divergences
+    SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+    WHERE logical_name_id = requested_logical_name_id
+      AND resolver_chain_id = requested_resolver_chain_id
+      AND lower(resolver_address) = lower(requested_resolver_address)
+      AND request_kind_hash =
+          public.digest(requested_record_key, 'sha256')
+      AND request_kind = requested_record_key
+      AND observed_positions <> compared_positions
+      AND cleared_at IS NULL;
+
+    IF EXISTS (
+        SELECT 1
+        FROM resolution_divergences
+        WHERE logical_name_id = requested_logical_name_id
+          AND resolver_chain_id = requested_resolver_chain_id
+          AND lower(resolver_address) = lower(requested_resolver_address)
+          AND request_kind_hash =
+              public.digest(requested_record_key, 'sha256')
+          AND request_kind <> requested_record_key
+    ) THEN
+        RAISE EXCEPTION 'resolution divergence request-key hash collision'
+            USING ERRCODE = '23514';
+    END IF;
+
+    INSERT INTO resolution_divergences (
+        logical_name_id,
+        resolver_chain_id,
+        resolver_address,
+        request_kind,
+        observed_positions,
+        indexed_result,
+        live_result
+    ) VALUES (
+        requested_logical_name_id,
+        requested_resolver_chain_id,
+        lower(requested_resolver_address),
+        requested_record_key,
+        compared_positions,
+        indexed_answer,
+        live_answer
+    )
+    ON CONFLICT ON CONSTRAINT resolution_divergences_pkey DO UPDATE
+    SET indexed_result = EXCLUDED.indexed_result,
+        live_result = EXCLUDED.live_result,
+        last_observed_at = GREATEST(
+            resolution_divergences.last_observed_at,
+            statement_timestamp()
+        ),
+        cleared_at = NULL
+    WHERE resolution_divergences.request_kind = EXCLUDED.request_kind;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'resolution divergence request-key hash collision'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN 'written';
+END
+$$;
+
+REVOKE ALL ON FUNCTION write_resolution_divergence(
+    uuid, text, text, text, bigint, text, jsonb, text, text, text,
+    text, jsonb, jsonb, boolean
+) FROM PUBLIC;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_proc
+        WHERE oid = 'write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'::regprocedure
+          AND md5(prosrc) = '6a4678aa84cd76e410d7883daed9f8fa'
+          AND proconfig = ARRAY['search_path=pg_catalog, bigname_phase, pg_temp'])
+        OR exact_zero_writer_metadata() - 'definition' - 'config'
+            <> (SELECT metadata - 'definition' - 'config' FROM exact_zero_expected_writer)
+        OR exact_zero_writer_metadata() = (SELECT metadata FROM exact_zero_expected_writer) THEN
+        RAISE EXCEPTION 'independent f952 predecessor was not installed';
+    END IF;
+END
+$$;
+SQL
+    for pass in 1 2; do
+        emit_phase_migration "$zero_default_migration" preceding-shape
+        cat <<'SQL'
+DO $$
+BEGIN
+    IF exact_zero_writer_metadata() <> (SELECT metadata FROM exact_zero_expected_writer) THEN
+        RAISE EXCEPTION 'exact-zero function definition, signature or privilege metadata diverged';
+    END IF;
+END
+$$;
+BEGIN;
+SELECT assert_exact_zero_migration_behavior();
+ROLLBACK;
+SQL
+    done
+    cat <<'SQL'
+DROP TABLE exact_zero_expected_writer;
+DROP FUNCTION exact_zero_writer_metadata();
+DROP FUNCTION assert_exact_zero_migration_behavior();
+SQL
+} | run_psql
+assert_migration_context_count "$zero_default_migration" empty-schema 1
+assert_migration_context_count "$zero_default_migration" baseline-first 2
+assert_migration_context_count "$zero_default_migration" preceding-shape 2
+report_timing exact-zero-default
 
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"

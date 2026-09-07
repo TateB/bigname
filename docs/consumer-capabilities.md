@@ -63,6 +63,9 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Address read | Indexed | Auto | Verified |
 | --- | --- | --- | --- |
 | Exact entry | Exact value | Exact value | Chain value |
+| Exact 20-byte zero `addr:60` behind an admitted ENSv1 pointer or Basenames registry pointer | Exact `not_found` | Exact `not_found` | Chain `not_found` |
+| Same exact ENSv1 zero entry on a flagged resolver plus a successful nonzero `addr:2147483648` | Exact `not_found` | Exact `not_found`; no provider call | Chain `not_found`; agreement |
+| Same exact Basenames registry-pointer entry plus a default entry (admitted resolver is unflagged) | Exact `not_found` | Exact `not_found` | Chain `not_found` |
 | Eligible EVM coin type, flagged resolver, default entry present | Derived value with per-key metadata | Derived value; no provider call | Chain value |
 | Coin type 60, flagged resolver, default entry is 20 zero bytes | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain `not_found` |
 | Eligible EVM coin type, flagged resolver, default source authoritatively absent | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain result |

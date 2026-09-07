@@ -78,7 +78,9 @@ pub(super) async fn build(
              AND declaration_manifest.namespace = pointer.pointer_namespace
         ),
         attributed_events AS (
-            SELECT pointer.resource_id AS attributed_resource_id, event.*
+            SELECT pointer.resource_id AS attributed_resource_id,
+                   pointer.pointer_source_family AS attributed_pointer_source_family,
+                   event.*
             FROM pointers pointer
             JOIN project_events event
               ON event.logical_name_id = pointer.logical_name_id
@@ -92,7 +94,9 @@ pub(super) async fn build(
             -- storage, independent of write time.
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
-            SELECT pointer.resource_id AS attributed_resource_id, event.*
+            SELECT pointer.resource_id AS attributed_resource_id,
+                   pointer.pointer_source_family AS attributed_pointer_source_family,
+                   event.*
             FROM pointers pointer
              JOIN project_events event
                ON event.chain_id = $1
@@ -121,7 +125,9 @@ pub(super) async fn build(
             UNION ALL
             -- The guarded ENSv2-origin exception uses the exact declaration already selected by
             -- resolver classification and applies only to pointers in that declaration's namespace.
-            SELECT pointer.resource_id AS attributed_resource_id, event.*
+            SELECT pointer.resource_id AS attributed_resource_id,
+                   pointer.pointer_source_family AS attributed_pointer_source_family,
+                   event.*
             FROM pointers pointer
             JOIN project_stage_resolver_current resolver
               ON resolver.chain_id = $1
@@ -182,7 +188,30 @@ pub(super) async fn build(
                          AND sibling.event_kind = 'RecordChanged'
                          AND sibling.after_state ->> 'record_key' = 'addr:60'
                          AND sibling.after_state ->> 'source_event' = 'AddrChanged'
-                   ) AS coin60_compatibility_source
+                   ) AS coin60_compatibility_source,
+                   (
+                       (
+                           event.source_family = 'ens_v1_resolver_l1'
+                           AND event.attributed_pointer_source_family IN (
+                               'ens_v1_registry_l1',
+                               'ens_v1_registrar_l1',
+                               'ens_v1_wrapper_l1'
+                           )
+                       )
+                       OR (
+                           event.source_family = 'basenames_base_resolver'
+                           AND event.attributed_pointer_source_family =
+                               'basenames_base_registry'
+                       )
+                   )
+                   AND event.after_state ->> 'record_key' = 'addr:60'
+                   AND event.after_state ->> 'record_family' = 'addr'
+                   AND event.after_state ->> 'selector_key' = '60'
+                   AND lower(COALESCE(
+                       event.after_state #>> '{value,bytes}',
+                       event.after_state ->> 'value'
+                   )) = '0x0000000000000000000000000000000000000000'
+                       AS coin60_zero_address_is_absent
             FROM attributed_events event
             LEFT JOIN versions version USING (attributed_resource_id)
             WHERE event.event_kind = 'RecordChanged'
@@ -226,6 +255,9 @@ pub(super) async fn build(
         ),
         record_rollups AS (
             SELECT event.attributed_resource_id AS resource_id,
+                   jsonb_agg(DISTINCT event.after_state ->> 'record_key'
+                       ORDER BY event.after_state ->> 'record_key')
+                       FILTER (WHERE event.coin60_zero_address_is_absent) AS exact_nonempty_keys,
                    jsonb_agg(jsonb_build_object(
                        'record_key', event.after_state ->> 'record_key',
                        'record_family', event.after_state ->> 'record_family',
@@ -257,6 +289,7 @@ pub(super) async fn build(
                        'record_family', event.after_state ->> 'record_family',
                        'selector_key', event.after_state -> 'selector_key',
                        'status', CASE
+                           WHEN event.coin60_zero_address_is_absent THEN 'not_found'
                            WHEN event.after_state ? 'value' THEN CASE
                                WHEN event.after_state ->> 'record_family' = 'contenthash'
                                 AND event.after_state ->> 'value' IN ('', '0x')
@@ -284,6 +317,7 @@ pub(super) async fn build(
                            ELSE 'unsupported'
                        END,
                        'value', CASE
+                           WHEN event.coin60_zero_address_is_absent THEN NULL::jsonb
                            WHEN event.after_state ? 'value'
                             AND NOT (
                                 (
@@ -473,7 +507,9 @@ pub(super) async fn build(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    )
-               ),
+               ) || CASE WHEN records.exact_nonempty_keys IS NULL THEN '{}'::jsonb
+                   ELSE jsonb_build_object('exact_nonempty_not_found_record_keys',
+                       records.exact_nonempty_keys) END,
                jsonb_strip_nulls(jsonb_build_object(
                    'block_number', latest_position.block_number,
                    'block_hash', latest_position.block_hash,
