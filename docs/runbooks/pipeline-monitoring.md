@@ -312,16 +312,24 @@ For `BignamePhaseRunnerCapacityPaused`:
 1. Find the runner warning `phase paused until storage capacity recovers` and
    read its `breach_reasons` and `free_disk_bytes` fields to identify which
    bound stopped work.
-2. If `breach_reasons` contains `database_size` and the host has storage
-   headroom, raise `database_max_bytes` by passing
-   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` to the phase-runner container, then
-   recreate it because the setting is read only at startup. The checked-in
-   Compose service does not forward this variable, so adding it only to
-   `.env.server` has no effect; use a reviewed deployment configuration or
-   Compose override that passes it into the container. If `breach_reasons`
-   contains `free_disk`, free disk space or lower usage on the filesystem that
-   contains the configured `writable_path`. `minimum_free_disk_bytes`, plus the
-   most recently completed batch's reserved-write estimate (zero before the
-   first batch), is the floor the runner is protecting.
-3. Once the capacity check clears, the phase resumes from its stored cursor.
+2. If `breach_reasons` contains `database_size`, review actual storage headroom
+   before increasing `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES`. Server Compose
+   forwards an explicitly configured ceiling; leaving it unset omits it and
+   disables that ceiling. Empty, malformed or overflowing values are invalid;
+   ceiling zero is a limit, not disabled protection. Recreate the runner after
+   changing settings because they are read only at startup.
+3. For `free_disk`, free space on the filesystem containing the configured
+   `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`. Follow the [capacity preflight](production-docker.md#capacity-preflight)
+   to verify it is PostgreSQL's actual filesystem and is writable without
+   exposing database files. The required server-Compose floor is operator-selected;
+   missing/empty values fail rendering, while zero must be rejected operationally.
+   The unchanged CLI still accepts zero. Do not derive a production reserve from
+   an old host observation or lower the floor merely to clear an alert.
+   The guard adds the preceding batch's reserved-write estimate to the floor;
+   that estimate starts at zero for a new batch loop and is not a reservation.
+   Capacity is checked before batches, not before all startup work or every write.
+   Heartbeats and unrelated writes can continue during a pause, so this is not
+   an absolute ENOSPC guarantee. A probe permission error is a retryable phase
+   failure, not an ordinary capacity breach.
+4. Once the capacity check clears, the phase resumes from its stored cursor.
    No phase-state edit or manual phase restart is needed.

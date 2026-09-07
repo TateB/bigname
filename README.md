@@ -59,7 +59,9 @@ same database.
 For server deployment:
 
 ```sh
-cp .env.server.example .env.server         # set passwords + image tag
+cp .env.server.example .env.server         # configure credentials, image and capacity inputs
+# Set a positive disk floor and pre-create the dedicated probe directory.
+# Complete docs/runbooks/production-docker.md#capacity-preflight before starting.
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 

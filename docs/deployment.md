@@ -44,8 +44,19 @@ recorded as a separate pre-deploy step rather than entered in `_sqlx_migrations`
 
 ```sh
 cp .env.server.example .env.server
+# Set credentials, the image, a positive disk floor and an absolute probe path.
+# Complete the capacity preflight linked below before starting services.
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
+
+Server Compose requires nonempty `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES`
+and `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`; missing or empty values fail rendering.
+Choose a positive reserve for the actual deployment, and pre-create a dedicated
+writable sibling on PostgreSQL's filesystem. The same absolute path is used on
+the Docker daemon host and inside the runner. Do not expose database files or
+change the existing PostgreSQL volume. Complete the [capacity preflight](runbooks/production-docker.md#capacity-preflight)
+for every active overlay before recreating the runner. A successful render alone
+does not prove filesystem identity, permissions or protection.
 
 Before the full `up`, apply reviewed versioned schema-migrations with the
 schema-migration runner — `sqlx migrate run --source migrations` from the
@@ -90,9 +101,21 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
 - `BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES`
+- `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES` — required server-Compose floor
+- `BIGNAME_PHASE_RUNNER_WRITABLE_PATH` — required server-Compose probe directory
+- `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` — optional logical database ceiling
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+
+The optional ceiling is omitted when unset; an explicitly empty value is invalid.
+A configured ceiling must parse as an unsigned 64-bit integer; zero is a limit,
+not a way to disable it. The floor must also parse as an unsigned 64-bit integer.
+Operational admission rejects floor zero: Compose only enforces presence, and
+the unchanged CLI accepts zero. Direct CLI defaults remain floor zero, path `.`
+and no ceiling; the existing capacity poll interval remains five seconds.
+These settings are read at startup. Shell values override `--env-file`, so inspect
+both interpolation inputs and the effective service/container configuration.
 
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require

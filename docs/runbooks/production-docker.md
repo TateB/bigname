@@ -21,12 +21,157 @@ docker compose --env-file .env.server \
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \
   -f docker-compose.reth-db.yml config
+
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.public.yml \
+  -f docker-compose.reth-db.yml config
 ```
 
 The reth overlay attaches the API and phase runner to the external
 `eth-archive-node_default` network and bind-mounts the configured
 `RETH_DATA_DIR` into the phase runner read-only. Create or start that network
 and make the canonical reth database path readable before using the overlay.
+
+## Capacity preflight
+
+Complete this before adopting the server configuration or recreating the runner.
+The required floor/path inputs intentionally make older incomplete configurations
+fail. Editing Compose does not change an already running container. This is part
+of #639: it selects no fixed 100 GB reserve, database-size default or production
+host measurement, and changes no direct CLI defaults or backup policy (#329).
+
+1. Choose a positive `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES` for the
+   deployment. It must be a decimal unsigned 64-bit integer (at most
+   `18446744073709551615`). Reject zero operationally: it disables the configured
+   reserve, although rendering and the unchanged CLI accept it. Do not copy a
+   development host's free-space figure. The optional
+   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` must be absent when unused; remove
+   its assignment rather than writing an empty value. Empty, malformed and
+   overflowing values must fail the real CLI parser. Ceiling zero is a limit.
+2. Select a dedicated, pre-created directory on the Docker daemon host as
+   `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`. It must be absolute; Compose binds that
+   same source and target read/write and does not create a missing host path.
+   Use a separate sibling on the database filesystem, never the data directory,
+   its parent/child, a Docker volume parent, or a directory containing database,
+   WAL, tablespace, socket, backup or other service content. It must contain only
+   disposable probe content and no links into those trees. Reject overlap with
+   every effective mount, including `RETH_DATA_DIR`.
+3. Record Docker/Compose versions, daemon host/context, Docker data root, volume
+   driver/options, rootless/user-namespace settings and applicable security policy.
+   Inspect PostgreSQL's effective mount rather than guessing from `postgres-data`:
+
+   ```sh
+   docker version
+   docker compose version
+   docker context show
+   docker info --format '{{json .SecurityOptions}} {{.DockerRootDir}}'
+   # Use the exact project and every active overlay for this and later commands.
+   pg_container=$(docker compose --env-file .env.server -f docker-compose.server.yml ps -q postgres)
+   docker inspect "$pg_container" --format '{{json .Mounts}}'
+   docker volume inspect NAME_FROM_POSTGRES_MOUNT
+   ```
+
+   Preserve `postgres-data:/var/lib/postgresql/data` and its existing volume
+   identity. The runner receives only the dedicated bind, never that volume or
+   a host path exposing it. Resolve canonical paths on the daemon host; record
+   `findmnt -T`, `stat` device/ownership/mode, applicable ACLs and `df -Pk` for
+   both the actual database storage and probe. Require matching actual mounted
+   filesystem/device, not merely matching path prefixes or equal free-byte counts.
+   Check corresponding mount/device/`df -Pk` observations inside both containers.
+4. Prepare permissions for the effective service identity, including rootless,
+   user-namespace, ACL and SELinux mappings. The image's nominal UID/GID is 10001;
+   do not blindly `chown 10001:10001` on the host. Verify required diagnostic
+   tools on the actual host/image rather than assuming they are installed.
+   From the actual candidate container as its normal service user, require a
+   successful create/remove operation. Also observe the real runner creating and
+   deleting `.phase-runner-capacity-probe-*` with a host filesystem event observer,
+   leaving no file behind. A manual touch by a different user is insufficient.
+5. Inspect effective settings before any recreation. Shell variables override
+   `--env-file`; clear unintended overrides. Capture outputs privately and redact
+   credentials before sharing. For each of server only, server/public,
+   server/Reth and server/public/Reth, run the corresponding command above with
+   both `config --format json` and `config --environment`. Require the exact floor
+   and path, an absent ceiling in the container when unset, and an exact decimal
+   ceiling when set. A null model key is unresolved, not an empty string; prove
+   omission by inspecting the actual container. Relative paths can also render;
+   their creation-time rejection remains a required control below.
+   Require one dedicated read/write bind, identical absolute source/target and
+   `create_host_path: false`. Both Reth sets must retain their separate read-only
+   mount. No unrelated service environment, command, port, network or volume may
+   change. Inspect the created container as well; the env file alone is not proof:
+
+   ```sh
+   runner_container=$(docker compose --env-file .env.server -f docker-compose.server.yml ps -q phase-runner)
+   docker inspect "$runner_container" --format '{{json .Config.Env}}'
+   docker inspect "$runner_container" --format '{{json .Mounts}}'
+   docker inspect "$runner_container" --format '{{json .Config.User}} {{json .Config.Entrypoint}} {{json .Config.Cmd}}'
+   docker top "$runner_container"
+   ```
+
+   Check the actual process environment/argv and effective UID/GID. The shipped
+   `phases` command executes `phase-runner run` without synthesizing capacity
+   arguments. Confirm PostgreSQL files such as `PG_VERSION` are unreachable from
+   the runner, including through the bind or symlinks. Record immutable image
+   identity, source identity and the complete effective overlay configuration.
+
+### Disposable acceptance before adoption
+
+Use newly owned project, volume, container and directory names, with an explicit
+runtime allocation. Preserve existing proof/production resources. Use the shipped
+PostgreSQL named-volume definition, an immutable candidate image, initialized
+scratch database and documented writer/verifier logins. A temporary override may
+pin the image, isolate ports/restart behavior and select a byte-identical compiled
+manifest deployment profile with supported sources and admitted chain names.
+Respect the single-ENS-chain restriction. Do not invent an uncompiled manifest,
+replace database storage, alter the probe bind or add a helper service. Attach all
+temporary overrides/fixtures to evidence; keep connection secrets separate.
+
+Run the following controls through the effective configuration and real service:
+
+| Control | Required observation |
+| --- | --- |
+| Floor or path missing, then empty | Each render fails nonzero. |
+| Relative path | Render or container creation rejects the nonabsolute target. |
+| Missing bind source | Container creation fails; the host directory is not created. |
+| Conflicting shell and env-file settings | Shell wins; effective values match the intended inputs. |
+| Ceiling unset | No ceiling environment entry or generated argument; reach the actual probe with no ceiling. |
+| Valid integer ceiling | Exact string forwarded; reach the actual database-size breach below. |
+| Empty/text/overflow ceiling or malformed/overflow floor | Actual CLI rejects that capacity input before unrelated prerequisites mask it. |
+| Floor zero | Render/parser accept it, but operational admission rejects it. |
+| Probe not writable | Capture `failed to write capacity probe under …`; it is retryable, not a capacity pause. Bound observation and cancel, then restore fixture permissions. |
+| Writable probe on a safe second filesystem | Probe can succeed, but device mismatch fails admission. |
+
+Supply the other required CLI inputs; `--help` and container creation alone do not
+prove parsing. For accepted values, reach the intended later capacity observation.
+With no ceiling, set a disposable floor just above observed free bytes and require
+only `free_disk`. With a positive floor below free bytes and a tiny valid ceiling,
+require only `database_size`. Record database/free/reserved-write bytes, reconcile
+free bytes against contemporaneous `df -Pk` available KiB times 1024, and account
+for intervening filesystem activity. Observe actual probe create/delete events.
+No pressure file or material disk consumption is needed. Startup must first pass
+manifest/database/verifier prerequisites. For this fresh immediately breached
+fixture, require first reserve zero and observe no provider requests; do not infer
+that property for arbitrary resumed state. Pause permits heartbeat/startup writes.
+
+One logical database-size query and one filesystem probe cannot certify remote
+PostgreSQL, opaque volume drivers, separate WAL, tablespaces, Docker metadata or
+other constrained devices. Stop admission if the storage relationship cannot be
+proved. This is a pre-batch floor with the preceding batch's write estimate, not
+an absolute ENOSPC guarantee. Existing startup-below-floor/same-PID raw recovery
+proof does not establish this wiring, mid-run pressure transition, full Verify,
+normalized publication, API correctness, restore or production serving acceptance.
+
+### Apply or roll back the wiring
+
+After the effective configuration and filesystem/permission checks pass, follow
+the approved deployment boundary and recreate only the intended phase-runner with
+all active overlays. Settings are read at startup. Changing the floor/ceiling does
+not require phase-row edits; genuine capacity breaches resume automatically after
+capacity recovers. Preserve the PostgreSQL volume during rollback: never use
+`down -v`. Restore the reviewed configuration/image and inspect the effective
+settings again. The harmless dedicated probe directory may remain, but reverting
+this wiring restores the old disabled/misdirected defaults and loses its protection.
 
 ## Before a from-zero or full-source walk
 
